@@ -1151,6 +1151,7 @@ impl<Message> Component<Message> for FieldGroup<Message> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SettingsStatusKind {
+    Information,
     Unavailable,
     Validation,
     RestartRequired,
@@ -1164,6 +1165,7 @@ impl<Message> SettingsStatus<Message> {
     pub fn new(theme: SemanticTheme, kind: SettingsStatusKind, message: impl Into<String>) -> Self {
         let message = message.into();
         let (mark, color, state) = match kind {
+            SettingsStatusKind::Information => ("i", theme.text.secondary, "information"),
             SettingsStatusKind::Unavailable => ("—", theme.text.disabled, "unavailable"),
             SettingsStatusKind::Validation => ("!", theme.text.warning, "validation"),
             SettingsStatusKind::RestartRequired => ("↻", theme.text.accent, "restart required"),

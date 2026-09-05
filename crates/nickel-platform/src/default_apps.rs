@@ -4,7 +4,7 @@
 //! with MIME databases, Windows consent UI, or Launch Services limitations.
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     fmt,
     path::Path,
     sync::{Arc, Mutex, OnceLock},
@@ -12,11 +12,16 @@ use std::{
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssociationTarget {
+    Extension(String),
     Mime(String),
     Scheme(String),
 }
 
 impl AssociationTarget {
+    pub fn extension(value: impl Into<String>) -> Self {
+        Self::Extension(value.into())
+    }
+
     pub fn mime(value: impl Into<String>) -> Self {
         Self::Mime(value.into())
     }
@@ -27,6 +32,7 @@ impl AssociationTarget {
 
     pub fn platform_key(&self) -> String {
         match self {
+            Self::Extension(value) => value.clone(),
             Self::Mime(value) => value.clone(),
             Self::Scheme(value) => format!("x-scheme-handler/{value}"),
         }
@@ -86,6 +92,10 @@ impl fmt::Display for AssociationError {
 impl std::error::Error for AssociationError {}
 
 pub trait AssociationBackend: Send + Sync {
+    fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+        Ok(Vec::new())
+    }
+
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError>;
     fn request_change(
         &self,
@@ -122,8 +132,7 @@ impl AssociationService {
         &self,
         target: &AssociationTarget,
     ) -> Result<AssociationSnapshot, AssociationError> {
-        let mut snapshot = self.backend.inspect(target)?;
-        snapshot.handlers.truncate(128);
+        let snapshot = self.backend.inspect(target)?;
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let changed = state
             .projections
@@ -141,6 +150,10 @@ impl AssociationService {
             }
         }
         Ok(snapshot)
+    }
+
+    pub fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+        self.backend.available_targets()
     }
 
     pub fn request_change(
@@ -389,6 +402,48 @@ struct LinuxAssociations;
 
 #[cfg(target_os = "linux")]
 impl LinuxAssociations {
+    fn available_targets() -> Vec<AssociationTarget> {
+        let mut keys = HashSet::new();
+        for root in desktop_data_roots() {
+            let Ok(entries) = std::fs::read_dir(root.join("applications")) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|extension| extension.to_str()) != Some("desktop") {
+                    continue;
+                }
+                let Ok(contents) = std::fs::read_to_string(path) else {
+                    continue;
+                };
+                let hidden = contents
+                    .lines()
+                    .any(|line| line == "Hidden=true" || line == "NoDisplay=true");
+                if hidden {
+                    continue;
+                }
+                keys.extend(
+                    contents
+                        .lines()
+                        .filter_map(|line| line.strip_prefix("MimeType="))
+                        .flat_map(|types| types.split(';'))
+                        .filter(|kind| !kind.is_empty())
+                        .map(str::to_owned),
+                );
+            }
+        }
+        let mut targets = keys
+            .into_iter()
+            .map(|key| {
+                key.strip_prefix("x-scheme-handler/")
+                    .map(AssociationTarget::scheme)
+                    .unwrap_or_else(|| AssociationTarget::mime(key))
+            })
+            .collect::<Vec<_>>();
+        targets.sort_by_key(AssociationTarget::platform_key);
+        targets
+    }
+
     fn query(target: &AssociationTarget) -> Result<Option<String>, AssociationError> {
         let output = std::process::Command::new("xdg-mime")
             .args(["query", "default", &target.platform_key()])
@@ -425,7 +480,7 @@ impl LinuxAssociations {
             let Ok(entries) = std::fs::read_dir(root.join("applications")) else {
                 continue;
             };
-            for entry in entries.flatten().take(2048) {
+            for entry in entries.flatten() {
                 let path = entry.path();
                 let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
                     continue;
@@ -457,9 +512,6 @@ impl LinuxAssociations {
                             .find_map(|line| line.strip_prefix("Icon=").map(str::to_owned)),
                         source: path.display().to_string(),
                     });
-                    if handlers.len() == 128 {
-                        break;
-                    }
                 }
             }
         }
@@ -470,6 +522,10 @@ impl LinuxAssociations {
 
 #[cfg(target_os = "linux")]
 impl AssociationBackend for LinuxAssociations {
+    fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+        Ok(Self::available_targets())
+    }
+
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
         let effective = Self::query(target)?.map(|id| ApplicationHandler {
             name: Self::desktop_name(&id),
@@ -635,7 +691,7 @@ fn windows_registry_string(key: &RegistryKey, name: &str) -> Option<String> {
 fn windows_registry_values(key: &RegistryKey) -> Vec<(String, String)> {
     use windows::{Win32::System::Registry::*, core::PWSTR};
     let mut values = Vec::new();
-    for index in 0..4096_u32 {
+    for index in 0..u32::MAX {
         let mut name = vec![0_u16; 256];
         let mut data = vec![0_u8; 1024];
         loop {
@@ -697,7 +753,7 @@ fn windows_registered_handlers(target: &AssociationTarget) -> Vec<ApplicationHan
         return Vec::new();
     };
     let association_group = match target {
-        AssociationTarget::Mime(_) => "FileAssociations",
+        AssociationTarget::Extension(_) | AssociationTarget::Mime(_) => "FileAssociations",
         AssociationTarget::Scheme(_) => "UrlAssociations",
     };
     let mut handlers = Vec::new();
@@ -733,12 +789,6 @@ fn windows_registered_handlers(target: &AssociationTarget) -> Vec<ApplicationHan
                 icon: windows_registry_string(&capabilities, "ApplicationIcon"),
                 source: format!("Windows RegisteredApplications ({scope})"),
             });
-            if handlers.len() == 128 {
-                break;
-            }
-        }
-        if handlers.len() == 128 {
-            break;
         }
     }
     handlers.sort_by(|left, right| {
@@ -748,6 +798,37 @@ fn windows_registered_handlers(target: &AssociationTarget) -> Vec<ApplicationHan
             .then_with(|| left.id.cmp(&right.id))
     });
     handlers
+}
+
+#[cfg(target_os = "windows")]
+fn windows_available_targets() -> Vec<AssociationTarget> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let mut targets = HashSet::new();
+    for root in [HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE] {
+        let Some(registrations) =
+            windows_open_registry_key(root, "Software\\RegisteredApplications")
+        else {
+            continue;
+        };
+        for (_, capabilities_path) in windows_registry_values(&registrations) {
+            for (group, is_scheme) in [("FileAssociations", false), ("UrlAssociations", true)] {
+                let path = format!("{capabilities_path}\\{group}");
+                let Some(associations) = windows_open_registry_key(root, &path) else {
+                    continue;
+                };
+                for (key, _) in windows_registry_values(&associations) {
+                    if is_scheme {
+                        targets.insert(AssociationTarget::scheme(key));
+                    } else if key.starts_with('.') {
+                        targets.insert(AssociationTarget::extension(key));
+                    }
+                }
+            }
+        }
+    }
+    let mut targets = targets.into_iter().collect::<Vec<_>>();
+    targets.sort_by_key(AssociationTarget::platform_key);
+    targets
 }
 
 #[cfg(target_os = "windows")]
@@ -827,6 +908,7 @@ fn windows_effective_handler(
 #[cfg(any(target_os = "windows", test))]
 fn windows_association_query_key(target: &AssociationTarget) -> Option<&str> {
     match target {
+        AssociationTarget::Extension(extension) => Some(extension.as_str()),
         AssociationTarget::Scheme(scheme) => Some(scheme.as_str()),
         AssociationTarget::Mime(mime) => Some(match mime.as_str() {
             "text/plain" => ".txt",
@@ -844,6 +926,10 @@ fn windows_association_query_key(target: &AssociationTarget) -> Option<&str> {
 
 #[cfg(target_os = "windows")]
 impl AssociationBackend for WindowsAssociations {
+    fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+        Ok(windows_available_targets())
+    }
+
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
         let effective = windows_effective_handler(target)?;
         let mut handlers = windows_registered_handlers(target);
@@ -939,6 +1025,49 @@ mod tests {
     struct Fixture {
         current: Arc<Mutex<String>>,
         confirm: bool,
+    }
+
+    struct LargeFixture;
+
+    impl AssociationBackend for LargeFixture {
+        fn inspect(
+            &self,
+            target: &AssociationTarget,
+        ) -> Result<AssociationSnapshot, AssociationError> {
+            Ok(AssociationSnapshot {
+                target: target.clone(),
+                effective: None,
+                handlers: (0..250)
+                    .map(|index| ApplicationHandler {
+                        id: format!("handler-{index:03}.desktop"),
+                        name: format!("Handler {index:03}"),
+                        icon: None,
+                        source: "fixture".into(),
+                    })
+                    .collect(),
+                capability: AssociationCapability::DirectUserChange,
+                scope: AssociationScope::User,
+                detail: String::new(),
+            })
+        }
+
+        fn request_change(
+            &self,
+            _: &AssociationTarget,
+            _: &str,
+        ) -> Result<ChangeOutcome, AssociationError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn association_service_does_not_truncate_compatible_handlers() {
+        let service = AssociationService::new(Box::new(LargeFixture));
+        let snapshot = service
+            .inspect(&AssociationTarget::mime("application/x-fixture"))
+            .unwrap();
+        assert_eq!(snapshot.handlers.len(), 250);
+        assert_eq!(snapshot.handlers.last().unwrap().id, "handler-249.desktop");
     }
 
     impl AssociationBackend for Fixture {

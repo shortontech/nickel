@@ -477,6 +477,8 @@ enum SettingsMessage {
     NetworkScroll,
     DefaultAppsScroll,
     DefaultAppTargetChanged(String),
+    DefaultAppHandlerSearchChanged(String),
+    BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
     AddDefaultAppTarget,
     ToggleDefaultAppSelect(usize),
     RequestDefaultAppConsent(usize),
@@ -628,6 +630,14 @@ fn bluetooth_power_message(value: bool) -> SettingsMessage {
 
 fn sidebar_search_message(value: String) -> SettingsMessage {
     SettingsMessage::SidebarSearchChanged(value)
+}
+
+fn default_app_target_search_message(value: String) -> SettingsMessage {
+    SettingsMessage::DefaultAppTargetChanged(value)
+}
+
+fn default_app_handler_search_message(value: String) -> SettingsMessage {
+    SettingsMessage::DefaultAppHandlerSearchChanged(value)
 }
 
 fn default_app_categories() -> Vec<DefaultAppRow> {
@@ -795,6 +805,15 @@ impl SettingsApp {
 
     fn load_default_apps(&mut self) {
         let service = nickel_platform::association_service();
+        if self.default_app_targets.is_empty() {
+            match service.available_targets() {
+                Ok(targets) => {
+                    self.default_app_targets = targets;
+                    self.default_app_target_status = None;
+                }
+                Err(error) => self.default_app_target_status = Some(error.to_string()),
+            }
+        }
         for row in &mut self.default_apps {
             match service.inspect(&row.target) {
                 Ok(snapshot) => {
@@ -807,6 +826,19 @@ impl SettingsApp {
             }
         }
         self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
+    }
+
+    fn add_default_app_target(&mut self, target: nickel_platform::AssociationTarget) {
+        if !self.default_apps.iter().any(|row| row.target == target) {
+            let snapshot = nickel_platform::association_service().inspect(&target);
+            self.default_apps.push(DefaultAppRow {
+                label: target.platform_key(),
+                target,
+                snapshot: snapshot.as_ref().ok().cloned(),
+                status: snapshot.err().map(|error| error.to_string()),
+            });
+        }
+        self.default_app_target_query.clear();
     }
 
     fn change_default_app(&mut self, row_index: usize, handler_id: &str) {
@@ -1173,13 +1205,25 @@ impl SettingsApp {
             SettingsMessage::DefaultAppTargetChanged(value) => {
                 self.default_app_target_query = value;
             }
+            SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
+                self.default_app_handler_query = value;
+            }
+            SettingsMessage::BrowseDefaultAppTarget(target) => {
+                self.add_default_app_target(target);
+            }
             SettingsMessage::AddDefaultAppTarget => {
                 let query = self.default_app_target_query.trim();
                 let target = query
-                    .strip_prefix("scheme:")
-                    .map(str::trim)
+                    .strip_prefix('.')
                     .filter(|value| !value.is_empty())
-                    .map(nickel_platform::AssociationTarget::scheme)
+                    .map(|value| nickel_platform::AssociationTarget::extension(format!(".{value}")))
+                    .or_else(|| {
+                        query
+                            .strip_prefix("scheme:")
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(nickel_platform::AssociationTarget::scheme)
+                    })
                     .or_else(|| {
                         query
                             .strip_prefix("x-scheme-handler/")
@@ -1192,26 +1236,19 @@ impl SettingsApp {
                             .then(|| nickel_platform::AssociationTarget::mime(query))
                     });
                 if let Some(target) = target {
-                    if !self.default_apps.iter().any(|row| row.target == target) {
-                        let snapshot = nickel_platform::association_service().inspect(&target);
-                        self.default_apps.push(DefaultAppRow {
-                            label: format!("Advanced — {}", target.platform_key()),
-                            target,
-                            snapshot: snapshot.as_ref().ok().cloned(),
-                            status: snapshot.err().map(|error| error.to_string()),
-                        });
-                    }
-                    self.default_app_target_query.clear();
+                    self.add_default_app_target(target);
                 } else {
                     self.status = "Enter a MIME type such as text/markdown or scheme:https".into();
                 }
             }
             SettingsMessage::ToggleDefaultAppSelect(index) => {
+                self.default_app_handler_query.clear();
                 self.default_app_select_expanded =
                     (self.default_app_select_expanded != Some(index)).then_some(index);
             }
             SettingsMessage::SetDefaultApp { row, handler_id } => {
                 self.change_default_app(row, &handler_id);
+                self.default_app_handler_query.clear();
             }
             SettingsMessage::RequestDefaultAppConsent(row) => {
                 self.change_default_app(row, "");
@@ -2628,6 +2665,50 @@ mod tests {
                     handler_id: "other.desktop".into(),
                 })
                 .is_empty()
+        );
+        app.default_apps[0].snapshot.as_mut().unwrap().handlers = (0..250)
+            .map(|index| nickel_platform::ApplicationHandler {
+                id: format!("handler-{index:03}.desktop"),
+                name: format!("Browser {index:03}"),
+                icon: None,
+                source: format!("fixture protocol support {index:03}"),
+            })
+            .collect();
+        app.update(SettingsMessage::DefaultAppHandlerSearchChanged(
+            "handler-249".into(),
+        ));
+        let searched = app.build_ui(850.0, 900.0);
+        assert!(
+            !searched
+                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                    row: 0,
+                    handler_id: "handler-249.desktop".into(),
+                })
+                .is_empty(),
+            "the final compatible handler must remain searchable without a result cap"
+        );
+        assert!(
+            searched
+                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                    row: 0,
+                    handler_id: "handler-001.desktop".into(),
+                })
+                .is_empty(),
+            "a handler search must filter unrelated choices"
+        );
+
+        let uncommon = nickel_platform::AssociationTarget::mime("application/x-nickel-fixture");
+        app.default_app_targets = vec![
+            uncommon.clone(),
+            nickel_platform::AssociationTarget::scheme("nickel-fixture"),
+        ];
+        app.update(SettingsMessage::DefaultAppTargetChanged("x-nickel".into()));
+        let associations = app.build_ui(850.0, 900.0);
+        assert!(
+            !associations
+                .semantic_targets_for_message(&SettingsMessage::BrowseDefaultAppTarget(uncommon,))
+                .is_empty(),
+            "platform-reported uncommon associations must be searchable"
         );
         assert!(!app.default_apps.iter().any(|row| {
             matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")

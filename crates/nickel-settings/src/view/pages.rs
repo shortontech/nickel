@@ -1,7 +1,7 @@
 use super::*;
 use nickel_ui::{
     Column, ComponentBuilderExt, GridColumnSpec, RadioGroup, RadioOption, Row, SettingsListCard,
-    TextField, Track,
+    Text, TextField, Track,
 };
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
@@ -199,18 +199,49 @@ impl SettingsApp {
         let rows = self.default_apps.iter().enumerate().map(|(index, row)| {
             let current = row.snapshot.as_ref().and_then(|snapshot| snapshot.effective.as_ref())
                 .map(|handler| handler.name.clone()).unwrap_or_else(|| "No effective handler reported".into());
-            let options: Vec<(String, SettingsMessage)> = row.snapshot.as_ref().map(|snapshot| snapshot.handlers.iter().map(|handler| {
-                (handler.name.clone(), SettingsMessage::SetDefaultApp { row: index, handler_id: handler.id.clone() })
-            }).collect()).unwrap_or_default();
+            let handler_query = self.default_app_handler_query.trim().to_lowercase();
+            let mut handlers = row.snapshot.as_ref().map(|snapshot| snapshot.handlers.iter().collect::<Vec<_>>()).unwrap_or_default();
+            let effective_id = row.snapshot.as_ref().and_then(|snapshot| snapshot.effective.as_ref()).map(|handler| handler.id.as_str());
+            handlers.sort_by(|left, right| {
+                (Some(left.id.as_str()) != effective_id).cmp(&(Some(right.id.as_str()) != effective_id))
+                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let options: Vec<(String, SettingsMessage)> = handlers.into_iter().filter(|handler| {
+                handler_query.is_empty()
+                    || handler.name.to_lowercase().contains(&handler_query)
+                    || handler.id.to_lowercase().contains(&handler_query)
+                    || handler.source.to_lowercase().contains(&handler_query)
+            }).map(|handler| {
+                let label = if Some(handler.id.as_str()) == effective_id {
+                    format!("{} (current)", handler.name)
+                } else {
+                    format!("{} — {}", handler.name, handler.id)
+                };
+                (label, SettingsMessage::SetDefaultApp { row: index, handler_id: handler.id.clone() })
+            }).collect();
             let detail = row.status.clone().or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone())).unwrap_or_else(|| "Not loaded".into());
             let mutable = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::DirectUserChange);
             let native_consent = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::NativeConsent);
             let selector = SelectField::new(theme, row.label.clone(), detail.clone(),
                 SettingsMessage::ToggleDefaultAppSelect(index), current.clone(), options,
                 self.default_app_select_expanded == Some(index)).id(format!("default-app-{index}"));
+            let chooser = if mutable && self.default_app_select_expanded == Some(index) {
+                AnyView::new(Column::new().gap(6.0)
+                    .child(SettingsSearchField::new(
+                        theme,
+                        format!("default-app-handler-search-{index}"),
+                        &self.default_app_handler_query,
+                        "Search installed applications",
+                        default_app_handler_search_message,
+                    ))
+                    .child(selector))
+            } else {
+                AnyView::new(selector)
+            };
             ui! {
                 <Container background={palette.surface} border={(palette.muted, 1.0)} padding={Insets::all(4.0)}>
-                    {if mutable { AnyView::new(selector) } else if native_consent {
+                    {if mutable { chooser } else if native_consent {
                         AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current)
                             .trailing(Button::semantic(theme, SettingsMessage::RequestDefaultAppConsent(index), "Open system settings", ButtonPresentation::Secondary).width(180.0)))
                     } else {
@@ -221,24 +252,99 @@ impl SettingsApp {
         });
         let note = SettingsStatus::<SettingsMessage>::new(
             theme,
-            SettingsStatusKind::Validation,
+            SettingsStatusKind::Information,
             "These are operating-system associations. Terminal and file-manager preferences are separate Nickel-owned settings.",
         );
+        let target_query = self.default_app_target_query.trim().to_lowercase();
+        let matching_targets = self
+            .default_app_targets
+            .iter()
+            .filter(|target| {
+                !target_query.is_empty()
+                    && target.platform_key().to_lowercase().contains(&target_query)
+                    && !self.default_apps.iter().any(|row| row.target == **target)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let file_targets = matching_targets
+            .iter()
+            .filter(|target| {
+                matches!(
+                    target,
+                    nickel_platform::AssociationTarget::Extension(_)
+                        | nickel_platform::AssociationTarget::Mime(_)
+                )
+            })
+            .cloned()
+            .map(|target| {
+                let key = target.platform_key();
+                SettingsRow::new(theme, key, "File type reported by the operating system").trailing(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::BrowseDefaultAppTarget(target),
+                        "Open",
+                        ButtonPresentation::Secondary,
+                    )
+                    .width(72.0),
+                )
+            });
+        let link_targets = matching_targets
+            .iter()
+            .filter(|target| matches!(target, nickel_platform::AssociationTarget::Scheme(_)))
+            .cloned()
+            .map(|target| {
+                let key = target
+                    .platform_key()
+                    .trim_start_matches("x-scheme-handler/")
+                    .to_owned();
+                SettingsRow::new(theme, key, "Link type reported by the operating system").trailing(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::BrowseDefaultAppTarget(target),
+                        "Open",
+                        ButtonPresentation::Secondary,
+                    )
+                    .width(72.0),
+                )
+            });
+        let target_results = if target_query.is_empty() {
+            AnyView::new(
+                Text::new("Search to browse file and link types registered on this computer.")
+                    .color(palette.muted),
+            )
+        } else if matching_targets.is_empty() {
+            AnyView::new(
+                Text::new("No additional registered file or link types match.")
+                    .color(palette.muted),
+            )
+        } else {
+            AnyView::new(
+                Column::new()
+                    .gap(6.0)
+                    .child(Text::new("File types").bold(true).color(palette.text))
+                    .children(file_targets)
+                    .child(Text::new("Link types").bold(true).color(palette.text))
+                    .children(link_targets),
+            )
+        };
         let advanced = SettingsRow::new(
             theme,
-            "Advanced type or protocol",
-            "Load one MIME type or URI scheme without eagerly enumerating the OS database",
+            "Browse file and link associations",
+            self.default_app_target_status
+                .as_deref()
+                .unwrap_or("Search the complete set reported by the operating system"),
         )
         .trailing(
             Row::new()
                 .gap(6.0)
                 .child(
-                    TextField::on_change_with_placeholder(
+                    SettingsSearchField::new(
+                        theme,
+                        "default-app-advanced-target",
                         &self.default_app_target_query,
-                        "text/markdown or scheme:https",
-                        SettingsMessage::DefaultAppTargetChanged,
+                        "Search file types and link schemes",
+                        default_app_target_search_message,
                     )
-                    .id("default-app-advanced-target")
                     .width(250.0),
                 )
                 .child(
@@ -288,7 +394,7 @@ impl SettingsApp {
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
                 <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0} theme={theme}>
-                    <Column gap={10.0}>{note}{terminal}{file_manager}{advanced}<Column gap={8.0} children={rows} /></Column>
+                    <Column gap={10.0}>{note}{terminal}{file_manager}{advanced}{target_results}<Column gap={8.0} children={rows} /></Column>
                 </VerticalScroll>
             </Column>
         }
