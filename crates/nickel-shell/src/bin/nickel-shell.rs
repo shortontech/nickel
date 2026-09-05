@@ -1478,6 +1478,7 @@ fn handle_shell_input(
         state.set_panel_output(output);
     }
     if role == SurfaceRole::Desktop {
+        let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
         if let Some(entry) = shell.surface(surface) {
             let output = entry.output_name().to_owned();
             if let Some(display) = shell.surface_display_geometry(surface) {
@@ -1490,7 +1491,15 @@ fn handle_shell_input(
             }
         }
         if state.desktop_input(event) {
-            render_role(shell, state, SurfaceRole::Desktop)?;
+            if coalesce_motion {
+                *hover_repaint = Some((
+                    SurfaceRole::Desktop,
+                    Instant::now() + Duration::from_millis(16),
+                ));
+            } else {
+                *hover_repaint = None;
+                render_role(shell, state, SurfaceRole::Desktop)?;
+            }
         }
         return Ok(());
     }

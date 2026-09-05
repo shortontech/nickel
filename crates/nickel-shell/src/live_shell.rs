@@ -847,6 +847,22 @@ impl DesktopApplication {
 
 type DesktopEntryFingerprint = (bool, Option<u64>, Option<std::time::SystemTime>);
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WallpaperSourceFingerprint {
+    path: std::path::PathBuf,
+    length: u64,
+    modified: Option<std::time::SystemTime>,
+}
+
+fn wallpaper_source_fingerprint(path: &std::path::Path) -> Option<WallpaperSourceFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some(WallpaperSourceFingerprint {
+        path: path.to_owned(),
+        length: metadata.len(),
+        modified: metadata.modified().ok(),
+    })
+}
+
 fn desktop_entry_fingerprint(entry: &nickel_file::FileEntry) -> DesktopEntryFingerprint {
     (entry.is_directory, entry.size, entry.modified)
 }
@@ -2062,11 +2078,13 @@ pub struct LiveShell {
     notification: Option<DesktopNotification>,
     notification_history_visible: bool,
     wallpaper_path: Option<std::path::PathBuf>,
+    wallpaper_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
     desktop_change_token: HostChangeToken,
     desktop_deadline: Option<Instant>,
+    desktop_application_dirty: bool,
     /// Button whose current press/release transaction belongs to a desktop
     /// overlay.  Application messages may close the overlay on release, so
     /// routing cannot be inferred independently from the menu's current
@@ -2284,6 +2302,9 @@ impl LiveShell {
                 #[cfg(not(target_os = "windows"))]
                 None
             });
+        let wallpaper_source_fingerprint = wallpaper_path
+            .as_deref()
+            .and_then(wallpaper_source_fingerprint);
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         let panel_icon = crate::icons::load_svg_bytes(
@@ -2411,11 +2432,13 @@ impl LiveShell {
             notification: None,
             notification_history_visible: false,
             wallpaper_path,
+            wallpaper_source_fingerprint,
             wallpaper,
             wallpaper_size,
             desktop_host,
             desktop_change_token: HostChangeToken::default(),
             desktop_deadline: None,
+            desktop_application_dirty: false,
             desktop_overlay_pointer_capture: None,
             panel_icon,
             codex_icon,
@@ -2673,6 +2696,10 @@ impl LiveShell {
             }
         }
         let shell_settings = ShellSettings::load_default();
+        let wallpaper_settings = WallpaperSettings::load_default();
+        if self.refresh_configured_wallpaper(wallpaper_settings.image) {
+            changed = true;
+        }
         self.launcher.set_places(crate::places::applications(
             shell_settings.preferred_file_manager.as_deref(),
         ));
@@ -2716,6 +2743,27 @@ impl LiveShell {
             changed = true;
         }
         changed
+    }
+
+    fn refresh_configured_wallpaper(
+        &mut self,
+        configured_path: Option<std::path::PathBuf>,
+    ) -> bool {
+        let next_fingerprint = configured_path
+            .as_deref()
+            .and_then(wallpaper_source_fingerprint);
+        if configured_path == self.wallpaper_path
+            && next_fingerprint == self.wallpaper_source_fingerprint
+        {
+            return false;
+        }
+
+        self.wallpaper_path = configured_path;
+        self.wallpaper_source_fingerprint = next_fingerprint;
+        self.wallpaper_size = (0, 0);
+        self.wallpaper = None;
+        self.desktop_application_dirty = true;
+        true
     }
 
     pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
@@ -2847,6 +2895,10 @@ impl LiveShell {
             }
             return outcome.changed;
         }
+        let coalesce_motion = matches!(
+            &event,
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
+        );
         let application = self.desktop_host.application_mut();
         let changed = match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
@@ -2877,7 +2929,9 @@ impl LiveShell {
             }),
             _ => false,
         };
-        if changed {
+        if changed && coalesce_motion {
+            self.desktop_application_dirty = true;
+        } else if changed {
             let outcome = self.desktop_host.step(HostBatch {
                 application_changed: true,
                 ..HostBatch::default()
@@ -4860,11 +4914,14 @@ impl LiveShell {
         application.wallpaper.clone_from(&self.wallpaper);
         application.palette = self.palette;
         let icons_changed = application.prepare_icons();
+        let application_changed =
+            self.desktop_application_dirty || wallpaper_changed || palette_changed || icons_changed;
         let outcome = self.desktop_host.step(HostBatch {
-            application_changed: wallpaper_changed || palette_changed || icons_changed,
+            application_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
+        self.desktop_application_dirty = false;
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
         self.desktop_host.commands().to_vec()
@@ -6356,6 +6413,37 @@ mod tests {
             !production.contains(".label_background("),
             "desktop labels must not paint independent opaque backplates"
         );
+    }
+
+    #[test]
+    fn configured_wallpaper_changes_replace_the_live_desktop_image() {
+        let directory = tempfile::tempdir().expect("wallpaper fixture directory");
+        let first_path = directory.path().join("first.png");
+        let second_path = directory.path().join("second.png");
+        let first = RgbaImage::from_pixel(8, 8, Rgba([220, 30, 40, 255]));
+        let second = RgbaImage::from_pixel(12, 9, Rgba([20, 80, 230, 255]));
+        first.save(&first_path).expect("save first wallpaper");
+        second.save(&second_path).expect("save second wallpaper");
+
+        let mut shell = LiveShell::new().expect("live shell");
+        assert!(shell.refresh_configured_wallpaper(Some(first_path)));
+        let first_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &first_scene,
+            shell.wallpaper.as_ref().expect("first wallpaper")
+        ));
+
+        assert!(shell.refresh_configured_wallpaper(Some(second_path)));
+        let second_scene = shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &second_scene,
+            shell.wallpaper.as_ref().expect("second wallpaper")
+        ));
+        assert_eq!(
+            shell.wallpaper.as_ref().unwrap().get_pixel(0, 0).0,
+            [20, 80, 230, 255]
+        );
+        assert!(!shell.refresh_configured_wallpaper(shell.wallpaper_path.clone()));
     }
 
     #[test]
@@ -8441,6 +8529,7 @@ mod tests {
                 position: Some(press),
             },
         )));
+        let host_token_before_motion = shell.desktop_change_token;
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Motion {
                 device: nickel_input::DeviceId(1),
@@ -8452,7 +8541,13 @@ mod tests {
                 }),
             },
         )));
+        assert_eq!(
+            shell.desktop_change_token, host_token_before_motion,
+            "pointer motion is accumulated without rebuilding the desktop host"
+        );
+        assert!(shell.desktop_application_dirty);
         let dragging = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(!shell.desktop_application_dirty);
         assert!(nickel_ui::backend::contains_image_pixels(
             &dragging, &artwork
         ));
