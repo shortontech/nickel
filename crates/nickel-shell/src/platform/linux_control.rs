@@ -39,6 +39,17 @@ struct ControlBackend {
 static BACKEND: OnceLock<ControlBackend> = OnceLock::new();
 static MPRIS_ACTIVITY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
 static MPRIS_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+static MPRIS_COMMANDS: OnceLock<mpsc::SyncSender<ConsumerControl>> = OnceLock::new();
+
+const MPRIS_COMMAND_CAPACITY: usize = 16;
+const MPRIS_ACTIVITY_CAPACITY: usize = 64;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MprisCandidate {
+    name: String,
+    playing: bool,
+    recent: u64,
+}
 
 pub fn handle_consumer_control(control: ConsumerControl) {
     match control {
@@ -46,13 +57,24 @@ pub fn handle_consumer_control(control: ConsumerControl) {
             tracing::warn!(?control, "PipeWire audio control is not initialized");
         }
         _ => {
-            let _ = thread::Builder::new()
-                .name("nickel-mpris-command".into())
-                .spawn(move || {
-                    if let Err(error) = dispatch_mpris(control) {
-                        tracing::debug!(?control, %error, "MPRIS command was not delivered");
-                    }
-                });
+            let commands = MPRIS_COMMANDS.get_or_init(|| {
+                let (sender, receiver) = mpsc::sync_channel(MPRIS_COMMAND_CAPACITY);
+                let _ = thread::Builder::new()
+                    .name("nickel-mpris-control".into())
+                    .spawn(move || mpris_worker(receiver));
+                sender
+            });
+            if let Err(error) = commands.try_send(control) {
+                tracing::debug!(?control, %error, "MPRIS command queue is unavailable or full");
+            }
+        }
+    }
+}
+
+fn mpris_worker(commands: mpsc::Receiver<ConsumerControl>) {
+    while let Ok(control) = commands.recv() {
+        if let Err(error) = dispatch_mpris(control) {
+            tracing::debug!(?control, %error, "MPRIS command was not delivered");
         }
     }
 }
@@ -79,7 +101,7 @@ fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
             let status = proxy
                 .get_property::<String>("PlaybackStatus")
                 .unwrap_or_else(|_| "Stopped".into());
-            let capable = can_control && mpris_capable(&proxy, control);
+            let capable = can_control && mpris_capable(&proxy, control, &status);
             drop(proxy);
             let recent = MPRIS_ACTIVITY
                 .get_or_init(Default::default)
@@ -87,21 +109,18 @@ fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
                 .ok()
                 .and_then(|activity| activity.get(&name).copied())
                 .unwrap_or(0);
-            capable.then_some((name, status, recent))
+            capable.then_some(MprisCandidate {
+                name,
+                playing: status == "Playing",
+                recent,
+            })
         })
         .collect::<Vec<_>>();
-    players.sort_by(|left, right| {
-        (right.1 == "Playing")
-            .cmp(&(left.1 == "Playing"))
-            .then_with(|| right.2.cmp(&left.2))
-            .then_with(|| left.0.cmp(&right.0))
-    });
-    let (name, _, _) = players
-        .first()
+    let name = select_mpris_candidate(&mut players)
         .ok_or_else(|| "no capable MPRIS player is available".to_owned())?;
     let proxy = Proxy::new(
         &connection,
-        name.as_str(),
+        name,
         "/org/mpris/MediaPlayer2",
         "org.mpris.MediaPlayer2.Player",
     )
@@ -123,17 +142,43 @@ fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
         .map(|_| {
             let sequence = MPRIS_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             if let Ok(mut activity) = MPRIS_ACTIVITY.get_or_init(Default::default).lock() {
-                activity.insert(name.clone(), sequence);
+                record_mpris_activity(&mut activity, name, sequence);
             }
         })
         .map_err(|error| error.to_string())
 }
 
-fn mpris_capable(proxy: &Proxy<'_>, control: ConsumerControl) -> bool {
+fn record_mpris_activity(activity: &mut HashMap<String, u64>, name: &str, sequence: u64) {
+    activity.insert(name.to_owned(), sequence);
+    if activity.len() > MPRIS_ACTIVITY_CAPACITY
+        && let Some(oldest) = activity
+            .iter()
+            .min_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
+            .map(|(name, _)| name.clone())
+    {
+        activity.remove(&oldest);
+    }
+}
+
+fn select_mpris_candidate(players: &mut [MprisCandidate]) -> Option<&str> {
+    players.sort_by(|left, right| {
+        right
+            .playing
+            .cmp(&left.playing)
+            .then_with(|| right.recent.cmp(&left.recent))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    players.first().map(|candidate| candidate.name.as_str())
+}
+
+fn mpris_capable(proxy: &Proxy<'_>, control: ConsumerControl, status: &str) -> bool {
     let property = match control {
         ConsumerControl::PlayPause => {
-            return proxy.get_property::<bool>("CanPlay").unwrap_or(false)
-                || proxy.get_property::<bool>("CanPause").unwrap_or(false);
+            return if status == "Playing" {
+                proxy.get_property::<bool>("CanPause").unwrap_or(false)
+            } else {
+                proxy.get_property::<bool>("CanPlay").unwrap_or(false)
+            };
         }
         ConsumerControl::Play => "CanPlay",
         ConsumerControl::Pause => "CanPause",
@@ -539,6 +584,10 @@ fn bluetooth_adapter_path(connection: &Connection) -> Result<OwnedObjectPath, St
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        MPRIS_ACTIVITY_CAPACITY, MprisCandidate, record_mpris_activity, select_mpris_candidate,
+    };
+
     #[test]
     fn wifi_network_identity_contains_device_and_access_point() {
         let id = "/device/wlan0\t/access-point/7";
@@ -546,5 +595,68 @@ mod tests {
             id.split_once('\t'),
             Some(("/device/wlan0", "/access-point/7"))
         );
+    }
+
+    #[test]
+    fn mpris_selection_prefers_playing_then_recent_then_stable_name() {
+        let candidates = || {
+            vec![
+                MprisCandidate {
+                    name: "org.mpris.MediaPlayer2.zeta".into(),
+                    playing: false,
+                    recent: 40,
+                },
+                MprisCandidate {
+                    name: "org.mpris.MediaPlayer2.beta".into(),
+                    playing: true,
+                    recent: 3,
+                },
+                MprisCandidate {
+                    name: "org.mpris.MediaPlayer2.alpha".into(),
+                    playing: true,
+                    recent: 3,
+                },
+            ]
+        };
+
+        let mut players = candidates();
+        assert_eq!(
+            select_mpris_candidate(&mut players),
+            Some("org.mpris.MediaPlayer2.alpha")
+        );
+
+        let mut players = candidates();
+        players[1].recent = 9;
+        assert_eq!(
+            select_mpris_candidate(&mut players),
+            Some("org.mpris.MediaPlayer2.beta")
+        );
+
+        let mut players = candidates();
+        players.iter_mut().for_each(|player| player.playing = false);
+        assert_eq!(
+            select_mpris_candidate(&mut players),
+            Some("org.mpris.MediaPlayer2.zeta")
+        );
+    }
+
+    #[test]
+    fn mpris_selection_has_a_bounded_empty_result() {
+        assert_eq!(select_mpris_candidate(&mut []), None);
+    }
+
+    #[test]
+    fn mpris_activity_history_evicts_the_oldest_player() {
+        let mut activity = std::collections::HashMap::new();
+        for sequence in 0..=MPRIS_ACTIVITY_CAPACITY {
+            record_mpris_activity(
+                &mut activity,
+                &format!("player-{sequence}"),
+                sequence as u64,
+            );
+        }
+        assert_eq!(activity.len(), MPRIS_ACTIVITY_CAPACITY);
+        assert!(!activity.contains_key("player-0"));
+        assert!(activity.contains_key(&format!("player-{MPRIS_ACTIVITY_CAPACITY}")));
     }
 }

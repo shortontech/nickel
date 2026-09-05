@@ -586,11 +586,10 @@ fn windows_effective_handler(
         core::{PCWSTR, PWSTR},
     };
 
-    let association = target
-        .platform_key()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect::<Vec<_>>();
+    let Some(query_key) = windows_association_query_key(target) else {
+        return Ok(None);
+    };
+    let association = query_key.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
     let mut length = 0_u32;
     // SAFETY: both pointers reference initialized NUL-terminated UTF-16 data;
     // the first call intentionally supplies no output buffer to obtain length.
@@ -647,6 +646,27 @@ fn windows_effective_handler(
         icon: Some(id.clone()),
         source: "Windows effective association".into(),
     }))
+}
+
+/// Translate Nickel's portable MIME/scheme authority into the association
+/// identifiers accepted by Windows `AssocQueryStringW`. Windows does not
+/// understand freedesktop MIME names or `x-scheme-handler/` keys.
+#[cfg(any(target_os = "windows", test))]
+fn windows_association_query_key(target: &AssociationTarget) -> Option<&str> {
+    match target {
+        AssociationTarget::Scheme(scheme) => Some(scheme.as_str()),
+        AssociationTarget::Mime(mime) => Some(match mime.as_str() {
+            "text/plain" => ".txt",
+            "text/markdown" => ".md",
+            "image/png" => ".png",
+            "image/jpeg" => ".jpg",
+            "image/gif" => ".gif",
+            "application/pdf" => ".pdf",
+            "audio/mpeg" => ".mp3",
+            "video/mp4" => ".mp4",
+            _ => return None,
+        }),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -733,6 +753,33 @@ impl AssociationBackend for UnsupportedAssociations {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_association_queries_use_native_extension_and_scheme_keys() {
+        for (mime, extension) in [
+            ("text/plain", ".txt"),
+            ("text/markdown", ".md"),
+            ("image/png", ".png"),
+            ("image/jpeg", ".jpg"),
+            ("image/gif", ".gif"),
+            ("application/pdf", ".pdf"),
+            ("audio/mpeg", ".mp3"),
+            ("video/mp4", ".mp4"),
+        ] {
+            assert_eq!(
+                windows_association_query_key(&AssociationTarget::mime(mime)),
+                Some(extension)
+            );
+        }
+        assert_eq!(
+            windows_association_query_key(&AssociationTarget::scheme("https")),
+            Some("https")
+        );
+        assert_eq!(
+            windows_association_query_key(&AssociationTarget::mime("application/x-unknown")),
+            None
+        );
+    }
 
     struct Fixture {
         current: Arc<Mutex<String>>,
