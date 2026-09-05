@@ -34,7 +34,33 @@ pub fn desktop_directory() -> PathBuf {
 }
 
 pub fn open_path(path: &Path) -> Result<(), String> {
-    nickel_platform::open_with_default(path).map_err(|error| error.to_string())
+    match open_target_kind(path) {
+        OpenTargetKind::Launcher => {
+            platform::open_launcher(path).map_err(|error| error.to_string())
+        }
+        OpenTargetKind::Document => {
+            nickel_platform::open_with_default(path).map_err(|error| error.to_string())
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenTargetKind {
+    Launcher,
+    Document,
+}
+
+fn open_target_kind(path: &Path) -> OpenTargetKind {
+    #[cfg(target_os = "linux")]
+    if path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+    {
+        return OpenTargetKind::Launcher;
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = path;
+    OpenTargetKind::Document
 }
 
 pub fn is_application_launcher(path: &Path) -> bool {
@@ -562,7 +588,9 @@ fn compare_names(left: &OsString, right: &OsString) -> Ordering {
 mod tests {
     use std::fs;
 
-    use super::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
+    use super::{
+        DirectoryBrowser, EntrySortKey, FileEntry, OpenTargetKind, SortDirection, open_target_kind,
+    };
 
     fn temporary_directory(name: &str) -> std::path::PathBuf {
         let path = std::env::temp_dir().join(format!(
@@ -613,6 +641,19 @@ mod tests {
         assert_eq!(browser.entries()[0].display_name(), "GitLab");
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn application_launchers_do_not_use_document_associations() {
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            open_target_kind(std::path::Path::new("opaque.desktop")),
+            OpenTargetKind::Launcher
+        );
+        assert_eq!(
+            open_target_kind(std::path::Path::new("notes.txt")),
+            OpenTargetKind::Document
+        );
     }
 
     #[test]

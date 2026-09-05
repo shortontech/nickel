@@ -495,6 +495,40 @@ pub(crate) fn home_directory() -> PathBuf {
 }
 
 #[cfg(target_os = "linux")]
+pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
+    if !launcher.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
+    std::process::Command::new("gio")
+        .args([std::ffi::OsStr::new("launch"), launcher.as_os_str()])
+        .status()
+        .map_err(spawn_open_error)
+        .and_then(|status| {
+            status
+                .success()
+                .then_some(())
+                .ok_or_else(|| OpenPathError::Platform(format!("gio launch exited with {status}")))
+        })
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
+    nickel_platform::open_with_default(launcher).map_err(|error| match error {
+        nickel_platform::DefaultLaunchError::TargetMissing => OpenPathError::TargetMissing,
+        nickel_platform::DefaultLaunchError::PermissionDenied => OpenPathError::PermissionDenied,
+        nickel_platform::DefaultLaunchError::AssociationMissing => {
+            OpenPathError::AssociationMissing
+        }
+        nickel_platform::DefaultLaunchError::Platform(detail) => OpenPathError::Platform(detail),
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) fn open_launcher(_launcher: &Path) -> Result<(), OpenPathError> {
+    Err(OpenPathError::Unsupported)
+}
+
+#[cfg(target_os = "linux")]
 pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
     if !launcher.exists() || !source.exists() {
         return Err(OpenPathError::TargetMissing);
