@@ -8,13 +8,14 @@ mod platform;
 mod view;
 
 use model::SettingsApp;
-#[cfg(not(target_os = "windows"))]
-use nickel_session_protocol::{
-    ClientEnvelope, OutputLayout as SessionOutputLayout, OutputPlacement as SessionOutputPlacement,
-    ServerEnvelope,
-};
+#[cfg(target_os = "linux")]
+use nickel_session_protocol::{ClientEnvelope, ServerEnvelope};
 use nickel_session_protocol::{
     Command as SessionCommand, Query as SessionQuery, Request as SessionRequest, ServerMessage,
+};
+#[cfg(not(target_os = "windows"))]
+use nickel_session_protocol::{
+    OutputLayout as SessionOutputLayout, OutputPlacement as SessionOutputPlacement,
 };
 use persistence::{
     load_shell_settings, try_save_shell_settings, try_save_wallpaper_settings,

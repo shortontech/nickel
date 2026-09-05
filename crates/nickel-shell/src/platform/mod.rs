@@ -464,8 +464,9 @@ mod unsupported;
 #[cfg(target_os = "macos")]
 pub use macos::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_discovery,
-    application_icon, applications, audio_status, bluetooth_status, capture_pointer,
-    configure_volume_osd_window, configured_primary_output, execute_run_command,
+    application_icon, applications, audio_status, bluetooth_status, capture_active_window,
+    capture_active_window_to_file, capture_desktop, capture_pointer, configure_volume_osd_window,
+    configured_primary_output, copy_image_to_clipboard, copy_temp_image_path, execute_run_command,
     handle_consumer_control, handle_focused_shortcut, launch_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
     network_status, register_session_shell, release_pointer, select_audio_device,

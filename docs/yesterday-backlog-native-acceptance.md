@@ -106,6 +106,12 @@ Clippy across all targets with warnings denied.
 
 ## Native visual, Settings, and default handlers
 
+Cross-target evidence recorded on 2026-09-04: the cross-platform package set listed in the Windows
+section passes strict Clippy for `x86_64-apple-darwin` with warnings denied. Screenshot capture and
+image clipboard operations remain explicitly unsupported on macOS rather than silently claiming an
+implementation. This is compile-time boundary evidence only, not native macOS or interactive
+acceptance.
+
 - **0171:** inspect Codex selector and task switcher under every supported theme, including live theme
   changes and forward/reverse switching.
 - **0173:** audit Linux and Windows at low/high DPI under dark, light, high-contrast, and custom

@@ -51,6 +51,26 @@ pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> boo
     false
 }
 
+pub fn capture_active_window() -> Result<(), String> {
+    Err("active-window capture is unsupported on this platform".into())
+}
+
+pub fn capture_active_window_to_file() -> Result<(), String> {
+    Err("active-window file capture is unsupported on this platform".into())
+}
+
+pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
+    Err("desktop capture is unsupported on this platform".into())
+}
+
+pub fn copy_image_to_clipboard(_image: &image::RgbaImage) -> Result<(), String> {
+    Err("image clipboard support is unavailable on this platform".into())
+}
+
+pub fn copy_temp_image_path(_image: &image::RgbaImage) -> Result<std::path::PathBuf, String> {
+    Err("temporary screenshot export is unavailable on this platform".into())
+}
+
 pub fn release_pointer() {}
 
 pub fn configure_volume_osd_window(_window: &impl raw_window_handle::HasWindowHandle) -> bool {

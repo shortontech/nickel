@@ -22,10 +22,12 @@ use nickel_file::{
     },
 };
 use nickel_session_protocol::ShellRole;
+#[cfg(any(target_os = "linux", all(test, not(target_os = "macos"))))]
+use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 #[cfg(any(target_os = "linux", test))]
 use nickel_session_protocol::{
-    AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
-    ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
+    PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellSemanticTarget,
+    WindowMenuTargetAction,
 };
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
@@ -70,8 +72,9 @@ fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) 
 }
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
+#[cfg(not(target_os = "macos"))]
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "macos")))]
 const PANEL_CONTROL_GAP: f32 = 8.0;
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
@@ -144,6 +147,7 @@ pub enum PanelAction {
     Codex,
     Tray(String),
     TrayContext(String),
+    #[cfg(not(target_os = "macos"))]
     Control,
 }
 
@@ -3130,6 +3134,7 @@ impl LiveShell {
     fn apply_panel_action(&mut self, action: PanelAction) {
         let anchored_role = match &action {
             PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
+            #[cfg(not(target_os = "macos"))]
             PanelAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
             _ => None,
         };
@@ -3247,6 +3252,7 @@ impl LiveShell {
             }
             PanelAction::Tray(id) => self.tray_feed.activate(&id),
             PanelAction::TrayContext(id) => self.tray_feed.context_menu(&id),
+            #[cfg(not(target_os = "macos"))]
             PanelAction::Control => {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
@@ -3415,16 +3421,8 @@ impl LiveShell {
                 .position(|item| item.id == id.as_str())
                 .map(PanelHover::Tray)
                 .unwrap_or(PanelHover::Tray(0)),
-            PanelAction::Control => {
-                #[cfg(not(target_os = "macos"))]
-                {
-                    PanelHover::Control
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    PanelHover::Launcher
-                }
-            }
+            #[cfg(not(target_os = "macos"))]
+            PanelAction::Control => PanelHover::Control,
         })
     }
 
@@ -3442,7 +3440,7 @@ impl LiveShell {
             .flatten()
     }
 
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(any(target_os = "linux", all(test, not(target_os = "macos"))))]
     pub fn popover_anchor(&self, preferred: AnchorSide) -> Option<(ShellRole, ShellPopoverAnchor)> {
         let anchor = self.pending_popover_anchor.as_ref()?;
         let visible = match anchor.role {
@@ -5836,8 +5834,10 @@ mod tests {
 
     use image::{Rgba, RgbaImage};
     use nickel_input::KeyCode;
+    #[cfg(not(target_os = "macos"))]
+    use nickel_session_protocol::AnchorSide;
     use nickel_session_protocol::{
-        AnchorSide, PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
+        PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::{
@@ -6484,6 +6484,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
