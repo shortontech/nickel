@@ -50,9 +50,34 @@ pub fn resolve_active_output(
         .or_else(|| context.enabled.first().map(|output| (*output).to_owned()))
 }
 
+/// Selects the default output captured for a new top-level window transaction.
+///
+/// Unlike a launcher invocation, creating a window has no direct input source
+/// attached to it. The focused application therefore wins, followed by the
+/// compositor's last genuine interaction. A current pointer location is useful
+/// only when no interaction has been recorded (for example, immediately after
+/// login). Every candidate is checked against the enabled topology so a stale
+/// focus or hot-unplugged output cannot strand the new window.
+pub fn resolve_new_window_output(context: ActiveOutputContext<'_>) -> Option<String> {
+    context
+        .enabled(context.focused_surface)
+        .or_else(|| context.enabled(context.recent_interaction))
+        .or_else(|| context.enabled(context.pointer))
+        .or_else(|| context.enabled(context.primary))
+        .or_else(|| {
+            context
+                .enabled
+                .iter()
+                .min()
+                .map(|output| (*output).to_owned())
+        })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ActiveOutputContext, InvocationSource, resolve_active_output};
+    use super::{
+        ActiveOutputContext, InvocationSource, resolve_active_output, resolve_new_window_output,
+    };
 
     const ENABLED: &[&str] = &["DP-1", "HDMI-A-1"];
 
@@ -131,6 +156,61 @@ mod tests {
         };
         assert_eq!(
             resolve_active_output(InvocationSource::Keyboard, deterministic).as_deref(),
+            Some("DP-1")
+        );
+    }
+
+    #[test]
+    fn new_windows_prefer_focused_application_then_recent_interaction() {
+        assert_eq!(
+            resolve_new_window_output(context()).as_deref(),
+            Some("HDMI-A-1")
+        );
+        let without_focus = ActiveOutputContext {
+            focused_surface: None,
+            ..context()
+        };
+        assert_eq!(
+            resolve_new_window_output(without_focus).as_deref(),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn new_windows_do_not_let_pointer_position_override_interaction_history() {
+        let context = ActiveOutputContext {
+            pointer: Some("DP-1"),
+            focused_surface: None,
+            recent_interaction: Some("HDMI-A-1"),
+            primary: Some("DP-1"),
+            enabled: ENABLED,
+        };
+        assert_eq!(
+            resolve_new_window_output(context).as_deref(),
+            Some("HDMI-A-1")
+        );
+    }
+
+    #[test]
+    fn new_window_policy_rejects_stale_candidates_and_falls_back_deterministically() {
+        let stale = ActiveOutputContext {
+            pointer: Some("unplugged-pointer"),
+            focused_surface: Some("unplugged-focus"),
+            recent_interaction: Some("unplugged-recent"),
+            primary: Some("HDMI-A-1"),
+            enabled: ENABLED,
+        };
+        assert_eq!(
+            resolve_new_window_output(stale).as_deref(),
+            Some("HDMI-A-1")
+        );
+        let no_primary = ActiveOutputContext {
+            primary: Some("unplugged-primary"),
+            enabled: &["HDMI-A-1", "DP-1"],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_new_window_output(no_primary).as_deref(),
             Some("DP-1")
         );
     }

@@ -14,7 +14,9 @@ use std::{
 };
 
 use nickel_core::{
-    active_output::{ActiveOutputContext, InvocationSource, resolve_active_output},
+    active_output::{
+        ActiveOutputContext, InvocationSource, resolve_active_output, resolve_new_window_output,
+    },
     focus::FocusTransactions,
     hotkeys::{CompositorShortcutAdapter, HotkeyAction},
     idle::{IdleController, IdleEffect, IdlePolicy},
@@ -5853,14 +5855,30 @@ impl NickelSession {
     }
 
     pub(crate) fn new_window_active_output_name(&self) -> Option<String> {
-        self.windows
+        let focused_surface = self
+            .windows
             .snapshot()
             .into_iter()
             .find(|window| window.active && !self.shell_owned_windows.contains(&window.id))
             .and_then(|window| self.window_for_registry_id(window.id))
-            .and_then(|window| self.output_name_for_window(&window))
-            .or_else(|| self.workspaces.active_output().map(str::to_owned))
-            .or_else(|| self.output_name_at_pointer())
+            .and_then(|window| self.output_name_for_window(&window));
+        let enabled = self
+            .space
+            .outputs()
+            .map(|output| output.name())
+            .collect::<Vec<_>>();
+        let enabled_refs = enabled.iter().map(String::as_str).collect::<Vec<_>>();
+        let pointer = self.output_name_at_pointer();
+        resolve_new_window_output(ActiveOutputContext {
+            pointer: pointer.as_deref(),
+            focused_surface: focused_surface.as_deref(),
+            recent_interaction: self
+                .last_interaction_output_name
+                .as_deref()
+                .or_else(|| self.workspaces.active_output()),
+            primary: self.primary_output_name.as_deref(),
+            enabled: &enabled_refs,
+        })
     }
 
     pub(crate) fn placement_outputs(&self) -> Vec<shell_layout::PlacementOutput> {
