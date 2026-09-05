@@ -1,5 +1,5 @@
 use super::*;
-use nickel_ui::{ComponentBuilderExt, RadioGroup, RadioOption, Row, TextField};
+use nickel_ui::{ComponentBuilderExt, RadioGroup, RadioOption, Row, SettingsListCard, TextField};
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
@@ -631,12 +631,10 @@ impl SettingsApp {
     pub(super) fn bluetooth_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
-        let device_cards = self
-            .bluetooth
-            .devices
-            .iter()
-            .enumerate()
-            .map(|(index, device)| {
+        let operation_pending = self.bluetooth_operation_rx.is_some();
+        let device_list = self.bluetooth.devices.iter().enumerate().fold(
+            SettingsListCard::new(theme),
+            |list, (index, device)| {
                 let status = if device.connected {
                     self.localizer.text("settings-bluetooth-connected")
                 } else if device.paired {
@@ -648,33 +646,37 @@ impl SettingsApp {
                     .battery_percent
                     .map(|percent| format!("{percent}%"))
                     .unwrap_or_default();
-                ui! {
-                    <Container height={68.0}
-                        id={format!("bluetooth-device-{index}")}
-                        background={palette.surface}
-                        hover_background={palette.surface_hover}
-                        pressed_background={palette.surface_hover}
-                        border={(if device.connected { palette.accent } else { palette.muted },
-                            if device.connected { 2.0 } else { 1.0 })}
-                        on_press={SettingsMessage::BluetoothDevice(index)}
-                        enabled={self.bluetooth.available && self.bluetooth.powered && self.bluetooth_operation_rx.is_none()}
-                        semantic_role={SemanticRole::Button}
-                        accessibility_label={format!("{}, {}, {}", device.name, status,
-                            if detail.is_empty() { "battery unknown".to_owned() } else { detail.clone() })}
-                        accessibility_state={if device.connected { "connected" } else { "not connected" }}
-                        padding={Insets { top: 12.0, right: 14.0, bottom: 10.0, left: 14.0 }}>
-                        <Row>
-                            <Column grow={1.0} gap={7.0}>
-                                <Text color={palette.text}>{&device.name}</Text>
-                                <Text scale={1.0} color={if device.connected { palette.complement } else { palette.muted }}>
-                                    {status}
-                                </Text>
-                            </Column>
-                            <Text color={palette.muted}>{detail}</Text>
-                        </Row>
-                    </Container>
-                }
-            });
+                let supporting = if detail.is_empty() {
+                    status
+                } else {
+                    format!("{status} · {detail}")
+                };
+                let available =
+                    self.bluetooth.available && self.bluetooth.powered && !operation_pending;
+                let action = if device.connected {
+                    self.localizer.text("settings-bluetooth-disconnect")
+                } else {
+                    self.localizer.text("settings-bluetooth-connect")
+                };
+                list.row(
+                    SettingsRow::new(theme, &device.name, supporting)
+                        .id(format!("bluetooth-device-{index}"))
+                        .trailing(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::BluetoothDevice(index),
+                                action,
+                                if available {
+                                    ButtonPresentation::Secondary
+                                } else {
+                                    ButtonPresentation::Disabled
+                                },
+                            )
+                            .id(format!("bluetooth-device-{index}-action")),
+                        ),
+                )
+            },
+        );
 
         let adapter_status = if let Some(operation) = &self.bluetooth_operation {
             match operation {
@@ -717,7 +719,6 @@ impl SettingsApp {
         } else {
             self.localizer.text("settings-bluetooth-discovery-start")
         };
-        let operation_pending = self.bluetooth_operation_rx.is_some();
         let discovery_available =
             self.bluetooth.available && self.bluetooth.powered && !operation_pending;
         let discovery_button = Button::semantic(
@@ -732,14 +733,16 @@ impl SettingsApp {
         )
         .width(150.0);
         let device_list = if self.bluetooth.devices.is_empty() {
-            ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
-                self.localizer.text("settings-bluetooth-no-devices")
-            } else {
-                self.localizer
-                    .text("settings-bluetooth-service-unavailable")
-            }}</Text></Column> }
+            AnyView::new(
+                ui! { <Column><Text color={palette.muted}>{if self.bluetooth.available {
+                    self.localizer.text("settings-bluetooth-no-devices")
+                } else {
+                    self.localizer
+                        .text("settings-bluetooth-service-unavailable")
+                }}</Text></Column> },
+            )
         } else {
-            ui! { <Column gap={10.0} children={device_cards} /> }
+            AnyView::new(device_list.id("bluetooth-devices"))
         };
         let bluetooth_switch_state = if !self.bluetooth.available || operation_pending {
             if self.bluetooth.powered {

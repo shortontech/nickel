@@ -2857,8 +2857,8 @@ mod tests {
             .lines()
             .filter(|line| line.contains("on_press={"))
             .collect::<Vec<_>>();
-        assert_eq!(click_targets.len(), 3, "{click_targets:#?}");
-        for required in ["SelectDisplay", "WifiNetwork", "BluetoothDevice"] {
+        assert_eq!(click_targets.len(), 2, "{click_targets:#?}");
+        for required in ["SelectDisplay", "WifiNetwork"] {
             assert!(
                 click_targets.iter().any(|line| line.contains(required)),
                 "missing documented custom composite for {required}: {click_targets:#?}"
@@ -2962,10 +2962,17 @@ mod tests {
         let device = bluetooth
             .accessibility_nodes()
             .iter()
-            .find(|node| node.id.as_str().ends_with("bluetooth-device-0"))
-            .expect("Bluetooth device card");
+            .find(|node| node.id.as_str().ends_with("bluetooth-device-0-action"))
+            .expect("Bluetooth device action");
         assert_eq!(device.semantic_role, Some(SemanticRole::Button));
-        assert_eq!(device.state.as_deref(), Some("not connected"));
+        assert_eq!(device.label.as_deref(), Some("Connect"));
+        assert_eq!(
+            bluetooth
+                .semantic_targets_for_message(&SettingsMessage::BluetoothDevice(0))
+                .len(),
+            1,
+            "only the explicit trailing button toggles the device"
+        );
     }
 
     #[test]
