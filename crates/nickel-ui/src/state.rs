@@ -623,12 +623,8 @@ impl UiStateStore {
     pub fn focus_lost(&mut self) -> Invalidation {
         let pressed = self.pointer.pressed.take().is_some();
         let captured = self.pointer.captured.take().is_some();
-        let context = self.text_context.take().is_some();
-        let overlay = if context {
-            self.dismiss_overlay(DismissReason::Cancel)
-        } else {
-            Invalidation::None
-        };
+        self.text_context = None;
+        let overlay = self.dismiss_overlay(DismissReason::Cancel);
         let changed = pressed || captured;
         if changed {
             Invalidation::Paint.merge(overlay)
@@ -797,8 +793,10 @@ mod tests {
         store
             .navigation_mut()
             .set_controller_selected(Some(UiId::from("controller")));
-        assert_eq!(store.focus_lost(), Invalidation::Paint);
+        store.open_overlay(OverlayId::new("context"), UiId::from("button"));
+        assert_eq!(store.focus_lost(), Invalidation::Layout);
         assert!(store.pressed().is_none() && store.captured().is_none());
+        assert!(store.open_overlay_id().is_none());
         assert_eq!(store.device_removed(), Invalidation::Paint);
         assert!(store.navigation().controller_selected().is_none());
         store.destroy();

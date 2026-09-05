@@ -2653,17 +2653,23 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
-        if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+        let focus_lost = matches!(event, nickel_input::InputEvent::FocusLost { .. });
+        if focus_lost {
             self.desktop_host.application_mut().context_menu = None;
         }
-        if self.desktop_host.application().context_menu.is_none()
-            && let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
-                button: nickel_input::PointerButton::Secondary,
-                edge: nickel_input::KeyEdge::Pressed,
-                position: Some(position),
-                ..
-            }) = &event
+        if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            button: nickel_input::PointerButton::Secondary,
+            edge: nickel_input::KeyEdge::Pressed,
+            position: Some(position),
+            ..
+        }) = &event
         {
+            if self.desktop_host.inspect().open_overlay.is_some() {
+                let _ = self.desktop_host.step(HostBatch {
+                    events: vec![HostEvent::Ui(UiEvent::Dismiss)],
+                    ..HostBatch::default()
+                });
+            }
             let application = self.desktop_host.application_mut();
             application.pointer_press(
                 DesktopPoint {
@@ -2682,6 +2688,7 @@ impl LiveShell {
         }
         if self.desktop_host.application().context_menu.is_some()
             || matches!(event, nickel_input::InputEvent::Touch(_))
+            || focus_lost
             || matches!(
                 event,
                 nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
@@ -2695,6 +2702,7 @@ impl LiveShell {
                     input: event,
                     clipboard_text: None,
                 }],
+                application_changed: focus_lost,
                 ..HostBatch::default()
             });
             self.desktop_change_token = outcome.change_token;
@@ -7957,6 +7965,49 @@ mod tests {
         assert!(shell.desktop_host.application().layout.icons_visible());
         assert!(shell.desktop_host.application().context_menu.is_some());
         assert!(shell.desktop_host.inspect().open_overlay.is_some());
+
+        let second_point = nickel_input::Point { x: 360.0, y: 340.0 };
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(4),
+                button: nickel_input::PointerButton::Secondary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(second_point),
+            },
+        )));
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
+        assert_eq!(
+            shell
+                .desktop_host
+                .application()
+                .context_menu
+                .as_ref()
+                .and_then(|menu| menu.anchor),
+            Some(nickel_file::desktop::Point {
+                x: second_point.x as f32,
+                y: second_point.y as f32,
+            })
+        );
+
+        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(5),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+            },
+        ));
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
+        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 6)));
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
+
+        assert!(shell.desktop_input(nickel_input::InputEvent::FocusLost {
+            order: nickel_input::EventOrder(7),
+        }));
+        assert!(shell.desktop_host.application().context_menu.is_none());
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
     }
 
     #[test]
