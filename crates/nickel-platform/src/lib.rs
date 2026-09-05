@@ -72,8 +72,13 @@ pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_fi
 #[cfg(target_os = "linux")]
 pub use linux::{
     installed_icon_themes, path_display_name, path_icon, path_icon_theme_revision,
-    path_icon_with_theme, path_icon_with_theme_at_size,
+    path_icon_with_theme, path_icon_with_theme_at_size, publish_color_scheme,
 };
+
+#[cfg(not(target_os = "linux"))]
+pub fn publish_color_scheme(_mode: nickel_core::theme::ThemeMode) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(not(target_os = "linux"))]
 pub fn path_display_name(_path: &std::path::Path) -> Option<String> {

@@ -1550,7 +1550,16 @@ impl SettingsApp {
         if !self.persistence_enabled {
             return;
         }
-        self.record_appearance_persistence(try_save_shell_settings(&self.shell_settings));
+        let result = try_save_shell_settings(&self.shell_settings).and_then(|()| {
+            let mode = self
+                .shell_settings
+                .resolve_appearance(nickel_platform::appearance())
+                .mode;
+            nickel_platform::publish_color_scheme(mode).map_err(|error| {
+                format!("appearance was saved but could not be published: {error}")
+            })
+        });
+        self.record_appearance_persistence(result);
     }
 
     fn persist_wallpaper(&mut self) {
@@ -3671,6 +3680,40 @@ mod tests {
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(navigation_states.get("Appearance"), Some(&"selected"));
         assert_eq!(navigation_states.get("Display"), Some(&"unselected"));
+    }
+
+    #[test]
+    fn bar_radio_options_receive_pointer_activation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Bar);
+        app.persistence_enabled = false;
+        app.shell_settings.bar_on_all_displays = true;
+        app.shell_settings.all_windows_on_every_bar = true;
+        let mut host = UiHost::new(app, 850, 580);
+
+        for (order, message) in [
+            SettingsMessage::BarPrimaryDisplay,
+            SettingsMessage::BarDisplayWindows,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let target = host
+                .unique_semantic_target_for_message(&message)
+                .expect("bar radio option");
+            let x = f64::from(target.bounds.origin.x + target.bounds.size.width / 2.0);
+            let y = f64::from(target.bounds.origin.y + target.bounds.size.height / 2.0);
+            host.handle_input(
+                &primary_event((order * 2 + 1) as u64, KeyEdge::Pressed, x, y),
+                None,
+            );
+            host.handle_input(
+                &primary_event((order * 2 + 2) as u64, KeyEdge::Released, x, y),
+                None,
+            );
+        }
+
+        assert!(!host.application().shell_settings.bar_on_all_displays);
+        assert!(!host.application().shell_settings.all_windows_on_every_bar);
     }
 
     #[test]

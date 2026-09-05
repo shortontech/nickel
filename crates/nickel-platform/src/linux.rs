@@ -11,6 +11,44 @@ use std::{
 use freedesktop_desktop_entry::DesktopEntry;
 
 use image::RgbaImage;
+use nickel_core::theme::ThemeMode;
+
+const GNOME_INTERFACE_SCHEMA: &str = "org.gnome.desktop.interface";
+const GNOME_COLOR_SCHEME_KEY: &str = "color-scheme";
+
+fn gsettings_color_scheme(mode: ThemeMode) -> &'static str {
+    match mode {
+        ThemeMode::Dark => "prefer-dark",
+        ThemeMode::Light => "prefer-light",
+    }
+}
+
+/// Publishes Nickel's effective appearance through its selected Settings
+/// portal backend.
+///
+/// xdg-desktop-portal-gtk monitors this schema and translates changes into
+/// `org.freedesktop.appearance/color-scheme` values and `SettingChanged`
+/// signals for clients such as Chromium.
+pub fn publish_color_scheme(mode: ThemeMode) -> Result<(), String> {
+    let output = std::process::Command::new("gsettings")
+        .args([
+            "set",
+            GNOME_INTERFACE_SCHEMA,
+            GNOME_COLOR_SCHEME_KEY,
+            gsettings_color_scheme(mode),
+        ])
+        .output()
+        .map_err(|error| format!("could not run gsettings: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if diagnostic.is_empty() {
+        format!("gsettings exited with {}", output.status)
+    } else {
+        format!("gsettings failed: {diagnostic}")
+    })
+}
 
 #[zbus::proxy(
     gen_async = false,
@@ -487,10 +525,17 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        decode_file_uri, desktop_entry_display_name_with, desktop_entry_icon_with, icon_name,
-        installed_icon_themes_in, load_icon, path_icon_theme_revision, path_icon_with_theme,
-        value_in_section,
+        decode_file_uri, desktop_entry_display_name_with, desktop_entry_icon_with,
+        gsettings_color_scheme, icon_name, installed_icon_themes_in, load_icon,
+        path_icon_theme_revision, path_icon_with_theme, value_in_section,
     };
+    use nickel_core::theme::ThemeMode;
+
+    #[test]
+    fn nickel_theme_modes_map_to_portal_backend_preferences() {
+        assert_eq!(gsettings_color_scheme(ThemeMode::Dark), "prefer-dark");
+        assert_eq!(gsettings_color_scheme(ThemeMode::Light), "prefer-light");
+    }
 
     #[test]
     fn desktop_entry_display_name_prefers_locale_and_falls_back_to_name() {
