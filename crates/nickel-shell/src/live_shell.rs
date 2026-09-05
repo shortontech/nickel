@@ -31,8 +31,8 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     AnyView, Column, Container, ControllerAction, DragGesture, DragPhase, FilePlaneItem,
     FrameOverlay, HostBatch, HostChangeToken, HostEvent, Image, ImageFit, Insets, Layer,
-    OverlayAnchor, OverlayMenu, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Spacer, Text,
-    TextAlign, TextField, UiEvent, UiId, ViewContext,
+    OverlayAnchor, OverlayMenu, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Size, Spacer,
+    Text, TextAlign, TextField, UiEvent, UiId, ViewContext,
 };
 
 use crate::{
@@ -1432,6 +1432,31 @@ impl nickel_ui::Application for DesktopApplication {
                     ))
                 });
             let label_height = (cell_height - 74.0).max(1.0);
+            let label_rect = Rect::new(
+                position.x + 3.0,
+                position.y + 62.0,
+                (cell_width - 6.0).max(1.0),
+                label_height,
+            );
+            let interaction_surface = if selected {
+                Some(self.palette.accent_soft)
+            } else if hovered == Some(item.id) || focused {
+                Some(self.palette.surface_hover)
+            } else {
+                None
+            };
+            let label_foreground = desktop_label_foreground(
+                self.wallpaper.as_deref(),
+                Size { width, height },
+                label_rect,
+                self.palette.background,
+                interaction_surface,
+            );
+            let label_outline = if label_foreground == 0x111111 {
+                0xccffffff
+            } else {
+                0xcc111111
+            };
             let mut tile = FilePlaneItem::new_with_generation(
                 DesktopMessage::Activate(item.id),
                 item.entry.display_name(),
@@ -1464,8 +1489,8 @@ impl nickel_ui::Application for DesktopApplication {
             .icon_size(48.0)
             .label_height(label_height)
             .label_scale(0.85)
-            .foreground(self.palette.text)
-            .label_background(self.palette.panel, 5.0)
+            .foreground(label_foreground)
+            .label_outline(label_outline, 1.0)
             .gap(8.0);
             if self.pointer_dragged && selected {
                 tile = tile.border(self.palette.accent, 2.0);
@@ -6009,6 +6034,109 @@ fn application_discovery_status_label(
     }
 }
 
+/// Pick desktop-label ink from the pixels which are actually behind that label.
+///
+/// The desktop image is stretched to the output host, so output origins and
+/// physical scale have already been projected away when this receives the
+/// host-local rectangle. Transparent image pixels are composited over the
+/// themed desktop base, followed by any selected/hover/focus tile surface.
+fn desktop_label_foreground(
+    wallpaper: Option<&image::RgbaImage>,
+    viewport: Size,
+    label: Rect,
+    desktop_base: nickel_ui::Color,
+    interaction_surface: Option<nickel_ui::Color>,
+) -> nickel_ui::Color {
+    const DARK_INK: nickel_ui::Color = 0x111111;
+    const LIGHT_INK: nickel_ui::Color = 0xffffff;
+    const SAMPLE_COLUMNS: usize = 9;
+    const SAMPLE_ROWS: usize = 5;
+
+    let base = color_channels(desktop_base);
+    let mut dark = [0.0; SAMPLE_COLUMNS * SAMPLE_ROWS];
+    let mut light = [0.0; SAMPLE_COLUMNS * SAMPLE_ROWS];
+    let mut sample = 0;
+    for row in 0..SAMPLE_ROWS {
+        for column in 0..SAMPLE_COLUMNS {
+            let x =
+                label.origin.x + label.size.width * (column as f32 + 0.5) / SAMPLE_COLUMNS as f32;
+            let y = label.origin.y + label.size.height * (row as f32 + 0.5) / SAMPLE_ROWS as f32;
+            let mut pixel = wallpaper
+                .filter(|image| {
+                    image.width() > 0
+                        && image.height() > 0
+                        && viewport.width > 0.0
+                        && viewport.height > 0.0
+                })
+                .map(|image| {
+                    let source_x = ((x / viewport.width).clamp(0.0, 1.0)
+                        * image.width().saturating_sub(1) as f32)
+                        .round() as u32;
+                    let source_y = ((y / viewport.height).clamp(0.0, 1.0)
+                        * image.height().saturating_sub(1) as f32)
+                        .round() as u32;
+                    let source = image.get_pixel(source_x, source_y).0;
+                    composite_rgba([source[0], source[1], source[2], source[3]], base)
+                })
+                .unwrap_or(base);
+            if let Some(surface) = interaction_surface {
+                pixel = composite_rgba(color_channels(surface), pixel);
+            }
+            let luminance = rgba_luminance(pixel);
+            dark[sample] = (luminance + 0.05) / 0.05;
+            light[sample] = 1.05 / (luminance + 0.05);
+            sample += 1;
+        }
+    }
+
+    // A low percentile keeps a small bright/dark detail from controlling the
+    // whole label while still preferring ink that survives a mixed image.
+    dark.sort_by(f32::total_cmp);
+    light.sort_by(f32::total_cmp);
+    let percentile = dark.len() / 5;
+    let dark_score = (dark[percentile], dark.iter().sum::<f32>());
+    let light_score = (light[percentile], light.iter().sum::<f32>());
+    if dark_score >= light_score {
+        DARK_INK
+    } else {
+        LIGHT_INK
+    }
+}
+
+fn color_channels(color: nickel_ui::Color) -> [u8; 4] {
+    let encoded_alpha = ((color >> 24) & 0xff) as u8;
+    [
+        ((color >> 16) & 0xff) as u8,
+        ((color >> 8) & 0xff) as u8,
+        (color & 0xff) as u8,
+        if color <= 0x00ff_ffff {
+            255
+        } else {
+            encoded_alpha
+        },
+    ]
+}
+
+fn composite_rgba(foreground: [u8; 4], background: [u8; 4]) -> [u8; 4] {
+    let alpha = foreground[3] as f32 / 255.0;
+    let blend = |index| {
+        (foreground[index] as f32 * alpha + background[index] as f32 * (1.0 - alpha)).round() as u8
+    };
+    [blend(0), blend(1), blend(2), 255]
+}
+
+fn rgba_luminance(pixel: [u8; 4]) -> f32 {
+    let channel = |value: u8| {
+        let value = value as f32 / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(pixel[0]) + 0.7152 * channel(pixel[1]) + 0.0722 * channel(pixel[2])
+}
+
 fn launch_error_summary(error: &platform::LaunchError) -> String {
     match error {
         platform::LaunchError::EmptyCommand => "no launch command".into(),
@@ -6139,13 +6267,96 @@ mod tests {
     use nickel_ui_testkit::{Scenario, Selector};
 
     use super::{
-        ControlAction, HostRuntimeSamples, LiveShell, initial_wallpaper, panel_status_layout,
-        panel_tray_icons,
+        ControlAction, HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
+        panel_status_layout, panel_tray_icons,
         platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
         semantic_theme_from_palette, session_feed_status_label, shortcut_capability_status,
         visible_tray_item, window_belongs_to_panel,
     };
+
+    #[test]
+    fn desktop_labels_use_local_wallpaper_luminance_without_label_backplates() {
+        let mut wallpaper = RgbaImage::from_pixel(200, 100, Rgba([245, 245, 245, 255]));
+        for pixel in wallpaper
+            .enumerate_pixels_mut()
+            .filter_map(|(x, _, pixel)| (x >= 100).then_some(pixel))
+        {
+            *pixel = Rgba([8, 8, 8, 255]);
+        }
+        let viewport = nickel_ui::Size {
+            width: 400.0,
+            height: 200.0,
+        };
+        let left = Rect::new(20.0, 50.0, 80.0, 36.0);
+        let right = Rect::new(300.0, 50.0, 80.0, 36.0);
+
+        assert_eq!(
+            desktop_label_foreground(Some(&wallpaper), viewport, left, 0x303030, None),
+            0x111111,
+            "light pixels beneath this label require dark ink"
+        );
+        assert_eq!(
+            desktop_label_foreground(Some(&wallpaper), viewport, right, 0xf0f0f0, None),
+            0xffffff,
+            "dark pixels beneath this label require light ink"
+        );
+
+        let checker = RgbaImage::from_fn(9, 5, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255, 255, 255, 255])
+            } else {
+                Rgba([0, 0, 0, 255])
+            }
+        });
+        assert_eq!(
+            desktop_label_foreground(
+                Some(&checker),
+                nickel_ui::Size {
+                    width: 9.0,
+                    height: 5.0,
+                },
+                Rect::new(0.0, 0.0, 9.0, 5.0),
+                0x303030,
+                None,
+            ),
+            0x111111,
+            "mixed regions use a deterministic low-percentile and mean tie break"
+        );
+
+        // Transparent/failed wallpaper data falls back to the themed desktop
+        // base, and an interaction surface becomes the immediate backdrop.
+        let transparent = RgbaImage::from_pixel(1, 1, Rgba([255, 255, 255, 0]));
+        assert_eq!(
+            desktop_label_foreground(Some(&transparent), viewport, left, 0x090909, None),
+            0xffffff
+        );
+        assert_eq!(
+            desktop_label_foreground(None, viewport, left, 0xf8f8f8, None),
+            0x111111
+        );
+        assert_eq!(
+            desktop_label_foreground(
+                Some(&wallpaper),
+                viewport,
+                right,
+                0x090909,
+                Some(0xffeeeeee),
+            ),
+            0x111111,
+            "selected/hover/focus surfaces take precedence over wallpaper"
+        );
+
+        let production = include_str!("live_shell.rs")
+            .split("\nmod tests {")
+            .next()
+            .expect("production source precedes tests");
+        assert!(production.contains(".foreground(label_foreground)"));
+        assert!(
+            !production.contains(".label_background("),
+            "desktop labels must not paint independent opaque backplates"
+        );
+    }
 
     #[test]
     fn desktop_refresh_retains_only_icons_with_unchanged_meaningful_metadata() {

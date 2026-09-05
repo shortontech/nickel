@@ -671,6 +671,16 @@ impl<Message> FilePlaneItem<Message> {
         self
     }
 
+    pub fn label_outline(mut self, color: Color, width: f32) -> Self {
+        if let Some(label) = self.label_box_mut()
+            && let Some(text) = label.children.first_mut()
+            && let Kind::Text { outline, .. } = &mut text.kind
+        {
+            *outline = (width > 0.0).then_some((color, width.max(0.5)));
+        }
+        self
+    }
+
     pub fn label_background(mut self, color: Color, radius: f32) -> Self {
         if let Some(label) = self.label_box_mut() {
             label.style.background = Some(Background::Solid(color));
@@ -905,6 +915,15 @@ impl<Message> Text<Message> {
 
     pub fn color(mut self, color: Color) -> Self {
         self.0 = self.0.foreground(color);
+        self
+    }
+
+    /// Paint a glyph outline behind this text without introducing a label
+    /// backplate. This is intended for text over photographic/mixed imagery.
+    pub fn outline(mut self, color: Color, width: f32) -> Self {
+        if let Kind::Text { outline, .. } = &mut self.0.kind {
+            *outline = (width > 0.0).then_some((color, width.max(0.5)));
+        }
         self
     }
 
@@ -3407,6 +3426,48 @@ mod semantic_control_tests {
             .first()
             .expect("disabled button remains in layout");
         assert!(!node.interaction.interactive);
+    }
+
+    #[test]
+    fn file_plane_labels_are_transparent_until_a_consumer_explicitly_styles_them() {
+        let mut item = FilePlaneItem::new(
+            Message::Activate,
+            "Wallpaper label",
+            17,
+            Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))),
+        );
+        let label = item.label_box_mut().expect("shared file-plane label box");
+        assert_eq!(label.style.background, None);
+        assert_eq!(label.style.corner_radius, 0.0);
+
+        let frame = UiFrame::layout(
+            FilePlaneItem::new(
+                Message::Activate,
+                "Mixed wallpaper",
+                18,
+                Arc::new(RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 0, 0]))),
+            )
+            .width(96.0)
+            .height(112.0)
+            .foreground(0xffffff)
+            .label_outline(0xcc111111, 1.0),
+            Rect::new(0.0, 0.0, 96.0, 112.0),
+        );
+        let glyph_commands = frame
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                PaintCommand::Text { color, .. } => Some(*color),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(glyph_commands.len(), 9);
+        assert_eq!(glyph_commands.last(), Some(&0xffffff));
+        assert!(glyph_commands[..8].iter().all(|color| *color == 0xcc111111));
+        assert!(frame.commands().iter().all(|command| !matches!(
+            command,
+            PaintCommand::Fill { .. } | PaintCommand::RoundedFill { .. }
+        )));
     }
 
     #[test]

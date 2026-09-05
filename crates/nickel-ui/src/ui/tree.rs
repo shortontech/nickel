@@ -5810,16 +5810,47 @@ fn emit_element<Message: Clone>(
             bold,
             wrap,
             ellipsis,
+            outline,
             ..
-        } => tree.commands.push(PaintCommand::Text {
-            bounds: rect,
-            text: text_for_bounds(value, *scale, *bold, *ellipsis, rect.size.width),
-            scale: *scale,
-            color: foreground.unwrap_or(0x00ff_ffff),
-            align: element.style.text_align,
-            bold: *bold,
-            wrap: *wrap,
-        }),
+        } => {
+            let text = text_for_bounds(value, *scale, *bold, *ellipsis, rect.size.width);
+            if let Some((color, width)) = outline {
+                for (x, y) in [
+                    (-1.0, -1.0),
+                    (0.0, -1.0),
+                    (1.0, -1.0),
+                    (-1.0, 0.0),
+                    (1.0, 0.0),
+                    (-1.0, 1.0),
+                    (0.0, 1.0),
+                    (1.0, 1.0),
+                ] {
+                    tree.commands.push(PaintCommand::Text {
+                        bounds: Rect::new(
+                            rect.origin.x + x * *width,
+                            rect.origin.y + y * *width,
+                            rect.size.width,
+                            rect.size.height,
+                        ),
+                        text: text.clone(),
+                        scale: *scale,
+                        color: *color,
+                        align: element.style.text_align,
+                        bold: *bold,
+                        wrap: *wrap,
+                    });
+                }
+            }
+            tree.commands.push(PaintCommand::Text {
+                bounds: rect,
+                text,
+                scale: *scale,
+                color: foreground.unwrap_or(0x00ff_ffff),
+                align: element.style.text_align,
+                bold: *bold,
+                wrap: *wrap,
+            });
+        }
         Kind::StyledText {
             value,
             spans,
