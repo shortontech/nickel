@@ -1018,7 +1018,11 @@ impl NickelSession {
         // already been reconciled. No event dispatch can change admission while the synchronous
         // renderer call owns the lease, so commit is intentionally infallible.
         assert!(self.preview_admitted.contains(&id));
-        assert_eq!(frame.rgba.len(), PREVIEW_FRAME_BYTES);
+        assert!(preview_mapping_has_exact_size(
+            &frame.rgba,
+            frame.width,
+            frame.height
+        ));
         self.preview_counters.captures += 1;
         self.preview_counters.cache_generation = self
             .preview_counters
@@ -7067,6 +7071,33 @@ mod protocol_tests {
         assert_eq!(session.preview_frames[&id].height, 135);
         assert_eq!(session.preview_counters.evictions, 0);
         assert_eq!(session.preview_counters.capture_failures, 1);
+    }
+
+    #[test]
+    fn fitted_preview_frame_is_stored_at_its_actual_dimensions() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session
+            .windows
+            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
+        session.preview_admitted.insert(id);
+        let width = 210;
+        let height = super::PREVIEW_HEIGHT as u16;
+
+        session.store_preview(
+            id,
+            super::PreviewFrame {
+                width,
+                height,
+                rgba: vec![17; usize::from(width) * usize::from(height) * 4],
+            },
+        );
+
+        let stored = &session.preview_frames[&id];
+        assert_eq!((stored.width, stored.height), (width, height));
+        assert_eq!(stored.rgba.len(), 113_400);
+        assert_eq!(session.preview_counters.captures, 1);
     }
 
     #[test]
