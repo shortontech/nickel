@@ -1983,6 +1983,8 @@ pub struct LiveShell {
     launcher_icons: LauncherIconCache,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
+    shortcut_action_status: Option<String>,
+    shortcut_capability_status: Option<String>,
     #[cfg(test)]
     launcher_preferences_path: Option<std::path::PathBuf>,
     #[cfg(test)]
@@ -2025,6 +2027,30 @@ impl HostRuntimeSamples {
 
 fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
     deadline.is_none_or(|deadline| now >= deadline)
+}
+
+fn shortcut_capability_status(
+    capability: &nickel_input::global::ShortcutCapability,
+) -> Option<String> {
+    use nickel_input::global::{ShortcutCapability, UnavailableReason};
+
+    let reason = match capability {
+        ShortcutCapability::Available => return None,
+        ShortcutCapability::Unavailable(UnavailableReason::UnsupportedPlatform) => {
+            "this platform is unsupported".to_owned()
+        }
+        ShortcutCapability::Unavailable(UnavailableReason::MissingRuntime) => {
+            "the Nickel session runtime is missing".to_owned()
+        }
+        ShortcutCapability::Unavailable(UnavailableReason::PermissionDenied) => {
+            "the session denied permission".to_owned()
+        }
+        ShortcutCapability::Unavailable(UnavailableReason::SessionLocked) => {
+            "the session is locked".to_owned()
+        }
+        ShortcutCapability::Unavailable(UnavailableReason::Backend(reason)) => reason.clone(),
+    };
+    Some(format!("Global shortcuts unavailable: {reason}."))
 }
 
 impl LiveShell {
@@ -2292,6 +2318,8 @@ impl LiveShell {
             launcher_icons,
             launcher_host,
             launcher_status: application_status.map(str::to_owned),
+            shortcut_action_status: None,
+            shortcut_capability_status: None,
             #[cfg(test)]
             launcher_preferences_path: None,
             #[cfg(test)]
@@ -3652,6 +3680,7 @@ impl LiveShell {
 
     fn apply_window_menu_action(&mut self, action: MenuAction) {
         match action {
+            MenuAction::Dismiss => self.dismiss_window_menu(),
             MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => {}
             MenuAction::Activate(window) => self.send_window_action(window, WindowAction::Activate),
             MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
@@ -3768,7 +3797,7 @@ impl LiveShell {
             self.close_window_preview();
         }
         if key == Some(KeyCode::Escape) {
-            self.close_window_preview();
+            self.dismiss_window_menu();
         }
         outcome.changed
     }
@@ -3790,7 +3819,7 @@ impl LiveShell {
             self.close_window_preview();
         }
         if action == ControllerAction::Cancel {
-            self.close_window_preview();
+            self.dismiss_window_menu();
         }
         outcome.changed
     }
@@ -3934,6 +3963,17 @@ impl LiveShell {
         self.window_menu_host = None;
         let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
+    }
+
+    fn dismiss_window_menu(&mut self) {
+        let focused_menu = self.window_menu.is_some();
+        self.close_window_preview();
+        if focused_menu {
+            let _ = send_session_command(
+                "restore-window-menu-focus",
+                ShellCommand::RestoreApplicationFocus,
+            );
+        }
     }
 
     pub fn global_shortcut(&mut self, shortcut: platform::GlobalShortcut) -> bool {
@@ -4450,8 +4490,11 @@ impl LiveShell {
             .cloned()
         else {
             tracing::warn!(application = name, "shortcut application is unavailable");
+            self.shortcut_action_status = Some(format!("{name} is unavailable."));
+            self.set_launcher_visible(true);
             return false;
         };
+        self.shortcut_action_status = None;
         self.launch_application(application);
         true
     }
@@ -4894,11 +4937,20 @@ impl LiveShell {
     fn launcher_status_text(&self) -> Option<String> {
         self.launcher_status
             .as_deref()
+            .or(self.shortcut_action_status.as_deref())
+            .or(self.shortcut_capability_status.as_deref())
             .or_else(|| secure_storage_status_label(self.secure_storage_state))
             .or_else(|| {
                 session_feed_status_label(self.window_feed_status, self.workspace_feed_status)
             })
             .map(str::to_owned)
+    }
+
+    pub fn set_global_shortcut_capability(
+        &mut self,
+        capability: &nickel_input::global::ShortcutCapability,
+    ) {
+        self.shortcut_capability_status = shortcut_capability_status(capability);
     }
 
     fn panel_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -5781,8 +5833,34 @@ mod tests {
         HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
         platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, semantic_theme_from_palette,
-        session_feed_status_label, visible_tray_item, window_belongs_to_panel,
+        session_feed_status_label, shortcut_capability_status, visible_tray_item,
+        window_belongs_to_panel,
     };
+
+    #[test]
+    fn shortcut_capability_failures_have_visible_classified_status() {
+        use nickel_input::global::{ShortcutCapability, UnavailableReason};
+
+        assert_eq!(
+            shortcut_capability_status(&ShortcutCapability::Available),
+            None
+        );
+        for (reason, detail) in [
+            (UnavailableReason::UnsupportedPlatform, "unsupported"),
+            (UnavailableReason::MissingRuntime, "runtime"),
+            (UnavailableReason::PermissionDenied, "permission"),
+            (UnavailableReason::SessionLocked, "locked"),
+            (
+                UnavailableReason::Backend("registration conflict".into()),
+                "registration conflict",
+            ),
+        ] {
+            let status = shortcut_capability_status(&ShortcutCapability::Unavailable(reason))
+                .expect("an unavailable shortcut adapter must remain visible");
+            assert!(status.starts_with("Global shortcuts unavailable:"));
+            assert!(status.contains(detail), "{status:?}");
+        }
+    }
 
     #[test]
     fn per_display_panel_projection_keeps_owned_and_unresolved_windows_only() {
@@ -5893,6 +5971,17 @@ mod tests {
         let status = shell.launcher_status.as_deref().unwrap_or_default();
         assert!(status.starts_with("Could not launch Missing application: "));
         assert!(status.contains("No such file") || status.contains("not found"));
+    }
+
+    #[test]
+    fn unavailable_shortcut_application_is_a_visible_typed_failure() {
+        let mut shell = LiveShell::new().unwrap();
+
+        assert!(!shell.launch_named_application("Missing Nickel Tool"));
+        assert_eq!(
+            shell.shortcut_action_status.as_deref(),
+            Some("Missing Nickel Tool is unavailable.")
+        );
     }
 
     fn launcher_application_menu_has_label(

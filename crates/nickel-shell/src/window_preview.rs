@@ -55,6 +55,7 @@ pub enum PreviewAction {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MenuAction {
+    Dismiss,
     ShowWorkspaces,
     ShowDisplays,
     Back,
@@ -221,6 +222,14 @@ impl Application for WindowMenuApp {
 
     fn poll(&mut self) -> bool {
         std::mem::take(&mut self.dirty)
+    }
+
+    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+        if shortcut != nickel_ui::Shortcut::Escape {
+            return false;
+        }
+        self.effects.push(MenuAction::Dismiss);
+        true
     }
 }
 
@@ -1125,6 +1134,11 @@ mod tests {
             host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
             assert_eq!(host.application_mut().take_effects(), vec![action]);
         }
+        assert!(host.application_mut().shortcut(nickel_ui::Shortcut::Escape));
+        assert_eq!(
+            host.application_mut().take_effects(),
+            vec![MenuAction::Dismiss]
+        );
         let root = window_menu_entries(
             &window,
             &workspaces,

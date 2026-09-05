@@ -2062,6 +2062,7 @@ fn main() -> Result<(), String> {
         .runtime_snapshot(feature_settings.codex_generation)
         .save_default();
     let hotkey_feed = platform::launcher_hotkey_receiver();
+    state.set_global_shortcut_capability(&hotkey_feed.capability);
     tracing::info!(
         ownership = ?hotkey_feed.ownership,
         capability = ?hotkey_feed.capability,
