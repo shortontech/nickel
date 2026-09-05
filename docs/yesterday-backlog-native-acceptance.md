@@ -38,6 +38,16 @@ benchmark, strict session Clippy passed, and the user confirmed Alt+Tab no longe
 installed two-output session. This closes the crash regression only; the visual and reverse-cycle
 checks below remain native acceptance work.
 
+Later on 2026-09-05, commit `c336c62` completed the shared file-plane presentation authority:
+Nickel File, desktop entries, launcher search results, and launcher application tiles now use the
+same component for hit regions, semantics, icon containment, bounded two-line labels, and
+hover/selection/focus presentation. Idle tiles are colorless and borderless unless a host supplies
+an active state, while desktop supplies only its label backing and layout policy. The relevant UI,
+File, and Shell suites passed, strict workspace all-target/all-feature Clippy passed on the combined
+tree, and the combined Shell suite passed 258 tests with eight explicitly ignored live/release
+checks. Visual label containment and interaction on installed Linux and Windows shells remain native
+acceptance rather than being inferred from those tests.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
@@ -124,6 +134,15 @@ non-Linux Wi-Fi controls. This is build and automated contract evidence only; it
 the interactive acceptance below. The same cross-platform package set also passes native Windows
 Clippy across all targets with warnings denied.
 
+On 2026-09-05, an isolated native Windows release shell launched in interactive session 1 and
+remained responsive. After commit `1b4b052`, its replacement reached first shell in 1.59 seconds;
+the wallpaper adapter logged an unavailable COM class and then successfully loaded the Windows
+`TranscodedWallpaper` fallback at 1920 by 1200. The focused native wallpaper suite passed six tests
+and production-binary Clippy passed. This proves the fallback and runtime path, but visual wallpaper
+presence still requires observation on the attached display. A separate all-feature fixture-only
+configuration defect found by the broader Clippy command remains open until its Windows-gated
+notification imports are corrected.
+
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
   truthful no-ops.
@@ -133,6 +152,9 @@ Clippy across all targets with warnings denied.
   Wayland/XWayland menu acceptance.
 - **0179:** test pin identity, launch, grouping, reorder, persistence, and recovery for desktop,
   packaged, and conventional executable applications on Linux and Windows.
+- **0180:** verify the shared file-plane item visually contains long one- and two-line labels and
+  exposes selection, keyboard focus, activation, and host-specific context menus on Windows; idle
+  launcher, File, and desktop icon tiles must not regain unconditional borders or backgrounds.
 
 ## Native visual, Settings, and default handlers
 
