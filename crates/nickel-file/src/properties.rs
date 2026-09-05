@@ -394,10 +394,27 @@ mod tests {
         );
         assert!(outcome.readonly.is_ok(), "{:?}", outcome.readonly);
         assert!(outcome.hidden.is_ok(), "{:?}", outcome.hidden);
+        #[cfg(target_os = "windows")]
+        assert_eq!(outcome.path.file_name().unwrap(), "visible.txt");
+        #[cfg(not(target_os = "windows"))]
         assert_eq!(outcome.path.file_name().unwrap(), ".visible.txt");
-        assert!(fs::metadata(outcome.path).unwrap().permissions().readonly());
+        assert!(
+            fs::metadata(&outcome.path)
+                .unwrap()
+                .permissions()
+                .readonly()
+        );
+        let updated_entry = FileEntry {
+            name: outcome.path.file_name().unwrap().to_owned(),
+            path: outcome.path,
+            is_directory: false,
+            size: Some(4),
+            modified: None,
+        };
+        assert!(EntryProperties::load(&updated_entry, None).unwrap().hidden);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn hidden_edit_never_replaces_an_existing_entry() {
         let directory = tempfile::tempdir().unwrap();

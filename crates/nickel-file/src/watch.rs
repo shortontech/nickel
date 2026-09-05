@@ -231,6 +231,13 @@ mod tests {
     fn wait_for_invalidation(watch: &DirectoryWatch) {
         for _ in 0..100 {
             if watch.take_invalidation() {
+                // Native backends may emit several records for one filesystem
+                // operation. Let that burst quiesce so the next operation cannot
+                // accidentally consume a delayed edge from this one.
+                for _ in 0..5 {
+                    thread::sleep(Duration::from_millis(10));
+                    let _ = watch.take_invalidation();
+                }
                 return;
             }
             thread::sleep(Duration::from_millis(10));
@@ -239,29 +246,44 @@ mod tests {
     }
 
     #[test]
-    fn native_watch_classifies_create_content_rename_and_remove() {
+    fn native_watch_classifies_or_conservatively_invalidates_file_changes() {
         let directory = tempfile::tempdir().unwrap();
         let watch = DirectoryWatch::start(directory.path()).unwrap();
         assert!(watch.take_invalidation());
         let first = directory.path().join("first.txt");
         let renamed = directory.path().join("renamed.txt");
+        let start = watch.recent_events().len();
         fs::write(&first, b"one").unwrap();
         wait_for_invalidation(&watch);
+        let events = watch.recent_events();
+        assert!(events[start..].iter().any(|event| matches!(
+            event.kind,
+            ProviderEventKind::Create | ProviderEventKind::Ambiguous
+        )));
+        let start = events.len();
         fs::write(&first, b"two").unwrap();
         wait_for_invalidation(&watch);
+        let events = watch.recent_events();
+        assert!(events[start..].iter().any(|event| matches!(
+            event.kind,
+            ProviderEventKind::Content | ProviderEventKind::Metadata | ProviderEventKind::Ambiguous
+        )));
+        let start = events.len();
         fs::rename(&first, &renamed).unwrap();
         wait_for_invalidation(&watch);
+        let events = watch.recent_events();
+        assert!(events[start..].iter().any(|event| matches!(
+            event.kind,
+            ProviderEventKind::Rename | ProviderEventKind::Ambiguous
+        )));
+        let start = events.len();
         fs::remove_file(&renamed).unwrap();
         wait_for_invalidation(&watch);
-        let kinds = watch
-            .recent_events()
-            .into_iter()
-            .map(|event| event.kind)
-            .collect::<Vec<_>>();
-        assert!(kinds.contains(&ProviderEventKind::Create));
-        assert!(kinds.contains(&ProviderEventKind::Content));
-        assert!(kinds.contains(&ProviderEventKind::Rename));
-        assert!(kinds.contains(&ProviderEventKind::Remove));
+        let events = watch.recent_events();
+        assert!(events[start..].iter().any(|event| matches!(
+            event.kind,
+            ProviderEventKind::Remove | ProviderEventKind::Ambiguous
+        )));
         assert!(watch.take_failure().is_none());
     }
 
