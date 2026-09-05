@@ -1393,7 +1393,8 @@ impl WinitShell {
                 }
             }
             SurfaceRole::VolumeOsd => {
-                if !crate::platform::configure_volume_osd_window(&window) {
+                let configured = crate::platform::configure_volume_osd_window(&window);
+                if !configured {
                     tracing::warn!(?role, "failed to configure Windows shell window");
                 }
             }

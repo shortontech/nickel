@@ -1418,10 +1418,10 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         None => return,
     };
     tracing::debug!(?shortcut, "dispatching Windows global shortcut");
-    if let Some(sender) = SHORTCUT_SENDER.get() {
-        if sender.send(shortcut).is_err() {
-            tracing::warn!("Windows global shortcut receiver disconnected");
-        }
+    if let Some(sender) = SHORTCUT_SENDER.get()
+        && sender.send(shortcut).is_err()
+    {
+        tracing::warn!("Windows global shortcut receiver disconnected");
     }
 }
 
@@ -1824,7 +1824,7 @@ pub fn configure_desktop_window(
     unsafe {
         let previous_dpi_context =
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        let result = (|| {
+        let result = {
             let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
             SetWindowLongPtrW(
                 hwnd,
@@ -1866,7 +1866,7 @@ pub fn configure_desktop_window(
                 SWP_NOACTIVATE | SWP_FRAMECHANGED,
             )
             .is_ok()
-        })();
+        };
         if !previous_dpi_context.is_invalid() {
             let _ = SetThreadDpiAwarenessContext(previous_dpi_context);
         }
@@ -2130,7 +2130,7 @@ pub fn update_panel_fullscreen_state() {
     }
     let foreground = unsafe { GetForegroundWindow() };
     let fullscreen = foreground.0 != panel.0
-        && foreground.0 != std::ptr::null_mut()
+        && !foreground.0.is_null()
         && unsafe { IsWindowVisible(foreground).as_bool() }
         && !unsafe { IsIconic(foreground).as_bool() }
         // Standard maximized windows can report monitor-sized outer bounds because GetWindowRect
@@ -2386,7 +2386,12 @@ unsafe extern "system" fn tray_window_proc(
     let panel = PANEL_WINDOW_HANDLE.load(Ordering::Relaxed);
     if previous != 0 && hwnd.0 as isize == panel {
         // SAFETY: previous is the live WNDPROC returned by SetWindowLongPtrW.
-        let procedure = unsafe { std::mem::transmute(previous) };
+        let procedure = unsafe {
+            std::mem::transmute::<
+                isize,
+                Option<unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT>,
+            >(previous)
+        };
         return unsafe { CallWindowProcW(procedure, hwnd, message, wparam, lparam) };
     }
     // SAFETY: Messages for the private TrayNotifyWnd child use the system default procedure.
@@ -3479,7 +3484,7 @@ fn window_icon(hwnd: HWND) -> Option<image::RgbaImage> {
         }
     };
     (handle != 0)
-        .then(|| HICON(handle as *mut c_void))
+        .then_some(HICON(handle as *mut c_void))
         .and_then(render_icon)
 }
 

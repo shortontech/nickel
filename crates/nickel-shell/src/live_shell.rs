@@ -78,6 +78,7 @@ const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
+#[cfg(target_os = "linux")]
 const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
 const WALLPAPER_MAX_WIDTH: u32 = 7680;
 const WALLPAPER_MAX_HEIGHT: u32 = 4320;
@@ -2057,6 +2058,7 @@ pub struct LiveShell {
     launcher_persistence_attempts: usize,
     secure_storage_override: Option<String>,
     secure_storage_state: platform::SecureStorageState,
+    #[cfg(target_os = "linux")]
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
@@ -2095,6 +2097,7 @@ fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
 }
 
 impl LiveShell {
+    #[cfg(any(target_os = "linux", test))]
     pub fn host_runtime_samples(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, u64) {
         (
             self.host_runtime_samples
@@ -2231,8 +2234,6 @@ impl LiveShell {
             };
         #[cfg(not(target_os = "linux"))]
         let secure_storage_state = platform::SecureStorageState::Ready;
-        #[cfg(not(target_os = "linux"))]
-        let secure_storage_query_error = None;
         let control_host = ControlCenterHost::new(
             ControlCenterApp::new(
                 network.clone(),
@@ -2366,6 +2367,7 @@ impl LiveShell {
             launcher_persistence_attempts: 0,
             secure_storage_override: None,
             secure_storage_state,
+            #[cfg(target_os = "linux")]
             secure_storage_query_error,
             requested_codex_project: None,
             screenshot: ScreenshotTool::default(),
@@ -3255,6 +3257,7 @@ impl LiveShell {
     /// Resolves a test/accessibility semantic target from the same live group
     /// and renderer frame records used by pointer hit testing. The caller is
     /// responsible for dispatching the returned point as ordinary input.
+    #[cfg(any(target_os = "linux", test))]
     pub fn resolve_semantic_target(
         &self,
         target: &ShellSemanticTarget,
@@ -3347,6 +3350,7 @@ impl LiveShell {
         }
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn perform_screenshot_semantic_action(
         &mut self,
         action: nickel_session_protocol::ScreenshotTargetAction,
@@ -3436,6 +3440,7 @@ impl LiveShell {
             .flatten()
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn popover_anchor(&self, preferred: AnchorSide) -> Option<(ShellRole, ShellPopoverAnchor)> {
         let anchor = self.pending_popover_anchor.as_ref()?;
         let visible = match anchor.role {

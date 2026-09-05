@@ -25,7 +25,7 @@ pub fn surface_size(
 ) -> (u32, u32) {
     #[cfg(target_os = "windows")]
     {
-        return windows::surface_size(_window, fallback);
+        windows::surface_size(_window, fallback)
     }
     #[cfg(not(target_os = "windows"))]
     {

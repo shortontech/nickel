@@ -43,6 +43,7 @@ enum ScreenshotCompletion {
         y: f32,
     },
     PointerReleased,
+    #[cfg(any(target_os = "linux", test))]
     Semantic {
         action: nickel_session_protocol::ScreenshotTargetAction,
     },
@@ -287,6 +288,7 @@ impl Application for ScreenshotApp {
             ScreenshotCompletion::PointerMoved { x, y } => self.pointer_moved(x, y),
             ScreenshotCompletion::PointerPressed { x, y } => self.pointer_pressed(x, y),
             ScreenshotCompletion::PointerReleased => self.pointer_released(),
+            #[cfg(any(target_os = "linux", test))]
             ScreenshotCompletion::Semantic { action } => self.perform_semantic_action(action),
             ScreenshotCompletion::Platform { effect, result } => {
                 match (effect, result) {
@@ -522,6 +524,7 @@ impl ScreenshotTool {
         outcome.changed | self.apply_effects()
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn perform_semantic_action(
         &mut self,
         action: nickel_session_protocol::ScreenshotTargetAction,

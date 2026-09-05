@@ -501,6 +501,7 @@ impl WindowPreviewFrame {
             })
     }
 
+    #[cfg(any(target_os = "linux", test))]
     pub fn semantic_bounds(&self, action: PreviewAction) -> Option<Rect> {
         let action = match action {
             PreviewAction::OpenMenu(window) => PreviewAction::Activate(window),

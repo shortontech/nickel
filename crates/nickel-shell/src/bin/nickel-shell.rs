@@ -196,6 +196,7 @@ mod command_line_tests {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn p95_u64(samples: &[u64]) -> Option<u64> {
     let mut samples = samples.to_vec();
     if samples.is_empty() {
@@ -1247,6 +1248,8 @@ fn set_surface_visibility(shell: &mut WinitShell, id: SurfaceId, role: SurfaceRo
     {
         tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (changed, role);
 }
 
 #[cfg(target_os = "linux")]

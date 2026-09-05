@@ -1,10 +1,12 @@
-use std::{
-    collections::VecDeque,
-    time::{Duration, Instant},
-};
+use std::time::Instant;
+#[cfg(any(target_os = "linux", test))]
+use std::{collections::VecDeque, time::Duration};
 
+#[cfg(any(target_os = "linux", test))]
 pub const MAX_NOTIFICATIONS: usize = 100;
+#[cfg(any(target_os = "linux", test))]
 pub const MAX_NOTIFICATION_ACTIONS: usize = 3;
+#[cfg(any(target_os = "linux", test))]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -13,6 +15,7 @@ pub struct NotificationAction {
     pub label: String,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NotificationRequest {
     pub app_name: String,
@@ -32,18 +35,21 @@ pub struct DesktopNotification {
     expires_at: Option<Instant>,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClosedNotification {
     pub id: u32,
     pub reason: u32,
 }
 
+#[cfg(any(target_os = "linux", test))]
 #[derive(Debug)]
 pub struct NotificationStore {
     notifications: VecDeque<DesktopNotification>,
     next_id: u32,
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl Default for NotificationStore {
     fn default() -> Self {
         Self {
@@ -53,6 +59,7 @@ impl Default for NotificationStore {
     }
 }
 
+#[cfg(any(target_os = "linux", test))]
 impl NotificationStore {
     pub fn notify(
         &mut self,
