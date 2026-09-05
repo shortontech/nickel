@@ -358,7 +358,7 @@ fn string_length(value: &[u16]) -> usize {
 mod tests {
     use std::path::Path;
 
-    use super::{string_length, terminated};
+    use super::{path_icon_at_size, string_length, terminated};
 
     #[test]
     fn utf16_helpers_terminate_and_measure_paths() {
@@ -366,5 +366,26 @@ mod tests {
         assert_eq!(value.last(), Some(&0));
         assert_eq!(string_length(&value), value.len() - 1);
         assert_eq!(string_length(&[b'N' as u16, 0, b'X' as u16]), 1);
+    }
+
+    #[test]
+    fn installed_shortcut_icon_has_visible_pixels() {
+        let Some(program_data) = std::env::var_os("PROGRAMDATA") else {
+            return;
+        };
+        let root =
+            std::path::PathBuf::from(program_data).join("Microsoft/Windows/Start Menu/Programs");
+        let shortcut = [
+            root.join("Google Chrome.lnk"),
+            root.join("Windows Kits/Application Verifier (X64)/Application Verifier (X64).lnk"),
+        ]
+        .into_iter()
+        .find(|path| path.is_file());
+        let Some(shortcut) = shortcut else {
+            return;
+        };
+
+        let image = path_icon_at_size(&shortcut, 48).expect("resolve an installed shortcut icon");
+        assert!(image.pixels().any(|pixel| pixel.0[3] != 0));
     }
 }

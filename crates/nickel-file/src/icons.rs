@@ -323,7 +323,7 @@ pub fn resolve_artwork_with_theme(
 ) -> ResolvedArtwork {
     let nickel = NickelIconProvider;
     let system = SystemIconProvider::new(theme);
-    let preferred: &dyn IconProvider = match preference {
+    let preferred: &dyn IconProvider = match effective_preference(preference, request.path) {
         FileIconPreference::Nickel => &nickel,
         FileIconPreference::System => &system,
     };
@@ -346,7 +346,7 @@ pub fn cache_key_with_theme(
     theme: Option<&str>,
     request: &ArtworkRequest<'_>,
 ) -> ArtworkCacheKey {
-    match preference {
+    match effective_preference(preference, request.path) {
         FileIconPreference::Nickel => ArtworkCacheKey::new(
             ArtworkSource::Nickel,
             NickelIconProvider.revision(),
@@ -358,6 +358,43 @@ pub fn cache_key_with_theme(
             request,
         ),
     }
+}
+
+/// Launcher files are references to applications rather than ordinary documents. Their artwork
+/// is owned by the host platform (`Icon=` on freedesktop desktop entries and Shell icon metadata
+/// on Windows), even when Nickel artwork is selected for regular files.
+fn effective_preference(preference: FileIconPreference, path: &Path) -> FileIconPreference {
+    if is_platform_launcher(path) {
+        FileIconPreference::System
+    } else {
+        preference
+    }
+}
+
+fn is_platform_launcher(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+        return false;
+    };
+    #[cfg(target_os = "linux")]
+    {
+        extension.eq_ignore_ascii_case("desktop")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        matches_ignore_ascii_case(extension, &["lnk", "url", "exe"])
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+    {
+        let _ = extension;
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 fn resolve_with_providers(
@@ -525,6 +562,54 @@ mod tests {
             FileIconPreference::default_for_os("linux"),
             FileIconPreference::Nickel
         );
+    }
+
+    #[test]
+    fn ordinary_files_keep_the_selected_provider() {
+        let path = Path::new("notes.txt");
+        assert_eq!(
+            effective_preference(FileIconPreference::Nickel, path),
+            FileIconPreference::Nickel
+        );
+        assert_eq!(
+            effective_preference(FileIconPreference::System, path),
+            FileIconPreference::System
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn freedesktop_launchers_always_use_platform_artwork() {
+        let path = Path::new("Example.DESKTOP");
+        assert!(is_platform_launcher(path));
+        assert_eq!(
+            effective_preference(FileIconPreference::Nickel, path),
+            FileIconPreference::System
+        );
+        let request = ArtworkRequest {
+            path,
+            kind: SemanticIconKind::UnknownFile,
+            logical_size: 48,
+            scale_milli: 1_000,
+            appearance: ArtworkAppearance::Dark,
+        };
+        assert_eq!(
+            cache_key(FileIconPreference::Nickel, &request).provider,
+            ArtworkSource::System
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_launchers_always_use_shell_artwork() {
+        for path in ["Example.LNK", "site.url", "program.exe"] {
+            let path = Path::new(path);
+            assert!(is_platform_launcher(path));
+            assert_eq!(
+                effective_preference(FileIconPreference::Nickel, path),
+                FileIconPreference::System
+            );
+        }
     }
 
     #[test]
