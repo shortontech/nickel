@@ -2625,9 +2625,7 @@ impl LiveShell {
 
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
         if action == ControllerAction::ContextMenu {
-            self.desktop_host
-                .application_mut()
-                .open_keyboard_context();
+            self.desktop_host.application_mut().open_keyboard_context();
             return true;
         }
         let outcome = self.desktop_host.step(HostBatch {
@@ -7363,16 +7361,17 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let outcome = host.perform_accessibility_action(
-            root,
-            SemanticAction::Invoke(ActionKind::ContextMenu),
-        );
+        let outcome = host
+            .perform_accessibility_action(root, SemanticAction::Invoke(ActionKind::ContextMenu));
         assert!(outcome.failures.is_empty());
         assert!(host.application().context_menu.is_some());
 
         let mut desktop = super::DesktopApplication::fixture(None, palette);
         desktop.open_keyboard_context();
-        assert!(desktop.context_menu.is_some(), "controller uses this command model");
+        assert!(
+            desktop.context_menu.is_some(),
+            "controller uses this command model"
+        );
     }
 
     #[test]
