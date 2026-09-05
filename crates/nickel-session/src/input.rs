@@ -483,7 +483,7 @@ impl NickelSession {
                     },
                 );
                 pointer.frame(self);
-                self.note_interaction_at(position);
+                self.record_interaction_output(position);
             }
             InputEvent::PointerMotionAbsolute { event, .. } => {
                 let output = self.space.outputs().next().unwrap();
@@ -531,7 +531,7 @@ impl NickelSession {
                     },
                 );
                 pointer.frame(self);
-                self.note_interaction_at(pos);
+                self.record_interaction_output(pos);
             }
             InputEvent::PointerButton { event, .. } => {
                 let pointer = self.seat.get_pointer().unwrap();
@@ -544,7 +544,7 @@ impl NickelSession {
                 let button_state = event.state();
 
                 if button_state == ButtonState::Pressed {
-                    self.note_interaction_at(pointer.current_location());
+                    self.record_interaction_output(pointer.current_location());
                 }
 
                 if button_state == ButtonState::Pressed {
@@ -1001,7 +1001,7 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                self.note_interaction_at(location);
+                self.record_interaction_output(location);
                 self.active_touch_slots.insert(event.slot());
                 let touch = self.seat.get_touch().unwrap();
                 touch.down(
@@ -1019,7 +1019,7 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                self.note_interaction_at(location);
+                self.record_interaction_output(location);
                 let touch = self.seat.get_touch().unwrap();
                 touch.motion(
                     self,

@@ -3220,6 +3220,13 @@ impl NickelSession {
 
     fn output_name_at_pointer(&self) -> Option<String> {
         let location = self.seat.get_pointer()?.current_location();
+        self.output_name_at(location)
+    }
+
+    /// Resolves a logical point through the compositor's single output hit
+    /// authority. Input handlers record the result rather than reproducing the
+    /// output geometry walk themselves.
+    fn output_name_at(&self, location: Point<f64, Logical>) -> Option<String> {
         self.space.outputs().find_map(|output| {
             self.space
                 .output_geometry(output)
@@ -3228,13 +3235,8 @@ impl NickelSession {
         })
     }
 
-    pub(crate) fn note_interaction_at(&mut self, location: Point<f64, Logical>) {
-        self.last_interaction_output_name = self.space.outputs().find_map(|output| {
-            self.space
-                .output_geometry(output)
-                .filter(|geometry| geometry.to_f64().contains(location))
-                .map(|_| output.name())
-        });
+    pub(crate) fn record_interaction_output(&mut self, location: Point<f64, Logical>) {
+        self.last_interaction_output_name = self.output_name_at(location);
     }
 
     pub fn set_launcher_visible(&mut self, visible: bool) {
