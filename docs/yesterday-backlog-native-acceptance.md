@@ -91,7 +91,8 @@ shared UI, and shell, including the Windows raw-input and filesystem-watcher pat
 and corrected portability defects involving the `.exe` suffix, Linux-only toolkit-scale variables,
 CRLF source auditing, Windows hidden-file attributes, coalesced native watcher events, and truthful
 non-Linux Wi-Fi controls. This is build and automated contract evidence only; it does not replace
-the interactive acceptance below.
+the interactive acceptance below. The same cross-platform package set also passes native Windows
+Clippy across all targets with warnings denied.
 
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
