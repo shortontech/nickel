@@ -2443,10 +2443,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 }
             }
             WindowEvent::DroppedFile(path) => {
-                if self.host.as_mut().is_some_and(|host| {
+                let handled = self.host.as_mut().is_some_and(|host| {
                     host.application_mut()
                         .file_drag_event(FileDragEvent::Dropped(path.clone()))
-                }) {
+                });
+                if handled {
                     self.scheduler.invalidate();
                 }
             }
