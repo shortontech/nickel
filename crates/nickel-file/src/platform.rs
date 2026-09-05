@@ -511,23 +511,6 @@ pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
         })
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
-    nickel_platform::open_with_default(launcher).map_err(|error| match error {
-        nickel_platform::DefaultLaunchError::TargetMissing => OpenPathError::TargetMissing,
-        nickel_platform::DefaultLaunchError::PermissionDenied => OpenPathError::PermissionDenied,
-        nickel_platform::DefaultLaunchError::AssociationMissing => {
-            OpenPathError::AssociationMissing
-        }
-        nickel_platform::DefaultLaunchError::Platform(detail) => OpenPathError::Platform(detail),
-    })
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows")))]
-pub(crate) fn open_launcher(_launcher: &Path) -> Result<(), OpenPathError> {
-    Err(OpenPathError::Unsupported)
-}
-
 #[cfg(target_os = "linux")]
 pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
     if !launcher.exists() || !source.exists() {
