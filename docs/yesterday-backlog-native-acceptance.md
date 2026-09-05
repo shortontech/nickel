@@ -28,6 +28,16 @@ association-query translation. The combined tree passes the full Linux workspace
 strict all-target/all-feature Clippy. The affected cross-platform package set also passes native
 Windows tests and strict all-target Clippy after these fixes.
 
+On 2026-09-05, the final Linux workspace run completed 82 suites with 1,805 passed, zero failed,
+and 26 ignored release/manual benchmarks. Both full-provider reachability traversals completed with
+all 4,285 advertised paths reachable across 99 fixture variants and zero issues. A subsequent
+installed-session Alt+Tab check reproduced a compositor panic twice: a fitted `210 x 135` preview
+was incorrectly required to occupy the maximum `240 x 135` byte count. Commit `6dc426c` validates
+the frame's actual dimensions instead; its session suite passed 216 tests with one ignored
+benchmark, strict session Clippy passed, and the user confirmed Alt+Tab no longer terminates the
+installed two-output session. This closes the crash regression only; the visual and reverse-cycle
+checks below remain native acceptance work.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
