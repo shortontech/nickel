@@ -234,16 +234,17 @@ fn profile_digest() -> String {
 fn find_on_path(path: &OsString) -> Option<PathBuf> {
     #[cfg(windows)]
     {
-        return find_on_windows_path(path);
+        find_on_windows_path(path)
     }
 
     #[cfg(not(windows))]
-    let name = "codex";
-    #[cfg(not(windows))]
-    env::split_paths(path)
-        .filter(|entry| !entry.as_os_str().is_empty())
-        .map(|entry| entry.join(name))
-        .find(|candidate| candidate.is_file())
+    {
+        let name = "codex";
+        env::split_paths(path)
+            .filter(|entry| !entry.as_os_str().is_empty())
+            .map(|entry| entry.join(name))
+            .find(|candidate| candidate.is_file())
+    }
 }
 
 #[cfg(windows)]

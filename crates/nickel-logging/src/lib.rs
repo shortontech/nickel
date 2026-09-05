@@ -36,10 +36,10 @@ fn log_directory() -> io::Result<PathBuf> {
         if let Some(local_app_data) = env::var_os("LOCALAPPDATA") {
             return Ok(PathBuf::from(local_app_data).join("Nickel").join("logs"));
         }
-        return Err(io::Error::new(
+        Err(io::Error::new(
             io::ErrorKind::NotFound,
             "LOCALAPPDATA is not set",
-        ));
+        ))
     }
     #[cfg(not(target_os = "windows"))]
     {
