@@ -79,7 +79,7 @@ pub(crate) fn build_view(
             (
                 index,
                 entry.clone(),
-                app.selected_entries.contains(&index)
+                app.is_index_selected(index)
                     || app.native_drop_destination.as_ref() == Some(&entry.path),
                 app.icons.get(&entry.path).cloned(),
             )

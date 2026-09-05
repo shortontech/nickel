@@ -214,12 +214,17 @@ pub struct FileIdentity(pub u64, pub u64);
 impl DirectoryBrowser {
     #[doc(hidden)]
     pub fn fixture(entries: Vec<FileEntry>) -> Self {
+        let identities = entries
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (entry.path.clone(), FileIdentity(0, index as u64)))
+            .collect();
         Self {
             current: PathBuf::from("/fixture"),
             history: Vec::new(),
             forward_history: Vec::new(),
             entries,
-            identities: HashMap::new(),
+            identities,
             show_hidden: true,
         }
     }

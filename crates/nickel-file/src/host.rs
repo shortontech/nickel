@@ -402,8 +402,15 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 changed |= update_drop_hover(app, drop_destination, Instant::now());
                 app.begin_file_drag_if_threshold(cursor);
                 if let Some(entries) = selected_entries {
-                    app.selected_entries = entries;
-                    app.selected = app.selected_entries.iter().copied().min();
+                    app.selected_entries = entries
+                        .into_iter()
+                        .filter_map(|index| app.browser.identity_at(index))
+                        .collect();
+                    app.selected = app.selected_entries.iter().copied().min_by_key(|identity| {
+                        app.browser
+                            .index_of_identity(*identity)
+                            .unwrap_or(usize::MAX)
+                    });
                 }
                 if resizing {
                     app.sidebar_width = cursor.x.clamp(MIN_SIDEBAR_WIDTH, MAX_SIDEBAR_WIDTH);
@@ -502,7 +509,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         host.application_mut().resolved_grid_columns =
             host.resolved_grid_columns().unwrap_or(1).max(1);
         let pending_ensure = std::mem::take(&mut host.application_mut().pending_ensure_visible);
-        let selected = host.application().selected;
+        let selected = host.application().selected_index();
         let scroll_offset = host.application().file_scroll_offset;
         let mut changed = false;
         changed |= open_drop_hover_target(host.application_mut(), Instant::now());
@@ -615,8 +622,9 @@ mod tests {
         let path = directory.path().join("report.txt");
         std::fs::write(&path, b"report").unwrap();
         let mut app = FileApp::new(directory.path().to_path_buf());
-        app.selected = Some(0);
-        app.selected_entries.insert(0);
+        let identity = app.browser.identity_at(0).unwrap();
+        app.selected = Some(identity);
+        app.selected_entries.insert(identity);
         app.update(FileMessage::BeginRename);
         app.update(FileMessage::RenameChanged("renamed.txt".into()));
 

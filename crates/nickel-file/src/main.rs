@@ -193,8 +193,9 @@ pub struct FileApp {
     pub(crate) localizer: Localizer,
     pub(crate) browser: DirectoryBrowser,
     pub(crate) cursor: Point,
-    pub(crate) selected: Option<usize>,
-    pub(crate) selected_entries: HashSet<usize>,
+    /// Stable selection authority; indices are derived only at view and input boundaries.
+    pub(crate) selected: Option<crate::FileIdentity>,
+    pub(crate) selected_entries: HashSet<crate::FileIdentity>,
     pub(crate) rename_editor: Option<RenameEditor>,
     rename_rx: Option<Receiver<RenameResult>>,
     pub(crate) file_clipboard: Option<ClipboardOffer>,
@@ -210,7 +211,7 @@ pub struct FileApp {
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
     transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(crate) pending_transfer_conflict: Option<PendingTransferConflict>,
-    pub(crate) selection_anchor: Option<usize>,
+    pub(crate) selection_anchor: Option<crate::FileIdentity>,
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
     pub(crate) status: String,
@@ -613,9 +614,12 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                     ]),
                     String::new(),
                 );
-                app.selected = Some(1);
-                app.selection_anchor = Some(0);
-                app.selected_entries = HashSet::from([0, 1]);
+                app.selected = app.identity_at(1);
+                app.selection_anchor = app.identity_at(0);
+                app.selected_entries = [0, 1]
+                    .into_iter()
+                    .filter_map(|index| app.identity_at(index))
+                    .collect();
                 app
             }
             "empty" | "unavailable" | "unreadable" | "loading" | "disconnected" => {
@@ -725,9 +729,9 @@ impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {
 
 pub(crate) struct FileTab {
     pub(crate) browser: DirectoryBrowser,
-    pub(crate) selected: Option<usize>,
-    pub(crate) selected_entries: HashSet<usize>,
-    pub(crate) selection_anchor: Option<usize>,
+    pub(crate) selected: Option<crate::FileIdentity>,
+    pub(crate) selected_entries: HashSet<crate::FileIdentity>,
+    pub(crate) selection_anchor: Option<crate::FileIdentity>,
     pub(crate) tab_id: u64,
     pub(crate) status: String,
     pub(crate) last_click: Option<FileClick>,
@@ -751,8 +755,23 @@ pub(crate) struct FileTab {
 }
 
 impl FileApp {
-    pub(crate) fn selected_is_container(&self) -> bool {
+    pub(crate) fn selected_index(&self) -> Option<usize> {
         self.selected
+            .and_then(|identity| self.browser.index_of_identity(identity))
+    }
+
+    pub(crate) fn is_index_selected(&self, index: usize) -> bool {
+        self.browser
+            .identity_at(index)
+            .is_some_and(|identity| self.selected_entries.contains(&identity))
+    }
+
+    fn identity_at(&self, index: usize) -> Option<crate::FileIdentity> {
+        self.browser.identity_at(index)
+    }
+
+    pub(crate) fn selected_is_container(&self) -> bool {
+        self.selected_index()
             .and_then(|index| self.browser.entries().get(index))
             .is_some_and(|entry| entry.is_directory)
     }
@@ -940,8 +959,8 @@ impl FileApp {
             .iter()
             .position(|entry| entry.path == path)
         {
-            app.selected = Some(index);
-            app.selected_entries.insert(index);
+            app.selected = app.identity_at(index);
+            app.selected_entries.extend(app.identity_at(index));
             <Self as nickel_ui::Application>::update(&mut app, FileMessage::BeginRename);
         }
         app
@@ -1236,7 +1255,7 @@ impl FileApp {
     }
     pub(crate) fn activate_selected(&mut self) {
         let entry = self
-            .selected
+            .selected_index()
             .and_then(|index| self.browser.entries().get(index))
             .cloned();
         self.activate_entry(entry);
@@ -1488,26 +1507,33 @@ impl FileApp {
                         } else {
                             HashSet::new()
                         };
-                        let focused = self.selected.and_then(|index| {
-                            self.browser
-                                .entries()
-                                .get(index)
-                                .map(|entry| (self.browser.identity_at(index), entry.path.clone()))
+                        let focused = self.selected.and_then(|identity| {
+                            self.browser.index_of_identity(identity).and_then(|index| {
+                                self.browser
+                                    .entries()
+                                    .get(index)
+                                    .map(|entry| (Some(identity), entry.path.clone()))
+                            })
                         });
                         let selected = self
                             .selected_entries
                             .iter()
-                            .filter_map(|index| {
-                                self.browser.entries().get(*index).map(|entry| {
-                                    (self.browser.identity_at(*index), entry.path.clone())
+                            .filter_map(|identity| {
+                                self.browser.index_of_identity(*identity).and_then(|index| {
+                                    self.browser
+                                        .entries()
+                                        .get(index)
+                                        .map(|entry| (Some(*identity), entry.path.clone()))
                                 })
                             })
                             .collect::<Vec<_>>();
-                        let anchor = self.selection_anchor.and_then(|index| {
-                            self.browser
-                                .entries()
-                                .get(index)
-                                .map(|entry| (self.browser.identity_at(index), entry.path.clone()))
+                        let anchor = self.selection_anchor.and_then(|identity| {
+                            self.browser.index_of_identity(identity).and_then(|index| {
+                                self.browser
+                                    .entries()
+                                    .get(index)
+                                    .map(|entry| (Some(identity), entry.path.clone()))
+                            })
                         });
                         self.browser = browser;
                         if self.navigation_invalidates_icons {
@@ -1591,13 +1617,14 @@ impl FileApp {
         let resolve = |candidate: &(Option<nickel_file::FileIdentity>, PathBuf)| {
             candidate
                 .0
-                .and_then(|identity| self.browser.index_of_identity(identity))
+                .filter(|identity| self.browser.index_of_identity(*identity).is_some())
                 .or_else(|| {
                     if candidate.0.is_none() {
                         self.browser
                             .entries()
                             .iter()
                             .position(|entry| entry.path == candidate.1)
+                            .and_then(|index| self.browser.identity_at(index))
                     } else {
                         None
                     }
@@ -1685,15 +1712,9 @@ impl FileApp {
 
     fn sort_by(&mut self, key: EntrySortKey) {
         let focused = self
-            .selected
+            .selected_index()
             .and_then(|index| self.browser.entries().get(index))
             .map(|entry| entry.path.clone());
-        let selected = self
-            .selected_entries
-            .iter()
-            .filter_map(|index| self.browser.entries().get(*index))
-            .map(|entry| entry.path.clone())
-            .collect::<HashSet<_>>();
         if self.sort_key == key {
             self.sort_direction = match self.sort_direction {
                 SortDirection::Ascending => SortDirection::Descending,
@@ -1704,18 +1725,14 @@ impl FileApp {
             self.sort_direction = SortDirection::Ascending;
         }
         self.browser.sort(self.sort_key, self.sort_direction);
-        self.selected_entries = self
-            .browser
-            .entries()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| selected.contains(&entry.path).then_some(index))
-            .collect();
+        self.selected_entries
+            .retain(|identity| self.browser.index_of_identity(*identity).is_some());
         self.selected = focused.and_then(|path| {
             self.browser
                 .entries()
                 .iter()
                 .position(|entry| entry.path == path)
+                .and_then(|index| self.browser.identity_at(index))
         });
         self.selection_anchor = self.selected;
         self.set_scroll_offset(0.0);
@@ -2019,13 +2036,13 @@ impl FileApp {
             self.selection_anchor = None;
             return;
         }
-        let Some(current) = self.selected else {
+        let Some(current) = self.selected_index() else {
             self.select_only(0);
             self.ensure_selection_visible();
             return;
         };
         let next = (current as isize + delta).clamp(0, len as isize - 1) as usize;
-        self.selected = Some(next);
+        self.selected = self.identity_at(next);
         if self.shift_down {
             self.select_range(next, self.control_down);
         } else if !self.control_down {
@@ -2035,35 +2052,49 @@ impl FileApp {
     }
 
     fn select_only(&mut self, index: usize) {
-        self.selected = Some(index);
+        let Some(identity) = self.identity_at(index) else {
+            return;
+        };
+        self.selected = Some(identity);
         self.selected_entries.clear();
-        self.selected_entries.insert(index);
-        self.selection_anchor = Some(index);
+        self.selected_entries.insert(identity);
+        self.selection_anchor = Some(identity);
     }
 
     fn select_range(&mut self, target: usize, additive: bool) {
         let anchor = self
             .selection_anchor
-            .filter(|index| *index < self.browser.entries().len())
-            .or(self.selected)
-            .filter(|index| *index < self.browser.entries().len())
+            .and_then(|identity| self.browser.index_of_identity(identity))
+            .or_else(|| self.selected_index())
             .unwrap_or(target);
         if !additive {
             self.selected_entries.clear();
         }
-        self.selected_entries
-            .extend(anchor.min(target)..=anchor.max(target));
-        self.selected = Some(target);
-        self.selection_anchor = Some(anchor);
+        let identities = (anchor.min(target)..=anchor.max(target))
+            .filter_map(|index| self.identity_at(index))
+            .collect::<Vec<_>>();
+        self.selected_entries.extend(identities);
+        self.selected = self.identity_at(target);
+        self.selection_anchor = self.identity_at(anchor);
     }
 
     pub(crate) fn toggle_active_selection(&mut self) {
-        let Some(index) = self.selected else { return };
-        if !self.selected_entries.remove(&index) {
-            self.selected_entries.insert(index);
-            self.selection_anchor = Some(index);
-        } else if self.selection_anchor == Some(index) {
-            self.selection_anchor = self.selected_entries.iter().copied().min();
+        let Some(identity) = self.selected else {
+            return;
+        };
+        if !self.selected_entries.remove(&identity) {
+            self.selected_entries.insert(identity);
+            self.selection_anchor = Some(identity);
+        } else if self.selection_anchor == Some(identity) {
+            self.selection_anchor = self
+                .selected_entries
+                .iter()
+                .copied()
+                .min_by_key(|identity| {
+                    self.browser
+                        .index_of_identity(*identity)
+                        .unwrap_or(usize::MAX)
+                });
         }
     }
 
@@ -2074,11 +2105,13 @@ impl FileApp {
     }
 
     pub(crate) fn select_all(&mut self) {
-        self.selected_entries = (0..self.browser.entries().len()).collect();
+        self.selected_entries = (0..self.browser.entries().len())
+            .filter_map(|index| self.identity_at(index))
+            .collect();
         self.selected = self
             .selected
-            .filter(|index| *index < self.browser.entries().len())
-            .or_else(|| (!self.browser.entries().is_empty()).then_some(0));
+            .filter(|identity| self.browser.index_of_identity(*identity).is_some())
+            .or_else(|| self.identity_at(0));
         self.selection_anchor = self.selected;
     }
 
@@ -2088,7 +2121,7 @@ impl FileApp {
             .entries()
             .iter()
             .enumerate()
-            .filter(|(index, _)| self.selected_entries.contains(index))
+            .filter(|(index, _)| self.is_index_selected(*index))
             .map(|(_, entry)| entry.path.clone())
             .collect()
     }
@@ -2099,9 +2132,7 @@ impl FileApp {
                 .entries()
                 .iter()
                 .enumerate()
-                .filter_map(|(index, entry)| {
-                    self.selected_entries.contains(&index).then_some(entry)
-                }),
+                .filter_map(|(index, entry)| self.is_index_selected(index).then_some(entry)),
         )
     }
 
@@ -2178,11 +2209,12 @@ impl FileApp {
         match message {
             FileMessage::BeginRename => {
                 if self.selected_entries.len() == 1 {
-                    let index = *self.selected_entries.iter().next().unwrap();
-                    if let (Some(entry), Some(identity)) = (
-                        self.browser.entries().get(index),
-                        self.browser.identity_at(index),
-                    ) {
+                    let identity = *self.selected_entries.iter().next().unwrap();
+                    if let Some(entry) = self
+                        .browser
+                        .index_of_identity(identity)
+                        .and_then(|index| self.browser.entries().get(index))
+                    {
                         self.rename_editor =
                             Some(RenameEditor::begin(identity, entry.path.clone()));
                         self.pending_focus = Some(UiId::from("file-rename-field"));
@@ -2237,11 +2269,14 @@ impl FileApp {
                     .entries()
                     .get(index)
                     .map(|entry| entry.path.clone());
-                if !self.selected_entries.contains(&index) {
+                if !self.is_index_selected(index) {
+                    let Some(identity) = self.identity_at(index) else {
+                        return;
+                    };
                     self.selected_entries.clear();
-                    self.selected_entries.insert(index);
-                    self.selected = Some(index);
-                    self.selection_anchor = Some(index);
+                    self.selected_entries.insert(identity);
+                    self.selected = Some(identity);
+                    self.selection_anchor = Some(identity);
                 }
                 self.context_selection = self.ordered_selection_snapshot();
                 self.selection_drag = None;
@@ -2264,7 +2299,7 @@ impl FileApp {
                         .find(|entry| &entry.path == path)
                         .cloned(),
                     None => self
-                        .selected
+                        .selected_index()
                         .and_then(|index| self.browser.entries().get(index))
                         .cloned(),
                 };
@@ -2312,7 +2347,7 @@ impl FileApp {
                 } else {
                     (self.selected_entries.len() == 1)
                         .then(|| {
-                            self.selected.and_then(|index| {
+                            self.selected_index().and_then(|index| {
                                 self.browser
                                     .entries()
                                     .get(index)
@@ -2608,13 +2643,18 @@ impl FileApp {
                 if self.shift_down {
                     self.select_range(index, self.control_down);
                 } else if self.control_down {
-                    if !self.selected_entries.remove(&index) {
-                        self.selected_entries.insert(index);
-                        self.selected = Some(index);
-                        self.selection_anchor = Some(index);
+                    let Some(identity) = self.identity_at(index) else {
+                        return;
+                    };
+                    if !self.selected_entries.remove(&identity) {
+                        self.selected_entries.insert(identity);
+                        self.selected = Some(identity);
+                        self.selection_anchor = Some(identity);
                     } else {
-                        self.selected = self.selected_entries.iter().copied().min();
-                        if self.selection_anchor == Some(index) {
+                        self.selected = self.selected_entries.iter().copied().min_by_key(|id| {
+                            self.browser.index_of_identity(*id).unwrap_or(usize::MAX)
+                        });
+                        if self.selection_anchor == Some(identity) {
                             self.selection_anchor = self.selected;
                         }
                     }
@@ -2711,7 +2751,7 @@ impl FileApp {
         else {
             return;
         };
-        if !self.selected_entries.contains(&clicked) {
+        if !self.is_index_selected(clicked) {
             return;
         }
         let sources = self
@@ -2959,10 +2999,10 @@ impl FileApp {
                     .iter()
                     .position(|entry| entry.path == to)
                 {
-                    self.selected = Some(index);
+                    self.selected = self.identity_at(index);
                     self.selected_entries.clear();
-                    self.selected_entries.insert(index);
-                    self.selection_anchor = Some(index);
+                    self.selected_entries.extend(self.identity_at(index));
+                    self.selection_anchor = self.identity_at(index);
                 }
                 self.status = format!(
                     "Renamed to {}",
@@ -3231,7 +3271,7 @@ impl Application for FileApp {
             })
             .collect::<Vec<_>>();
         if let Some(editor) = &self.rename_editor {
-            let selected = self.selected.unwrap_or(0);
+            let selected = self.selected_index().unwrap_or(0);
             let surface = TransientSurface::dialog(
                 "file-rename",
                 OverlayAnchor::InvocationTargetCenter(UiId::new(format!("file-entry-{selected}"))),
@@ -3612,10 +3652,10 @@ mod live_reconciliation_tests {
         let renamed = directory.path().join("renamed.txt");
         fs::write(&original, b"content").unwrap();
         let mut app = FileApp::new(directory.path().to_path_buf());
-        app.selected = Some(0);
-        app.selected_entries = HashSet::from([0]);
-        app.selection_anchor = Some(0);
         let identity = app.browser.identity_at(0).unwrap();
+        app.selected = Some(identity);
+        app.selected_entries = HashSet::from([identity]);
+        app.selection_anchor = Some(identity);
 
         fs::rename(&original, &renamed).unwrap();
         let refreshed = DirectoryBrowser::open(directory.path()).unwrap();
@@ -3626,9 +3666,9 @@ mod live_reconciliation_tests {
             Some((Some(identity), original)),
         );
 
-        assert_eq!(app.selected, Some(0));
-        assert_eq!(app.selected_entries, HashSet::from([0]));
-        assert_eq!(app.selection_anchor, Some(0));
+        assert_eq!(app.selected, Some(identity));
+        assert_eq!(app.selected_entries, HashSet::from([identity]));
+        assert_eq!(app.selection_anchor, Some(identity));
         assert_eq!(app.browser.entries()[0].path, renamed);
     }
 
@@ -3661,10 +3701,10 @@ mod live_reconciliation_tests {
         let replacement = directory.path().join("replacement.tmp");
         fs::write(&target, b"old").unwrap();
         let mut app = FileApp::new(directory.path().to_path_buf());
-        app.selected = Some(0);
-        app.selected_entries = HashSet::from([0]);
-        app.selection_anchor = Some(0);
         let identity = app.browser.identity_at(0).unwrap();
+        app.selected = Some(identity);
+        app.selected_entries = HashSet::from([identity]);
+        app.selection_anchor = Some(identity);
 
         fs::write(&replacement, b"new").unwrap();
         fs::remove_file(&target).unwrap();
@@ -3704,8 +3744,9 @@ mod live_reconciliation_tests {
         fs::write(source.path().join("a.txt"), b"a").unwrap();
         fs::write(source.path().join("b.txt"), b"b").unwrap();
         let mut app = FileApp::new(source.path().to_path_buf());
-        app.selected_entries = HashSet::from([0]);
-        app.selected = Some(0);
+        let identity = app.browser.identity_at(0).unwrap();
+        app.selected_entries = HashSet::from([identity]);
+        app.selected = Some(identity);
         app.update_message(FileMessage::BeginRename);
         app.update_message(FileMessage::RenameChanged("renamed.txt".into()));
         app.update_message(FileMessage::CommitRename);
@@ -3716,7 +3757,9 @@ mod live_reconciliation_tests {
         assert!(source.path().join("renamed.txt").exists());
 
         app.browser = DirectoryBrowser::open(source.path()).unwrap();
-        app.selected_entries = (0..app.browser.entries().len()).collect();
+        app.selected_entries = (0..app.browser.entries().len())
+            .filter_map(|index| app.browser.identity_at(index))
+            .collect();
         app.update_message(FileMessage::CopySelection);
         let destination = tempfile::tempdir().unwrap();
         app.browser = DirectoryBrowser::open(destination.path()).unwrap();

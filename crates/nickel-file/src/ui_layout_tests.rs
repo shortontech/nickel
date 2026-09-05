@@ -9,6 +9,20 @@ use sha2::{Digest, Sha256};
 
 const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
 
+fn selected_indices(app: &FileApp) -> HashSet<usize> {
+    app.selected_entries
+        .iter()
+        .filter_map(|identity| app.browser.index_of_identity(*identity))
+        .collect()
+}
+
+fn set_selected_indices(app: &mut FileApp, indices: &[usize]) {
+    app.selected_entries = indices
+        .iter()
+        .filter_map(|index| app.browser.identity_at(*index))
+        .collect();
+}
+
 fn relative_luminance(color: u32) -> f32 {
     let channel = |shift: u32| {
         let value = ((color >> shift) & 0xff_u32) as f32 / 255.0;
@@ -55,26 +69,30 @@ fn pointer_selection_supports_toggle_ranges_and_additive_ranges() {
     let (_directory, mut app) = selection_app(8);
 
     app.update_message(FileMessage::Entry(2));
-    assert_eq!(app.selected_entries, HashSet::from([2]));
-    assert_eq!(app.selection_anchor, Some(2));
+    assert_eq!(selected_indices(&app), HashSet::from([2]));
+    assert_eq!(
+        app.selection_anchor
+            .and_then(|identity| app.browser.index_of_identity(identity)),
+        Some(2)
+    );
 
     app.control_down = true;
     app.update_message(FileMessage::Entry(6));
-    assert_eq!(app.selected_entries, HashSet::from([2, 6]));
-    assert_eq!(app.selected, Some(6));
+    assert_eq!(selected_indices(&app), HashSet::from([2, 6]));
+    assert_eq!(app.selected_index(), Some(6));
 
     app.control_down = false;
     app.shift_down = true;
     app.update_message(FileMessage::Entry(4));
-    assert_eq!(app.selected_entries, HashSet::from([4, 5, 6]));
+    assert_eq!(selected_indices(&app), HashSet::from([4, 5, 6]));
 
     app.control_down = true;
     app.update_message(FileMessage::Entry(1));
-    assert_eq!(app.selected_entries, HashSet::from([1, 2, 3, 4, 5, 6]));
+    assert_eq!(selected_indices(&app), HashSet::from([1, 2, 3, 4, 5, 6]));
 
     app.control_down = false;
     app.update_message(FileMessage::Entry(7));
-    assert_eq!(app.selected_entries, HashSet::from([6, 7]));
+    assert_eq!(selected_indices(&app), HashSet::from([6, 7]));
 }
 
 #[test]
@@ -84,25 +102,25 @@ fn keyboard_selection_moves_focus_without_destroying_selection() {
 
     app.control_down = true;
     app.select_relative(2);
-    assert_eq!(app.selected, Some(5));
-    assert_eq!(app.selected_entries, HashSet::from([3]));
+    assert_eq!(app.selected_index(), Some(5));
+    assert_eq!(selected_indices(&app), HashSet::from([3]));
 
     app.toggle_active_selection();
-    assert_eq!(app.selected_entries, HashSet::from([3, 5]));
+    assert_eq!(selected_indices(&app), HashSet::from([3, 5]));
 
     app.shift_down = true;
     app.select_relative(2);
-    assert_eq!(app.selected, Some(7));
-    assert_eq!(app.selected_entries, HashSet::from([3, 5, 6, 7]));
+    assert_eq!(app.selected_index(), Some(7));
+    assert_eq!(selected_indices(&app), HashSet::from([3, 5, 6, 7]));
 
     app.control_down = false;
     app.select_relative(-4);
-    assert_eq!(app.selected_entries, HashSet::from([3, 4, 5]));
+    assert_eq!(selected_indices(&app), HashSet::from([3, 4, 5]));
 
     app.clear_selection();
     app.select_relative(5);
-    assert_eq!(app.selected, Some(0));
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(app.selected_index(), Some(0));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
 }
 
 #[test]
@@ -116,9 +134,9 @@ fn grid_and_details_views_share_the_same_selection_reducer() {
         app.control_down = false;
         app.shift_down = true;
         app.update_message(FileMessage::Entry(5));
-        assert_eq!(app.selected, Some(5), "active item in {mode:?}");
+        assert_eq!(app.selected_index(), Some(5), "active item in {mode:?}");
         assert_eq!(
-            app.selected_entries,
+            selected_indices(&app),
             HashSet::from([5, 6, 7, 8]),
             "range selection in {mode:?}"
         );
@@ -131,7 +149,7 @@ fn grid_and_details_views_share_the_same_selection_reducer() {
 #[test]
 fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
     let (_directory, mut app) = selection_app(6);
-    app.selected_entries = HashSet::from([4, 1, 3]);
+    set_selected_indices(&mut app, &[4, 1, 3]);
     let expected = [1, 3, 4]
         .map(|index| app.browser.entries()[index].path.clone())
         .to_vec();
@@ -179,10 +197,10 @@ fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
 #[test]
 fn select_all_empty_space_and_invalid_anchor_are_deterministic_at_scale() {
     let (_directory, mut app) = selection_app(2_048);
-    app.selection_anchor = Some(9_999);
+    app.selection_anchor = app.identity_at(9_999);
     app.shift_down = true;
     app.update_message(FileMessage::Entry(2_047));
-    assert_eq!(app.selected_entries, HashSet::from([2_047]));
+    assert_eq!(selected_indices(&app), HashSet::from([2_047]));
 
     app.select_all();
     assert_eq!(app.ordered_selection_snapshot().len(), 2_048);
@@ -361,9 +379,9 @@ fn provider_changes_preserve_independent_tab_view_state() {
     std::fs::write(directory.path().join("root.txt"), b"root").unwrap();
     std::fs::write(child.join("child.txt"), b"child").unwrap();
     let mut app = FileApp::new(directory.path().to_path_buf());
-    app.selected = Some(1);
-    app.selected_entries = HashSet::from([1]);
-    app.selection_anchor = Some(1);
+    app.selected = app.identity_at(1);
+    set_selected_indices(&mut app, &[1]);
+    app.selection_anchor = app.identity_at(1);
     app.file_scroll_offset = 31.0;
     app.view_mode = FileViewMode::Details;
     app.sort_key = EntrySortKey::Size;
@@ -371,9 +389,9 @@ fn provider_changes_preserve_independent_tab_view_state() {
     app.new_tab_at(child.clone());
     settle_navigation(&mut app);
     let inactive_icon_before = app.inactive_tab(0).unwrap().tab_icon.as_ref().unwrap().0;
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
-    app.selection_anchor = Some(0);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
+    app.selection_anchor = app.identity_at(0);
     app.file_scroll_offset = 17.0;
     app.sort_key = EntrySortKey::Modified;
 
@@ -386,7 +404,7 @@ fn provider_changes_preserve_independent_tab_view_state() {
     app.refresh_icons_for(FileIconPreference::Nickel, ThemeMode::Dark);
 
     assert_eq!(app.browser.current(), child);
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
     assert_eq!(app.file_scroll_offset, 17.0);
     assert_eq!(app.view_mode, FileViewMode::Grid);
     assert_eq!(app.sort_key, EntrySortKey::Modified);
@@ -395,7 +413,13 @@ fn provider_changes_preserve_independent_tab_view_state() {
     assert!(root.tab_icon.is_some());
     assert_ne!(root.tab_icon.as_ref().unwrap().0, inactive_icon_before);
     assert_eq!(root.browser.current(), directory.path());
-    assert_eq!(root.selected_entries, HashSet::from([1]));
+    assert_eq!(
+        root.selected_entries
+            .iter()
+            .filter_map(|identity| root.browser.index_of_identity(*identity))
+            .collect::<HashSet<_>>(),
+        HashSet::from([1])
+    );
     assert_eq!(root.file_scroll_offset, 31.0);
     assert_eq!(root.view_mode, FileViewMode::Details);
     assert_eq!(root.sort_key, EntrySortKey::Size);
@@ -405,8 +429,8 @@ fn provider_changes_preserve_independent_tab_view_state() {
 #[test]
 fn provider_revision_changes_refresh_artwork_without_losing_view_state() {
     let mut app = FileApp::fixture();
-    app.selected = Some(1);
-    app.selected_entries = HashSet::from([1]);
+    app.selected = app.identity_at(1);
+    set_selected_indices(&mut app, &[1]);
     app.file_scroll_offset = 23.0;
     app.view_mode = FileViewMode::Details;
     let generation = app.icon_generation;
@@ -414,7 +438,7 @@ fn provider_revision_changes_refresh_artwork_without_losing_view_state() {
 
     assert!(app.sync_icon_settings());
     assert_ne!(app.icon_generation, generation);
-    assert_eq!(app.selected_entries, HashSet::from([1]));
+    assert_eq!(selected_indices(&app), HashSet::from([1]));
     assert_eq!(app.file_scroll_offset, 23.0);
     assert_eq!(app.view_mode, FileViewMode::Details);
 }
@@ -423,14 +447,14 @@ fn provider_revision_changes_refresh_artwork_without_losing_view_state() {
 fn display_scale_changes_refresh_physical_artwork_without_losing_selection() {
     let mut app = FileApp::fixture();
     let path = app.browser.entries()[0].path.clone();
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
     let generation = app.icon_generation;
 
     assert!(Application::scale_factor_changed(&mut app, 1.25));
     assert_eq!(app.artwork_scale_milli, 1_250);
     assert_ne!(app.icon_generation, generation);
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
     let pixels = &app.icons.get(&path).unwrap().1;
     assert_eq!((pixels.width(), pixels.height()), (120, 120));
     assert!(!Application::scale_factor_changed(&mut app, 1.25));
@@ -495,7 +519,7 @@ fn status_area_reports_selection_and_total_without_hiding_errors() {
     let mut app = FileApp::fixture();
     assert_eq!(file_status_text(&app), "3 items · fixture");
 
-    app.selected_entries = HashSet::from([1, 2]);
+    set_selected_indices(&mut app, &[1, 2]);
     assert_eq!(
         file_status_text(&app),
         "2 selected · 640 B · 3 items · fixture"
@@ -531,11 +555,11 @@ fn selection_status_omits_size_for_containers_and_unknown_metadata() {
             modified: None,
         },
     ]);
-    app.selected_entries = HashSet::from([1]);
+    set_selected_indices(&mut app, &[1]);
     assert!(file_status_text(&app).contains("1 selected · 12 B"));
-    app.selected_entries = HashSet::from([0, 1]);
+    set_selected_indices(&mut app, &[0, 1]);
     assert!(file_status_text(&app).starts_with("2 selected · 3 items"));
-    app.selected_entries = HashSet::from([1, 2]);
+    set_selected_indices(&mut app, &[1, 2]);
     assert!(file_status_text(&app).starts_with("2 selected · 3 items"));
 }
 
@@ -575,16 +599,22 @@ fn grid_and_details_modes_are_owned_independently_by_each_tab() {
     app.new_tab_at(child);
     assert_eq!(app.view_mode, FileViewMode::Grid);
     assert_eq!(app.sort_key, EntrySortKey::Name);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while app.navigation_rx.is_some() {
+        app.poll_navigation();
+        assert!(Instant::now() < deadline, "new tab listing did not settle");
+        std::thread::sleep(Duration::from_millis(1));
+    }
     app.update_message(FileMessage::Entry(0));
 
     app.switch_tab(0);
     assert_eq!(app.view_mode, FileViewMode::Details);
     assert_eq!(app.sort_key, EntrySortKey::Type);
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
     app.switch_tab(1);
     assert_eq!(app.view_mode, FileViewMode::Grid);
     assert_eq!(app.sort_key, EntrySortKey::Name);
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
 }
 
 #[test]
@@ -592,13 +622,16 @@ fn sorting_preserves_selection_by_entry_identity() {
     let mut app = FileApp::fixture();
     app.update_message(FileMessage::Entry(2));
     let selected_path = app.browser.entries()[2].path.clone();
+    let selected_identity = app.selected.unwrap();
 
     app.update_message(FileMessage::SortBy(EntrySortKey::Type));
     app.update_message(FileMessage::SortBy(EntrySortKey::Type));
 
     assert_eq!(app.sort_direction, SortDirection::Descending);
+    assert_eq!(app.selected, Some(selected_identity));
+    assert_eq!(app.selected_entries, HashSet::from([selected_identity]));
     assert_eq!(
-        app.selected
+        app.selected_index()
             .and_then(|index| app.browser.entries().get(index))
             .map(|entry| &entry.path),
         Some(&selected_path)
@@ -873,8 +906,8 @@ fn compact_grid_contains_multiline_labels_inside_their_rows() {
 fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
     let mut app = FileApp::fixture();
     app.view_mode = FileViewMode::Details;
-    app.selected = Some(1);
-    app.selected_entries = HashSet::from([1]);
+    app.selected = app.identity_at(1);
+    set_selected_indices(&mut app, &[1]);
     app.file_scroll_offset = 17.0;
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
@@ -912,13 +945,13 @@ fn narrow_places_surface_replaces_squeezed_sidebar_without_losing_view_state() {
             .any(|node| node.id.as_str().ends_with("/narrow-places-surface"))
     );
     assert_eq!(app.view_mode, FileViewMode::Details);
-    assert_eq!(app.selected_entries, HashSet::from([1]));
+    assert_eq!(selected_indices(&app), HashSet::from([1]));
     assert_eq!(app.file_scroll_offset, 17.0);
 
     app.update_message(FileMessage::TogglePlaces);
     assert!(!app.places_open);
     assert_eq!(app.view_mode, FileViewMode::Details);
-    assert_eq!(app.selected_entries, HashSet::from([1]));
+    assert_eq!(selected_indices(&app), HashSet::from([1]));
 }
 
 #[test]
@@ -1146,8 +1179,8 @@ fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
     std::fs::write(root.path().join("report.txt"), b"report").unwrap();
     let mut app = FileApp::new(root.path().to_path_buf());
     app.update_message(FileMessage::ToggleCommandSurface);
-    app.selected = Some(1);
-    app.selected_entries = HashSet::from([1]);
+    app.selected = app.identity_at(1);
+    set_selected_indices(&mut app, &[1]);
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
     );
@@ -1164,8 +1197,8 @@ fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
     assert_eq!(app.tabs.len(), 1);
 
     app.update_message(FileMessage::ToggleCommandSurface);
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
     let directory_frame = nickel_ui::UiFrame::layout(
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
@@ -1183,8 +1216,8 @@ fn open_in_new_tab_is_enabled_only_for_browsable_containers() {
 #[test]
 fn command_surface_exposes_open_and_complete_tab_management() {
     let mut app = FileApp::fixture();
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
     app.update_message(FileMessage::ToggleCommandSurface);
     let palette = ThemePalette::from_appearance(
         ShellSettings::load_default().resolve_appearance(nickel_platform::appearance()),
@@ -1329,16 +1362,16 @@ fn closing_active_tab_selects_nearest_survivor_without_mutating_it() {
 
     app.new_tab_at(middle);
     settle_navigation(&mut app);
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
     app.file_scroll_offset = 23.0;
     app.view_mode = FileViewMode::Details;
     app.sort_key = EntrySortKey::Size;
 
     app.new_tab_at(right.clone());
     settle_navigation(&mut app);
-    app.selected = Some(0);
-    app.selected_entries = HashSet::from([0]);
+    app.selected = app.identity_at(0);
+    set_selected_indices(&mut app, &[0]);
     app.file_scroll_offset = 41.0;
     app.view_mode = FileViewMode::Grid;
     app.sort_key = EntrySortKey::Modified;
@@ -1349,7 +1382,7 @@ fn closing_active_tab_selects_nearest_survivor_without_mutating_it() {
     assert_eq!(app.tabs.len(), 2);
     assert_eq!(app.active_tab, 1);
     assert_eq!(app.browser.current(), right);
-    assert_eq!(app.selected_entries, HashSet::from([0]));
+    assert_eq!(selected_indices(&app), HashSet::from([0]));
     assert_eq!(app.file_scroll_offset, 41.0);
     assert_eq!(app.view_mode, FileViewMode::Grid);
     assert_eq!(app.sort_key, EntrySortKey::Modified);
@@ -2055,8 +2088,8 @@ fn activation_reports_every_typed_result_and_coalesces_pending_requests() {
         (platform, "adapter failed"),
     ] {
         let mut app = FileApp::new(directory.path().to_path_buf());
-        app.selected = Some(0);
-        app.selected_entries.insert(0);
+        app.selected = app.identity_at(0);
+        app.selected_entries.extend(app.identity_at(0));
         app.activation_op = operation;
         app.activate_selected();
         assert_eq!(app.status, "Opening report.txt…");
@@ -2084,7 +2117,7 @@ fn context_invocation_captures_anchor_and_target_identity() {
     let target = app.context_target.clone();
 
     app.cursor = Point { x: 701.0, y: 509.0 };
-    app.selected = Some(1);
+    app.selected = app.identity_at(1);
 
     assert_eq!(app.context_anchor, Some(anchor));
     assert_eq!(target, app.context_target);
@@ -2143,11 +2176,11 @@ fn context_actions_use_the_captured_selection_and_implemented_folder_capabilitie
         .position(|entry| entry.display_name() == "folder")
         .unwrap();
 
-    app.selected_entries = HashSet::from([alpha]);
-    app.selected = Some(alpha);
+    set_selected_indices(&mut app, &[alpha]);
+    app.selected = app.browser.identity_at(alpha);
     app.update_message(FileMessage::ContextEntry(alpha));
-    app.selected_entries = HashSet::from([beta]);
-    app.selected = Some(beta);
+    set_selected_indices(&mut app, &[beta]);
+    app.selected = app.browser.identity_at(beta);
     app.update_message(FileMessage::ContextCopy);
     assert_eq!(
         app.file_clipboard.as_ref().unwrap().sources[0].path,
@@ -2262,8 +2295,9 @@ fn properties_action_opens_one_parented_semantic_dialog() {
     std::fs::write(directory.path().join("report.txt"), b"report").unwrap();
     let browser = DirectoryBrowser::open(directory.path()).unwrap();
     let mut host = UiHost::new(FileApp::with_browser(browser, String::new()), 860, 620);
-    host.application_mut().selected = Some(0);
-    host.application_mut().selected_entries.insert(0);
+    let identity = host.application().identity_at(0).unwrap();
+    host.application_mut().selected = Some(identity);
+    host.application_mut().selected_entries.insert(identity);
     host.application_mut()
         .update(FileMessage::ContextProperties);
     assert_eq!(
@@ -2321,8 +2355,8 @@ fn selected_folder_properties_do_not_offer_file_associations() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::create_dir(directory.path().join("folder")).unwrap();
     let mut app = FileApp::new(directory.path().to_path_buf());
-    app.selected = Some(0);
-    app.selected_entries.insert(0);
+    app.selected = app.identity_at(0);
+    app.selected_entries.extend(app.identity_at(0));
 
     app.update(FileMessage::ContextProperties);
 
@@ -2664,14 +2698,14 @@ fn focused_selection_is_visually_distinct_and_survives_window_focus_loss() {
         scenario.keyboard_focus(FocusDirection::Next).unwrap();
     }
     assert_eq!(
-        scenario.host().application().selected_entries,
+        selected_indices(scenario.host().application()),
         HashSet::from([0])
     );
     let focused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
 
     scenario.window_focus(false).unwrap();
     assert_eq!(
-        scenario.host().application().selected_entries,
+        selected_indices(scenario.host().application()),
         HashSet::from([0])
     );
     let unfocused = nickel_ui_testkit::render_host(scenario.host(), 820, 620, 1.0);
