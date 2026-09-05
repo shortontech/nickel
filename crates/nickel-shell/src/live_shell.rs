@@ -51,9 +51,9 @@ use crate::{
     },
     screenshot::ScreenshotTool,
     window_preview::{
-        MENU_WIDTH, MenuAction, PreviewAction, WindowMenuApp, WindowPreviewFrame,
-        build_preview_frame, menu_height, menu_height_for_rows, preview_dimensions,
-        semantic_theme_from_palette, window_menu_max_rows,
+        MENU_WIDTH, MenuAction, PreviewAction, TaskbarPreviewAnchor, WindowMenuApp,
+        WindowPreviewFrame, build_preview_frame, menu_height, menu_height_for_rows,
+        preview_dimensions, semantic_theme_from_palette, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -4197,14 +4197,21 @@ impl LiveShell {
     }
 
     fn preview_origin_x(&self, index: usize, width: u32) -> i32 {
-        let icon_center = self
+        let control_bounds = self
             .panel_host
             .semantic_targets_for_message(&PanelAction::Task(index))
             .into_iter()
             .next()
-            .map(|target| target.bounds.origin.x + target.bounds.size.width / 2.0)
-            .unwrap_or(PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH + PANEL_ITEM_WIDTH / 2.0);
-        self.panel_origin_x + (icon_center - width as f32 / 2.0).round() as i32
+            .map(|target| target.bounds)
+            .unwrap_or_else(|| {
+                Rect::new(
+                    PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH,
+                    0.0,
+                    PANEL_ITEM_WIDTH,
+                    PANEL_ITEM_WIDTH,
+                )
+            });
+        TaskbarPreviewAnchor::new(self.panel_origin_x, control_bounds).preview_origin_x(width)
     }
 
     fn window_context_menu_height(&self) -> i32 {
@@ -7030,7 +7037,7 @@ mod tests {
         let (preview_width, _) = super::preview_dimensions(2);
         assert_eq!(
             shell.preview_origin_x(0, preview_width),
-            panel.x - i32::try_from(preview_width / 2).unwrap()
+            (panel.x - i32::try_from(preview_width / 2).unwrap()).max(shell.panel_origin_x)
         );
 
         let group = shell.launcher.group_windows(&shell.windows).remove(0);

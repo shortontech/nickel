@@ -1,7 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use nickel_core::theme::ThemePalette;
-#[cfg(any(target_os = "linux", test))]
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
@@ -389,6 +388,27 @@ pub struct WindowPreviewFrame {
     host: UiHost<WindowPreviewApp>,
     change_token: HostChangeToken,
     next_deadline: Option<Instant>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TaskbarPreviewAnchor {
+    output_origin_x: i32,
+    control_bounds: Rect,
+}
+
+impl TaskbarPreviewAnchor {
+    pub fn new(output_origin_x: i32, control_bounds: Rect) -> Self {
+        Self {
+            output_origin_x,
+            control_bounds,
+        }
+    }
+
+    pub fn preview_origin_x(self, preview_width: u32) -> i32 {
+        let control_center = self.control_bounds.origin.x + self.control_bounds.size.width / 2.0;
+        (self.output_origin_x + (control_center - preview_width as f32 / 2.0).round() as i32)
+            .max(self.output_origin_x)
+    }
 }
 
 pub struct WindowPreviewApp {
@@ -801,6 +821,14 @@ mod tests {
     fn native_thumbnails_follow_card_geometry() {
         assert_eq!(native_thumbnail_bounds(0), (20, 50, 280, 166));
         assert_eq!(native_thumbnail_bounds(1), (306, 50, 566, 166));
+    }
+
+    #[test]
+    fn taskbar_preview_anchor_keeps_a_wide_preview_on_the_invoking_output() {
+        let anchor = TaskbarPreviewAnchor::new(1_920, Rect::new(48.0, 0.0, 48.0, 56.0));
+
+        assert_eq!(anchor.preview_origin_x(1_160), 1_920);
+        assert!(anchor.preview_origin_x(80) >= 1_920);
     }
 
     #[test]
