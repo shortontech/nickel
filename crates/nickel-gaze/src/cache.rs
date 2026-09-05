@@ -233,7 +233,10 @@ fn io_error(path: &Path, source: io::Error) -> CacheError {
 mod tests {
     use super::{CacheError, ModelArtifact, parse_manifest, safe_component, verify_artifact};
     use sha2::{Digest, Sha256};
-    use std::{fs, time::SystemTime};
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn checked_in_manifest_is_complete() {
@@ -269,10 +272,13 @@ mod tests {
 
     #[test]
     fn verifies_length_and_digest() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should follow the Unix epoch")
+            .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "nickel-gaze-cache-test-{}-{:?}",
+            "nickel-gaze-cache-test-{}-{nonce}",
             std::process::id(),
-            SystemTime::now()
         ));
         fs::create_dir_all(&directory).expect("temporary directory should exist");
         let path = directory.join("model.onnx");
