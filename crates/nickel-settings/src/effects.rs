@@ -96,7 +96,6 @@ impl SettingsApp {
             .collect();
         if outputs.is_empty() {
             self.status = self.localizer.text("settings-status-using-mock-displays");
-            return;
         }
         let minimum_x = outputs.iter().map(|output| output.x).min().unwrap_or(0);
         let minimum_y = outputs.iter().map(|output| output.y).min().unwrap_or(0);
@@ -444,7 +443,6 @@ impl SettingsApp {
                 let (signal, connected) =
                     available_profiles.get(&key).copied().unwrap_or((0, false));
                 networks_by_profile.entry(key).or_insert(WifiNetwork {
-                    id: profile.clone(),
                     profile,
                     signal,
                     connected,

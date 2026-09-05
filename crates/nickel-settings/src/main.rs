@@ -8,10 +8,13 @@ mod platform;
 mod view;
 
 use model::SettingsApp;
+#[cfg(not(target_os = "windows"))]
 use nickel_session_protocol::{
-    ClientEnvelope, Command as SessionCommand, OutputLayout as SessionOutputLayout,
-    OutputPlacement as SessionOutputPlacement, Query as SessionQuery, Request as SessionRequest,
-    ServerEnvelope, ServerMessage,
+    ClientEnvelope, OutputLayout as SessionOutputLayout, OutputPlacement as SessionOutputPlacement,
+    ServerEnvelope,
+};
+use nickel_session_protocol::{
+    Command as SessionCommand, Query as SessionQuery, Request as SessionRequest, ServerMessage,
 };
 use persistence::{
     load_shell_settings, try_save_shell_settings, try_save_wallpaper_settings,
@@ -408,6 +411,7 @@ struct NetworkAdapter {
 }
 
 struct WifiNetwork {
+    #[cfg(target_os = "linux")]
     id: String,
     profile: String,
     signal: u32,
@@ -2807,6 +2811,7 @@ mod tests {
 
         let mut network = SettingsApp::with_initial_page(SettingsPage::Network);
         network.wifi_networks.push(WifiNetwork {
+            #[cfg(target_os = "linux")]
             id: "test".into(),
             profile: "Test network".into(),
             signal: 75,
