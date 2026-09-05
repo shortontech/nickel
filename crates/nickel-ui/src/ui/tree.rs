@@ -6938,6 +6938,7 @@ fn apply_transient_state<Message>(
         );
     if owns_state {
         let scope_background_active = state.window_focused()
+            && state.input_modality() == InputModality::Controller
             && element.navigation_scope.is_some()
             && (state.navigation().controller_selected() == Some(id)
                 || state.navigation().controller_scope() == Some(id)

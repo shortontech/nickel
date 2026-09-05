@@ -2741,9 +2741,16 @@ mod tests {
             .clone();
         state.navigation_mut().set_controller_pane(Some(sidebar));
 
-        let selected = UiFrame::layout_with_state(build(), bounds, &mut state);
         let focused_sidebar =
             crate::focused_surface(theme.surfaces.sidebar, theme.borders.controller_focus);
+        let pointer = UiFrame::layout_with_state(build(), bounds, &mut state);
+        assert!(!pointer.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::Fill { color, .. } if *color == focused_sidebar
+        )));
+
+        pointer.handle_event(&mut state, UiEvent::ControllerDown);
+        let selected = UiFrame::layout_with_state(build(), bounds, &mut state);
         assert!(selected.commands().iter().any(|command| matches!(
             command,
             PaintCommand::Fill { color, .. } if *color == focused_sidebar
