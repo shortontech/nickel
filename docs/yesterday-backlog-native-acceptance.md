@@ -90,6 +90,15 @@ and raises/focuses modal children. The complete Session suite passed 204 tests w
 release benchmark and strict all-target/all-feature Clippy passed. Native Chrome portal chooser and
 VS Code confirmation acceptance require a compositor/session restart with the installed binary.
 
+The Spec 0136 completeness audit found that `Super+P` still opened the generic Control Center rather
+than the required projection chooser. Commit `70a5976` adds a dedicated keyboard/controller-
+focusable chooser, filters choices against the live output topology, preserves preview Keep/Revert
+and 15-second rollback, and clears false confirmation state when native preview dispatch fails. The
+Shell suite passed 266 tests with eight ignored live/release checks, the core shell and workspace
+scenario suites passed 22 tests, strict Shell Clippy passed, and the Windows GNU cross-check passed.
+The physical multi-output, client, controller-parity, focus-restoration, and native Windows items
+below remain required.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
