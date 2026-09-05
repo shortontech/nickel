@@ -3599,8 +3599,6 @@ fn explore_controller_routes<A: Application>(
     targets: &BTreeSet<String>,
     policy: &ReachabilityPolicy,
 ) -> ControllerGraphResult {
-    let started = Instant::now();
-    let ceiling = Duration::from_millis(policy.wall_time_ms);
     let mut routes = std::collections::BTreeMap::new();
     // Seed structural traversal from the default pane and nearby shoulder
     // peers. Ordinary pane spines are recorded once before spatial BFS.
@@ -3619,15 +3617,6 @@ fn explore_controller_routes<A: Application>(
         let mut seed_states = BTreeSet::new();
         let mut repeat_recoveries = 0;
         for _ in seed_prefix.len()..policy.maximum_path_length {
-            if started.elapsed() >= ceiling {
-                return ControllerGraphResult {
-                    routes,
-                    failure: Some(format!(
-                        "controller graph exploration exceeded the {}ms wall ceiling during structural seeding",
-                        ceiling.as_millis()
-                    )),
-                };
-            }
             let inspection = seed.host.inspect();
             if let Some(current) = inspection.controller_target.as_ref()
                 && targets.contains(current.as_str())
@@ -3687,17 +3676,6 @@ fn explore_controller_routes<A: Application>(
     let mut last_trace = Vec::new();
 
     while let Some(prefix) = queue.pop_front() {
-        if started.elapsed() >= ceiling {
-            return ControllerGraphResult {
-                routes,
-                failure: Some(format!(
-                    "controller BFS exceeded the {}ms wall ceiling after {} states; trace={}",
-                    ceiling.as_millis(),
-                    visited.len(),
-                    last_trace.join(" -> ")
-                )),
-            };
-        }
         if prefix.len() > policy.maximum_path_length {
             continue;
         }
@@ -4752,6 +4730,31 @@ mod tests {
             issue.kind == ReachabilityIssueKind::Unreachable
                 && issue.detail.contains("path ceiling")
         }));
+    }
+
+    #[test]
+    fn controller_graph_completion_is_independent_of_machine_speed() {
+        let factory = || Scenario::new(Counter::default(), 320, 160);
+        let targets = factory()
+            .semantic_nodes()
+            .into_iter()
+            .filter(|node| {
+                node.actions.iter().any(|action| {
+                    action_supported_by_modality(*action, ReachabilityModality::Controller)
+                })
+            })
+            .map(|node| node.id.as_str().to_owned())
+            .collect();
+        let routes = explore_controller_routes(
+            &factory,
+            &targets,
+            &ReachabilityPolicy {
+                wall_time_ms: 0,
+                ..ReachabilityPolicy::default()
+            },
+        );
+        assert_eq!(routes.failure, None);
+        assert_eq!(routes.routes.len(), targets.len());
     }
 
     #[test]
