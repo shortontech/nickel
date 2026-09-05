@@ -104,6 +104,10 @@ pub enum ControllerEvent {
     ThreadCreated(Thread),
     ThreadSelected(Thread),
     TurnAccepted,
+    ModelRejected {
+        model: String,
+        message: String,
+    },
     ApprovalPolicyAccepted(ApprovalPolicy),
     Protocol(CodexEvent),
     Incompatible(String),
@@ -349,6 +353,7 @@ fn run_worker(
                 reasoning_effort,
                 approval_policy,
             } => {
+                let requested_model = model.clone();
                 let thread = match selected_thread.clone() {
                     Some(id) => Ok(id),
                     None => backend
@@ -365,7 +370,7 @@ fn run_worker(
                             thread.id
                         }),
                 };
-                thread
+                let result = thread
                     .and_then(|thread_id| {
                         backend.start_turn(StartTurn {
                             thread_id,
@@ -380,8 +385,21 @@ fn run_worker(
                         active_turn = Some(turn.id);
                         let _ = send(ControllerEvent::TurnAccepted);
                         let _ = send(ControllerEvent::ApprovalPolicyAccepted(approval_policy));
-                    })
-                    .map_err(|error| error.to_string())
+                    });
+                match result {
+                    Ok(()) => Ok(()),
+                    Err(error) => {
+                        let message = error.to_string();
+                        if let Some(model) = requested_model
+                            && error_indicates_model_rejection(&message)
+                        {
+                            let _ = send(ControllerEvent::ModelRejected { model, message });
+                            Ok(())
+                        } else {
+                            Err(message)
+                        }
+                    }
+                }
             }
             ControllerCommand::Shell(command) => {
                 let thread = match selected_thread.clone() {
@@ -442,6 +460,22 @@ fn run_worker(
             return;
         }
     }
+}
+
+fn error_indicates_model_rejection(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("model")
+        && [
+            "unavailable",
+            "unsupported",
+            "not supported",
+            "not found",
+            "unknown",
+            "invalid",
+            "rejected",
+        ]
+        .into_iter()
+        .any(|reason| message.contains(reason))
 }
 
 fn selection_failure_event(no_candidates: bool, reason: String) -> ControllerEvent {
@@ -713,9 +747,9 @@ mod tests {
     use nickel_codex::{Project, ReplayBackend, Thread, ThreadId, ThreadRuntime};
 
     use super::{
-        ControllerEvent, create_managed_workspace_at, next_new_thread_cwd, project_snapshot,
-        selection_failure_event, snapshot, sort_projects_by_recent_threads,
-        verify_thread_is_resumable,
+        ControllerEvent, create_managed_workspace_at, error_indicates_model_rejection,
+        next_new_thread_cwd, project_snapshot, selection_failure_event, snapshot,
+        sort_projects_by_recent_threads, verify_thread_is_resumable,
     };
 
     fn project(id: &str, root: &str) -> Project {
@@ -944,5 +978,25 @@ mod tests {
             selection_failure_event(false, "schema mismatch".into()),
             ControllerEvent::Incompatible(_)
         ));
+    }
+
+    #[test]
+    fn only_explicit_model_rejections_trigger_model_fallback() {
+        for message in [
+            "unknown model nickel-2",
+            "Model is unavailable",
+            "the selected model is not supported",
+            "invalid MODEL identifier",
+        ] {
+            assert!(error_indicates_model_rejection(message), "{message}");
+        }
+        for message in [
+            "connection unavailable",
+            "turn/start timed out",
+            "model response timed out",
+            "invalid approval policy",
+        ] {
+            assert!(!error_indicates_model_rejection(message), "{message}");
+        }
     }
 }

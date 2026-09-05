@@ -424,6 +424,7 @@ impl ChatApplication {
                     ControllerEvent::ApprovalPolicyAccepted(policy) => {
                         self.accept_approval_policy(*policy);
                     }
+                    ControllerEvent::ModelRejected { .. } => {}
                     ControllerEvent::Failure(_)
                     | ControllerEvent::Incompatible(_)
                     | ControllerEvent::Unavailable(_) => {

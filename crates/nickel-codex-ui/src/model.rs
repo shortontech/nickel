@@ -342,6 +342,28 @@ impl ChatState {
                     self.send_pending = false;
                 }
             }
+            ControllerEvent::ModelRejected { model, message } => {
+                self.send_pending = false;
+                if self.selected_model.as_deref() == Some(model.as_str()) {
+                    self.selected_model = self
+                        .models
+                        .iter()
+                        .find(|candidate| candidate.id != model)
+                        .map(|candidate| candidate.id.clone());
+                    self.selected_reasoning_effort = self
+                        .selected_model
+                        .as_deref()
+                        .and_then(|selected| {
+                            self.models
+                                .iter()
+                                .find(|candidate| candidate.id == selected)
+                        })
+                        .and_then(|candidate| candidate.default_reasoning_effort.clone());
+                }
+                self.push_diagnostic(format!(
+                    "The selected model was rejected; choose another model before retrying: {message}"
+                ));
+            }
             ControllerEvent::ApprovalPolicyAccepted(policy) => {
                 self.effective_approval_policy = policy;
             }
@@ -1138,6 +1160,75 @@ mod tests {
         assert_eq!(Arc::strong_count(&stale), 1);
         let current = state.transcript_selection_document();
         assert_ne!(&*current, &*stale);
+    }
+
+    #[test]
+    fn rejected_selected_model_falls_back_visibly_without_losing_the_draft() {
+        let mut state = ChatState {
+            status: ConnectionStatus::Ready,
+            models: vec![
+                Model {
+                    id: "rejected".into(),
+                    display_name: "Rejected".into(),
+                    default_reasoning_effort: Some("high".into()),
+                    supported_reasoning_efforts: Vec::new(),
+                },
+                Model {
+                    id: "fallback".into(),
+                    display_name: "Fallback".into(),
+                    default_reasoning_effort: Some("medium".into()),
+                    supported_reasoning_efforts: Vec::new(),
+                },
+            ],
+            selected_model: Some("rejected".into()),
+            selected_reasoning_effort: Some("high".into()),
+            draft: "keep this retry".into(),
+            ..Default::default()
+        };
+        assert!(state.begin_send().is_some());
+
+        state.apply(
+            state.generation,
+            ControllerEvent::ModelRejected {
+                model: "rejected".into(),
+                message: "unknown model rejected".into(),
+            },
+        );
+
+        assert_eq!(state.selected_model.as_deref(), Some("fallback"));
+        assert_eq!(state.selected_reasoning_effort.as_deref(), Some("medium"));
+        assert_eq!(state.draft, "keep this retry");
+        assert!(state.can_send());
+        assert!(state.diagnostics.back().is_some_and(|message| {
+            message.contains("selected model was rejected")
+                && message.contains("unknown model rejected")
+        }));
+    }
+
+    #[test]
+    fn late_rejection_cannot_replace_a_newer_explicit_model_choice() {
+        let mut state = ChatState {
+            models: vec![Model {
+                id: "new-choice".into(),
+                display_name: "New choice".into(),
+                default_reasoning_effort: Some("medium".into()),
+                supported_reasoning_efforts: Vec::new(),
+            }],
+            selected_model: Some("new-choice".into()),
+            selected_reasoning_effort: Some("medium".into()),
+            ..Default::default()
+        };
+
+        state.apply(
+            state.generation,
+            ControllerEvent::ModelRejected {
+                model: "old-choice".into(),
+                message: "unknown model old-choice".into(),
+            },
+        );
+
+        assert_eq!(state.selected_model.as_deref(), Some("new-choice"));
+        assert_eq!(state.selected_reasoning_effort.as_deref(), Some("medium"));
     }
 
     #[test]
