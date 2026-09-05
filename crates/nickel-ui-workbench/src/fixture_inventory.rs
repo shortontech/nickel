@@ -11,9 +11,9 @@ use nickel_ui::{
     ButtonLabel, ChoiceCard, ChoiceCardGroup, ColorSwatch, Column, CompactIconTile,
     ComponentBuilderExt, Container, ContentPane, ControllerFamily, CustomPaint, Dropdown,
     FallbackAvatar, FieldGroup, FileGrid, FileGridItem, FrameOverlay, Grid, Header, HorizontalRule,
-    Icon, Image, InlineButtonGroup, Insets, ItemPresentation, LauncherSearchField, Menu, MenuBar,
-    MenuItem, NavigationItem, NavigationSectionLabel, OverlayAnchor, OverlayStyle, PageHeader,
-    Popover, PreviewTile, ProjectStatusRow, RadioButton, RadioGroup, RadioOption, Rect,
+    Icon, Image, InlineButtonGroup, Insets, ItemPresentation, LauncherSearchField, Layer, Menu,
+    MenuBar, MenuItem, NavigationItem, NavigationSectionLabel, OverlayAnchor, OverlayStyle,
+    PageHeader, Popover, PreviewTile, ProjectStatusRow, RadioButton, RadioGroup, RadioOption, Rect,
     SectionHeader, SelectField, SelectionIndicator, SelectionRegion, SemanticControllerAction,
     SemanticRole, SemanticTheme, SessionActionRow, SettingsCard, SettingsListCard,
     SettingsNavigation, SettingsRow, SettingsSearchField, SettingsSection, SettingsShell,
@@ -219,6 +219,27 @@ impl InventoryApp {
                             .padding(Insets::all(10.0))
                             .child(Text::new(label))
                     })),
+            )
+            .child(
+                Layer::new()
+                    .id("layer-sample")
+                    .width(240.0)
+                    .height(56.0)
+                    .child(
+                        Container::new()
+                            .width(240.0)
+                            .height(56.0)
+                            .background(palette.surfaces.card)
+                            .border(palette.borders.subtle, 1.0)
+                            .radius(8.0),
+                    )
+                    .child(
+                        Container::new()
+                            .width(240.0)
+                            .height(56.0)
+                            .padding(Insets::all(12.0))
+                            .child(Text::new("Layered card content")),
+                    ),
             )
             .child(Header::new("Media, selection, and virtualization"))
             .child(

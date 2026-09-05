@@ -244,6 +244,51 @@ const SHELL_RUNTIME_VARIANTS: &[FixtureVariant] = &[
     ),
 ];
 #[cfg(not(feature = "shell-provider"))]
+const SHELL_LAUNCHER_DASHBOARD_VARIANTS: &[FixtureVariant] = &[
+    external_variant(
+        "populated-wide-ltr-dark-1x-pointer",
+        "Populated pointer",
+        "shell-launcher-dashboard",
+        920,
+        680,
+    ),
+    external_variant(
+        "empty-narrow-rtl-light-2x-keyboard",
+        "Empty keyboard",
+        "shell-launcher-dashboard",
+        540,
+        680,
+    ),
+    external_variant(
+        "loading-wide-ltr-high-contrast-1x-controller-playstation",
+        "Loading PlayStation",
+        "shell-launcher-dashboard",
+        920,
+        680,
+    ),
+    external_variant(
+        "partial-failure-narrow-rtl-dark-2x-a11y",
+        "Partial failure accessibility",
+        "shell-launcher-dashboard",
+        540,
+        680,
+    ),
+    external_variant(
+        "populated-narrow-ltr-light-1x-controller-xbox",
+        "Populated Xbox",
+        "shell-launcher-dashboard",
+        540,
+        680,
+    ),
+    external_variant(
+        "empty-wide-rtl-high-contrast-2x-controller-switch",
+        "Empty Switch",
+        "shell-launcher-dashboard",
+        920,
+        680,
+    ),
+];
+#[cfg(not(feature = "shell-provider"))]
 const SHELL_DESKTOP_VARIANTS: &[FixtureVariant] = &[
     external_variant("solid", "Solid background", "shell-desktop", 960, 540),
     external_variant("wallpaper", "Wallpaper", "shell-desktop", 960, 540),
@@ -339,6 +384,15 @@ shell_external_fixture!(
     "Shell runtime",
     "Production shell-owned UiHost lifecycle surface",
     SHELL_RUNTIME_VARIANTS
+);
+#[cfg(not(feature = "shell-provider"))]
+shell_external_fixture!(
+    SHELL_LAUNCHER_DASHBOARD_METADATA,
+    SHELL_LAUNCHER_DASHBOARD_PROVIDER,
+    "shell.launcher-dashboard",
+    "Launcher dashboard",
+    "Production launcher dashboard state and presentation matrix",
+    SHELL_LAUNCHER_DASHBOARD_VARIANTS
 );
 #[cfg(not(feature = "shell-provider"))]
 shell_external_fixture!(
@@ -1461,6 +1515,7 @@ enum GalleryMessage {
     Adjust(f32),
     Toggle(bool),
     Select(&'static str),
+    SelectDensity(&'static str),
 }
 
 #[derive(Clone, Copy)]
@@ -1481,6 +1536,7 @@ struct GalleryApp {
     accessibility: AccessibilityPreset,
     text: String,
     selected: &'static str,
+    density: &'static str,
     enabled: bool,
     value: f32,
 }
@@ -1500,6 +1556,7 @@ impl GalleryApp {
             },
             text: String::new(),
             selected: "general",
+            density: "comfortable",
             enabled: true,
             value: 0.42,
         }
@@ -1572,10 +1629,14 @@ impl GalleryApp {
                 .child(
                     Dropdown::new(
                         GalleryMessage::Activate("dropdown"),
-                        "Comfortable",
+                        if self.density == "compact" {
+                            "Compact"
+                        } else {
+                            "Comfortable"
+                        },
                         [
-                            ("Compact", GalleryMessage::Select("compact")),
-                            ("Comfortable", GalleryMessage::Select("comfortable")),
+                            ("Compact", GalleryMessage::SelectDensity("compact")),
+                            ("Comfortable", GalleryMessage::SelectDensity("comfortable")),
                         ],
                     )
                     .id("density")
@@ -1766,6 +1827,7 @@ impl Application for GalleryApp {
             GalleryMessage::Adjust(value) => self.value = value,
             GalleryMessage::Toggle(value) => self.enabled = value,
             GalleryMessage::Select(value) => self.selected = value,
+            GalleryMessage::SelectDensity(value) => self.density = value,
             GalleryMessage::Activate(_) => {}
         }
     }
@@ -3274,6 +3336,10 @@ fn registry() -> Result<Vec<FixtureRegistryEntry>, Box<dyn Error>> {
     #[cfg(not(feature = "shell-provider"))]
     {
         registry.register_external(&SHELL_RUNTIME_METADATA, SHELL_RUNTIME_PROVIDER)?;
+        registry.register_external(
+            &SHELL_LAUNCHER_DASHBOARD_METADATA,
+            SHELL_LAUNCHER_DASHBOARD_PROVIDER,
+        )?;
         registry.register_external(&SHELL_DESKTOP_METADATA, SHELL_DESKTOP_PROVIDER)?;
         registry.register_external(&SHELL_PANEL_METADATA, SHELL_PANEL_PROVIDER)?;
         registry.register_external(&SHELL_NOTIFICATION_METADATA, SHELL_NOTIFICATION_PROVIDER)?;
@@ -4351,13 +4417,17 @@ mod tests {
 
         for dishonest in [
             admitted.replacen(
-                "one SwashCache per SoftwareRenderer owner",
+                "one SwashCache per SdlComponentRenderer owner",
                 "dependency-owned",
                 1,
             ),
             admitted.replacen("opaque_dependency", "0", 1),
             admitted.replace("drop", "release"),
         ] {
+            assert_ne!(
+                dishonest, admitted,
+                "opaque-admission corruption must alter the inventoried row"
+            );
             let inventory = CACHE_INVENTORY.replace(admitted, &dishonest);
             assert!(
                 validate_cache_inventory_with(&inventory, CacheInventoryValidation::Routine)
@@ -4833,6 +4903,13 @@ mod tests {
         let (width, height) = app.initial_size();
         let mut host = UiHost::new(app, width, height);
         let before = render_host(&host, width, height, 1.0);
+        let focused = nickel_ui::focused_surface_with_foreground(0x243957, 0xffd166, 0xf5f9ff);
+        let focused_pixel = [
+            ((focused >> 16) & 0xff) as u8,
+            ((focused >> 8) & 0xff) as u8,
+            (focused & 0xff) as u8,
+            255,
+        ];
 
         let mut after = before.clone();
         for _ in 0..32 {
@@ -4842,7 +4919,7 @@ mod tests {
             if after
                 .rgba
                 .chunks_exact(4)
-                .any(|pixel| pixel == [255, 209, 102, 255])
+                .any(|pixel| pixel == focused_pixel)
             {
                 break;
             }
@@ -4856,8 +4933,8 @@ mod tests {
             after
                 .rgba
                 .chunks_exact(4)
-                .any(|pixel| pixel == [255, 209, 102, 255]),
-            "the controller focus ring must be visibly distinct from selected-state blue"
+                .any(|pixel| pixel == focused_pixel),
+            "controller focus must visibly hue-shift the focused child surface"
         );
     }
 
