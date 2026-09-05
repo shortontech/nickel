@@ -42,6 +42,14 @@ struct MessageRegion<Message> {
     message_mapper: Option<fn(f32) -> Message>,
 }
 
+struct OverlayMenuLevel<'a, Message> {
+    id: &'a UiId,
+    node_index: usize,
+    rect: Rect,
+    items: &'a [crate::OverlayMenuItem<Message>],
+    depth: usize,
+}
+
 #[derive(Clone, Debug)]
 struct TextInputRegion<Message> {
     id: UiId,
@@ -931,6 +939,309 @@ impl<Message: Clone> UiFrame<Message> {
         }
     }
 
+    fn emit_overlay_menu_items(
+        &mut self,
+        state: &UiStateStore,
+        menu: &crate::OverlayMenu<Message>,
+        level: OverlayMenuLevel<'_, Message>,
+    ) -> Option<Rect> {
+        let OverlayMenuLevel {
+            id: menu_id,
+            node_index: menu_index,
+            rect,
+            items,
+            depth,
+        } = level;
+        let belongs_to = |ancestor: &UiId, candidate: &UiId| {
+            candidate == ancestor
+                || candidate
+                    .as_str()
+                    .strip_prefix(ancestor.as_str())
+                    .is_some_and(|suffix| suffix.starts_with('/'))
+        };
+        let hovered = state
+            .hovered()
+            .filter(|id| belongs_to(menu.id.as_ui_id(), id));
+        let authority = hovered.or_else(|| {
+            (state.input_modality() != InputModality::Pointer)
+                .then(|| {
+                    state
+                        .navigation()
+                        .controller_selected()
+                        .or_else(|| state.focused())
+                })
+                .flatten()
+        });
+        let active_submenu = items.iter().enumerate().find(|(_, item)| {
+            if item.children.is_empty() {
+                return false;
+            }
+            let id = menu_id.scoped(item.id.as_str());
+            authority.is_some_and(|selected| belongs_to(&id, selected))
+        });
+
+        let mut submenu = None;
+        for (index, item) in items.iter().enumerate() {
+            let item_rect = Rect::new(
+                rect.origin.x + menu.padding.left,
+                rect.origin.y + menu.padding.top + index as f32 * (menu.row_height + menu.row_gap),
+                rect.size.width - menu.padding.left - menu.padding.right,
+                menu.row_height,
+            );
+            let id = menu_id.scoped(item.id.as_str());
+            let enabled =
+                item.action.is_some() || item.text_command.is_some() || !item.children.is_empty();
+            let interaction = InteractionState {
+                interactive: enabled,
+                focused: state.focused() == Some(&id),
+                hovered: state.hovered() == Some(&id),
+                pressed: state.pressed() == Some(&id),
+                controller_selected: state.navigation().controller_selected() == Some(&id),
+                ..InteractionState::default()
+            };
+            let interaction_color = if interaction.pressed {
+                menu.item_pressed
+            } else if interaction.hovered {
+                menu.item_hover
+            } else if interaction.focused || interaction.controller_selected {
+                menu.item_selected
+            } else {
+                None
+            };
+            if let Some(color) = interaction_color {
+                self.commands.push(PaintCommand::RoundedFill {
+                    rect: item_rect,
+                    color,
+                    radius: menu.item_radius,
+                });
+            }
+            let text_bounds = item_rect.inset(Insets::all(8.0));
+            self.commands.push(PaintCommand::Text {
+                bounds: text_bounds,
+                text: item.label.clone(),
+                scale: menu.text_scale,
+                color: menu.foreground,
+                align: menu.text_align,
+                bold: false,
+                wrap: false,
+            });
+            if !item.children.is_empty() {
+                self.commands.push(PaintCommand::Text {
+                    bounds: text_bounds,
+                    text: match menu.direction {
+                        crate::ReadingDirection::LeftToRight => "›",
+                        crate::ReadingDirection::RightToLeft => "‹",
+                    }
+                    .into(),
+                    scale: menu.text_scale,
+                    color: menu.foreground,
+                    align: match menu.direction {
+                        crate::ReadingDirection::LeftToRight => TextAlign::End,
+                        crate::ReadingDirection::RightToLeft => TextAlign::Start,
+                    },
+                    bold: false,
+                    wrap: false,
+                });
+            }
+            let item_index = self.resolved.nodes.len();
+            self.resolved.nodes.push(ResolvedNode {
+                component: "MenuItem",
+                id: id.clone(),
+                source: None,
+                allocated: item_rect,
+                padding_box: item_rect,
+                border_box: item_rect,
+                content: text_bounds,
+                constraints: Constraints::tight(item_rect.size),
+                preferred: item_rect.size,
+                flex_basis: Length::Auto,
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                clip: Some(rect),
+                scroll: None,
+                grid_tracks: Vec::new(),
+                hit_stack: Some(self.hits.len()),
+                interaction,
+                navigation_scope: (!item.children.is_empty()).then(|| {
+                    crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical)
+                }),
+                adjustment_step: 0.05,
+                controller_value: None,
+                accessibility_label: Some(item.label.clone()),
+                accessibility_description: None,
+                accessibility_role: Some(SemanticRole::MenuItem.as_str().into()),
+                accessibility_state: None,
+                accessibility_controls: (!item.children.is_empty()).then(|| id.scoped("submenu")),
+                accessibility_hidden: false,
+                semantic_role: Some(SemanticRole::MenuItem),
+                semantic_actions: enabled
+                    .then_some(ActionKind::Activate)
+                    .into_iter()
+                    .collect(),
+                semantic_value: None,
+                children: Vec::new(),
+            });
+            self.resolved.nodes[menu_index].children.push(item_index);
+            self.hits.push(HitRegion {
+                id: id.clone(),
+                rect: item_rect,
+                target_bounds: item_rect,
+                message: item.action.clone(),
+                message_mapper: None,
+                drag_mapper: None,
+            });
+            if let Some(message) = item.action.clone() {
+                self.messages.push(MessageRegion {
+                    id: id.clone(),
+                    navigation_owner: Some(menu_id.clone()),
+                    rect: item_rect,
+                    message,
+                    message_mapper: None,
+                });
+            }
+            if let Some(command) = item.text_command {
+                self.text_commands.push(TextCommandRegion {
+                    id: id.clone(),
+                    editor: menu.anchor.id().clone(),
+                    command,
+                });
+            }
+            self.accessibility.push(AccessibilityNode {
+                id: id.clone(),
+                parent: Some(menu_id.clone()),
+                component: "MenuItem",
+                rect: item_rect,
+                interactive: enabled,
+                label: Some(item.label.clone()),
+                description: None,
+                role: Some("menuitem".into()),
+                state: None,
+                controls: (!item.children.is_empty()).then(|| id.scoped("submenu")),
+                semantic_role: Some(SemanticRole::MenuItem),
+                actions: enabled
+                    .then_some(ActionKind::Activate)
+                    .into_iter()
+                    .collect(),
+                enabled,
+                focused: interaction.focused,
+                controller_selected: interaction.controller_selected,
+                navigation_depth: depth,
+                value: None,
+            });
+            if active_submenu.is_some_and(|(active, _)| active == index) {
+                submenu = Some((id, item_index, item_rect, item.children.as_slice()));
+            }
+        }
+
+        let (parent_id, parent_index, anchor, children) = submenu?;
+        let submenu_id = parent_id.scoped("submenu");
+        let height = menu.padding.top
+            + menu.row_height * children.len() as f32
+            + menu.row_gap * children.len().saturating_sub(1) as f32
+            + menu.padding.bottom;
+        let submenu_rect = crate::place_transient(
+            anchor,
+            Size {
+                width: menu.width,
+                height,
+            },
+            self.viewport,
+            crate::OverlayPlacement::After,
+            menu.collision,
+            menu.direction,
+            1.0,
+        );
+        self.commands.push(PaintCommand::RoundedFill {
+            rect: submenu_rect,
+            color: menu.background,
+            radius: menu.radius,
+        });
+        if menu.border_width > 0.0 {
+            self.commands.push(PaintCommand::OverlayStroke {
+                rect: submenu_rect.inset(Insets::all(menu.border_width / 2.0)),
+                color: menu.border,
+                width: menu.border_width,
+            });
+        }
+        let submenu_index = self.resolved.nodes.len();
+        self.resolved.nodes.push(ResolvedNode {
+            component: "Menu",
+            id: submenu_id.clone(),
+            source: None,
+            allocated: submenu_rect,
+            padding_box: submenu_rect,
+            border_box: submenu_rect,
+            content: submenu_rect.inset(menu.padding),
+            constraints: Constraints::tight(submenu_rect.size),
+            preferred: submenu_rect.size,
+            flex_basis: Length::Auto,
+            flex_grow: 0.0,
+            flex_shrink: 0.0,
+            clip: None,
+            scroll: None,
+            grid_tracks: Vec::new(),
+            hit_stack: None,
+            interaction: InteractionState::default(),
+            navigation_scope: Some(
+                crate::NavigationScope::group().traversal(crate::NavigationTraversal::Vertical),
+            ),
+            adjustment_step: 0.05,
+            controller_value: None,
+            accessibility_label: None,
+            accessibility_description: None,
+            accessibility_role: Some(SemanticRole::Menu.as_str().into()),
+            accessibility_state: None,
+            accessibility_controls: None,
+            accessibility_hidden: false,
+            semantic_role: Some(SemanticRole::Menu),
+            semantic_actions: Vec::new(),
+            semantic_value: None,
+            children: Vec::with_capacity(children.len()),
+        });
+        self.resolved.nodes[parent_index]
+            .children
+            .push(submenu_index);
+        self.accessibility.push(AccessibilityNode {
+            id: submenu_id.clone(),
+            parent: Some(parent_id),
+            component: "Menu",
+            rect: submenu_rect,
+            interactive: false,
+            label: None,
+            description: None,
+            role: Some(SemanticRole::Menu.as_str().into()),
+            state: None,
+            controls: None,
+            semantic_role: Some(SemanticRole::Menu),
+            actions: Vec::new(),
+            enabled: true,
+            focused: false,
+            controller_selected: false,
+            navigation_depth: depth + 1,
+            value: None,
+        });
+        let descendant = self.emit_overlay_menu_items(
+            state,
+            menu,
+            OverlayMenuLevel {
+                id: &submenu_id,
+                node_index: submenu_index,
+                rect: submenu_rect,
+                items: children,
+                depth: depth + 1,
+            },
+        );
+        Some(descendant.map_or(submenu_rect, |child| {
+            let left = submenu_rect.origin.x.min(child.origin.x);
+            let top = submenu_rect.origin.y.min(child.origin.y);
+            let right = (submenu_rect.origin.x + submenu_rect.size.width)
+                .max(child.origin.x + child.size.width);
+            let bottom = (submenu_rect.origin.y + submenu_rect.size.height)
+                .max(child.origin.y + child.size.height);
+            Rect::new(left, top, right - left, bottom - top)
+        }))
+    }
+
     /// Registers and, when open, emits a menu into this frame's authoritative
     /// overlay paint and hit stacks.
     pub fn present_menu(
@@ -1062,25 +1373,24 @@ impl<Message: Clone> UiFrame<Message> {
             value: None,
         });
         if menu.focus == crate::OverlayFocusPolicy::FirstItem
-            && let Some(item) = menu
-                .items
-                .iter()
-                .find(|item| item.action.is_some() || item.text_command.is_some())
+            && let Some(item) = menu.items.iter().find(|item| {
+                item.action.is_some() || item.text_command.is_some() || !item.children.is_empty()
+            })
         {
             let id = menu.id.item_id(&item.id);
-            let menu_item_ids = menu
-                .items
-                .iter()
-                .map(|candidate| menu.id.item_id(&candidate.id))
-                .collect::<Vec<_>>();
             let belongs_to_menu = |selected: Option<&UiId>| {
-                selected.is_some_and(|selected| menu_item_ids.contains(selected))
+                selected.is_some_and(|selected| {
+                    selected
+                        .as_str()
+                        .strip_prefix(menu.id.as_ui_id().as_str())
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                })
             };
             if !belongs_to_menu(state.focused()) {
                 state.set_focus(Some(id.clone()));
             }
             if (state.navigation().controller_selected().is_some()
-                || state.input_modality() == InputModality::Controller)
+                || state.input_modality() != InputModality::Pointer)
                 && !belongs_to_menu(state.navigation().controller_selected())
             {
                 state.navigation_mut().set_controller_selected(Some(id));
@@ -1098,133 +1408,25 @@ impl<Message: Clone> UiFrame<Message> {
                 state.set_focus(Some(selected));
             }
         }
-        for (index, item) in menu.items.into_iter().enumerate() {
-            let item_rect = Rect::new(
-                rect.origin.x + menu.padding.left,
-                rect.origin.y + menu.padding.top + index as f32 * (menu.row_height + menu.row_gap),
-                rect.size.width - menu.padding.left - menu.padding.right,
-                menu.row_height,
-            );
-            let id = menu.id.item_id(&item.id);
-            let interaction = InteractionState {
-                interactive: item.action.is_some() || item.text_command.is_some(),
-                focused: state.focused() == Some(&id),
-                hovered: state.hovered() == Some(&id),
-                pressed: state.pressed() == Some(&id),
-                controller_selected: state.navigation().controller_selected() == Some(&id),
-                ..InteractionState::default()
-            };
-            let interaction_color = if interaction.pressed {
-                menu.item_pressed
-            } else if interaction.hovered {
-                menu.item_hover
-            } else if interaction.focused || interaction.controller_selected {
-                menu.item_selected
-            } else {
-                None
-            };
-            if let Some(color) = interaction_color {
-                self.commands.push(PaintCommand::RoundedFill {
-                    rect: item_rect,
-                    color,
-                    radius: menu.item_radius,
-                });
-            }
-            self.commands.push(PaintCommand::Text {
-                bounds: item_rect.inset(Insets::all(8.0)),
-                text: item.label.clone(),
-                scale: menu.text_scale,
-                color: menu.foreground,
-                align: menu.text_align,
-                bold: false,
-                wrap: false,
-            });
-            let enabled = item.action.is_some() || item.text_command.is_some();
-            let item_index = self.resolved.nodes.len();
-            self.resolved.nodes.push(ResolvedNode {
-                component: "MenuItem",
-                id: id.clone(),
-                source: None,
-                allocated: item_rect,
-                padding_box: item_rect,
-                border_box: item_rect,
-                content: item_rect.inset(Insets::all(8.0)),
-                constraints: Constraints::tight(item_rect.size),
-                preferred: item_rect.size,
-                flex_basis: Length::Auto,
-                flex_grow: 0.0,
-                flex_shrink: 0.0,
-                clip: Some(rect),
-                scroll: None,
-                grid_tracks: Vec::new(),
-                hit_stack: Some(self.hits.len()),
-                interaction,
-                navigation_scope: None,
-                adjustment_step: 0.05,
-                controller_value: None,
-                accessibility_label: Some(item.label.clone()),
-                accessibility_description: None,
-                accessibility_role: Some(SemanticRole::MenuItem.as_str().into()),
-                accessibility_state: None,
-                accessibility_controls: None,
-                accessibility_hidden: false,
-                semantic_role: Some(SemanticRole::MenuItem),
-                semantic_actions: enabled
-                    .then_some(ActionKind::Activate)
-                    .into_iter()
-                    .collect(),
-                semantic_value: None,
-                children: Vec::new(),
-            });
-            self.resolved.nodes[menu_index].children.push(item_index);
-            self.hits.push(HitRegion {
-                id: id.clone(),
-                rect: item_rect,
-                target_bounds: item_rect,
-                message: item.action.clone(),
-                message_mapper: None,
-                drag_mapper: None,
-            });
-            if let Some(message) = item.action {
-                self.messages.push(MessageRegion {
-                    id: id.clone(),
-                    navigation_owner: Some(menu.id.as_ui_id().clone()),
-                    rect: item_rect,
-                    message,
-                    message_mapper: None,
-                });
-            }
-            if let Some(command) = item.text_command {
-                self.text_commands.push(TextCommandRegion {
-                    id: id.clone(),
-                    editor: menu.anchor.id().clone(),
-                    command,
-                });
-            }
-            self.accessibility.push(AccessibilityNode {
-                id: id.clone(),
-                parent: Some(menu.id.as_ui_id().clone()),
-                component: "MenuItem",
-                rect: item_rect,
-                interactive: enabled,
-                label: Some(item.label),
-                description: None,
-                role: Some("menuitem".into()),
-                state: None,
-                controls: None,
-                semantic_role: Some(SemanticRole::MenuItem),
-                actions: enabled
-                    .then_some(ActionKind::Activate)
-                    .into_iter()
-                    .collect(),
-                enabled,
-                focused: interaction.focused,
-                controller_selected: interaction.controller_selected,
-                navigation_depth: 1,
-                value: None,
-            });
-        }
-        self.active_overlay = Some((menu.id.clone(), rect));
+        let submenu_rect = self.emit_overlay_menu_items(
+            state,
+            &menu,
+            OverlayMenuLevel {
+                id: menu.id.as_ui_id(),
+                node_index: menu_index,
+                rect,
+                items: &menu.items,
+                depth: 1,
+            },
+        );
+        let active_rect = submenu_rect.map_or(rect, |child| {
+            let left = rect.origin.x.min(child.origin.x);
+            let top = rect.origin.y.min(child.origin.y);
+            let right = (rect.origin.x + rect.size.width).max(child.origin.x + child.size.width);
+            let bottom = (rect.origin.y + rect.size.height).max(child.origin.y + child.size.height);
+            Rect::new(left, top, right - left, bottom - top)
+        });
+        self.active_overlay = Some((menu.id.clone(), active_rect));
         self.active_overlay_dismiss = Some(crate::DismissPolicy::default());
         let overlay_root = menu.id.as_ui_id();
         let overlay_accessibility = self
@@ -2693,6 +2895,10 @@ impl<Message: Clone> UiFrame<Message> {
                     outcome.messages.push(message);
                 }
                 let overlay_action = activates
+                    && released.is_some_and(|item| {
+                        self.message_for_id(item).is_some()
+                            || self.text_commands.iter().any(|command| &command.id == item)
+                    })
                     && self.active_overlay.as_ref().is_some_and(|(id, _)| {
                         released.is_some_and(|item| self.is_descendant_or_self(id.as_ui_id(), item))
                     });

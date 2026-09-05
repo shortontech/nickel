@@ -281,6 +281,8 @@ pub struct OverlayMenuItem<Message> {
     pub accessible_name: Option<String>,
     pub tone: TransientTone,
     pub separator_before: bool,
+    /// Child commands presented as a real adjacent submenu. Empty for leaves.
+    pub children: Vec<OverlayMenuItem<Message>>,
 }
 
 impl<Message> OverlayMenuItem<Message> {
@@ -295,6 +297,7 @@ impl<Message> OverlayMenuItem<Message> {
             accessible_name: None,
             tone: TransientTone::Ordinary,
             separator_before: false,
+            children: Vec::new(),
         }
     }
     pub fn disabled(id: impl Into<UiId>, label: impl Into<String>) -> Self {
@@ -308,7 +311,23 @@ impl<Message> OverlayMenuItem<Message> {
             accessible_name: None,
             tone: TransientTone::Ordinary,
             separator_before: false,
+            children: Vec::new(),
         }
+    }
+
+    pub fn submenu(
+        id: impl Into<UiId>,
+        label: impl Into<String>,
+        children: impl IntoIterator<Item = OverlayMenuItem<Message>>,
+    ) -> Self {
+        let mut item = Self::disabled(id, label);
+        item.children.extend(children);
+        item
+    }
+
+    pub fn child(mut self, item: OverlayMenuItem<Message>) -> Self {
+        self.children.push(item);
+        self
     }
 
     pub(crate) fn text_command(
@@ -588,6 +607,16 @@ mod tests {
             .item(OverlayMenuItem::action("choose", "Choose", Message::Choose))
     }
 
+    fn nested_menu(anchor: UiId) -> OverlayMenu<Message> {
+        OverlayMenu::new("context", OverlayAnchor::InvocationTarget(anchor)).item(
+            OverlayMenuItem::submenu(
+                "view",
+                "View",
+                [OverlayMenuItem::action("choose", "Choose", Message::Choose)],
+            ),
+        )
+    }
+
     #[test]
     fn context_channels_open_the_same_registered_overlay() {
         for channel in 0..4 {
@@ -688,6 +717,72 @@ mod tests {
         let outcome = open.handle_event(&mut state, UiEvent::ControllerActivate);
         assert_eq!(outcome.messages, vec![Message::Choose]);
         assert!(state.open_overlay_id().is_none());
+    }
+
+    #[test]
+    fn nested_menu_supports_pointer_keyboard_dismissal_and_edge_constrained_placement() {
+        let mut pointer_state = UiStateStore::default();
+        let mut closed = frame(&mut pointer_state);
+        let anchor = anchor_id(&closed);
+        closed.handle_event(
+            &mut pointer_state,
+            UiEvent::PointerMoved(Point { x: -1.0, y: -1.0 }),
+        );
+        pointer_state.open_overlay(OverlayId::new("context"), anchor.clone());
+        closed
+            .present_menu(&mut pointer_state, nested_menu(anchor.clone()))
+            .unwrap();
+        let view = OverlayId::new("context").item_id(&UiId::from("view"));
+        let view_rect = closed.resolved_layout().find(&view).unwrap().allocated;
+        closed.handle_event(
+            &mut pointer_state,
+            UiEvent::PointerMoved(Point {
+                x: view_rect.origin.x + 2.0,
+                y: view_rect.origin.y + 2.0,
+            }),
+        );
+        assert_eq!(pointer_state.hovered(), Some(&view));
+        let mut open = frame(&mut pointer_state);
+        pointer_state.set_hovered(Some(view.clone()));
+        open.present_menu(&mut pointer_state, nested_menu(anchor.clone()))
+            .unwrap();
+        let child = view.scoped("submenu").scoped("choose");
+        let child_rect = open
+            .resolved_layout()
+            .find(&child)
+            .expect("hover opens child menu")
+            .allocated;
+        assert!(child_rect.origin.x >= 0.0 && child_rect.origin.y >= 0.0);
+        assert!(child_rect.origin.x + child_rect.size.width <= 240.0);
+        assert!(child_rect.origin.y + child_rect.size.height <= 120.0);
+        let point = Point {
+            x: child_rect.origin.x + 2.0,
+            y: child_rect.origin.y + 2.0,
+        };
+        open.handle_event(&mut pointer_state, UiEvent::PointerMoved(point));
+        open.handle_event(&mut pointer_state, UiEvent::PointerPressed(point));
+        let outcome = open.handle_event(&mut pointer_state, UiEvent::PointerReleased(point));
+        assert_eq!(outcome.messages, vec![Message::Choose]);
+        assert!(pointer_state.open_overlay_id().is_none());
+
+        let mut keyboard_state = UiStateStore::default();
+        let mut open = frame(&mut keyboard_state);
+        let anchor = anchor_id(&open);
+        keyboard_state.open_overlay(OverlayId::new("context"), anchor.clone());
+        open.present_menu(&mut keyboard_state, nested_menu(anchor.clone()))
+            .unwrap();
+        assert_eq!(
+            keyboard_state.navigation().controller_selected(),
+            Some(&view)
+        );
+        open.handle_event(&mut keyboard_state, UiEvent::KeyboardNavigateRight);
+        assert_eq!(
+            keyboard_state.navigation().controller_selected(),
+            Some(&child)
+        );
+        let outcome = open.handle_event(&mut keyboard_state, UiEvent::KeyboardNavigateActivate);
+        assert_eq!(outcome.messages, vec![Message::Choose]);
+        assert!(keyboard_state.open_overlay_id().is_none());
     }
 
     #[test]

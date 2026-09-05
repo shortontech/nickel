@@ -1284,6 +1284,30 @@ impl nickel_ui::Application for DesktopApplication {
                     "Personalize",
                     DesktopMessage::Command(DesktopCommand::Personalize),
                 ));
+            let mut view_items = Vec::new();
+            let mut sort_items = Vec::new();
+            let mut root_items = Vec::new();
+            for item in std::mem::take(&mut menu.items) {
+                match item.id.as_str() {
+                    "show-icons" | "small-icons" | "medium-icons" | "large-icons" | "align"
+                    | "auto-arrange" | "folders-first" | "folders-mixed" => view_items.push(item),
+                    "sort-name"
+                    | "sort-name-descending"
+                    | "sort-kind"
+                    | "sort-kind-descending"
+                    | "sort-size"
+                    | "sort-size-descending"
+                    | "sort-modified"
+                    | "sort-modified-ascending"
+                    | "manual" => sort_items.push(item),
+                    _ => root_items.push(item),
+                }
+            }
+            menu.items = vec![
+                OverlayMenuItem::submenu("view", "View", view_items),
+                OverlayMenuItem::submenu("sort-by", "Sort By", sort_items),
+            ];
+            menu.items.extend(root_items);
             menu.background = self.palette.surface;
             menu.border = self.palette.muted;
             menu.foreground = self.palette.text;
@@ -8033,6 +8057,11 @@ mod tests {
     fn desktop_live_input_rebuilds_selection_and_keyboard_navigation() {
         use std::{ffi::OsString, path::PathBuf};
         let mut shell = LiveShell::new().unwrap();
+        let artwork = Arc::new(image::RgbaImage::from_pixel(
+            3,
+            3,
+            image::Rgba([24, 96, 220, 255]),
+        ));
         let application = shell.desktop_host.application_mut();
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
@@ -8068,7 +8097,13 @@ mod tests {
                 })
                 .collect(),
         );
+        application
+            .icon_cache
+            .insert(PathBuf::from("/desktop/first.txt"), Arc::clone(&artwork));
         let before_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(before_commands.iter().any(|command| {
+            matches!(command, nickel_ui::backend::PaintCommand::Image { image, .. } if image.as_raw() == artwork.as_raw())
+        }));
         let before_token = shell.desktop_change_token;
 
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
@@ -8088,12 +8123,26 @@ mod tests {
         );
         assert_ne!(shell.desktop_change_token, before_token);
         assert_ne!(shell.desktop_host.commands(), before_commands);
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Released,
+                position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+            },
+        )));
+        let selected_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
+        assert!(shell.desktop_host.application().layout.icons_visible());
+        assert!(selected_commands.iter().any(|command| {
+            matches!(command, nickel_ui::backend::PaintCommand::Image { image, .. } if image.as_raw() == artwork.as_raw())
+        }));
 
         let pointer_token = shell.desktop_change_token;
         assert!(
             shell.desktop_input(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
                 device: nickel_input::DeviceId(1),
-                order: nickel_input::EventOrder(2),
+                order: nickel_input::EventOrder(3),
                 physical: nickel_input::PhysicalKey::Code(KeyCode::ArrowDown),
                 logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ArrowDown),
                 location: nickel_input::KeyLocation::Standard,
@@ -8458,6 +8507,41 @@ mod tests {
                 .any(|item| item.label == "Display Settings")
         );
         assert!(menu.items.iter().any(|item| item.label == "Refresh"));
+        let view = menu
+            .items
+            .iter()
+            .find(|item| item.label == "View")
+            .expect("presentation commands are grouped under View");
+        assert!(
+            view.children
+                .iter()
+                .any(|item| item.id.as_str() == "show-icons")
+        );
+        assert!(view.children.iter().any(|item| item.id.as_str() == "align"));
+        let sort = menu
+            .items
+            .iter()
+            .find(|item| item.label == "Sort By")
+            .expect("sort commands are grouped under Sort By");
+        assert!(
+            sort.children
+                .iter()
+                .any(|item| item.id.as_str() == "sort-name")
+        );
+        assert!(
+            sort.children
+                .iter()
+                .any(|item| item.id.as_str() == "manual")
+        );
+        assert!(
+            menu.items.len() <= 9,
+            "background commands must not flatten"
+        );
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.id.as_str() != "small-icons")
+        );
         assert!(menu.row_height * menu.items.len() as f32 <= 600.0);
         assert_ne!(menu.background, 0x000000);
         assert_ne!(menu.border, menu.background);
@@ -8512,6 +8596,98 @@ mod tests {
             desktop.context_menu.is_some(),
             "controller uses this command model"
         );
+    }
+
+    #[test]
+    fn desktop_view_submenu_toggles_authoritative_icon_visibility_through_live_input() {
+        fn send_button(
+            shell: &mut LiveShell,
+            order: &mut u64,
+            button: nickel_input::PointerButton,
+            edge: nickel_input::KeyEdge,
+            point: nickel_input::Point,
+        ) {
+            *order += 1;
+            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Button {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(*order),
+                    button,
+                    edge,
+                    position: Some(point),
+                },
+            ));
+        }
+
+        fn invoke_visibility(shell: &mut LiveShell, order: &mut u64, expected_label: &str) {
+            let anchor = nickel_input::Point { x: 300.0, y: 300.0 };
+            send_button(
+                shell,
+                order,
+                nickel_input::PointerButton::Secondary,
+                nickel_input::KeyEdge::Pressed,
+                anchor,
+            );
+            send_button(
+                shell,
+                order,
+                nickel_input::PointerButton::Secondary,
+                nickel_input::KeyEdge::Released,
+                anchor,
+            );
+            let view = shell
+                .desktop_host
+                .accessibility_nodes()
+                .iter()
+                .find(|node| node.label.as_deref() == Some("View"))
+                .expect("compact root menu exposes View")
+                .rect;
+            *order += 1;
+            let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+                nickel_input::PointerEvent::Motion {
+                    device: nickel_input::DeviceId(1),
+                    order: nickel_input::EventOrder(*order),
+                    position: nickel_input::Point {
+                        x: f64::from(view.origin.x + view.size.width / 2.0),
+                        y: f64::from(view.origin.y + view.size.height / 2.0),
+                    },
+                    delta: None,
+                },
+            ));
+            let command = shell
+                .desktop_host
+                .accessibility_nodes()
+                .iter()
+                .find(|node| node.label.as_deref() == Some(expected_label))
+                .expect("hovering View exposes its submenu")
+                .rect;
+            let point = nickel_input::Point {
+                x: f64::from(command.origin.x + command.size.width / 2.0),
+                y: f64::from(command.origin.y + command.size.height / 2.0),
+            };
+            send_button(
+                shell,
+                order,
+                nickel_input::PointerButton::Primary,
+                nickel_input::KeyEdge::Pressed,
+                point,
+            );
+            send_button(
+                shell,
+                order,
+                nickel_input::PointerButton::Primary,
+                nickel_input::KeyEdge::Released,
+                point,
+            );
+        }
+
+        let mut shell = LiveShell::new().unwrap();
+        let mut order = 0;
+        assert!(shell.desktop_host.application().layout.icons_visible());
+        invoke_visibility(&mut shell, &mut order, "Hide desktop icons");
+        assert!(!shell.desktop_host.application().layout.icons_visible());
+        invoke_visibility(&mut shell, &mut order, "Show desktop icons");
+        assert!(shell.desktop_host.application().layout.icons_visible());
     }
 
     #[test]
