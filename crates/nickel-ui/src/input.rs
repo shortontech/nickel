@@ -4,6 +4,7 @@ use nickel_input::{
     AggregateModifier, DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, LogicalKey, NamedKey,
     PhysicalKey, PointerButton, PointerEvent, TextEvent, TouchEvent, TouchId,
 };
+use std::collections::VecDeque;
 
 use crate::{Point, Shortcut, UiEvent};
 
@@ -32,7 +33,7 @@ pub enum InputCommand {
 pub struct FocusedInputDispatcher {
     pointer: Point,
     active_touch: Option<TouchId>,
-    consumed_text: Option<ConsumedTextTransaction>,
+    consumed_text: VecDeque<ConsumedTextTransaction>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,23 +57,27 @@ impl FocusedInputDispatcher {
                 TextEvent::Commit { device, order, .. } => (*device, *order, true),
                 TextEvent::Preedit { device, order, .. } => (*device, *order, false),
             };
-            if self.consumed_text == Some(ConsumedTextTransaction { device, order }) {
+            let correlated = ConsumedTextTransaction { device, order };
+            if let Some(index) = self
+                .consumed_text
+                .iter()
+                .position(|transaction| *transaction == correlated)
+            {
                 // One composition transaction may contain multiple preedit
                 // updates followed by a commit. Keep suppressing until the
                 // commit closes that exact device/order transaction.
                 if committed {
-                    self.consumed_text = None;
+                    self.consumed_text.remove(index);
                 }
                 return Vec::new();
             }
-            if self.consumed_text.is_some_and(|transaction| {
-                transaction.device == device && order.0 > transaction.order.0
-            }) {
-                // A backend is allowed to omit a correlated text event. A
-                // later transaction proves the old suppression can no longer
-                // match, so retire it without eating genuine input.
-                self.consumed_text = None;
-            }
+            // A backend is allowed to omit correlated text events. A later
+            // transaction from the same device proves older suppressions can
+            // no longer match, so retire them without disturbing transactions
+            // still pending on another keyboard/IME device.
+            self.consumed_text.retain(|transaction| {
+                transaction.device != device || transaction.order.0 >= order.0
+            });
         }
 
         match event {
@@ -187,20 +192,16 @@ impl FocusedInputDispatcher {
                 commands
             }
             InputEvent::FocusGained { .. } => {
-                self.consumed_text = None;
+                self.consumed_text.clear();
                 vec![InputCommand::Ui(UiEvent::FocusGained)]
             }
             InputEvent::FocusLost { .. } => {
-                self.consumed_text = None;
+                self.consumed_text.clear();
                 vec![InputCommand::Ui(UiEvent::FocusLost)]
             }
             InputEvent::DeviceRemoved { device, .. } => {
-                if self
-                    .consumed_text
-                    .is_some_and(|transaction| transaction.device == *device)
-                {
-                    self.consumed_text = None;
-                }
+                self.consumed_text
+                    .retain(|transaction| transaction.device != *device);
                 vec![InputCommand::Ui(UiEvent::DeviceRemoved)]
             }
             InputEvent::Key(event) if event.edge == KeyEdge::Pressed => {
@@ -412,57 +413,30 @@ impl FocusedInputDispatcher {
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("c") =>
                     {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Copy];
+                        InputCommand::Copy
                     }
-                    (_, PhysicalKey::Code(KeyCode::KeyC)) if command => {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Copy];
-                    }
+                    (_, PhysicalKey::Code(KeyCode::KeyC)) if command => InputCommand::Copy,
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("x") =>
                     {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Cut];
+                        InputCommand::Cut
                     }
-                    (_, PhysicalKey::Code(KeyCode::KeyX)) if command => {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Cut];
-                    }
+                    (_, PhysicalKey::Code(KeyCode::KeyX)) if command => InputCommand::Cut,
                     (LogicalKey::Character(value), _)
                         if command && value.eq_ignore_ascii_case("v") =>
                     {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Paste];
+                        InputCommand::Paste
                     }
-                    (_, PhysicalKey::Code(KeyCode::KeyV)) if command => {
-                        self.consume_text_from(event);
-                        return vec![InputCommand::Paste];
-                    }
+                    (_, PhysicalKey::Code(KeyCode::KeyV)) if command => InputCommand::Paste,
                     _ => return Vec::new(),
                 };
-                if event.repeat
-                    && matches!(
-                        command,
-                        InputCommand::Ui(
-                            UiEvent::FocusNext
-                                | UiEvent::FocusPrevious
-                                | UiEvent::KeyboardActivate
-                                | UiEvent::SelectionClear
-                        )
-                    )
-                {
+                if consumes_correlated_text(&command) {
+                    self.consume_text_from(event);
+                }
+                if event.repeat && suppresses_repeat(&command) {
                     Vec::new()
                 } else {
-                    if consumes_correlated_text(&command) {
-                        self.consume_text_from(event);
-                    }
-                    vec![match command {
-                        InputCommand::Ui(_) | InputCommand::Application { .. } => command,
-                        InputCommand::Copy | InputCommand::Cut | InputCommand::Paste => {
-                            unreachable!()
-                        }
-                    }]
+                    vec![command]
                 }
             }
             InputEvent::Key(_) | InputEvent::Pointer(_) | InputEvent::Touch(_) => Vec::new(),
@@ -470,15 +444,28 @@ impl FocusedInputDispatcher {
     }
 
     fn consume_text_from(&mut self, event: &nickel_input::KeyEvent) {
-        self.consumed_text = Some(ConsumedTextTransaction {
+        let transaction = ConsumedTextTransaction {
             device: event.device,
             order: event.order,
-        });
+        };
+        if !self.consumed_text.contains(&transaction) {
+            // A missing native text callback must not grow this queue forever.
+            // Thirty-two outstanding command transactions is already far past
+            // plausible interactive delivery latency and keeps diagnostics and
+            // memory bounded under a broken backend.
+            if self.consumed_text.len() == 32 {
+                self.consumed_text.pop_front();
+            }
+            self.consumed_text.push_back(transaction);
+        }
     }
 }
 
 fn consumes_correlated_text(command: &InputCommand) -> bool {
     matches!(
+        command,
+        InputCommand::Copy | InputCommand::Cut | InputCommand::Paste
+    ) || matches!(
         command,
         InputCommand::Ui(
             UiEvent::TextSelectAll
@@ -499,6 +486,24 @@ fn consumes_correlated_text(command: &InputCommand) -> bool {
             shortcut: Shortcut::Reload,
             ..
         }
+    )
+}
+
+fn suppresses_repeat(command: &InputCommand) -> bool {
+    matches!(
+        command,
+        InputCommand::Copy | InputCommand::Cut | InputCommand::Paste
+    ) || matches!(
+        command,
+        InputCommand::Ui(
+            UiEvent::FocusNext
+                | UiEvent::FocusPrevious
+                | UiEvent::KeyboardActivate
+                | UiEvent::SelectionClear
+                | UiEvent::TextSelectAll
+                | UiEvent::TextUndo
+                | UiEvent::TextRedo
+        )
     )
 }
 
@@ -833,6 +838,67 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_devices_keep_independent_consumed_text_transactions() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let context = InputContext {
+            text_focused: true,
+            ..InputContext::default()
+        };
+        for device in [1, 2] {
+            assert_eq!(
+                dispatch.dispatch_with_context(
+                    &InputEvent::Key(nickel_input::KeyEvent {
+                        device: DeviceId(device),
+                        order: EventOrder(10),
+                        physical: PhysicalKey::Code(KeyCode::KeyA),
+                        logical: LogicalKey::Character("a".into()),
+                        location: nickel_input::KeyLocation::Standard,
+                        edge: KeyEdge::Pressed,
+                        repeat: false,
+                        modifiers: nickel_input::ModifierState::from_sides(
+                            [Modifier::ControlLeft,]
+                        ),
+                    }),
+                    context,
+                ),
+                [InputCommand::Ui(UiEvent::TextSelectAll)]
+            );
+        }
+
+        assert!(dispatch.dispatch(&commit(2, 10, "a")).is_empty());
+        assert!(dispatch.dispatch(&commit(1, 10, "a")).is_empty());
+        assert_eq!(
+            dispatch.dispatch(&commit(1, 11, "b")),
+            [InputCommand::Ui(UiEvent::TextInput("b".into()))]
+        );
+    }
+
+    #[test]
+    fn consecutive_consumed_commands_do_not_overwrite_each_other() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let context = InputContext {
+            text_focused: true,
+            ..InputContext::default()
+        };
+        for order in [20, 21] {
+            dispatch.dispatch_with_context(
+                &key_at(
+                    order,
+                    LogicalKey::Character("a".into()),
+                    KeyCode::KeyA,
+                    &[Modifier::ControlLeft],
+                ),
+                context,
+            );
+        }
+
+        // Native text/IME queues may report the callbacks after both key
+        // callbacks; both exact transactions remain consumed.
+        assert!(dispatch.dispatch(&commit(1, 20, "a")).is_empty());
+        assert!(dispatch.dispatch(&commit(1, 21, "a")).is_empty());
+    }
+
+    #[test]
     fn altgr_text_and_ime_transactions_are_not_suppressed() {
         let mut dispatch = FocusedInputDispatcher::default();
         assert!(
@@ -881,6 +947,38 @@ mod tests {
                     &[Modifier::ControlLeft],
                 )),
                 [expected]
+            );
+            assert!(dispatch.dispatch(&commit(1, order, character)).is_empty());
+        }
+    }
+
+    #[test]
+    fn editing_shortcut_repeats_are_consumed_without_reexecuting_commands() {
+        let mut dispatch = FocusedInputDispatcher::default();
+        let context = InputContext {
+            text_focused: true,
+            ..InputContext::default()
+        };
+        for (order, code, character) in [
+            (24, KeyCode::KeyA, "a"),
+            (25, KeyCode::KeyC, "c"),
+            (26, KeyCode::KeyX, "x"),
+            (27, KeyCode::KeyV, "v"),
+            (28, KeyCode::KeyZ, "z"),
+        ] {
+            let InputEvent::Key(mut repeat) = key_at(
+                order,
+                LogicalKey::Character(character.into()),
+                code,
+                &[Modifier::ControlLeft],
+            ) else {
+                unreachable!()
+            };
+            repeat.repeat = true;
+            assert!(
+                dispatch
+                    .dispatch_with_context(&InputEvent::Key(repeat), context)
+                    .is_empty()
             );
             assert!(dispatch.dispatch(&commit(1, order, character)).is_empty());
         }
