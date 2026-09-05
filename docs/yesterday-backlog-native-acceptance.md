@@ -147,6 +147,14 @@ deterministic `DesktopNotification` directly. Native Windows all-target/all-feat
 then passed, as did 14 focused native notification tests; the corresponding Linux notification
 tests and strict workspace Clippy also pass on the integrated tree.
 
+The isolated Windows shell was then rebuilt from exact master `6a0a572`, including the shared
+file-plane, wallpaper fallback, and fixture-portability changes. Its native serial release build
+passed in 2 minutes 18 seconds; the exact-master binary remained responsive in interactive session
+1 at about 81 MiB and reached first shell in 1.57 seconds. Its log again recorded the unavailable COM
+class followed by a successful 1920 by 1200 `TranscodedWallpaper` fallback. Temporary launch-task
+registration was removed and the user's dirty primary Windows checkout was not modified. Wallpaper,
+label containment, and icon selection/navigation still require direct visual observation.
+
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
   truthful no-ops.
