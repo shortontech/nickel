@@ -21,9 +21,11 @@ use nickel_file::{
         SelectionModifiers, SortDirection as DesktopSortDirection, SortKey as DesktopSortKey,
     },
 };
+use nickel_session_protocol::ShellRole;
+#[cfg(any(target_os = "linux", test))]
 use nickel_session_protocol::{
     AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
-    ShellPopoverAnchor, ShellRole, ShellSemanticTarget, WindowMenuTargetAction,
+    ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
 };
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
@@ -2097,7 +2099,7 @@ fn preview_refresh_due(deadline: Option<Instant>, now: Instant) -> bool {
 }
 
 impl LiveShell {
-    #[cfg(any(target_os = "linux", test))]
+    #[cfg(target_os = "linux")]
     pub fn host_runtime_samples(&self) -> (Vec<u64>, Vec<u64>, Vec<u64>, Vec<u64>, u64) {
         (
             self.host_runtime_samples

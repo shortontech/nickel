@@ -6,12 +6,14 @@ use std::{
 };
 
 use image::RgbaImage;
+#[cfg(any(target_os = "linux", test))]
+use nickel_ui::ActionKind;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    ActionKind, Align, Application, Button, ButtonPresentation, Column, Completion,
-    CompletionFailure, CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch,
-    HostEvent, Image, ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, Tone,
-    UiEvent, UiHost, ViewContext,
+    Align, Application, Button, ButtonPresentation, Column, Completion, CompletionFailure,
+    CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch, HostEvent, Image,
+    ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, Tone, UiEvent, UiHost,
+    ViewContext,
 };
 
 use crate::platform;
@@ -205,6 +207,7 @@ impl ScreenshotApp {
         });
     }
 
+    #[cfg(any(target_os = "linux", test))]
     fn perform_semantic_action(
         &mut self,
         action: nickel_session_protocol::ScreenshotTargetAction,

@@ -1,11 +1,13 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use nickel_core::theme::ThemePalette;
+#[cfg(any(target_os = "linux", test))]
+use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, Align, AnyView, Application, Button, Collection, CollectionPresentation,
     CollectionState, ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, Image, ImageFit, ImagePresentation, Insets, Point, Rect, Row, SemanticAction,
+    HostEventOutcome, Image, ImageFit, ImagePresentation, Insets, Point, Row, SemanticAction,
     SemanticRole, SemanticTheme, Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
 };
 
