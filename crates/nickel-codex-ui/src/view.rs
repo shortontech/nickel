@@ -1780,7 +1780,7 @@ mod tests {
             assert!(offenders.is_empty(), "{label}: {offenders:?}");
         }
 
-        let codex = include_str!("view.rs");
+        let codex = include_str!("view.rs").replace("\r\n", "\n");
         let fallback_start = codex.find("fn semantic_theme()").unwrap();
         let fallback_end = codex[fallback_start..]
             .find("\n}\n\n")
