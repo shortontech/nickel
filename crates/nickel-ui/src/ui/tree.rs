@@ -6656,6 +6656,13 @@ fn resolved_child_id<Message>(parent: &UiId, child: &Element<Message>, index: us
     )
 }
 
+fn mask_text(value: &str, mask: char) -> String {
+    value
+        .chars()
+        .map(|character| if character == '\n' { '\n' } else { mask })
+        .collect()
+}
+
 fn apply_transient_state<Message>(
     element: &mut Element<Message>,
     id: &UiId,
@@ -6830,21 +6837,20 @@ fn apply_transient_state<Message>(
                 .flatten()
                 .map(|selection| {
                     let width = |end| {
-                        measure_text(
-                            &editor.text()[..end],
-                            *scale,
-                            *bold,
-                            false,
-                            None,
-                            Some(1),
-                            f32::INFINITY,
-                        )
-                        .width
+                        let visible = input_mask.map_or_else(
+                            || editor.text()[..end].to_owned(),
+                            |mask| mask_text(&editor.text()[..end], mask),
+                        );
+                        measure_text(&visible, *scale, *bold, false, None, Some(1), f32::INFINITY)
+                            .width
                     };
                     (width(selection.start), width(selection.end))
                 });
             *caret_position = (focused && caret_visible).then(|| {
-                let prefix = editor.display_caret_prefix();
+                let prefix = input_mask.map_or_else(
+                    || editor.display_caret_prefix(),
+                    |mask| mask_text(&editor.display_caret_prefix(), mask),
+                );
                 let (line_index, line) =
                     prefix
                         .rsplit_once('\n')
@@ -6863,7 +6869,7 @@ fn apply_transient_state<Message>(
                 }
             });
             *value = if let Some(mask) = input_mask {
-                std::iter::repeat_n(*mask, editor.text().chars().count()).collect()
+                mask_text(&editor.display_text_with_caret(""), *mask)
             } else {
                 editor.display_text_with_caret("")
             };

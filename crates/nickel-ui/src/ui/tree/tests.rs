@@ -497,6 +497,80 @@ fn single_line_text_field_centers_placeholder_and_masked_text() {
 }
 
 #[test]
+fn masked_field_geometry_uses_concealed_glyphs_for_caret_selection_and_ime() {
+    fn geometry(
+        value: &str,
+        preedit: Option<&str>,
+        select_all: bool,
+    ) -> (Rect, Option<Rect>, String, Rect) {
+        let bounds = Rect::new(20.0, 30.0, 340.0, 64.0);
+        let build = |state: &mut UiStateStore| {
+            UiFrame::layout_with_state(
+                TextField::on_change_masked_with_placeholder(value, "Password", '•', map_query)
+                    .id("password")
+                    .scale(18.0)
+                    .single_line_height(bounds.size.height),
+                bounds,
+                state,
+            )
+        };
+        let mut state = UiStateStore::default();
+        let initial = build(&mut state);
+        initial.handle_event(&mut state, UiEvent::FocusNext);
+        if select_all {
+            initial.handle_event(&mut state, UiEvent::TextSelectAll);
+        }
+        if let Some(preedit) = preedit {
+            initial.handle_event(&mut state, UiEvent::ImePreedit(preedit.into()));
+        }
+        let frame = build(&mut state);
+        let caret = frame
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Fill { rect, .. } if rect.size.width == 1.5 => Some(*rect),
+                _ => None,
+            })
+            .expect("focused caret");
+        let selection = frame.commands().iter().find_map(|command| match command {
+            PaintCommand::Fill { rect, color } if *color == 0x315a8f => Some(*rect),
+            _ => None,
+        });
+        let (text, text_bounds) = frame
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { text, bounds, .. } => Some((text.clone(), *bounds)),
+                _ => None,
+            })
+            .expect("masked text");
+        (caret, selection, text, text_bounds)
+    }
+
+    let (ascii_caret, _, ascii_text, ascii_bounds) = geometry("iiii", None, false);
+    let (fallback_caret, _, fallback_text, fallback_bounds) = geometry("ＷＷＷＷ", None, false);
+    assert_eq!(ascii_text, "••••");
+    assert_eq!(fallback_text, ascii_text);
+    assert_eq!(fallback_caret.origin.x, ascii_caret.origin.x);
+    assert_eq!(fallback_caret.origin.y, ascii_caret.origin.y);
+
+    let (_, ascii_selection, _, _) = geometry("iiii", None, true);
+    let (_, fallback_selection, _, _) = geometry("ＷＷＷＷ", None, true);
+    assert_eq!(fallback_selection, ascii_selection);
+
+    let (ascii_ime_caret, _, ascii_ime_text, _) = geometry("ii", Some("ab"), false);
+    let (fallback_ime_caret, _, fallback_ime_text, _) = geometry("ii", Some("世界"), false);
+    assert_eq!(ascii_ime_text, "••••");
+    assert_eq!(fallback_ime_text, ascii_ime_text);
+    assert_eq!(fallback_ime_caret.origin.x, ascii_ime_caret.origin.x);
+    assert_eq!(fallback_ime_caret.origin.y, ascii_ime_caret.origin.y);
+
+    assert_eq!(fallback_bounds, ascii_bounds);
+    assert_eq!(ascii_caret.origin.y, ascii_bounds.origin.y);
+    assert_eq!(ascii_selection.unwrap().origin.y, ascii_bounds.origin.y);
+}
+
+#[test]
 fn image_presentations_resolve_deterministic_bounds_and_alignment() {
     let viewport = Rect::new(10.0, 20.0, 200.0, 100.0);
     let source = Size::new(100.0, 100.0);
