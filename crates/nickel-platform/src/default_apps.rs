@@ -558,6 +558,199 @@ fn desktop_data_roots() -> Vec<std::path::PathBuf> {
 struct WindowsAssociations;
 
 #[cfg(target_os = "windows")]
+struct RegistryKey(windows::Win32::System::Registry::HKEY);
+
+#[cfg(target_os = "windows")]
+impl Drop for RegistryKey {
+    fn drop(&mut self) {
+        // SAFETY: this wrapper is constructed only from a successful RegOpenKeyExW call
+        // and owns exactly one corresponding close.
+        unsafe {
+            let _ = windows::Win32::System::Registry::RegCloseKey(self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_open_registry_key(
+    root: windows::Win32::System::Registry::HKEY,
+    path: &str,
+) -> Option<RegistryKey> {
+    use windows::{Win32::System::Registry::*, core::PCWSTR};
+    let path = path.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut key = HKEY::default();
+    // SAFETY: path is a valid NUL-terminated UTF-16 string and key points to writable storage.
+    let status = unsafe { RegOpenKeyExW(root, PCWSTR(path.as_ptr()), None, KEY_READ, &mut key) };
+    (status == windows::Win32::Foundation::ERROR_SUCCESS).then_some(RegistryKey(key))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_string(key: &RegistryKey, name: &str) -> Option<String> {
+    use windows::{Win32::System::Registry::*, core::PCWSTR};
+    let name = name.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    let mut value_type = REG_VALUE_TYPE::default();
+    let mut bytes = 0_u32;
+    // SAFETY: the value name is NUL terminated and the sizing call supplies no data buffer.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            None,
+            Some(&mut bytes),
+        )
+    };
+    if status != windows::Win32::Foundation::ERROR_SUCCESS
+        || !matches!(value_type, REG_SZ | REG_EXPAND_SZ)
+        || bytes == 0
+        || bytes > 64 * 1024
+    {
+        return None;
+    }
+    let mut data = vec![0_u16; bytes.div_ceil(2) as usize];
+    // SAFETY: data contains at least the byte count returned by the sizing call.
+    let status = unsafe {
+        RegQueryValueExW(
+            key.0,
+            PCWSTR(name.as_ptr()),
+            None,
+            Some(&mut value_type),
+            Some(data.as_mut_ptr().cast()),
+            Some(&mut bytes),
+        )
+    };
+    if status != windows::Win32::Foundation::ERROR_SUCCESS {
+        return None;
+    }
+    let units = (bytes as usize / 2).min(data.len());
+    let end = data[..units]
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units);
+    Some(String::from_utf16_lossy(&data[..end]))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_values(key: &RegistryKey) -> Vec<(String, String)> {
+    use windows::{Win32::System::Registry::*, core::PWSTR};
+    let mut values = Vec::new();
+    for index in 0..4096_u32 {
+        let mut name = vec![0_u16; 256];
+        let mut data = vec![0_u8; 1024];
+        loop {
+            let mut name_len = name.len() as u32;
+            let mut data_len = data.len() as u32;
+            let mut value_type = REG_VALUE_TYPE::default();
+            // SAFETY: both buffers report their writable lengths and remain alive for the call.
+            let status = unsafe {
+                RegEnumValueW(
+                    key.0,
+                    index,
+                    Some(PWSTR(name.as_mut_ptr())),
+                    &mut name_len,
+                    None,
+                    Some(&mut value_type.0),
+                    Some(data.as_mut_ptr()),
+                    Some(&mut data_len),
+                )
+            };
+            if status == windows::Win32::Foundation::ERROR_NO_MORE_ITEMS {
+                return values;
+            }
+            if status == windows::Win32::Foundation::ERROR_MORE_DATA
+                && name.len() < 16 * 1024
+                && data.len() < 64 * 1024
+            {
+                name.resize(name.len() * 2, 0);
+                data.resize(data.len() * 2, 0);
+                continue;
+            }
+            if status == windows::Win32::Foundation::ERROR_SUCCESS
+                && matches!(value_type, REG_SZ | REG_EXPAND_SZ)
+            {
+                let name_len = (name_len as usize).min(name.len());
+                let data_units = (data_len as usize / 2).min(data.len() / 2);
+                // SAFETY: u8 registry storage is suitably sized; read_unaligned avoids relying on
+                // its alignment while converting the returned UTF-16 code units.
+                let decoded = (0..data_units)
+                    .map(|offset| unsafe {
+                        std::ptr::read_unaligned(data.as_ptr().add(offset * 2).cast::<u16>())
+                    })
+                    .take_while(|unit| *unit != 0)
+                    .collect::<Vec<_>>();
+                values.push((
+                    String::from_utf16_lossy(&name[..name_len]),
+                    String::from_utf16_lossy(&decoded),
+                ));
+            }
+            break;
+        }
+    }
+    values
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registered_handlers(target: &AssociationTarget) -> Vec<ApplicationHandler> {
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+    let Some(query_key) = windows_association_query_key(target) else {
+        return Vec::new();
+    };
+    let association_group = match target {
+        AssociationTarget::Mime(_) => "FileAssociations",
+        AssociationTarget::Scheme(_) => "UrlAssociations",
+    };
+    let mut handlers = Vec::new();
+    for (root, scope) in [(HKEY_CURRENT_USER, "user"), (HKEY_LOCAL_MACHINE, "machine")] {
+        let Some(registrations) =
+            windows_open_registry_key(root, "Software\\RegisteredApplications")
+        else {
+            continue;
+        };
+        for (id, capabilities_path) in windows_registry_values(&registrations) {
+            if handlers
+                .iter()
+                .any(|handler: &ApplicationHandler| handler.id.eq_ignore_ascii_case(&id))
+            {
+                continue;
+            }
+            let Some(capabilities) = windows_open_registry_key(root, &capabilities_path) else {
+                continue;
+            };
+            let association_path = format!("{capabilities_path}\\{association_group}");
+            let Some(associations) = windows_open_registry_key(root, &association_path) else {
+                continue;
+            };
+            if windows_registry_string(&associations, query_key).is_none() {
+                continue;
+            }
+            let name = windows_registry_string(&capabilities, "ApplicationName")
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or_else(|| id.clone());
+            handlers.push(ApplicationHandler {
+                id,
+                name,
+                icon: windows_registry_string(&capabilities, "ApplicationIcon"),
+                source: format!("Windows RegisteredApplications ({scope})"),
+            });
+            if handlers.len() == 128 {
+                break;
+            }
+        }
+        if handlers.len() == 128 {
+            break;
+        }
+    }
+    handlers.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    handlers
+}
+
+#[cfg(target_os = "windows")]
 fn windows_effective_handler(
     target: &AssociationTarget,
 ) -> Result<Option<ApplicationHandler>, AssociationError> {
@@ -653,9 +846,17 @@ fn windows_association_query_key(target: &AssociationTarget) -> Option<&str> {
 impl AssociationBackend for WindowsAssociations {
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
         let effective = windows_effective_handler(target)?;
+        let mut handlers = windows_registered_handlers(target);
+        if let Some(current) = effective.as_ref()
+            && !handlers
+                .iter()
+                .any(|handler| handler.id.eq_ignore_ascii_case(&current.id))
+        {
+            handlers.insert(0, current.clone());
+        }
         Ok(AssociationSnapshot {
             target: target.clone(),
-            handlers: effective.clone().into_iter().collect(),
+            handlers,
             effective,
             capability: AssociationCapability::NativeConsent,
             scope: AssociationScope::User,
