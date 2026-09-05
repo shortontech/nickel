@@ -12,11 +12,11 @@
   },
   "reachability": {
     "path": "assets/evidence/ui-reachability-report.json",
-    "sha256": "41b339f3bf99de92726b0442a06b1630479fc006b29d3586befd7a255450e32d",
+    "sha256": "c34d7cd95309c9b135debcc2fda63f00a382c83e615d2f034de18c90fff971d2",
     "report_schema": 2,
-    "fixture_variants": 74,
-    "path_count": 1386,
-    "reached_count": 1386,
+    "fixture_variants": 99,
+    "path_count": 4285,
+    "reached_count": 4285,
     "issue_count": 0,
     "generator_command": "cargo run -q -p nickel-ui-workbench --all-features -- reachability-report assets/evidence/ui-reachability-report.json",
     "drift_check": "The evidence validator regenerates or reads the full report, verifies its hash and schema, and requires reached_count == path_count with issue_count == 0. Any topology, action, route, or serialized-path change changes the retained hash."
