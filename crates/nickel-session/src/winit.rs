@@ -90,10 +90,11 @@ pub fn init_winit(
         },
     );
     let _global = output.create_global::<NickelSession>(&display_handle);
+    let configured_scale = state.configured_output_scale(&output);
     output.change_current_state(
         Some(mode),
         Some(Transform::Flipped180),
-        None,
+        Some(configured_scale),
         Some((0, 0).into()),
     );
     output.set_preferred(mode);
@@ -130,6 +131,7 @@ pub fn init_winit(
                     output.change_current_state(Some(mode), None, None, None);
                     damage_tracker = OutputDamageTracker::from_output(&output);
                     state.space.refresh();
+                    state.refresh_surface_scales();
                     state.relayout_shell_surfaces();
                     let _ = display.flush_clients();
                     backend.window().request_redraw();
@@ -547,6 +549,7 @@ pub fn init_winit(
                     }
 
                     state.space.refresh();
+                    state.refresh_surface_scales();
                     state.popups.cleanup();
                     let _ = display.flush_clients();
 

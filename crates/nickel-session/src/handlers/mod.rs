@@ -24,6 +24,7 @@ use smithay::input::{
 };
 use smithay::reexports::wayland_server::Resource;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::wayland::fractional_scale::FractionalScaleHandler;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::seat::WaylandFocus;
 use smithay::wayland::selection::data_device::{
@@ -223,5 +224,11 @@ mod selection_policy_tests {
 //
 
 impl OutputHandler for NickelSession {}
+
+impl FractionalScaleHandler for NickelSession {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        self.refresh_new_surface_scale(&surface);
+    }
+}
 
 delegate_dispatch2!(NickelSession);

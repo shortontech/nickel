@@ -91,6 +91,7 @@ impl SettingsApp {
                 physical_height: output.physical_height_mm,
                 primary: output.primary,
                 enabled: output.enabled,
+                scale_120: output.scale_120,
             })
             .collect();
         if outputs.is_empty() {
@@ -168,6 +169,7 @@ impl SettingsApp {
                     },
                     primary: output.primary,
                     enabled: output.enabled,
+                    scale_120: output.scale_120,
                 }
             })
             .collect();
@@ -181,6 +183,9 @@ impl SettingsApp {
             .iter()
             .position(|display| display.primary)
             .unwrap_or(0);
+        if self.pending_display_revert.is_none() {
+            self.confirmed_displays = self.displays.clone();
+        }
         self.applied = true;
         self.status.clear();
     }
@@ -258,6 +263,7 @@ impl SettingsApp {
                     },
                     primary: primary.as_ref() == Some(&monitor),
                     enabled: true,
+                    scale_120: (monitor.scale_factor() * 120.0).round() as u32,
                 }
             })
             .collect();
@@ -266,6 +272,9 @@ impl SettingsApp {
             .iter()
             .position(|display| display.primary)
             .unwrap_or(0);
+        if self.pending_display_revert.is_none() {
+            self.confirmed_displays = self.displays.clone();
+        }
         self.applied = true;
         self.status.clear();
     }
@@ -569,8 +578,7 @@ impl SettingsApp {
         {
             match apply_windows_layout(&self.displays, &placements, primary) {
                 Ok(()) => {
-                    self.applied = true;
-                    self.status = self.localizer.text("settings-status-layout-applied");
+                    self.display_apply_succeeded();
                 }
                 Err(error) => {
                     self.applied = false;
@@ -596,6 +604,7 @@ impl SettingsApp {
                     x,
                     y,
                     enabled: display.enabled,
+                    scale_120: display.scale_120,
                 })
                 .collect(),
         };
@@ -604,8 +613,7 @@ impl SettingsApp {
             layout,
         })) {
             Ok(ServerMessage::Ack) => {
-                self.applied = true;
-                self.status = self.localizer.text("settings-status-layout-applied");
+                self.display_apply_succeeded();
             }
             Ok(ServerMessage::Error { message, .. }) => {
                 self.applied = false;
@@ -618,6 +626,32 @@ impl SettingsApp {
                 self.status = self.localizer.text("settings-status-session-unavailable");
             }
         }
+    }
+
+    pub(crate) fn display_apply_succeeded(&mut self) {
+        self.applied = true;
+        if self.reverting_display {
+            self.reverting_display = false;
+            self.confirmed_displays = self.displays.clone();
+            self.pending_display_revert = None;
+            self.status = "Previous display settings restored.".into();
+        } else {
+            self.pending_display_revert = Some((
+                Instant::now() + Duration::from_secs(15),
+                self.confirmed_displays.clone(),
+            ));
+            self.status = "Keep these display settings? They will revert in 15 seconds.".into();
+        }
+    }
+
+    pub(crate) fn revert_display_layout(&mut self) {
+        let Some((_, previous)) = self.pending_display_revert.take() else {
+            return;
+        };
+        self.displays = previous;
+        self.selected = self.selected.min(self.displays.len().saturating_sub(1));
+        self.reverting_display = true;
+        self.apply_layout();
     }
 }
 

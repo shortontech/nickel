@@ -838,6 +838,13 @@ pub struct OutputPlacement {
     pub x: i32,
     pub y: i32,
     pub enabled: bool,
+    /// Exact desired scale in Wayland fractional-scale units (120 == 100%).
+    #[serde(default = "default_output_scale_120")]
+    pub scale_120: u32,
+}
+
+const fn default_output_scale_120() -> u32 {
+    120
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1310,6 +1317,26 @@ mod tests {
                 envelope
             );
         }
+    }
+
+    #[test]
+    fn output_layout_round_trips_exact_fractional_scale() {
+        let request = Request::Command(Command::ApplyOutputs {
+            layout: OutputLayout {
+                primary: "edid-primary".into(),
+                placements: vec![OutputPlacement {
+                    name: "edid-primary".into(),
+                    x: -1920,
+                    y: 37,
+                    enabled: true,
+                    scale_120: 150,
+                }],
+            },
+        });
+        assert_eq!(
+            decode::<Request>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
     }
 
     #[test]

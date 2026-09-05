@@ -284,6 +284,43 @@ impl SettingsApp {
                 .id("display-enabled")
                 .accessibility_label("Display enabled"),
         );
+        let scale = SliderField::new(
+            theme,
+            "Scale",
+            "Logical size on this display. Applications may need to redraw.",
+            format!("{}%", selected.scale_120 * 100 / 120),
+            (selected.scale_120.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+            display_scale_message,
+        )
+        .id("display-scale");
+        let app_scale_units = match self.application_scale_policy {
+            ApplicationScalePolicy::Custom(scale) => scale.units(),
+            _ => 120,
+        };
+        let app_scale = SettingsCard::titled(
+            theme,
+            "Application compatibility scale",
+            "Toolkit compatibility is separate from per-display Wayland scale. Running applications may need a restart.",
+        )
+        .id("application-scale")
+        .child(
+            Row::new()
+                .gap(8.0)
+                .child(Button::semantic(theme, SettingsMessage::ApplicationScaleFollow, "Follow Nickel", ButtonPresentation::Secondary))
+                .child(Button::semantic(theme, SettingsMessage::ApplicationScaleUnchanged, "Leave unchanged", ButtonPresentation::Secondary)),
+        )
+        .child(
+            SliderField::new(
+                theme,
+                "Custom application scale",
+                "Used only when custom compatibility scaling is selected.",
+                format!("{}%", app_scale_units * 100 / 120),
+                (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+                application_scale_message,
+            )
+            .id("application-custom-scale"),
+        )
+        .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let apply = Button::semantic(
             theme,
             SettingsMessage::DisplayApply,
@@ -291,6 +328,26 @@ impl SettingsApp {
             ButtonPresentation::Primary,
         )
         .width(105.0);
+        let confirmation: AnyView<SettingsMessage> = if self.pending_display_revert.is_some() {
+            AnyView::new(
+                Row::new()
+                    .gap(8.0)
+                    .child(Button::semantic(
+                        theme,
+                        SettingsMessage::DisplayKeep,
+                        "Keep",
+                        ButtonPresentation::Primary,
+                    ))
+                    .child(Button::semantic(
+                        theme,
+                        SettingsMessage::DisplayRevert,
+                        "Revert",
+                        ButtonPresentation::Secondary,
+                    )),
+            )
+        } else {
+            AnyView::new(nickel_ui::Container::new())
+        };
         let display_cards = self.displays.iter().enumerate().map(|(index, display)| {
             let selected = index == self.selected;
             let detail = if display.enabled {
@@ -360,14 +417,17 @@ impl SettingsApp {
                             </Text>
                         </Row>
                         {enabled}
+                        {scale}
                         <Row height={42.0} gap={12.0}>
                             {identify}{make_primary}{apply}
                         </Row>
+                        {confirmation}
                     </Column>
                 </Container>
                 <Text color={if self.applied { palette.complement } else { palette.muted }} height={18.0}>
                     {&self.status}
                 </Text>
+                {app_scale}
             </Column>
         }
     }

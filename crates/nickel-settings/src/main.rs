@@ -35,6 +35,7 @@ use zbus::{
 };
 
 use nickel_core::{
+    dpi::{ApplicationScalePolicy, Scale120},
     optional_features::{
         ApplyRequirement, CodexSource, FeatureCapability, FeatureEffectiveState, FeatureHealth,
         FeatureInstallation, FeaturePolicy, FeatureState, FeatureSupport, OptionalFeatureRuntime,
@@ -323,8 +324,10 @@ struct OutputSnapshot {
     physical_height: i32,
     primary: bool,
     enabled: bool,
+    scale_120: u32,
 }
 
+#[derive(Clone, Debug)]
 struct DisplayCard {
     connector: String,
     name: String,
@@ -334,6 +337,7 @@ struct DisplayCard {
     rect: Rect,
     primary: bool,
     enabled: bool,
+    scale_120: u32,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -487,7 +491,13 @@ enum SettingsMessage {
     },
     DisplayPrimary,
     DisplayEnabled(bool),
+    SetDisplayScale(u32),
+    ApplicationScaleFollow,
+    ApplicationScaleUnchanged,
+    SetApplicationScale(u32),
     DisplayApply,
+    DisplayKeep,
+    DisplayRevert,
 }
 
 fn display_drag_message(seed: SettingsMessage, gesture: DragGesture) -> SettingsMessage {
@@ -500,6 +510,14 @@ fn display_drag_message(seed: SettingsMessage, gesture: DragGesture) -> Settings
         x: gesture.position.x.round() as i32,
         y: gesture.position.y.round() as i32,
     }
+}
+
+fn display_scale_message(value: f32) -> SettingsMessage {
+    SettingsMessage::SetDisplayScale((value.clamp(0.0, 1.0) * 14.0).round() as u32)
+}
+
+fn application_scale_message(value: f32) -> SettingsMessage {
+    SettingsMessage::SetApplicationScale((value.clamp(0.0, 1.0) * 14.0).round() as u32)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -581,6 +599,127 @@ fn default_app_categories() -> Vec<DefaultAppRow> {
 }
 
 impl SettingsApp {
+    fn refresh_toolkit_scale(&mut self) {
+        #[cfg(target_os = "linux")]
+        {
+            let backend = nickel_platform::LinuxToolkitScaleBackend::detect();
+            let observed = nickel_platform::ToolkitScaleBackend::capabilities(&backend)
+                .into_iter()
+                .filter(|capability| capability.available)
+                .filter_map(|capability| {
+                    nickel_platform::ToolkitScaleBackend::read(&backend, capability.family)
+                        .ok()
+                        .map(|value| (capability.family, value))
+                })
+                .collect::<Vec<_>>();
+            if !self.toolkit_scale_observed.is_empty() && self.toolkit_scale_observed != observed {
+                self.toolkit_scale_status =
+                    "Toolkit scale configuration changed outside Nickel; values were refreshed."
+                        .into();
+                self.request_redraw();
+            }
+            self.toolkit_scale_observed = observed;
+        }
+        self.next_toolkit_scale_refresh = Instant::now() + Duration::from_secs(2);
+    }
+
+    fn apply_application_scale_policy(&mut self) {
+        let mut settings =
+            nickel_core::dpi::ApplicationScaleSettings::load_default().unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        {
+            let backend = nickel_platform::LinuxToolkitScaleBackend::detect();
+            let report = if self.application_scale_policy == ApplicationScalePolicy::FollowNickel {
+                let mut owned = Vec::new();
+                if let (Some(previous), Some(applied)) = (
+                    settings.owned_gtk_previous.clone(),
+                    settings.owned_gtk_applied.clone(),
+                ) {
+                    owned.push(nickel_platform::ToolkitWrite {
+                        family: nickel_platform::ToolkitFamily::Gtk,
+                        previous,
+                        applied,
+                        restart_required: true,
+                    });
+                }
+                if let (Some(previous), Some(applied)) = (
+                    settings.owned_qt_previous.clone(),
+                    settings.owned_qt_applied.clone(),
+                ) {
+                    owned.push(nickel_platform::ToolkitWrite {
+                        family: nickel_platform::ToolkitFamily::Qt,
+                        previous,
+                        applied,
+                        restart_required: true,
+                    });
+                }
+                let report = nickel_platform::reset_owned_toolkit_scale(&backend, &owned);
+                for write in &report.writes {
+                    match write.family {
+                        nickel_platform::ToolkitFamily::Gtk => {
+                            settings.owned_gtk_previous = None;
+                            settings.owned_gtk_applied = None;
+                        }
+                        nickel_platform::ToolkitFamily::Qt => {
+                            settings.owned_qt_previous = None;
+                            settings.owned_qt_applied = None;
+                        }
+                    }
+                }
+                report
+            } else {
+                let report =
+                    nickel_platform::apply_toolkit_scale(&backend, self.application_scale_policy);
+                for write in &report.writes {
+                    match write.family {
+                        nickel_platform::ToolkitFamily::Gtk => {
+                            settings.owned_gtk_previous = Some(write.previous.clone());
+                            settings.owned_gtk_applied = Some(write.applied.clone());
+                        }
+                        nickel_platform::ToolkitFamily::Qt => {
+                            settings.owned_qt_previous = Some(write.previous.clone());
+                            settings.owned_qt_applied = Some(write.applied.clone());
+                        }
+                    }
+                }
+                report
+            };
+            let restart = report.writes.iter().any(|write| write.restart_required);
+            self.toolkit_scale_status = if report.failures.is_empty() {
+                if report.writes.is_empty() {
+                    "No toolkit values needed changing; launch-time compatibility will be used where necessary.".into()
+                } else if restart {
+                    "Application scale updated. Already-running applications may need a restart."
+                        .into()
+                } else {
+                    "Application scale updated.".into()
+                }
+            } else {
+                format!(
+                    "Application scale was only partially applied: {}",
+                    report
+                        .failures
+                        .iter()
+                        .map(|(family, error)| format!("{family:?}: {error}"))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                )
+            };
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            self.toolkit_scale_status =
+                "Native per-monitor DPI is managed by the operating system.".into();
+        }
+        settings.policy = self.application_scale_policy;
+        if let Err(error) = settings.save_default() {
+            self.toolkit_scale_status = format!(
+                "{} Could not persist the compatibility choice: {error}",
+                self.toolkit_scale_status
+            );
+        }
+    }
+
     fn load_default_apps(&mut self) {
         let service = nickel_platform::association_service();
         for row in &mut self.default_apps {
@@ -913,7 +1052,43 @@ impl SettingsApp {
                     self.status = self.localizer.text("settings-status-changes-not-applied");
                 }
             }
+            SettingsMessage::SetDisplayScale(step) => {
+                // Supported quarter-step scales from 50% through 400%.
+                self.displays[self.selected].scale_120 = 60 + step.min(14) * 30;
+                self.applied = false;
+                self.status = self.localizer.text("settings-status-changes-not-applied");
+            }
+            SettingsMessage::ApplicationScaleFollow => {
+                self.application_scale_policy = ApplicationScalePolicy::FollowNickel;
+                self.apply_application_scale_policy();
+            }
+            SettingsMessage::ApplicationScaleUnchanged => {
+                self.application_scale_policy = ApplicationScalePolicy::Unchanged;
+                self.toolkit_scale_status =
+                    "Application toolkit settings are left unchanged.".into();
+                let mut settings =
+                    nickel_core::dpi::ApplicationScaleSettings::load_default().unwrap_or_default();
+                settings.policy = self.application_scale_policy;
+                if let Err(error) = settings.save_default() {
+                    self.toolkit_scale_status = format!(
+                        "{} Could not persist the choice: {error}",
+                        self.toolkit_scale_status
+                    );
+                }
+            }
+            SettingsMessage::SetApplicationScale(step) => {
+                self.application_scale_policy = ApplicationScalePolicy::Custom(
+                    Scale120::new(60 + step.min(14) * 30).expect("supported scale is non-zero"),
+                );
+                self.apply_application_scale_policy();
+            }
             SettingsMessage::DisplayApply => self.apply_layout(),
+            SettingsMessage::DisplayKeep => {
+                self.confirmed_displays = self.displays.clone();
+                self.pending_display_revert = None;
+                self.status = "Display settings kept.".into();
+            }
+            SettingsMessage::DisplayRevert => self.revert_display_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
             SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
@@ -1360,6 +1535,14 @@ impl SettingsApp {
         self.poll_bluetooth_operation();
         self.poll_codex_probe();
         let now = Instant::now();
+        if self
+            .pending_display_revert
+            .as_ref()
+            .is_some_and(|(deadline, _)| now >= *deadline)
+        {
+            self.revert_display_layout();
+            self.request_redraw();
+        }
         let session_events = self
             .session_events
             .as_ref()
@@ -1390,6 +1573,9 @@ impl SettingsApp {
         {
             self.refresh_optional_feature_state();
             self.next_optional_feature_refresh = now + Duration::from_millis(250);
+        }
+        if self.page == SettingsPage::Display && now >= self.next_toolkit_scale_refresh {
+            self.refresh_toolkit_scale();
         }
         if self
             .appearance_save_deadline
@@ -1810,6 +1996,11 @@ impl Application for SettingsApp {
         deadlines.extend(self.appearance_save_deadline);
         deadlines.extend(self.desktop_count_save_deadline);
         deadlines.extend(self.next_wifi_refresh);
+        deadlines.extend(
+            self.pending_display_revert
+                .as_ref()
+                .map(|(deadline, _)| *deadline),
+        );
         if self.page == SettingsPage::Bluetooth {
             deadlines.push(self.next_bluetooth_refresh);
         }
@@ -1830,6 +2021,9 @@ impl Application for SettingsApp {
         }
         if self.page == SettingsPage::OptionalFeatures {
             deadlines.push(self.next_optional_feature_refresh);
+        }
+        if self.page == SettingsPage::Display {
+            deadlines.push(self.next_toolkit_scale_refresh);
         }
         if self.codex_probe_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
@@ -2007,9 +2201,24 @@ mod tests {
     };
 
     #[test]
-    fn idle_settings_host_declares_no_poll_deadline() {
+    fn display_settings_polls_for_external_toolkit_changes() {
         let app = SettingsApp::with_initial_page(SettingsPage::Display);
-        assert_eq!(Application::poll_interval(&app), None);
+        assert!(Application::poll_interval(&app).is_some());
+    }
+
+    #[test]
+    fn risky_display_changes_have_explicit_keep_and_revert_state() {
+        let mut app = SettingsApp::default();
+        let original = app.displays.clone();
+        app.displays[0].scale_120 = 180;
+        app.display_apply_succeeded();
+        assert!(app.pending_display_revert.is_some());
+        assert!(Application::poll_interval(&app).is_some());
+
+        app.revert_display_layout();
+        // The platform request is unavailable in tests, but the requested
+        // model is restored before adapter execution.
+        assert_eq!(app.displays[0].scale_120, original[0].scale_120);
     }
 
     #[test]

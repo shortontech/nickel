@@ -65,6 +65,14 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth_status: Option<String>,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
+    pub(super) confirmed_displays: Vec<DisplayCard>,
+    pub(super) pending_display_revert: Option<(Instant, Vec<DisplayCard>)>,
+    pub(super) reverting_display: bool,
+    pub(super) application_scale_policy: ApplicationScalePolicy,
+    pub(super) toolkit_scale_status: String,
+    #[cfg(target_os = "linux")]
+    pub(super) toolkit_scale_observed: Vec<(nickel_platform::ToolkitFamily, String)>,
+    pub(super) next_toolkit_scale_refresh: Instant,
 }
 
 impl Default for SettingsApp {
@@ -79,6 +87,9 @@ impl Default for SettingsApp {
             CodexSource::Executable(path) => path.display().to_string(),
             _ => String::new(),
         };
+        let application_scale_policy = nickel_core::dpi::ApplicationScaleSettings::load_default()
+            .unwrap_or_default()
+            .policy;
         let (wallpaper_preview, wallpaper_dimensions, wallpaper_status) =
             match load_wallpaper_preview(&wallpaper_settings) {
                 Ok(Some(preview)) => (
@@ -89,42 +100,45 @@ impl Default for SettingsApp {
                 Ok(None) => (None, None, None),
                 Err(error) => (None, None, Some(error.to_string())),
             };
+        let displays = vec![
+            DisplayCard {
+                connector: "DVI-I-1".into(),
+                name: "ASUS MB16ACV".into(),
+                detail: "DISPLAYLINK  1920 X 1080".into(),
+                logical_width: 1920,
+                logical_height: 1080,
+                rect: Rect {
+                    x: 225,
+                    y: 186,
+                    w: 270,
+                    h: 160,
+                },
+                primary: false,
+                enabled: true,
+                scale_120: 120,
+            },
+            DisplayCard {
+                connector: "DP-3".into(),
+                name: "DP-3".into(),
+                detail: "NVIDIA  1920 X 1080".into(),
+                logical_width: 1920,
+                logical_height: 1080,
+                rect: Rect {
+                    x: 495,
+                    y: 176,
+                    w: 300,
+                    h: 180,
+                },
+                primary: true,
+                enabled: true,
+                scale_120: 120,
+            },
+        ];
         Self {
             controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
             redraw_requested: Cell::new(true),
-            displays: vec![
-                DisplayCard {
-                    connector: "DVI-I-1".into(),
-                    name: "ASUS MB16ACV".into(),
-                    detail: "DISPLAYLINK  1920 X 1080".into(),
-                    logical_width: 1920,
-                    logical_height: 1080,
-                    rect: Rect {
-                        x: 225,
-                        y: 186,
-                        w: 270,
-                        h: 160,
-                    },
-                    primary: false,
-                    enabled: true,
-                },
-                DisplayCard {
-                    connector: "DP-3".into(),
-                    name: "DP-3".into(),
-                    detail: "NVIDIA  1920 X 1080".into(),
-                    logical_width: 1920,
-                    logical_height: 1080,
-                    rect: Rect {
-                        x: 495,
-                        y: 176,
-                        w: 300,
-                        h: 180,
-                    },
-                    primary: true,
-                    enabled: true,
-                },
-            ],
+            displays: displays.clone(),
             selected: 1,
             cursor: (0, 0),
             drag_offset: None,
@@ -184,6 +198,14 @@ impl Default for SettingsApp {
             bluetooth_status: None,
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
+            confirmed_displays: displays,
+            pending_display_revert: None,
+            reverting_display: false,
+            application_scale_policy,
+            toolkit_scale_status: String::new(),
+            #[cfg(target_os = "linux")]
+            toolkit_scale_observed: Vec::new(),
+            next_toolkit_scale_refresh: Instant::now(),
         }
     }
 }

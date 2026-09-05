@@ -1,4 +1,5 @@
 pub mod active_output;
+pub mod dpi;
 pub mod focus;
 pub mod hotkeys;
 pub mod idle;

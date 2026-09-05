@@ -272,6 +272,17 @@ impl Application {
             .env_remove("NICKEL_SESSION_CONTROL")
             .env_remove("NICKEL_SESSION_TOKEN")
             .env_remove("NICKEL_SHELL_TEST_CONTROL");
+        #[cfg(target_os = "linux")]
+        for (name, value) in nickel_core::dpi::ApplicationScaleSettings::load_default()
+            .unwrap_or_default()
+            .launch_environment(true)
+        {
+            if value.is_empty() {
+                command.env_remove(name);
+            } else {
+                command.env(name, value);
+            }
+        }
         Ok(command)
     }
 

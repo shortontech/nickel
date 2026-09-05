@@ -32,7 +32,7 @@ use nickel_session_protocol::{
     WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
 use smithay::{
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    desktop::{PopupManager, Space, Window, WindowSurfaceType, find_popup_root_surface},
     input::{Seat, SeatState},
     output::{Mode as OutputMode, Output, PhysicalProperties, Scale as OutputScale, Subpixel},
     reexports::{
@@ -49,7 +49,10 @@ use smithay::{
     },
     utils::{IsAlive, Logical, Point, Rectangle, SERIAL_COUNTER, Size, Transform},
     wayland::{
-        compositor::{CompositorClientState, CompositorState},
+        compositor::{
+            CompositorClientState, CompositorState, get_parent, send_surface_state, with_states,
+        },
+        fractional_scale::{FractionalScaleManagerState, with_fractional_scale},
         idle_inhibit::IdleInhibitManagerState,
         image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
         image_copy_capture::{ImageCopyCaptureState, Session},
@@ -82,6 +85,19 @@ use crate::{
 const OUTPUT_GLOBAL_BIND_SETTLE_GRACE: Duration = Duration::from_secs(3);
 const OUTPUT_GLOBAL_DISABLED_GRACE: Duration = Duration::from_secs(3);
 const MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS: usize = nickel_session_protocol::MAX_OUTPUTS;
+
+fn stable_output_identity(output: &Output) -> String {
+    let physical = output.physical_properties();
+    let hardware = format!(
+        "{}|{}|{}|{}x{}",
+        physical.make, physical.model, physical.serial_number, physical.size.w, physical.size.h
+    );
+    if physical.serial_number.is_empty() {
+        format!("{hardware}|{}", output.name())
+    } else {
+        hardware
+    }
+}
 
 fn output_global_capacity_available(pending: usize, live: usize) -> bool {
     pending.saturating_add(live) < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
@@ -374,6 +390,7 @@ pub struct NickelSession {
 
     // Smithay State
     pub compositor_state: CompositorState,
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub xdg_shell_state: XdgShellState,
     pub activation_state: XdgActivationState,
     pub decoration_state: XdgDecorationState,
@@ -405,6 +422,7 @@ pub struct NickelSession {
     pub seat: Seat<Self>,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    surface_effective_outputs: HashMap<ObjectId, String>,
     /// Live XDG protocol roles outlive their mapped compositor representation.
     pub(crate) xdg_toplevel_windows: HashMap<ObjectId, Window>,
     pub(crate) mapped_xdg_toplevels: HashSet<ObjectId>,
@@ -445,6 +463,7 @@ pub struct NickelSession {
     pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
+    output_scale_preferences: nickel_core::dpi::PersistedOutputScales,
     virtual_test_outputs: HashMap<String, (Output, Option<GlobalId>)>,
     pending_output_global_retirements: DeferredGlobalRetirements<GlobalId>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
@@ -635,6 +654,12 @@ struct PreviewCacheCounters {
 }
 
 impl NickelSession {
+    pub(crate) fn configured_output_scale(&self, output: &Output) -> OutputScale {
+        self.output_scale_preferences
+            .get(&stable_output_identity(output))
+            .map(|scale| OutputScale::Fractional(scale.factor()))
+            .unwrap_or(OutputScale::Integer(1))
+    }
     /// Map a compositor-managed window only while its Wayland client has a
     /// buffer attached. X11 windows and non-XDG surfaces are unaffected.
     pub(crate) fn map_buffered_window(
@@ -1264,6 +1289,7 @@ impl NickelSession {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
+        let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let activation_state = XdgActivationState::new::<Self>(&dh);
         let decoration_state = XdgDecorationState::new::<Self>(&dh);
@@ -1369,6 +1395,7 @@ impl NickelSession {
             socket_name,
 
             compositor_state,
+            fractional_scale_manager_state,
             xdg_shell_state,
             activation_state,
             decoration_state,
@@ -1399,6 +1426,7 @@ impl NickelSession {
             seat,
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            surface_effective_outputs: HashMap::new(),
             xdg_toplevel_windows: HashMap::new(),
             mapped_xdg_toplevels: HashSet::new(),
             restored_xdg_toplevels: HashSet::new(),
@@ -1438,6 +1466,8 @@ impl NickelSession {
             preview_window: None,
             server_decorated: HashSet::new(),
             primary_output_name: None,
+            output_scale_preferences: nickel_core::dpi::PersistedOutputScales::load_default()
+                .unwrap_or_default(),
             virtual_test_outputs: HashMap::new(),
             pending_output_global_retirements: DeferredGlobalRetirements::default(),
             preview_frames: HashMap::new(),
@@ -2757,9 +2787,11 @@ impl NickelSession {
         }
         let mut names = HashSet::new();
         if placements.iter().any(|placement| {
-            !connected.contains_key(&placement.name) || !names.insert(&placement.name)
+            !connected.contains_key(&placement.name)
+                || !names.insert(&placement.name)
+                || !(60..=480).contains(&placement.scale_120)
         }) {
-            return Err("layout contains an unknown or duplicate output");
+            return Err("layout contains an unknown, duplicate, or invalidly scaled output");
         }
         if !placements
             .iter()
@@ -2786,13 +2818,24 @@ impl NickelSession {
             .enumerate()
             .filter(|(_, output)| output.enabled)
         {
-            let left_size = connected[&left.name].1;
+            let scaled_size = |placement: &nickel_session_protocol::OutputPlacement| {
+                let (output, fallback) = &connected[&placement.name];
+                output.current_mode().map_or(*fallback, |mode| {
+                    output
+                        .current_transform()
+                        .transform_size(mode.size)
+                        .to_f64()
+                        .to_logical(f64::from(placement.scale_120) / 120.0)
+                        .to_i32_round()
+                })
+            };
+            let left_size = scaled_size(left);
             for right in placements
                 .iter()
                 .skip(index + 1)
                 .filter(|output| output.enabled)
             {
-                let right_size = connected[&right.name].1;
+                let right_size = scaled_size(right);
                 let overlaps = left.x < right.x + right_size.w
                     && left.x + left_size.w > right.x
                     && left.y < right.y + right_size.h
@@ -2824,12 +2867,28 @@ impl NickelSession {
                 .cloned()
                 .ok_or("enabled output did not become active")?;
             let location = (placement.x, placement.y).into();
-            output.change_current_state(None, None, None, Some(location));
+            output.change_current_state(
+                None,
+                None,
+                Some(OutputScale::Fractional(
+                    f64::from(placement.scale_120) / 120.0,
+                )),
+                Some(location),
+            );
             self.space.map_output(&output, location);
+            self.output_scale_preferences.set(
+                stable_output_identity(&output),
+                nickel_core::dpi::Scale120::new(placement.scale_120).unwrap_or_default(),
+            );
         }
+        self.output_scale_preferences
+            .save_default()
+            .map_err(|_| "could not persist output scales")?;
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
+        self.space.refresh();
+        self.refresh_surface_scales();
         self.notify_protocol_snapshot();
         Ok(())
     }
@@ -5295,6 +5354,141 @@ impl NickelSession {
             width: geometry.size.w,
             height: geometry.size.h,
         })
+    }
+
+    /// Reconcile every mapped top-level's effective output after Space has sent
+    /// the complete enter/leave set. Geometry remains logical; only buffer
+    /// preferences change while the client prepares its next commit.
+    pub(crate) fn refresh_surface_scales(&mut self) {
+        const HYSTERESIS_AREA: u64 = 4_096;
+        let outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                let geometry = self.space.output_geometry(output)?;
+                Some((
+                    nickel_core::dpi::OutputScale {
+                        identity: output.name(),
+                        geometry: nickel_core::dpi::LogicalRect {
+                            x: geometry.loc.x,
+                            y: geometry.loc.y,
+                            width: geometry.size.w,
+                            height: geometry.size.h,
+                        },
+                        scale: nickel_core::dpi::Scale120::new(
+                            (output.current_scale().fractional_scale() * 120.0).round() as u32,
+                        )
+                        .unwrap_or_default(),
+                    },
+                    output.clone(),
+                ))
+            })
+            .collect::<Vec<_>>();
+        let candidates = outputs
+            .iter()
+            .map(|(candidate, _)| candidate.clone())
+            .collect::<Vec<_>>();
+        let active = self.last_interaction_output_name.as_deref();
+        let windows = self.space.elements().cloned().collect::<Vec<_>>();
+        for window in windows {
+            let Some(surface) = window.wl_surface() else {
+                continue;
+            };
+            let Some(bounds) = self.space.element_bbox(&window) else {
+                continue;
+            };
+            let previous = self
+                .surface_effective_outputs
+                .get(&surface.id())
+                .map(String::as_str);
+            let selection = nickel_core::dpi::select_effective_output(
+                nickel_core::dpi::LogicalRect {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                },
+                &candidates,
+                previous,
+                active,
+                HYSTERESIS_AREA,
+            );
+            let Some(identity) = selection.output else {
+                self.surface_effective_outputs.remove(&surface.id());
+                continue;
+            };
+            let Some((candidate, output)) = outputs
+                .iter()
+                .find(|(candidate, _)| candidate.identity == identity)
+            else {
+                continue;
+            };
+            self.surface_effective_outputs
+                .insert(surface.id(), identity);
+            let integer_scale = candidate.scale.integer_buffer_scale();
+            let fractional_scale = candidate.scale.factor();
+            let transform = output.current_transform();
+            window.with_surfaces(|surface, states| {
+                send_surface_state(surface, states, integer_scale, transform);
+                with_fractional_scale(states, |state| state.set_preferred_scale(fractional_scale));
+            });
+            // Popups are separate surface trees rather than descendants visited by
+            // `Window::with_surfaces`. Keep their buffer preference locked to the
+            // owning top-level while that window crosses an output boundary.
+            for (popup, _) in PopupManager::popups_for_surface(&surface) {
+                with_states(popup.wl_surface(), |states| {
+                    send_surface_state(popup.wl_surface(), states, integer_scale, transform);
+                    with_fractional_scale(states, |state| {
+                        state.set_preferred_scale(fractional_scale)
+                    });
+                });
+            }
+        }
+
+        // A data-device icon has no xdg parent from which to derive an output.
+        // The interaction output is the source-side scale and remains stable for
+        // the lifetime of the drag even when the pointer straddles two outputs.
+        if let Some(icon) = self.dnd_icon.as_ref() {
+            let output = active
+                .and_then(|name| self.space.outputs().find(|output| output.name() == name))
+                .or_else(|| self.space.outputs().next());
+            if let Some(output) = output {
+                let fractional = output.current_scale().fractional_scale();
+                let integer = fractional.ceil().max(1.0) as i32;
+                with_states(icon, |states| {
+                    send_surface_state(icon, states, integer, output.current_transform());
+                    with_fractional_scale(states, |state| state.set_preferred_scale(fractional));
+                });
+            }
+        }
+    }
+
+    pub(crate) fn refresh_new_surface_scale(&mut self, surface: &WlSurface) {
+        let mut root = self
+            .popups
+            .find_popup(surface)
+            .and_then(|popup| find_popup_root_surface(&popup).ok())
+            .unwrap_or_else(|| surface.clone());
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let identity = self.surface_effective_outputs.get(&root.id()).cloned();
+        let output = identity
+            .as_deref()
+            .and_then(|identity| {
+                self.space
+                    .outputs()
+                    .find(|output| output.name() == identity)
+            })
+            .cloned()
+            .or_else(|| self.space.outputs().next().cloned());
+        let Some(output) = output else { return };
+        let fractional = output.current_scale().fractional_scale();
+        let integer = fractional.ceil().max(1.0) as i32;
+        with_states(surface, |states| {
+            send_surface_state(surface, states, integer, output.current_transform());
+            with_fractional_scale(states, |state| state.set_preferred_scale(fractional));
+        });
     }
 
     pub(crate) fn output_geometry_named(&self, name: &str) -> Option<Geometry> {

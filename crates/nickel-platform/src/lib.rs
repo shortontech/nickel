@@ -3,6 +3,7 @@
 mod default_apps;
 mod media;
 mod platform_contract;
+mod toolkit_scale;
 
 pub use default_apps::{
     ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
@@ -15,6 +16,13 @@ pub use default_apps::{
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
 pub use platform_contract::{
     AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,
+};
+#[cfg(target_os = "linux")]
+pub use toolkit_scale::LinuxToolkitScaleBackend;
+pub use toolkit_scale::{
+    ToolkitApplyReport, ToolkitCapability, ToolkitFamily, ToolkitScaleBackend, ToolkitWrite,
+    apply_toolkit_scale, reset_owned_toolkit_scale, supported_custom_scales,
+    toolkit_launch_environment,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]

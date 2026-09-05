@@ -88,8 +88,27 @@ const EVDI_MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const SWITCHER_MAX_CARDS: usize = 5;
 
 fn output_model(connector_name: &str) -> String {
+    output_edid(connector_name)
+        .and_then(|edid| {
+            edid.get(54..126)
+                .unwrap_or_default()
+                .chunks_exact(18)
+                .find_map(|descriptor| {
+                    if descriptor[..5] != [0, 0, 0, 0xfc, 0] {
+                        return None;
+                    }
+                    let model = String::from_utf8_lossy(&descriptor[5..18])
+                        .trim_matches(['\0', '\n', '\r', ' '])
+                        .to_owned();
+                    (!model.is_empty()).then_some(model)
+                })
+        })
+        .unwrap_or_else(|| connector_name.to_owned())
+}
+
+fn output_edid(connector_name: &str) -> Option<Vec<u8>> {
     let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
-        return connector_name.to_owned();
+        return None;
     };
     let suffix = format!("-{connector_name}");
     for entry in entries.flatten() {
@@ -97,22 +116,21 @@ fn output_model(connector_name: &str) -> String {
         if !file_name.to_string_lossy().ends_with(&suffix) {
             continue;
         }
-        let Ok(edid) = std::fs::read(entry.path().join("edid")) else {
-            continue;
-        };
-        for descriptor in edid.get(54..126).unwrap_or_default().chunks_exact(18) {
-            if descriptor[..5] != [0, 0, 0, 0xfc, 0] {
-                continue;
-            }
-            let model = String::from_utf8_lossy(&descriptor[5..18])
-                .trim_matches(['\0', '\n', '\r', ' '])
-                .to_owned();
-            if !model.is_empty() {
-                return model;
-            }
+        if let Ok(edid) = std::fs::read(entry.path().join("edid")) {
+            return Some(edid);
         }
     }
-    connector_name.to_owned()
+    None
+}
+
+fn stable_edid_id(connector_name: &str) -> String {
+    let Some(edid) = output_edid(connector_name) else {
+        return String::new();
+    };
+    let hash = edid.iter().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("edid-{hash:016x}")
 }
 
 fn connector_name(connector: &connector::Info) -> String {
@@ -1718,14 +1736,15 @@ impl NickelSession {
                 subpixel: connector.subpixel().into(),
                 make: "Unknown".into(),
                 model,
-                serial_number: String::new(),
+                serial_number: stable_edid_id(&name),
             },
         );
         output.set_preferred(wl_mode);
+        let configured_scale = self.configured_output_scale(&output);
         output.change_current_state(
             Some(wl_mode),
             Some(Transform::Normal),
-            None,
+            Some(configured_scale),
             Some((0, 0).into()),
         );
         let publish_global = self.output_global_identity_available(&name);
@@ -2889,6 +2908,7 @@ impl NickelSession {
             );
         }
         self.space.refresh();
+        self.refresh_surface_scales();
         self.popups.cleanup();
         let _ = self.display_handle.flush_clients();
     }
