@@ -538,6 +538,114 @@ impl<Message> Component<Message> for FileGrid<Message> {
     }
 }
 
+/// Shared visual content for an entry in a file-like plane.
+///
+/// Selection, activation, ordering, and scrolling remain owned by the containing
+/// collection. This component centralizes the icon/label geometry used by file
+/// manager grids, launcher grids, and desktop icons so each surface configures
+/// one authority instead of maintaining a subtly different tile implementation.
+pub struct FilePlaneItem<Message = String> {
+    column: Column<Message>,
+}
+
+impl<Message> FilePlaneItem<Message> {
+    pub fn new(label: impl Into<String>, icon_id: u16, icon: Arc<RgbaImage>) -> Self {
+        Self::from_image(label, Image::new(icon_id, icon))
+    }
+
+    pub fn new_with_generation(
+        label: impl Into<String>,
+        icon_id: u16,
+        icon: Arc<RgbaImage>,
+        generation: u64,
+    ) -> Self {
+        Self::from_image(label, Image::new_with_generation(icon_id, icon, generation))
+    }
+
+    fn from_image(label: impl Into<String>, image: Image<Message>) -> Self {
+        let label = label.into();
+        Self {
+            column: Column::new()
+                .fill_width()
+                .align_items(Align::Center)
+                .gap(5.0)
+                .child(image.height(62.0).fit(ImageFit::Contain))
+                .child(
+                    Container::new()
+                        .height(36.0)
+                        .fill_width()
+                        .overflow_x(Overflow::Clip)
+                        .overflow_y(Overflow::Clip)
+                        .child(
+                            Text::new(label)
+                                .height(36.0)
+                                .wrap(true)
+                                .max_lines(2)
+                                .ellipsis(true)
+                                .align(TextAlign::Center)
+                                .fill_width(),
+                        ),
+                ),
+        }
+    }
+
+    pub fn icon_size(mut self, size: f32) -> Self {
+        if let Some(icon) = self.column.0.children.first_mut() {
+            icon.style.height = Length::Px(size.max(1.0));
+            icon.style.width = Length::Px(size.max(1.0));
+        }
+        self
+    }
+
+    pub fn label_height(mut self, height: f32) -> Self {
+        if let Some(label) = self.column.0.children.get_mut(1) {
+            label.style.height = Length::Px(height.max(1.0));
+            if let Some(text) = label.children.first_mut() {
+                text.style.height = Length::Px(height.max(1.0));
+            }
+        }
+        self
+    }
+
+    pub fn label_scale(mut self, scale: f32) -> Self {
+        if let Some(label) = self.column.0.children.get_mut(1)
+            && let Some(text) = label.children.first_mut()
+            && let Kind::Text { scale: value, .. } = &mut text.kind
+        {
+            *value = scale.max(0.1);
+        }
+        self
+    }
+
+    pub fn foreground(mut self, color: Color) -> Self {
+        if let Some(label) = self.column.0.children.get_mut(1)
+            && let Some(text) = label.children.first_mut()
+        {
+            text.style.foreground = Some(color);
+        }
+        self
+    }
+
+    pub fn label_background(mut self, color: Color, radius: f32) -> Self {
+        if let Some(label) = self.column.0.children.get_mut(1) {
+            label.style.background = Some(Background::Solid(color));
+            label.style.corner_radius = radius.max(0.0);
+        }
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.column.0.style.gap = gap.max(0.0);
+        self
+    }
+}
+
+impl<Message> Component<Message> for FilePlaneItem<Message> {
+    fn into_element(self) -> Element<Message> {
+        self.column.into_element()
+    }
+}
+
 pub struct FileGridItem<Message = String>(Container<Message>);
 
 impl<Message> FileGridItem<Message> {
@@ -567,7 +675,6 @@ impl<Message> FileGridItem<Message> {
     }
 
     fn from_image(message: Message, label: impl Into<String>, image: Image<Message>) -> Self {
-        let label = label.into();
         Self(
             Container::new()
                 .padding(Insets {
@@ -577,20 +684,7 @@ impl<Message> FileGridItem<Message> {
                     left: 6.0,
                 })
                 .message(message)
-                .child(
-                    Column::new()
-                        .fill_width()
-                        .gap(5.0)
-                        .child(image.height(62.0).fit(ImageFit::Contain))
-                        .child(
-                            Text::new(label)
-                                .height(36.0)
-                                .wrap(true)
-                                .max_lines(2)
-                                .align(TextAlign::Center)
-                                .fill_width(),
-                        ),
-                ),
+                .child(FilePlaneItem::from_image(label, image)),
         )
     }
 
@@ -598,8 +692,9 @@ impl<Message> FileGridItem<Message> {
         self.0 = self.0.background(background).border(border, 1.0);
         if let Some(column) = self.0.0.children.first_mut()
             && let Some(label) = column.children.get_mut(1)
+            && let Some(text) = label.children.first_mut()
         {
-            label.style.foreground = Some(foreground);
+            text.style.foreground = Some(foreground);
         }
         self
     }
@@ -608,8 +703,9 @@ impl<Message> FileGridItem<Message> {
         self.0 = self.0.background(background);
         if let Some(column) = self.0.0.children.first_mut()
             && let Some(label) = column.children.get_mut(1)
+            && let Some(text) = label.children.first_mut()
         {
-            label.style.foreground = Some(foreground);
+            text.style.foreground = Some(foreground);
         }
         self
     }

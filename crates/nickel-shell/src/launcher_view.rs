@@ -20,8 +20,8 @@ use nickel_i18n::{ActionLabel, Localizer};
 use nickel_ui::{
     AccountSummaryRow, ActionLegend, ActionLegendActions, ActionLegendEntry, AnyView,
     Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
-    ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FrameOverlay, Image,
-    InputModality, Insets, LauncherSearchField, NavigationScope, NavigationTraversal,
+    ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FilePlaneItem, FrameOverlay,
+    Image, InputModality, Insets, LauncherSearchField, NavigationScope, NavigationTraversal,
     OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle, ProjectStatusRow, ReadingDirection,
     Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SemanticControllerAction, SemanticTheme,
     Shortcut, ShortcutRow, ShortcutState, StartMenuNarrowPane, StartMenuShell, Text, TextAlign,
@@ -692,16 +692,10 @@ fn build_launcher_view_directional(
                 .radius(theme.radii.card)
                 .align_items(nickel_ui::Align::Center)
                 .child(
-                    Image::new(icon.0, icon.1)
-                        .width(ICON_SIZE)
-                        .height(ICON_SIZE),
-                )
-                .child(
-                    Text::new(name)
-                        .color(theme.text.primary)
-                        .align(TextAlign::Center)
-                        .max_lines(2)
-                        .ellipsis(true),
+                    FilePlaneItem::new(name, icon.0, icon.1)
+                        .icon_size(ICON_SIZE)
+                        .label_height(36.0)
+                        .foreground(theme.text.primary),
                 )
         },
     )

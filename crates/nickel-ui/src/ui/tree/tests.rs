@@ -845,6 +845,49 @@ fn file_grid_tiles_expose_actions_and_centered_labels() {
 }
 
 #[test]
+fn file_plane_item_contains_long_multiline_labels() {
+    let icon = Arc::new(RgbaImage::new(16, 16));
+    let tree = UiFrame::layout(
+        Container::<TestMessage>::new()
+            .width(96.0)
+            .height(104.0)
+            .child(
+                FilePlaneItem::new(
+                    "monitors_receipt.pdf\nRobert Half - Security Engineer.txt",
+                    1,
+                    icon,
+                )
+                .icon_size(48.0)
+                .label_height(36.0),
+            ),
+        Rect::new(0.0, 0.0, 96.0, 104.0),
+    );
+    let text = tree
+        .commands()
+        .iter()
+        .filter_map(|command| match command {
+            PaintCommand::Text { bounds, .. } => Some(*bounds),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!text.is_empty());
+    assert!(text.iter().all(|bounds| {
+        bounds.origin.x >= 0.0
+            && bounds.origin.y >= 0.0
+            && bounds.origin.x + bounds.size.width <= 96.0
+            && bounds.origin.y + bounds.size.height <= 104.0
+    }));
+    assert!(
+        tree.commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::PushClip(_)))
+    );
+    assert!(tree.accessibility_nodes().iter().any(|node| {
+        node.label.as_deref() == Some("monitors_receipt.pdf\nRobert Half - Security Engineer.txt")
+    }));
+}
+
+#[test]
 fn slider_reports_horizontal_fraction() {
     let tree = UiFrame::layout(
         Slider::new(TestMessage::Named("volume"), 0.5).width(200.0),

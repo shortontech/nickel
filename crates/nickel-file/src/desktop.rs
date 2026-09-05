@@ -124,6 +124,18 @@ impl DesktopLayout {
         &self.selection
     }
 
+    /// The stable item that owns keyboard/controller actions.
+    pub fn active(&self) -> Option<DesktopEntryId> {
+        self.anchor
+            .filter(|id| self.items.iter().any(|item| item.id == *id))
+            .or_else(|| {
+                self.items
+                    .iter()
+                    .map(|item| item.id)
+                    .find(|id| self.selection.contains(id))
+            })
+    }
+
     pub fn arrangement(&self) -> Arrangement {
         self.arrangement
     }
@@ -257,16 +269,51 @@ impl DesktopLayout {
 
     /// Shared keyboard/controller/accessibility directional selection command.
     pub fn select_direction(&mut self, horizontal: i8, vertical: i8, extend: bool) {
-        let Some(current) = self
-            .anchor
-            .and_then(|anchor| self.items.iter().find(|item| item.id == anchor))
-            .or_else(|| self.items.first())
-        else {
+        self.select_direction_with_modifiers(
+            horizontal,
+            vertical,
+            SelectionModifiers {
+                range: extend,
+                ..SelectionModifiers::default()
+            },
+        );
+    }
+
+    pub fn select_direction_with_modifiers(
+        &mut self,
+        horizontal: i8,
+        vertical: i8,
+        modifiers: SelectionModifiers,
+    ) {
+        if self.anchor.is_none() {
+            if let Some(first) = self.items.first().map(|item| item.id) {
+                self.select(first, modifiers);
+            }
+            return;
+        }
+        let Some(candidate) = self.directional_candidate(horizontal, vertical) else {
             return;
         };
+        self.select(candidate, modifiers);
+    }
+
+    /// Moves only the keyboard focus/anchor, preserving the current selection.
+    pub fn focus_direction(&mut self, horizontal: i8, vertical: i8) {
+        if self.anchor.is_none() {
+            self.anchor = self.items.first().map(|item| item.id);
+            return;
+        }
+        if let Some(candidate) = self.directional_candidate(horizontal, vertical) {
+            self.anchor = Some(candidate);
+        }
+    }
+
+    fn directional_candidate(&self, horizontal: i8, vertical: i8) -> Option<DesktopEntryId> {
+        let current = self
+            .anchor
+            .and_then(|anchor| self.items.iter().find(|item| item.id == anchor))?;
         let origin = current.position;
-        let candidate = self
-            .items
+        self.items
             .iter()
             .filter(|item| item.id != current.id)
             .filter_map(|item| {
@@ -278,14 +325,7 @@ impl DesktopLayout {
             })
             .min_by(|left, right| left.0.total_cmp(&right.0))
             .map(|(_, id)| id)
-            .unwrap_or(current.id);
-        self.select(
-            candidate,
-            SelectionModifiers {
-                range: extend,
-                ..SelectionModifiers::default()
-            },
-        );
+            .or(Some(current.id))
     }
 
     /// Moves the selected group. Moving an unselected item selects only that item first.
@@ -786,6 +826,46 @@ mod tests {
         layout.reconcile(vec![entry(1, "Renamed", true, 0)]);
         assert_eq!(layout.items()[0].entry.display_name(), "Renamed");
         assert_eq!(layout.selected(), &HashSet::from([notes]));
+    }
+
+    #[test]
+    fn keyboard_focus_navigation_preserves_or_extends_selection_by_policy() {
+        let mut layout = DesktopLayout::new(vec![output("left", 0.0)]);
+        layout.reconcile(vec![
+            entry(1, "one", false, 1),
+            entry(2, "two", false, 2),
+            entry(3, "three", false, 3),
+        ]);
+        let one = DesktopEntryId(FileIdentity(7, 1));
+        let two = DesktopEntryId(FileIdentity(7, 2));
+
+        layout.select_direction(0, 1, false);
+        assert_eq!(layout.active(), Some(one));
+        assert_eq!(layout.selected(), &HashSet::from([one]));
+
+        layout.focus_direction(0, 1);
+        assert_eq!(layout.active(), Some(two));
+        assert_eq!(layout.selected(), &HashSet::from([one]));
+
+        layout.select(
+            two,
+            SelectionModifiers {
+                toggle: true,
+                ..SelectionModifiers::default()
+            },
+        );
+        assert_eq!(layout.selected(), &HashSet::from([one, two]));
+
+        layout.select_direction_with_modifiers(
+            0,
+            1,
+            SelectionModifiers {
+                range: true,
+                additive_range: true,
+                ..SelectionModifiers::default()
+            },
+        );
+        assert_eq!(layout.selected().len(), 3);
     }
 
     #[test]

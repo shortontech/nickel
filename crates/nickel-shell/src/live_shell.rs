@@ -29,10 +29,10 @@ use nickel_session_protocol::{
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    AnyView, Column, Container, ControllerAction, DragGesture, DragPhase, FrameOverlay, HostBatch,
-    HostChangeToken, HostEvent, Image, ImageFit, Insets, Layer, OverlayAnchor, OverlayMenu,
-    OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, TextField,
-    UiEvent, UiId, ViewContext,
+    AnyView, Column, Container, ControllerAction, DragGesture, DragPhase, FilePlaneItem,
+    FrameOverlay, HostBatch, HostChangeToken, HostEvent, Image, ImageFit, Insets, Layer,
+    OverlayAnchor, OverlayMenu, OverlayMenuItem, Point, Row, SemanticRole, Shortcut, Spacer, Text,
+    TextAlign, TextField, UiEvent, UiId, ViewContext,
 };
 
 use crate::{
@@ -551,9 +551,12 @@ impl DesktopApplication {
     }
 
     fn open_keyboard_context(&mut self) {
-        if let Some(id) = self.layout.selected().iter().copied().next()
+        if let Some(id) = self.layout.active()
             && self.layout.items().iter().any(|item| item.id == id)
         {
+            if !self.layout.selected().contains(&id) {
+                self.layout.select(id, SelectionModifiers::default());
+            }
             self.context_menu = Some(DesktopMenuContext {
                 anchor: None,
                 entry: Some(id),
@@ -695,7 +698,7 @@ impl DesktopApplication {
                 self.apply_desktop_command(DesktopCommand::Paste);
             }
             KeyCode::KeyC | KeyCode::KeyX if self.modifiers.toggle => {
-                if let Some(id) = self.layout.selected().iter().copied().next() {
+                if let Some(id) = self.layout.active() {
                     <Self as nickel_ui::Application>::update(
                         self,
                         if code == KeyCode::KeyX {
@@ -714,7 +717,7 @@ impl DesktopApplication {
             }
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
             KeyCode::F2 => {
-                if let Some(id) = self.layout.selected().iter().copied().next() {
+                if let Some(id) = self.layout.active() {
                     <Self as nickel_ui::Application>::update(self, DesktopMessage::Rename(id));
                 }
             }
@@ -722,12 +725,45 @@ impl DesktopApplication {
             KeyCode::ArrowRight if move_selected => self.move_selected_by(96.0, 0.0),
             KeyCode::ArrowUp if move_selected => self.move_selected_by(0.0, -112.0),
             KeyCode::ArrowDown if move_selected => self.move_selected_by(0.0, 112.0),
-            KeyCode::ArrowLeft => self.layout.select_direction(-1, 0, self.modifiers.range),
-            KeyCode::ArrowRight => self.layout.select_direction(1, 0, self.modifiers.range),
-            KeyCode::ArrowUp => self.layout.select_direction(0, -1, self.modifiers.range),
-            KeyCode::ArrowDown => self.layout.select_direction(0, 1, self.modifiers.range),
+            KeyCode::ArrowLeft if self.modifiers.toggle && !self.modifiers.range => {
+                self.layout.focus_direction(-1, 0)
+            }
+            KeyCode::ArrowRight if self.modifiers.toggle && !self.modifiers.range => {
+                self.layout.focus_direction(1, 0)
+            }
+            KeyCode::ArrowUp if self.modifiers.toggle && !self.modifiers.range => {
+                self.layout.focus_direction(0, -1)
+            }
+            KeyCode::ArrowDown if self.modifiers.toggle && !self.modifiers.range => {
+                self.layout.focus_direction(0, 1)
+            }
+            KeyCode::ArrowLeft => {
+                self.layout
+                    .select_direction_with_modifiers(-1, 0, self.modifiers)
+            }
+            KeyCode::ArrowRight => {
+                self.layout
+                    .select_direction_with_modifiers(1, 0, self.modifiers)
+            }
+            KeyCode::ArrowUp => self
+                .layout
+                .select_direction_with_modifiers(0, -1, self.modifiers),
+            KeyCode::ArrowDown => self
+                .layout
+                .select_direction_with_modifiers(0, 1, self.modifiers),
+            KeyCode::Space => {
+                if let Some(id) = self.layout.active() {
+                    self.layout.select(
+                        id,
+                        SelectionModifiers {
+                            toggle: true,
+                            ..SelectionModifiers::default()
+                        },
+                    );
+                }
+            }
             KeyCode::Enter | KeyCode::NumpadEnter => {
-                if let Some(id) = self.layout.selected().iter().copied().next() {
+                if let Some(id) = self.layout.active() {
                     self.activate(id);
                 }
             }
@@ -741,7 +777,7 @@ impl DesktopApplication {
     }
 
     fn move_selected_by(&mut self, x: f32, y: f32) {
-        if let Some(id) = self.layout.selected().iter().copied().next() {
+        if let Some(id) = self.layout.active() {
             self.layout
                 .move_group(id, DesktopPoint { x, y }, &self.active_output);
             self.save_layout();
@@ -1294,6 +1330,7 @@ impl nickel_ui::Application for DesktopApplication {
                 y: item.position.y - self.output_origin.y,
             };
             let selected = self.layout.selected().contains(&item.id);
+            let focused = self.layout.active() == Some(item.id);
             let mut tile = Container::new()
                 .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
                 .position(position)
@@ -1309,48 +1346,47 @@ impl nickel_ui::Application for DesktopApplication {
                 .controller_focus_background_tint(self.palette.complement);
             if selected {
                 tile = tile.background(self.palette.accent_soft);
-            } else if hovered == Some(item.id) {
+            } else if hovered == Some(item.id) || focused {
                 tile = tile.background(self.palette.surface_hover);
             }
             if self.pointer_dragged && selected {
                 tile = tile.border(self.palette.accent, 2.0);
             }
-            let mut contents = Layer::new().width(cell_width).height(cell_height - 4.0);
-            if let Some(pixels) = self.icon_cache.get(&item.entry.path) {
-                contents = contents.child(
-                    Container::new()
-                        .position(Point {
-                            x: (cell_width - 48.0) / 2.0,
-                            y: 6.0,
-                        })
-                        .width(48.0)
-                        .height(48.0)
-                        .child(
-                            Image::new(10_000_u16.saturating_add(index as u16), Arc::clone(pixels))
-                                .width(48.0)
-                                .height(48.0)
-                                .decorative(),
-                        ),
+            let icon = self
+                .icon_cache
+                .get(&item.entry.path)
+                .cloned()
+                .unwrap_or_else(|| {
+                    Arc::new(image::RgbaImage::from_pixel(
+                        1,
+                        1,
+                        image::Rgba([0, 0, 0, 0]),
+                    ))
+                });
+            let label_height = (cell_height - 74.0).max(1.0);
+            let contents = Container::new()
+                .width(cell_width)
+                .height(cell_height - 4.0)
+                .padding(Insets {
+                    top: 6.0,
+                    right: 3.0,
+                    bottom: 8.0,
+                    left: 3.0,
+                })
+                .child(
+                    FilePlaneItem::new_with_generation(
+                        item.entry.display_name(),
+                        10_000_u16.saturating_add(index as u16),
+                        icon,
+                        self.directory_generation,
+                    )
+                    .icon_size(48.0)
+                    .label_height(label_height)
+                    .label_scale(0.85)
+                    .foreground(self.palette.text)
+                    .label_background(self.palette.panel, 5.0)
+                    .gap(8.0),
                 );
-            }
-            contents = contents.child(
-                Container::new()
-                    .position(Point { x: 3.0, y: 62.0 })
-                    .width(cell_width - 6.0)
-                    .height(cell_height - 74.0)
-                    .padding(Insets::symmetric(2.0, 2.0))
-                    .background(self.palette.panel)
-                    .radius(5.0)
-                    .child(
-                        Text::new(item.entry.display_name())
-                            .width(cell_width - 10.0)
-                            .height(cell_height - 78.0)
-                            .scale(0.85)
-                            .color(self.palette.text)
-                            .align(TextAlign::Center)
-                            .wrap(true),
-                    ),
-            );
             layer = layer.child(tile.child(contents));
         }
         if let Some(start) = self.selection_start {
@@ -2627,7 +2663,7 @@ impl LiveShell {
             return outcome.changed;
         }
         let application = self.desktop_host.application_mut();
-        match event {
+        let changed = match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
                 button,
@@ -2659,21 +2695,66 @@ impl LiveShell {
                 y: position.y as f32,
             }),
             _ => false,
+        };
+        if changed {
+            let outcome = self.desktop_host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            self.desktop_change_token = outcome.change_token;
+            self.desktop_deadline = outcome.next_deadline;
         }
+        changed
     }
 
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
-        if action == ControllerAction::ContextMenu {
-            self.desktop_host.application_mut().open_keyboard_context();
-            return true;
+        let application = self.desktop_host.application_mut();
+        let changed = match action {
+            ControllerAction::Left => {
+                application.layout.select_direction(-1, 0, false);
+                true
+            }
+            ControllerAction::Right => {
+                application.layout.select_direction(1, 0, false);
+                true
+            }
+            ControllerAction::Up => {
+                application.layout.select_direction(0, -1, false);
+                true
+            }
+            ControllerAction::Down => {
+                application.layout.select_direction(0, 1, false);
+                true
+            }
+            ControllerAction::Confirm => {
+                if let Some(id) = application.layout.active() {
+                    application.activate(id);
+                }
+                true
+            }
+            ControllerAction::ContextMenu => {
+                application.open_keyboard_context();
+                true
+            }
+            ControllerAction::Cancel => {
+                application.context_menu = None;
+                application.layout.clear_selection();
+                true
+            }
+            ControllerAction::Launcher
+            | ControllerAction::PreviousPane
+            | ControllerAction::NextPane => false,
+        };
+        if !changed {
+            return false;
         }
         let outcome = self.desktop_host.step(HostBatch {
-            events: vec![HostEvent::Controller(action)],
+            application_changed: true,
             ..HostBatch::default()
         });
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        outcome.changed
+        true
     }
 
     pub fn desktop_file_drop(&mut self, source: &std::path::Path) -> bool {
@@ -7669,6 +7750,104 @@ mod tests {
         assert_eq!(entry.rect.size.width, 96.0);
         assert!(entry.actions.contains(&ActionKind::Activate));
         assert!(entry.actions.contains(&ActionKind::ContextMenu));
+    }
+
+    #[test]
+    fn desktop_live_input_rebuilds_selection_and_keyboard_navigation() {
+        use std::{ffi::OsString, path::PathBuf};
+        let mut shell = LiveShell::new().unwrap();
+        let application = shell.desktop_host.application_mut();
+        application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 400.0,
+                height: 600.0,
+            },
+            scale: 1.0,
+        }]);
+        application.set_active_output(
+            "primary".into(),
+            nickel_file::desktop::Point::default(),
+            1.0,
+        );
+        application.layout.reconcile(
+            ["first.txt", "second.txt"]
+                .into_iter()
+                .enumerate()
+                .map(|(index, name)| {
+                    (
+                        nickel_file::FileIdentity(41, index as u64 + 1),
+                        nickel_file::FileEntry {
+                            name: OsString::from(name),
+                            path: PathBuf::from("/desktop").join(name),
+                            is_directory: false,
+                            size: Some(1),
+                            modified: None,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let before_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
+        let before_token = shell.desktop_change_token;
+
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+            },
+        )));
+        assert_eq!(
+            shell.desktop_host.application().layout.active(),
+            Some(nickel_file::desktop::DesktopEntryId(
+                nickel_file::FileIdentity(41, 1)
+            ))
+        );
+        assert_ne!(shell.desktop_change_token, before_token);
+        assert_ne!(shell.desktop_host.commands(), before_commands);
+
+        let pointer_token = shell.desktop_change_token;
+        assert!(
+            shell.desktop_input(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                physical: nickel_input::PhysicalKey::Code(KeyCode::ArrowDown),
+                logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ArrowDown),
+                location: nickel_input::KeyLocation::Standard,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: false,
+                modifiers: nickel_input::ModifierState::default(),
+            },))
+        );
+        assert_eq!(
+            shell.desktop_host.application().layout.active(),
+            Some(nickel_file::desktop::DesktopEntryId(
+                nickel_file::FileIdentity(41, 2)
+            ))
+        );
+        assert_ne!(shell.desktop_change_token, pointer_token);
+    }
+
+    #[test]
+    fn file_like_surfaces_share_the_file_plane_item_authority() {
+        let file = include_str!("../../nickel-file/src/components.rs");
+        let launcher = include_str!("launcher_view.rs");
+        let desktop = include_str!("live_shell.rs");
+        let desktop_production = desktop
+            .split("\nmod tests {")
+            .next()
+            .expect("production source precedes tests");
+        assert!(file.contains("<FileGridItem"));
+        assert!(launcher.contains("FilePlaneItem::new"));
+        assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
+        let shared = include_str!("../../nickel-ui/src/ui/components.rs");
+        assert!(shared.contains("pub struct FilePlaneItem"));
+        assert!(shared.contains("FilePlaneItem::from_image(label, image)"));
     }
 
     #[test]
