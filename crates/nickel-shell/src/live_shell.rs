@@ -1303,7 +1303,12 @@ impl nickel_ui::Application for DesktopApplication {
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let width = context.viewport.size.width;
         let height = context.viewport.size.height;
-        let mut layer = Layer::new().width(width).height(height);
+        let mut layer = Layer::new().width(width).height(height).child(
+            Container::new()
+                .width(width)
+                .height(height)
+                .background(self.palette.background),
+        );
         if let Some(wallpaper) = &self.wallpaper {
             layer = layer.child(
                 Image::new(1, Arc::clone(wallpaper))
@@ -2171,7 +2176,13 @@ impl LiveShell {
                 ),
         );
         let wallpaper_settings = WallpaperSettings::load_default();
-        let wallpaper_path = wallpaper_settings.image;
+        let (wallpaper_path, wallpaper, wallpaper_size) =
+            initial_wallpaper(wallpaper_settings.image, || {
+                #[cfg(target_os = "windows")]
+                return platform::wallpaper().image;
+                #[cfg(not(target_os = "windows"))]
+                None
+            });
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         let panel_icon = crate::icons::load_svg_bytes(
@@ -2232,8 +2243,11 @@ impl LiveShell {
             650,
         );
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
-        let desktop_host =
-            nickel_ui::UiHost::new(DesktopApplication::new(None, palette), 1920, 1080);
+        let desktop_host = nickel_ui::UiHost::new(
+            DesktopApplication::new(wallpaper.clone(), palette),
+            1920,
+            1080,
+        );
         let lock_host = nickel_ui::UiHost::new(
             LockApplication {
                 password: Zeroizing::new(String::new()),
@@ -2296,8 +2310,8 @@ impl LiveShell {
             notification: None,
             notification_history_visible: false,
             wallpaper_path,
-            wallpaper: None,
-            wallpaper_size: (0, 0),
+            wallpaper,
+            wallpaper_size,
             desktop_host,
             desktop_change_token: HostChangeToken::default(),
             desktop_deadline: None,
@@ -5822,6 +5836,24 @@ fn wallpaper_cache_target(current: (u32, u32), requested: (u32, u32)) -> Option<
     (requested_pixels.saturating_mul(4) <= current_pixels).then_some(bounded)
 }
 
+fn initial_wallpaper(
+    configured_path: Option<std::path::PathBuf>,
+    system_image: impl FnOnce() -> Option<image::RgbaImage>,
+) -> (
+    Option<std::path::PathBuf>,
+    Option<Arc<image::RgbaImage>>,
+    (u32, u32),
+) {
+    if configured_path.is_some() {
+        return (configured_path, None, (0, 0));
+    }
+    let wallpaper = system_image().map(Arc::new);
+    let size = wallpaper
+        .as_deref()
+        .map_or((0, 0), |image| image.dimensions());
+    (None, wallpaper, size)
+}
+
 #[cfg(test)]
 fn panel_control_start(width: u32) -> f32 {
     width as f32 - PANEL_CLOCK_WIDTH - PANEL_CONTROL_GAP
@@ -5906,12 +5938,43 @@ mod tests {
     use nickel_ui_testkit::{Scenario, Selector};
 
     use super::{
-        HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
+        HostRuntimeSamples, LiveShell, initial_wallpaper, panel_status_layout, panel_tray_icons,
         platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, semantic_theme_from_palette,
         session_feed_status_label, shortcut_capability_status, visible_tray_item,
         window_belongs_to_panel,
     };
+
+    #[test]
+    fn explicit_wallpaper_path_wins_without_loading_the_system_wallpaper() {
+        let path = std::path::PathBuf::from("configured-wallpaper.png");
+        let (resolved_path, wallpaper, size) = initial_wallpaper(Some(path.clone()), || {
+            panic!("an explicit Nickel wallpaper must suppress the system fallback")
+        });
+
+        assert_eq!(resolved_path, Some(path));
+        assert!(wallpaper.is_none());
+        assert_eq!(size, (0, 0));
+    }
+
+    #[test]
+    fn system_wallpaper_is_used_when_nickel_has_no_explicit_path() {
+        let image = RgbaImage::from_pixel(3, 2, Rgba([10, 20, 30, 255]));
+        let (resolved_path, wallpaper, size) = initial_wallpaper(None, || Some(image.clone()));
+
+        assert!(resolved_path.is_none());
+        assert_eq!(wallpaper.as_deref(), Some(&image));
+        assert_eq!(size, (3, 2));
+    }
+
+    #[test]
+    fn missing_system_wallpaper_degrades_to_the_themed_desktop_base() {
+        let (resolved_path, wallpaper, size) = initial_wallpaper(None, || None);
+
+        assert!(resolved_path.is_none());
+        assert!(wallpaper.is_none());
+        assert_eq!(size, (0, 0));
+    }
 
     #[test]
     fn shortcut_capability_failures_have_visible_classified_status() {
@@ -7223,6 +7286,14 @@ mod tests {
     #[test]
     fn desktop_scene_rebuilds_when_wallpaper_arrives_at_the_initial_host_size() {
         let mut shell = LiveShell::new().unwrap();
+        shell.wallpaper = None;
+        shell.wallpaper_size = (0, 0);
+        shell.desktop_host.application_mut().wallpaper = None;
+        shell.desktop_host.step(HostBatch {
+            application_changed: true,
+            surface_size: Some((1920, 1080)),
+            ..HostBatch::default()
+        });
         shell.wallpaper = Some(Arc::new(RgbaImage::from_pixel(
             1920,
             1080,
