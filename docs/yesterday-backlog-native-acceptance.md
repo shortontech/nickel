@@ -86,10 +86,12 @@ an installed native session, physical hardware, or visual inspection.
 Automated native Windows evidence recorded on 2026-09-04: the cross-platform application/library
 set (`nickel-core`, `nickel-input`, `nickel-platform`, `nickel-ui`, `nickel-file`,
 `nickel-settings`, `nickel-codex-ui`, and `nickel-shell`) passed `cargo check --all-targets` on the
-Windows MSVC host. The core, input, and platform test suites then passed natively, including the
-Windows raw-input tests. That run found and corrected two test portability defects (the `.exe`
-suffix and Linux-only toolkit-scale launch variables). This is build and automated contract
-evidence only; it does not replace the interactive acceptance below.
+Windows MSVC host. Native tests then passed for core, input, platform, File, Settings, Codex UI,
+shared UI, and shell, including the Windows raw-input and filesystem-watcher paths. Those runs found
+and corrected portability defects involving the `.exe` suffix, Linux-only toolkit-scale variables,
+CRLF source auditing, Windows hidden-file attributes, coalesced native watcher events, and truthful
+non-Linux Wi-Fi controls. This is build and automated contract evidence only; it does not replace
+the interactive acceptance below.
 
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
