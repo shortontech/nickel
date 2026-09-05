@@ -10,15 +10,15 @@ pub(crate) fn config_path(file_name: &str) -> io::Result<PathBuf> {
     {
         let root = std::env::var_os("LOCALAPPDATA")
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is not set"))?;
-        return Ok(PathBuf::from(root).join("Nickel").join(file_name));
+        Ok(PathBuf::from(root).join("Nickel").join(file_name))
     }
     #[cfg(target_os = "macos")]
     {
         let root = std::env::var_os("HOME")
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-        return Ok(PathBuf::from(root)
+        Ok(PathBuf::from(root)
             .join("Library/Application Support/Nickel")
-            .join(file_name));
+            .join(file_name))
     }
     #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
     {
