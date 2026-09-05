@@ -20,7 +20,7 @@ use winit::event::{Event, WindowEvent};
 #[cfg(not(target_os = "windows"))]
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::platform::pump_events::EventLoopExtPumpEvents;
+use winit::platform::pump_events::{EventLoopExtPumpEvents, PumpStatus};
 #[cfg(target_os = "linux")]
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::{Window, WindowId};
@@ -322,6 +322,11 @@ pub enum ShellEvent {
     #[cfg(target_os = "linux")]
     TestControl(crate::platform::ShellTestRequest),
     Quit,
+    /// The native event source can no longer deliver events. Unlike closing an
+    /// individual shell surface, this is terminal on every platform.
+    RuntimeTerminated {
+        code: i32,
+    },
     Input {
         surface: SurfaceId,
         event: InputEvent,
@@ -354,6 +359,17 @@ pub enum ShellEvent {
     },
     DisplayTopologyChanged,
     Redraw(SurfaceId),
+}
+
+fn record_pump_status(pending: &mut VecDeque<ShellEvent>, status: PumpStatus) {
+    let PumpStatus::Exit(code) = status else {
+        return;
+    };
+    // A terminal native event source supersedes buffered input. Prioritizing it
+    // prevents a disconnected Wayland pump from being called again and turning
+    // the shell into an orphaned busy loop while stale events drain.
+    pending.clear();
+    pending.push_back(ShellEvent::RuntimeTerminated { code });
 }
 
 pub struct ShellSurface {
@@ -1300,7 +1316,8 @@ impl WinitShell {
         let displays = &mut self.displays;
         self.events.set_control_flow(ControlFlow::Wait);
         #[allow(deprecated)]
-        self.events
+        let status = self
+            .events
             .pump_events(timeout, |event, active| match event {
                 Event::Resumed | Event::AboutToWait => {
                     *displays = active
@@ -1368,6 +1385,7 @@ impl WinitShell {
                 }
                 _ => {}
             });
+        record_pump_status(pending, status);
     }
 
     pub fn display_geometries(&self) -> Result<Vec<DisplayGeometry>, String> {
@@ -1794,15 +1812,30 @@ mod tests {
     use super::{
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_CREATION_RETRY_MAX,
         OUTPUT_CREATION_RETRY_MIN, OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry,
-        OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, desired_output_surfaces,
-        durable_presenter_peak, output_name_at, output_role_is_retired, panel_outputs,
-        parse_proc_status_rss, preferred_output_index, require_displays, shell_surface_title,
-        surface_geometry, surface_is_borderless,
+        OutputRetirementTracker, PANEL_TITLE, PanelEdge, ShellEvent, SurfaceRole,
+        desired_output_surfaces, durable_presenter_peak, output_name_at, output_role_is_retired,
+        panel_outputs, parse_proc_status_rss, preferred_output_index, record_pump_status,
+        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
-    use std::collections::HashSet;
+    use std::collections::{HashSet, VecDeque};
     use std::time::{Duration, Instant};
+    use winit::platform::pump_events::PumpStatus;
+
+    #[test]
+    fn terminal_native_pump_status_supersedes_buffered_events_once() {
+        let mut pending = VecDeque::from([ShellEvent::Quit]);
+        record_pump_status(&mut pending, PumpStatus::Continue);
+        assert!(matches!(pending.front(), Some(ShellEvent::Quit)));
+
+        record_pump_status(&mut pending, PumpStatus::Exit(1));
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.front(),
+            Some(ShellEvent::RuntimeTerminated { code: 1 })
+        ));
+    }
 
     #[test]
     fn active_output_selection_uses_interaction_then_primary_then_stable_identity() {

@@ -2363,6 +2363,10 @@ fn main() -> Result<(), String> {
                 state.hide_overlay(SurfaceRole::Screenshot);
                 sync_visibility(&mut shell, &state);
             }
+            Some(ShellEvent::RuntimeTerminated { code }) => {
+                tracing::info!(code, "native shell event source terminated; exiting");
+                break;
+            }
             Some(event @ (ShellEvent::Quit | ShellEvent::CloseRequested(_)))
                 if shell_event_ends_process(&event) =>
             {
