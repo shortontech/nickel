@@ -108,7 +108,12 @@ impl CompositorHandler for NickelSession {
             }
         };
 
-        xdg_shell::handle_commit(&mut self.popups, &self.space, surface);
+        // A newly-created xdg_toplevel is deliberately not inserted into Space until it
+        // attaches its first buffer.  Its initial (bufferless) commit must nevertheless
+        // receive a configure; looking it up only in Space deadlocks undecorated child
+        // windows such as Chromium's portal chooser and Electron confirmation dialogs.
+        let toplevel = self.xdg_toplevel_window(surface);
+        xdg_shell::handle_commit(&mut self.popups, toplevel, surface);
         resize_grab::handle_commit(&mut self.space, surface);
         if let Some(sender) = &self.buffer_commit_tx {
             let _ = sender.send(SurfaceBufferCommit {

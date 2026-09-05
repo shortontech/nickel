@@ -1,7 +1,7 @@
 use nickel_session_protocol::ShellRole;
 use smithay::{
     desktop::{
-        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, Space, Window,
+        PopupKeyboardGrab, PopupKind, PopupManager, PopupPointerGrab, Window,
         find_popup_root_surface, get_popup_toplevel_coords,
     },
     input::{
@@ -21,7 +21,9 @@ use smithay::{
         seat::WaylandFocus,
         shell::xdg::{
             PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            XdgToplevelSurfaceData, decoration::XdgDecorationHandler,
+            XdgToplevelSurfaceData,
+            decoration::XdgDecorationHandler,
+            dialog::{ToplevelDialogHint, XdgDialogHandler},
         },
     },
 };
@@ -89,8 +91,34 @@ fn unauthenticated_reserved_shell_role(
         .flatten()
 }
 
-fn new_toplevel_may_focus(current_focus_is_shell: Option<bool>) -> bool {
-    current_focus_is_shell.unwrap_or(true)
+fn new_toplevel_may_focus(current_focus_is_shell: Option<bool>, has_parent: bool) -> bool {
+    has_parent || current_focus_is_shell.unwrap_or(true)
+}
+
+fn parent_relative_dialog_location(
+    parent: Rectangle<i32, Logical>,
+    child: (i32, i32),
+    work_area: Rectangle<i32, Logical>,
+) -> Point<i32, Logical> {
+    let centered = shell_layout::centered_in(
+        shell_layout::Geometry {
+            x: parent.loc.x,
+            y: parent.loc.y,
+            width: parent.size.w,
+            height: parent.size.h,
+        },
+        child,
+    );
+    let constrained = shell_layout::constrain_to_area(
+        centered,
+        shell_layout::Geometry {
+            x: work_area.loc.x,
+            y: work_area.loc.y,
+            width: work_area.size.w,
+            height: work_area.size.h,
+        },
+    );
+    (constrained.x, constrained.y).into()
 }
 
 impl XdgShellHandler for NickelSession {
@@ -379,6 +407,28 @@ impl XdgShellHandler for NickelSession {
     }
 }
 
+impl XdgDialogHandler for NickelSession {
+    fn dialog_hint_changed(&mut self, toplevel: ToplevelSurface, hint: ToplevelDialogHint) {
+        let Some(window) = self.xdg_toplevel_window(toplevel.wl_surface()) else {
+            return;
+        };
+        tracing::info!(surface = ?toplevel.wl_surface().id(), ?hint, "xdg dialog hint changed");
+        if hint == ToplevelDialogHint::Modal && self.space.element_location(&window).is_some() {
+            self.space.raise_element(&window, true);
+            self.space.elements().for_each(|candidate| {
+                candidate.set_activated(candidate == &window);
+            });
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Some(KeyboardFocusTarget::Wayland(toplevel.wl_surface().clone())),
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+            );
+            self.raise_panels();
+            self.request_output_redraw();
+        }
+    }
+}
+
 // Xdg Shell
 impl XdgDecorationHandler for NickelSession {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
@@ -512,17 +562,9 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(popups: &mut PopupManager, space: &Space<Window>, surface: &WlSurface) {
+pub fn handle_commit(popups: &mut PopupManager, window: Option<Window>, surface: &WlSurface) {
     // Handle toplevel commits.
-    if let Some(window) = space
-        .elements()
-        .find(|window| {
-            window
-                .toplevel()
-                .is_some_and(|toplevel| toplevel.wl_surface() == surface)
-        })
-        .cloned()
-    {
+    if let Some(window) = window {
         let initial_configure_sent = with_states(surface, |states| {
             states
                 .data_map
@@ -595,12 +637,14 @@ impl NickelSession {
             width: size.w.max(1),
             height: size.h.max(1),
         };
-        let parent_output = window.toplevel().and_then(|toplevel| {
-            toplevel.parent().and_then(|parent| {
-                self.xdg_toplevel_window(&parent)
-                    .and_then(|parent| self.output_name_for_window(&parent))
-            })
+        let parent_window = window.toplevel().and_then(|toplevel| {
+            toplevel
+                .parent()
+                .and_then(|parent| self.xdg_toplevel_window(&parent))
         });
+        let parent_output = parent_window
+            .as_ref()
+            .and_then(|parent| self.output_name_for_window(parent));
         let restored_output = restoring
             .then(|| {
                 outputs
@@ -622,6 +666,24 @@ impl NickelSession {
             ) {
                 let replacement = if decision.reason == shell_layout::PlacementReason::Restored {
                     shell_layout::constrain_to_area(captured, decision.work_area)
+                } else if let Some(parent_bounds) = parent_window
+                    .as_ref()
+                    .and_then(|parent| self.space.element_geometry(parent))
+                {
+                    let location = parent_relative_dialog_location(
+                        parent_bounds,
+                        (captured.width, captured.height),
+                        Rectangle::new(
+                            (decision.work_area.x, decision.work_area.y).into(),
+                            (decision.work_area.width, decision.work_area.height).into(),
+                        ),
+                    );
+                    shell_layout::Geometry {
+                        x: location.x,
+                        y: location.y,
+                        width: captured.width,
+                        height: captured.height,
+                    }
                 } else {
                     shell_layout::centered_in(decision.work_area, (captured.width, captured.height))
                 };
@@ -642,7 +704,8 @@ impl NickelSession {
         }
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(id) = registry_id.filter(|id| {
-            !self.shell_owned_windows.contains(id) && new_toplevel_may_focus(current_focus_is_shell)
+            !self.shell_owned_windows.contains(id)
+                && new_toplevel_may_focus(current_focus_is_shell, parent_window.is_some())
         }) {
             self.windows.raise(id);
             self.workspaces.focused(&id);
@@ -992,9 +1055,9 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus, popup_constraint_area,
-        popup_output_for_anchor, shell_owned_window_is_application,
-        unauthenticated_reserved_shell_role,
+        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus,
+        parent_relative_dialog_location, popup_constraint_area, popup_output_for_anchor,
+        shell_owned_window_is_application, unauthenticated_reserved_shell_role,
     };
     use nickel_session_protocol::ShellRole;
     use smithay::utils::Rectangle;
@@ -1068,9 +1131,26 @@ mod tests {
 
     #[test]
     fn background_toplevel_cannot_replace_application_focus() {
-        assert!(new_toplevel_may_focus(None));
-        assert!(new_toplevel_may_focus(Some(true)));
-        assert!(!new_toplevel_may_focus(Some(false)));
+        assert!(new_toplevel_may_focus(None, false));
+        assert!(new_toplevel_may_focus(Some(true), false));
+        assert!(!new_toplevel_may_focus(Some(false), false));
+        assert!(new_toplevel_may_focus(Some(false), true));
+    }
+
+    #[test]
+    fn child_dialog_is_centered_on_parent_and_constrained_to_work_area() {
+        let work_area = Rectangle::new((0, 0).into(), (1920, 1024).into());
+        let parent = Rectangle::new((300, 100).into(), (1200, 800).into());
+        assert_eq!(
+            parent_relative_dialog_location(parent, (600, 400), work_area),
+            (600, 300).into()
+        );
+
+        let edge_parent = Rectangle::new((-100, -50).into(), (500, 300).into());
+        assert_eq!(
+            parent_relative_dialog_location(edge_parent, (700, 500), work_area),
+            (0, 0).into()
+        );
     }
 
     #[test]

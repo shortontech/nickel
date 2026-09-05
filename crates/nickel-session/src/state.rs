@@ -65,7 +65,9 @@ use smithay::{
         relative_pointer::RelativePointerManagerState,
         seat::WaylandFocus,
         selection::{data_device::DataDeviceState, primary_selection::PrimarySelectionState},
-        shell::xdg::{ToplevelSurface, XdgShellState, decoration::XdgDecorationState},
+        shell::xdg::{
+            ToplevelSurface, XdgShellState, decoration::XdgDecorationState, dialog::XdgDialogState,
+        },
         shm::ShmState,
         socket::ListeningSocketSource,
         xdg_activation::XdgActivationState,
@@ -451,6 +453,7 @@ pub struct NickelSession {
     pub compositor_state: CompositorState,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     pub xdg_shell_state: XdgShellState,
+    pub xdg_dialog_state: XdgDialogState,
     pub activation_state: XdgActivationState,
     pub decoration_state: XdgDecorationState,
     pub shm_state: ShmState,
@@ -1377,6 +1380,7 @@ impl NickelSession {
         let compositor_state = CompositorState::new::<Self>(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
+        let xdg_dialog_state = XdgDialogState::new::<Self>(&dh);
         let activation_state = XdgActivationState::new::<Self>(&dh);
         let decoration_state = XdgDecorationState::new::<Self>(&dh);
         let shm_state = ShmState::new::<Self>(&dh, vec![]);
@@ -1483,6 +1487,7 @@ impl NickelSession {
             compositor_state,
             fractional_scale_manager_state,
             xdg_shell_state,
+            xdg_dialog_state,
             activation_state,
             decoration_state,
             shm_state,
