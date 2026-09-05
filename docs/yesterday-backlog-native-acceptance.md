@@ -141,8 +141,11 @@ class and then successfully loaded the Windows `TranscodedWallpaper` fallback at
 focused native wallpaper suite passed six tests and production-binary Clippy passed. This proves the
 fallback and runtime path, but the replacement predates the shared file-plane commit and visual
 wallpaper presence still requires observation on the attached display. A separate all-feature
-fixture-only configuration defect found by the broader Clippy command remains open until its
-Windows-gated notification imports are corrected.
+fixture-only configuration defect found by the broader Clippy command was corrected in `a3c9228`
+without broadening the Linux-only notification service API: the cross-platform fixture now builds a
+deterministic `DesktopNotification` directly. Native Windows all-target/all-feature release Clippy
+then passed, as did 14 focused native notification tests; the corresponding Linux notification
+tests and strict workspace Clippy also pass on the integrated tree.
 
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
