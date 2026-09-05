@@ -826,53 +826,26 @@ impl DesktopApplication {
         }
     }
 
-    fn paint_icons(&mut self) -> Vec<PaintCommand> {
-        let mut commands = Vec::new();
+    fn prepare_icons(&mut self) -> bool {
         if !self.layout.icons_visible() {
-            return commands;
+            return false;
         }
-        let (cell_width, cell_height) = self.layout.grid();
-        let hovered = self
-            .pointer_seen
-            .then(|| self.hit(self.pointer_position))
-            .flatten();
-        for (index, item) in self
+        let previous_len = self.icon_cache.len();
+        let preference = ShellSettings::load_default().file_icon_provider;
+        let appearance = if self.palette.background & 0xff > 0x80 {
+            nickel_file::icons::ArtworkAppearance::Light
+        } else {
+            nickel_file::icons::ArtworkAppearance::Dark
+        };
+        for item in self
             .layout
             .items()
             .iter()
             .filter(|item| item.output == self.active_output)
-            .enumerate()
         {
-            let x = item.position.x - self.output_origin.x;
-            let y = item.position.y - self.output_origin.y;
-            if self.layout.selected().contains(&item.id) || hovered == Some(item.id) {
-                commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x, y, cell_width, cell_height - 4.0),
-                    color: if self.layout.selected().contains(&item.id) {
-                        self.palette.accent_soft
-                    } else {
-                        self.palette.surface_hover
-                    },
-                    radius: 8.0,
-                });
-            }
-            if self.pointer_dragged && self.layout.selected().contains(&item.id) {
-                commands.push(PaintCommand::Stroke {
-                    rect: Rect::new(x, y, cell_width, cell_height - 4.0),
-                    color: self.palette.accent,
-                    width: 2.0,
-                });
-            }
-            let pixels = self
-                .icon_cache
+            self.icon_cache
                 .entry(item.entry.path.clone())
                 .or_insert_with(|| {
-                    let preference = ShellSettings::load_default().file_icon_provider;
-                    let appearance = if self.palette.background & 0xff > 0x80 {
-                        nickel_file::icons::ArtworkAppearance::Light
-                    } else {
-                        nickel_file::icons::ArtworkAppearance::Dark
-                    };
                     nickel_file::icons::resolve_artwork(
                         preference,
                         &nickel_file::icons::ArtworkRequest {
@@ -888,57 +861,8 @@ impl DesktopApplication {
                     )
                     .pixels
                 });
-            commands.push(PaintCommand::Image {
-                bounds: Rect::new(x + (cell_width - 48.0) / 2.0, y + 6.0, 48.0, 48.0),
-                id: 10_000_u16.saturating_add(index as u16),
-                generation: 0,
-                image: Arc::clone(pixels),
-                high_density: None,
-            });
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(x + 3.0, y + 62.0, cell_width - 6.0, cell_height - 74.0),
-                color: self.palette.panel,
-                radius: 5.0,
-            });
-            commands.push(PaintCommand::Text {
-                bounds: Rect::new(x + 5.0, y + 64.0, cell_width - 10.0, cell_height - 78.0),
-                text: item.entry.display_name(),
-                scale: 0.85,
-                color: self.palette.text,
-                align: TextAlign::Center,
-                bold: false,
-                wrap: true,
-            });
         }
-        if let Some(start) = self.selection_start {
-            let current = self.pointer_position;
-            commands.push(PaintCommand::OverlayFill {
-                rect: Rect::new(
-                    start.x.min(current.x),
-                    start.y.min(current.y),
-                    (current.x - start.x).abs(),
-                    (current.y - start.y).abs(),
-                ),
-                color: self.palette.accent_soft,
-            });
-        }
-        if let Some(error) = &self.error {
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(20.0, 20.0, 500.0, 42.0),
-                color: self.palette.surface,
-                radius: 8.0,
-            });
-            commands.push(PaintCommand::Text {
-                bounds: Rect::new(32.0, 25.0, 476.0, 32.0),
-                text: error.clone(),
-                scale: 0.9,
-                color: self.palette.text,
-                align: TextAlign::Start,
-                bold: false,
-                wrap: false,
-            });
-        }
-        commands
+        self.icon_cache.len() != previous_len
     }
 }
 
@@ -1415,29 +1339,111 @@ impl nickel_ui::Application for DesktopApplication {
                     .decorative(),
             );
         }
-        for item in self
+        let hovered = self
+            .pointer_seen
+            .then(|| self.hit(self.pointer_position))
+            .flatten();
+        let (cell_width, cell_height) = self.layout.grid();
+        for (index, item) in self
             .layout
             .items()
             .iter()
             .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
+            .enumerate()
         {
             let position = Point {
                 x: item.position.x - self.output_origin.x,
                 y: item.position.y - self.output_origin.y,
             };
+            let selected = self.layout.selected().contains(&item.id);
+            let mut tile = Container::new()
+                .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+                .position(position)
+                .width(cell_width)
+                .height(cell_height - 4.0)
+                .radius(8.0)
+                .message(DesktopMessage::Activate(item.id))
+                .context_message(DesktopMessage::Context(item.id))
+                .semantic_role(SemanticRole::GridCell)
+                .accessibility_label(item.entry.display_name())
+                .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
+                .focus_background_tint(self.palette.accent)
+                .controller_focus_background_tint(self.palette.complement);
+            if selected {
+                tile = tile.background(self.palette.accent_soft);
+            } else if hovered == Some(item.id) {
+                tile = tile.background(self.palette.surface_hover);
+            }
+            if self.pointer_dragged && selected {
+                tile = tile.border(self.palette.accent, 2.0);
+            }
+            let mut contents = Layer::new().width(cell_width).height(cell_height - 4.0);
+            if let Some(pixels) = self.icon_cache.get(&item.entry.path) {
+                contents = contents.child(
+                    Container::new()
+                        .position(Point {
+                            x: (cell_width - 48.0) / 2.0,
+                            y: 6.0,
+                        })
+                        .width(48.0)
+                        .height(48.0)
+                        .child(
+                            Image::new(10_000_u16.saturating_add(index as u16), Arc::clone(pixels))
+                                .width(48.0)
+                                .height(48.0)
+                                .decorative(),
+                        ),
+                );
+            }
+            contents = contents.child(
+                Container::new()
+                    .position(Point { x: 3.0, y: 62.0 })
+                    .width(cell_width - 6.0)
+                    .height(cell_height - 74.0)
+                    .padding(Insets::symmetric(2.0, 2.0))
+                    .background(self.palette.panel)
+                    .radius(5.0)
+                    .child(
+                        Text::new(item.entry.display_name())
+                            .width(cell_width - 10.0)
+                            .height(cell_height - 78.0)
+                            .scale(0.85)
+                            .color(self.palette.text)
+                            .align(TextAlign::Center)
+                            .wrap(true),
+                    ),
+            );
+            layer = layer.child(tile.child(contents));
+        }
+        if let Some(start) = self.selection_start {
+            let current = self.pointer_position;
             layer = layer.child(
                 Container::new()
-                    .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
-                    .position(position)
-                    .width(self.layout.grid().0)
-                    .height(self.layout.grid().1 - 4.0)
-                    .message(DesktopMessage::Activate(item.id))
-                    .context_message(DesktopMessage::Context(item.id))
-                    .semantic_role(SemanticRole::GridCell)
-                    .accessibility_label(item.entry.display_name())
-                    .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
-                    .focus_background_tint(self.palette.accent)
-                    .controller_focus_background_tint(self.palette.complement),
+                    .position(Point {
+                        x: start.x.min(current.x),
+                        y: start.y.min(current.y),
+                    })
+                    .width((current.x - start.x).abs())
+                    .height((current.y - start.y).abs())
+                    .background(self.palette.accent_soft),
+            );
+        }
+        if let Some(error) = &self.error {
+            layer = layer.child(
+                Container::new()
+                    .position(Point { x: 20.0, y: 20.0 })
+                    .width(500.0)
+                    .height(42.0)
+                    .padding(Insets::symmetric(12.0, 5.0))
+                    .background(self.palette.surface)
+                    .radius(8.0)
+                    .child(
+                        Text::new(error.clone())
+                            .width(476.0)
+                            .height(32.0)
+                            .scale(0.9)
+                            .color(self.palette.text),
+                    ),
             );
         }
         Container::new()
@@ -1463,6 +1469,7 @@ impl nickel_ui::Application for DesktopApplication {
             self.refresh_directory(true);
             changed = true;
         }
+        changed |= self.prepare_icons();
         changed
     }
 
@@ -1484,6 +1491,74 @@ pub struct LockApplication {
     password: Zeroizing<String>,
     status: Option<String>,
     effects: Vec<LockEffect>,
+}
+
+struct VolumeOsdApplication {
+    label: String,
+    percent: u8,
+    palette: ThemePalette,
+}
+
+impl nickel_ui::Application for VolumeOsdApplication {
+    type Message = ();
+
+    fn update(&mut self, (): Self::Message) {}
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let width = context.viewport.size.width;
+        let height = context.viewport.size.height;
+        let track_width = (width - 48.0).max(0.0);
+        Container::new()
+            .id("volume-osd")
+            .semantic_role(SemanticRole::Status)
+            .accessibility_label(self.label.clone())
+            .width(width)
+            .height(height)
+            .background(self.palette.panel)
+            .radius(14.0)
+            .child(
+                Layer::new()
+                    .width(width)
+                    .height(height)
+                    .child(
+                        Container::new()
+                            .position(Point { x: 24.0, y: 14.0 })
+                            .width(track_width)
+                            .height(32.0)
+                            .child(
+                                Text::new(self.label.clone())
+                                    .width(track_width)
+                                    .height(32.0)
+                                    .scale(1.15)
+                                    .color(self.palette.text)
+                                    .align(TextAlign::Center)
+                                    .bold(true),
+                            ),
+                    )
+                    .child(
+                        Container::new()
+                            .position(Point {
+                                x: 24.0,
+                                y: height - 28.0,
+                            })
+                            .width(track_width)
+                            .height(8.0)
+                            .background(self.palette.surface_hover)
+                            .radius(4.0),
+                    )
+                    .child(
+                        Container::new()
+                            .position(Point {
+                                x: 24.0,
+                                y: height - 28.0,
+                            })
+                            .width(track_width * f32::from(self.percent) / 100.0)
+                            .height(8.0)
+                            .background(self.palette.accent)
+                            .radius(4.0),
+                    ),
+            )
+    }
 }
 
 pub struct PanelApplication {
@@ -1936,6 +2011,7 @@ pub struct LiveShell {
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
     volume_osd_until: Option<Instant>,
+    volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
     launcher_visible: bool,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
@@ -2132,6 +2208,15 @@ impl LiveShell {
         let network = platform::network_status();
         let bluetooth = platform::bluetooth_status();
         let audio = platform::audio_status();
+        let volume_osd_host = nickel_ui::UiHost::new(
+            VolumeOsdApplication {
+                label: String::new(),
+                percent: audio.volume_percent.min(100),
+                palette,
+            },
+            420,
+            96,
+        );
         #[cfg(target_os = "linux")]
         let (secure_storage_state, secure_storage_query_error) =
             match platform::secure_storage_state() {
@@ -2235,6 +2320,7 @@ impl LiveShell {
             bluetooth,
             audio,
             volume_osd_until: None,
+            volume_osd_host,
             launcher_visible: false,
             locked: false,
             lock_host,
@@ -4505,23 +4591,23 @@ impl LiveShell {
             _ => true,
         };
         let palette_changed = application.palette != self.palette;
+        if palette_changed {
+            application.icon_cache.clear();
+        }
         application.wallpaper.clone_from(&self.wallpaper);
         application.palette = self.palette;
+        let icons_changed = application.prepare_icons();
         let outcome = self.desktop_host.step(HostBatch {
-            application_changed: wallpaper_changed || palette_changed,
+            application_changed: wallpaper_changed || palette_changed || icons_changed,
             surface_size: Some((width, height)),
             ..HostBatch::default()
         });
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        let mut commands = self.desktop_host.commands().to_vec();
-        commands.extend(self.desktop_host.application_mut().paint_icons());
-        commands
+        self.desktop_host.commands().to_vec()
     }
 
-    fn volume_osd_scene(&self, width: u32, height: u32) -> Vec<PaintCommand> {
-        let width = width as f32;
-        let height = height as f32;
+    fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
         let percent = self.audio.volume_percent.min(100);
         let mut label = if self.audio.muted {
             "Muted".to_owned()
@@ -4541,39 +4627,19 @@ impl LiveShell {
             label.push_str(" · ");
             label.push_str(output);
         }
-        let track = Rect::new(24.0, height - 28.0, (width - 48.0).max(0.0), 8.0);
-        let fill = Rect::new(
-            track.origin.x,
-            track.origin.y,
-            track.size.width * f32::from(percent) / 100.0,
-            track.size.height,
-        );
-        vec![
-            PaintCommand::RoundedFill {
-                rect: Rect::new(0.0, 0.0, width, height),
-                color: 0xee171a20,
-                radius: 14.0,
-            },
-            PaintCommand::Text {
-                bounds: Rect::new(24.0, 14.0, width - 48.0, 32.0),
-                text: label,
-                scale: 1.15,
-                color: 0xfff4f6f8,
-                align: TextAlign::Center,
-                bold: true,
-                wrap: false,
-            },
-            PaintCommand::RoundedFill {
-                rect: track,
-                color: 0xff3b414b,
-                radius: 4.0,
-            },
-            PaintCommand::RoundedFill {
-                rect: fill,
-                color: 0xff23a8f2,
-                radius: 4.0,
-            },
-        ]
+        let application = self.volume_osd_host.application_mut();
+        let changed = application.label != label
+            || application.percent != percent
+            || application.palette != self.palette;
+        application.label = label;
+        application.percent = percent;
+        application.palette = self.palette;
+        self.volume_osd_host.step(HostBatch {
+            application_changed: changed,
+            surface_size: Some((width, height)),
+            ..HostBatch::default()
+        });
+        self.volume_osd_host.commands().to_vec()
     }
 
     fn lock_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -5762,7 +5828,6 @@ mod tests {
         AnchorSide, PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
-    use nickel_ui::backend::PaintCommand;
     use nickel_ui::{
         ActionKind, Application as _, ControllerAction, FrameOverlay, HostBatch, HostEvent,
         HostTelemetry, InputModality, OverlayAnchor, Point, Rect, SemanticAction, SemanticRole,
@@ -7368,9 +7433,27 @@ mod tests {
         });
         let first_deadline = shell.volume_osd_until.unwrap();
         assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
-        assert!(shell.volume_osd_scene(320, 88).iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Volume 47%")
-        ));
+        shell.volume_osd_scene(320, 88);
+        assert!(
+            shell
+                .volume_osd_host
+                .application()
+                .label
+                .starts_with("Volume 47%")
+        );
+        assert!(
+            shell
+                .volume_osd_host
+                .accessibility_nodes()
+                .iter()
+                .any(|node| {
+                    node.semantic_role == Some(SemanticRole::Status)
+                        && node
+                            .label
+                            .as_deref()
+                            .is_some_and(|label| label.starts_with("Volume 47%"))
+                })
+        );
 
         shell.global_shortcut(GlobalShortcut::AudioChanged {
             available: true,
@@ -7379,10 +7462,13 @@ mod tests {
             output_name: None,
         });
         assert!(shell.volume_osd_until.unwrap() >= first_deadline);
+        shell.volume_osd_scene(320, 88);
         assert!(
-            shell.volume_osd_scene(320, 88).iter().any(
-                |command| matches!(command, PaintCommand::Text { text, .. } if text == "Muted")
-            )
+            shell
+                .volume_osd_host
+                .application()
+                .label
+                .starts_with("Muted")
         );
 
         let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
@@ -7404,13 +7490,18 @@ mod tests {
             muted: false,
             output_name: Some("Private Bluetooth Headset".into()),
         });
-        let commands = shell.volume_osd_scene(320, 88);
-        assert!(commands.iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "Volume 47% · Audio output")
-        ));
-        assert!(!commands.iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text.contains("Private"))
-        ));
+        shell.volume_osd_scene(320, 88);
+        assert_eq!(
+            shell.volume_osd_host.application().label,
+            "Volume 47% · Audio output"
+        );
+        assert!(
+            !shell
+                .volume_osd_host
+                .application()
+                .label
+                .contains("Private")
+        );
     }
 
     #[test]
@@ -7455,31 +7546,38 @@ mod tests {
             nickel_file::desktop::Point { x: -400.0, y: 0.0 },
             1.0,
         );
-        let commands = desktop.paint_icons();
-        assert!(commands.iter().any(
-            |command| matches!(command, PaintCommand::Text { text, .. } if text == "document.txt")
-        ));
-        assert_eq!(
-            commands
-                .iter()
-                .filter(|command| matches!(command, PaintCommand::RoundedFill { .. }))
-                .count(),
-            1,
-            "label treatment only; idle tile and icon have no background fill"
-        );
-        desktop.set_active_output(
+        let _ = desktop.prepare_icons();
+        let mut host = UiHost::new(desktop, 400, 600);
+        let entry = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.semantic_role == Some(SemanticRole::GridCell))
+            .expect("desktop entry belongs to the active output");
+        assert_eq!(entry.label.as_deref(), Some("document.txt"));
+        host.application_mut().set_active_output(
             "right".into(),
             nickel_file::desktop::Point { x: 0.0, y: 0.0 },
             1.5,
         );
-        assert!(desktop.paint_icons().is_empty());
-
-        desktop.set_active_output(
+        host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .all(|node| node.semantic_role != Some(SemanticRole::GridCell))
+        );
+        host.application_mut().set_active_output(
             "left".into(),
             nickel_file::desktop::Point { x: -400.0, y: 0.0 },
             1.0,
         );
-        let host = UiHost::new(desktop, 400, 600);
+        let _ = host.application_mut().prepare_icons();
+        host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
         let entry = host
             .accessibility_nodes()
             .iter()
