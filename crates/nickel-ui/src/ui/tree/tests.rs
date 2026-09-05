@@ -1273,6 +1273,71 @@ fn scroll_viewport_exposes_and_performs_accessible_scroll_actions() {
 }
 
 #[test]
+fn controller_can_select_and_adjust_a_scroll_viewport() {
+    let mut state = UiStateStore::default();
+    let build = |state: &mut UiStateStore| {
+        UiFrame::layout_with_state(
+            VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+                .on_scroll(|_| TestMessage::Named("changed"))
+                .child(Spacer::vertical(400.0)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            state,
+        )
+    };
+    let tree = build(&mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerNext);
+    assert_eq!(
+        state.navigation().controller_selected(),
+        Some(&UiId::from("root"))
+    );
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(state.navigation().controller_editing());
+
+    let outcome = tree.handle_event(&mut state, UiEvent::ControllerAdjust(1.0));
+    assert_eq!(outcome.messages, vec![TestMessage::Named("changed")]);
+    assert_eq!(
+        state.state(&UiId::from("root")).unwrap().scroll_offset,
+        80.0
+    );
+}
+
+#[test]
+fn controller_adjusts_selected_slider_instead_of_ancestor_scroll() {
+    let mut state = UiStateStore::default();
+    let build = |state: &mut UiStateStore| {
+        UiFrame::layout_with_state(
+            VerticalScroll::new(TestMessage::Named("scroll"), 0.0)
+                .on_scroll(|_| TestMessage::Named("scrolled"))
+                .child(
+                    Column::new()
+                        .child(
+                            Slider::on_change(map_volume, 0.5)
+                                .id("slider")
+                                .accessibility_label("Value"),
+                        )
+                        .child(Spacer::vertical(400.0)),
+                ),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+            state,
+        )
+    };
+    let tree = build(&mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerNext);
+    tree.handle_event(&mut state, UiEvent::ControllerNext);
+    assert_eq!(
+        state.navigation().controller_selected(),
+        Some(&UiId::from("root/#0/slider"))
+    );
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+
+    let outcome = tree.handle_event(&mut state, UiEvent::ControllerAdjust(-1.0));
+    assert_eq!(outcome.messages, vec![TestMessage::Volume(45)]);
+    assert_eq!(state.state(&UiId::from("root")).unwrap().scroll_offset, 0.0);
+}
+
+#[test]
 fn page_keys_scroll_the_focused_viewport_through_shared_state() {
     let mut state = UiStateStore::default();
     state.set_focus(Some(UiId::from("root")));

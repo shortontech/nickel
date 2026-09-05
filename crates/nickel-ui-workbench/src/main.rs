@@ -4719,6 +4719,35 @@ mod tests {
     }
 
     #[test]
+    fn settings_inventory_controller_routes_are_complete() {
+        let entries = registry()
+            .expect("registry")
+            .into_iter()
+            .filter(|entry| entry.metadata.id == "settings.component-inventory")
+            .collect::<Vec<_>>();
+        let report = audit_registry_reachability(&entries, &ReachabilityPolicy::default())
+            .expect("settings reachability audit");
+
+        assert_eq!(
+            report
+                .variants
+                .iter()
+                .map(|variant| variant.variant.as_str())
+                .collect::<Vec<_>>(),
+            ["dark", "compact"]
+        );
+        assert!(
+            report.is_complete(),
+            "settings controller routes must be complete: {:#?}",
+            report
+                .variants
+                .iter()
+                .flat_map(|variant| &variant.report.issues)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn codex_fixture_occupies_readable_preview_bounds() {
         let session = fixture_entry(CODEX_ID).expect("Codex fixture").open();
         let nodes = session.semantic_nodes();

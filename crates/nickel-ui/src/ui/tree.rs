@@ -2882,10 +2882,6 @@ impl<Message: Clone> UiFrame<Message> {
             UiEvent::ControllerAdjust(direction) => {
                 if !state.navigation().controller_editing() {
                     Invalidation::None
-                } else if let Some(invalidation) =
-                    self.operate_navigation_scroll(state, direction, &mut outcome.messages)
-                {
-                    invalidation
                 } else if let Some((value, step, map)) =
                     state.navigation().controller_selected().and_then(|id| {
                         let node = self.resolved.nodes.iter().find(|node| &node.id == id)?;
@@ -2901,6 +2897,10 @@ impl<Message: Clone> UiFrame<Message> {
                         .messages
                         .push(map((value + direction.signum() * step).clamp(0.0, 1.0)));
                     Invalidation::Layout
+                } else if let Some(invalidation) =
+                    self.operate_navigation_scroll(state, direction, &mut outcome.messages)
+                {
+                    invalidation
                 } else {
                     Invalidation::None
                 }
@@ -3017,6 +3017,17 @@ impl<Message: Clone> UiFrame<Message> {
                         };
                     }
                     if node.controller_value.is_some() && node.adjustment_step > 0.0 {
+                        return EventOutcome {
+                            messages: outcome.messages,
+                            invalidation: state.navigation_mut().set_controller_editing(true),
+                            clipboard_text: None,
+                        };
+                    }
+                    if self.scrolls.iter().any(|scroll| scroll.id == node.id)
+                        && node.semantic_actions.iter().any(|action| {
+                            matches!(action, ActionKind::Increment | ActionKind::Decrement)
+                        })
+                    {
                         return EventOutcome {
                             messages: outcome.messages,
                             invalidation: state.navigation_mut().set_controller_editing(true),
@@ -3741,7 +3752,7 @@ impl<Message: Clone> UiFrame<Message> {
         direction: isize,
         continue_in_parent: bool,
     ) -> Invalidation {
-        let ids = self.controller_targets(state);
+        let ids = self.controller_targets_with_scrolls(state, continue_in_parent);
         let at_scope_edge = state
             .navigation()
             .controller_selected()
@@ -3758,7 +3769,8 @@ impl<Message: Clone> UiFrame<Message> {
                 Some(crate::NavigationExit::Parent) => {
                     let mut invalidation = self.leave_controller_scope(state, &scope);
                     if continue_in_parent {
-                        let parent_targets = self.controller_targets(state);
+                        let parent_targets =
+                            self.controller_targets_with_scrolls(state, continue_in_parent);
                         invalidation = invalidation.merge(self.select_controller_from(
                             state,
                             direction,
@@ -4125,7 +4137,13 @@ impl<Message: Clone> UiFrame<Message> {
             .map(|index| count(&self.resolved.nodes, index))
     }
 
-    fn collect_controller_targets(&self, index: usize, root: bool, targets: &mut Vec<UiId>) {
+    fn collect_controller_targets(
+        &self,
+        index: usize,
+        root: bool,
+        include_scrolls: bool,
+        targets: &mut Vec<UiId>,
+    ) {
         let node = &self.resolved.nodes[index];
         // A nested scope is itself a controller waypoint even when its
         // container has no activation message. Confirm enters the scope; its
@@ -4133,6 +4151,16 @@ impl<Message: Clone> UiFrame<Message> {
         if !root && node.navigation_scope.is_some() && self.node_has_controller_action(index) {
             targets.push(node.id.clone());
             return;
+        }
+        let is_scroll_target = self.scrolls.iter().any(|scroll| scroll.id == node.id)
+            && node
+                .semantic_actions
+                .iter()
+                .any(|action| matches!(action, ActionKind::Increment | ActionKind::Decrement));
+        // A scroll viewport is directly adjustable, but unlike a button it
+        // must not hide the controls contained in its viewport from traversal.
+        if include_scrolls && is_scroll_target {
+            targets.push(node.id.clone());
         }
         if (!root || node.navigation_scope.is_none())
             && node.semantic_actions.iter().any(|action| {
@@ -4145,17 +4173,25 @@ impl<Message: Clone> UiFrame<Message> {
                         | ActionKind::SetValue
                 )
             })
-            && !self.scrolls.iter().any(|scroll| scroll.id == node.id)
+            && !is_scroll_target
         {
             targets.push(node.id.clone());
             return;
         }
         for child in &node.children {
-            self.collect_controller_targets(*child, false, targets);
+            self.collect_controller_targets(*child, false, include_scrolls, targets);
         }
     }
 
     fn controller_targets(&self, state: &UiStateStore) -> Vec<UiId> {
+        self.controller_targets_with_scrolls(state, false)
+    }
+
+    fn controller_targets_with_scrolls(
+        &self,
+        state: &UiStateStore,
+        include_scrolls: bool,
+    ) -> Vec<UiId> {
         if let Some((overlay, _)) = &self.active_overlay {
             let mut targets = self
                 .messages
@@ -4180,7 +4216,7 @@ impl<Message: Clone> UiFrame<Message> {
             .and_then(|id| self.resolved.nodes.iter().position(|node| &node.id == id))
             .unwrap_or(0);
         let mut targets = Vec::new();
-        self.collect_controller_targets(root, true, &mut targets);
+        self.collect_controller_targets(root, true, include_scrolls, &mut targets);
         let root_id = &self.resolved.nodes[root].id;
         if state
             .state(root_id)
