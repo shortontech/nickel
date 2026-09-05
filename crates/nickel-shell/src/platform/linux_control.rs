@@ -37,18 +37,114 @@ struct ControlBackend {
 }
 
 static BACKEND: OnceLock<ControlBackend> = OnceLock::new();
-static MPRIS_ACTIVITY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
-static MPRIS_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static MPRIS_COMMANDS: OnceLock<mpsc::SyncSender<ConsumerControl>> = OnceLock::new();
 
 const MPRIS_COMMAND_CAPACITY: usize = 16;
-const MPRIS_ACTIVITY_CAPACITY: usize = 64;
+const MPRIS_PLAYER_CAPACITY: usize = 64;
+const MPRIS_REFRESH_INTERVAL: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct MprisCandidate {
+struct MprisPlayer {
     name: String,
-    playing: bool,
+    owner: String,
+    status: String,
+    can_play: bool,
+    can_pause: bool,
+    can_control: bool,
+    can_next: bool,
+    can_previous: bool,
+    can_seek: bool,
     recent: u64,
+}
+
+impl MprisPlayer {
+    fn playing(&self) -> bool {
+        self.status == "Playing"
+    }
+
+    fn supports(&self, control: ConsumerControl) -> bool {
+        self.can_control
+            && match control {
+                ConsumerControl::PlayPause => {
+                    if self.playing() {
+                        self.can_pause
+                    } else {
+                        self.can_play
+                    }
+                }
+                ConsumerControl::Play => self.can_play,
+                ConsumerControl::Pause => self.can_pause,
+                ConsumerControl::Stop => true,
+                ConsumerControl::Next => self.can_next,
+                ConsumerControl::Previous => self.can_previous,
+                ConsumerControl::FastForward | ConsumerControl::Rewind => self.can_seek,
+                ConsumerControl::VolumeUp
+                | ConsumerControl::VolumeDown
+                | ConsumerControl::VolumeMute => false,
+            }
+    }
+}
+
+#[derive(Debug, Default)]
+struct MprisTracker {
+    players: HashMap<String, MprisPlayer>,
+    sequence: u64,
+    bus_generation: u64,
+}
+
+impl MprisTracker {
+    fn replace_snapshot(&mut self, mut observed: Vec<MprisPlayer>) {
+        observed.sort_by(|left, right| left.name.cmp(&right.name));
+        observed.truncate(MPRIS_PLAYER_CAPACITY);
+        let old = std::mem::take(&mut self.players);
+        let mut sequence = self.sequence;
+        let players = observed
+            .into_iter()
+            .map(|mut player| {
+                if let Some(old) = old
+                    .get(&player.name)
+                    .filter(|old| old.owner == player.owner)
+                {
+                    player.recent = old.recent;
+                    if old.status != player.status {
+                        sequence = sequence.saturating_add(1);
+                        player.recent = sequence;
+                    }
+                }
+                (player.name.clone(), player)
+            })
+            .collect();
+        self.sequence = sequence;
+        self.players = players;
+    }
+
+    fn bus_restarted(&mut self) {
+        self.players.clear();
+        self.bus_generation = self.bus_generation.saturating_add(1);
+    }
+
+    fn select(&self, control: ConsumerControl) -> Option<&MprisPlayer> {
+        self.players
+            .values()
+            .filter(|player| player.supports(control))
+            .max_by(|left, right| {
+                left.playing()
+                    .cmp(&right.playing())
+                    .then_with(|| left.recent.cmp(&right.recent))
+                    .then_with(|| right.name.cmp(&left.name))
+            })
+    }
+
+    fn dispatched(&mut self, name: &str, owner: &str) {
+        self.sequence = self.sequence.saturating_add(1);
+        if let Some(player) = self
+            .players
+            .get_mut(name)
+            .filter(|player| player.owner == owner)
+        {
+            player.recent = self.sequence;
+        }
+    }
 }
 
 pub fn handle_consumer_control(control: ConsumerControl) {
@@ -72,26 +168,54 @@ pub fn handle_consumer_control(control: ConsumerControl) {
 }
 
 fn mpris_worker(commands: mpsc::Receiver<ConsumerControl>) {
-    while let Ok(control) = commands.recv() {
-        if let Err(error) = dispatch_mpris(control) {
-            tracing::debug!(?control, %error, "MPRIS command was not delivered");
+    let mut connection = None;
+    let mut tracker = MprisTracker::default();
+    loop {
+        match commands.recv_timeout(MPRIS_REFRESH_INTERVAL) {
+            Ok(control) => match refresh_mpris(&mut connection, &mut tracker) {
+                Ok(()) => {
+                    if let Err(error) = dispatch_mpris(&connection, &mut tracker, control) {
+                        tracing::debug!(?control, %error, "MPRIS command was not delivered");
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(?control, %error, "MPRIS bus failed before dispatch");
+                    connection = None;
+                    tracker.bus_restarted();
+                }
+            },
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Err(error) = refresh_mpris(&mut connection, &mut tracker) {
+                    tracing::debug!(%error, "MPRIS tracker will reconnect after a bus failure");
+                    connection = None;
+                    tracker.bus_restarted();
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
 }
 
-fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
-    let connection = Connection::session().map_err(|error| error.to_string())?;
+fn refresh_mpris(
+    connection: &mut Option<Connection>,
+    tracker: &mut MprisTracker,
+) -> Result<(), String> {
+    if connection.is_none() {
+        *connection = Some(Connection::session().map_err(|error| error.to_string())?);
+    }
+    let connection = connection.as_ref().expect("connection was initialized");
     let dbus =
-        zbus::blocking::fdo::DBusProxy::new(&connection).map_err(|error| error.to_string())?;
-    let mut players = dbus
+        zbus::blocking::fdo::DBusProxy::new(connection).map_err(|error| error.to_string())?;
+    let players = dbus
         .list_names()
         .map_err(|error| error.to_string())?
         .into_iter()
         .filter(|name| name.as_str().starts_with("org.mpris.MediaPlayer2."))
         .filter_map(|name| {
-            let name = name.to_string();
+            let owner = dbus.get_name_owner(name.clone().into()).ok()?.to_string();
+            let name = name.as_str().to_owned();
             let proxy = Proxy::new(
-                &connection,
+                connection,
                 name.as_str(),
                 "/org/mpris/MediaPlayer2",
                 "org.mpris.MediaPlayer2.Player",
@@ -101,26 +225,38 @@ fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
             let status = proxy
                 .get_property::<String>("PlaybackStatus")
                 .unwrap_or_else(|_| "Stopped".into());
-            let capable = can_control && mpris_capable(&proxy, control, &status);
-            drop(proxy);
-            let recent = MPRIS_ACTIVITY
-                .get_or_init(Default::default)
-                .lock()
-                .ok()
-                .and_then(|activity| activity.get(&name).copied())
-                .unwrap_or(0);
-            capable.then_some(MprisCandidate {
-                name,
-                playing: status == "Playing",
-                recent,
+            Some(MprisPlayer {
+                name: name.clone(),
+                owner,
+                status,
+                can_play: proxy.get_property::<bool>("CanPlay").unwrap_or(false),
+                can_pause: proxy.get_property::<bool>("CanPause").unwrap_or(false),
+                can_control,
+                can_next: proxy.get_property::<bool>("CanGoNext").unwrap_or(false),
+                can_previous: proxy.get_property::<bool>("CanGoPrevious").unwrap_or(false),
+                can_seek: proxy.get_property::<bool>("CanSeek").unwrap_or(false),
+                recent: 0,
             })
         })
         .collect::<Vec<_>>();
-    let name = select_mpris_candidate(&mut players)
+    tracker.replace_snapshot(players);
+    Ok(())
+}
+
+fn dispatch_mpris(
+    connection: &Option<Connection>,
+    tracker: &mut MprisTracker,
+    control: ConsumerControl,
+) -> Result<(), String> {
+    let connection = connection.as_ref().ok_or("MPRIS bus is unavailable")?;
+    let selected = tracker
+        .select(control)
         .ok_or_else(|| "no capable MPRIS player is available".to_owned())?;
+    let name = selected.name.clone();
+    let owner = selected.owner.clone();
     let proxy = Proxy::new(
-        &connection,
-        name,
+        connection,
+        name.as_str(),
         "/org/mpris/MediaPlayer2",
         "org.mpris.MediaPlayer2.Player",
     )
@@ -140,57 +276,9 @@ fn dispatch_mpris(control: ConsumerControl) -> Result<(), String> {
     };
     result
         .map(|_| {
-            let sequence = MPRIS_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if let Ok(mut activity) = MPRIS_ACTIVITY.get_or_init(Default::default).lock() {
-                record_mpris_activity(&mut activity, name, sequence);
-            }
+            tracker.dispatched(&name, &owner);
         })
         .map_err(|error| error.to_string())
-}
-
-fn record_mpris_activity(activity: &mut HashMap<String, u64>, name: &str, sequence: u64) {
-    activity.insert(name.to_owned(), sequence);
-    if activity.len() > MPRIS_ACTIVITY_CAPACITY
-        && let Some(oldest) = activity
-            .iter()
-            .min_by(|left, right| left.1.cmp(right.1).then_with(|| left.0.cmp(right.0)))
-            .map(|(name, _)| name.clone())
-    {
-        activity.remove(&oldest);
-    }
-}
-
-fn select_mpris_candidate(players: &mut [MprisCandidate]) -> Option<&str> {
-    players.sort_by(|left, right| {
-        right
-            .playing
-            .cmp(&left.playing)
-            .then_with(|| right.recent.cmp(&left.recent))
-            .then_with(|| left.name.cmp(&right.name))
-    });
-    players.first().map(|candidate| candidate.name.as_str())
-}
-
-fn mpris_capable(proxy: &Proxy<'_>, control: ConsumerControl, status: &str) -> bool {
-    let property = match control {
-        ConsumerControl::PlayPause => {
-            return if status == "Playing" {
-                proxy.get_property::<bool>("CanPause").unwrap_or(false)
-            } else {
-                proxy.get_property::<bool>("CanPlay").unwrap_or(false)
-            };
-        }
-        ConsumerControl::Play => "CanPlay",
-        ConsumerControl::Pause => "CanPause",
-        ConsumerControl::Stop => "CanControl",
-        ConsumerControl::Next => "CanGoNext",
-        ConsumerControl::Previous => "CanGoPrevious",
-        ConsumerControl::FastForward | ConsumerControl::Rewind => "CanSeek",
-        ConsumerControl::VolumeUp | ConsumerControl::VolumeDown | ConsumerControl::VolumeMute => {
-            return false;
-        }
-    };
-    proxy.get_property::<bool>(property).unwrap_or(false)
 }
 
 pub fn network_status() -> NetworkStatus {
@@ -584,9 +672,23 @@ fn bluetooth_adapter_path(connection: &Connection) -> Result<OwnedObjectPath, St
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        MPRIS_ACTIVITY_CAPACITY, MprisCandidate, record_mpris_activity, select_mpris_candidate,
-    };
+    use super::{MPRIS_PLAYER_CAPACITY, MprisPlayer, MprisTracker};
+    use nickel_session_protocol::ConsumerControl;
+
+    fn player(name: &str, owner: &str, status: &str) -> MprisPlayer {
+        MprisPlayer {
+            name: name.into(),
+            owner: owner.into(),
+            status: status.into(),
+            can_play: true,
+            can_pause: true,
+            can_control: true,
+            can_next: true,
+            can_previous: true,
+            can_seek: true,
+            recent: 0,
+        }
+    }
 
     #[test]
     fn wifi_network_identity_contains_device_and_access_point() {
@@ -599,64 +701,106 @@ mod tests {
 
     #[test]
     fn mpris_selection_prefers_playing_then_recent_then_stable_name() {
-        let candidates = || {
-            vec![
-                MprisCandidate {
-                    name: "org.mpris.MediaPlayer2.zeta".into(),
-                    playing: false,
-                    recent: 40,
-                },
-                MprisCandidate {
-                    name: "org.mpris.MediaPlayer2.beta".into(),
-                    playing: true,
-                    recent: 3,
-                },
-                MprisCandidate {
-                    name: "org.mpris.MediaPlayer2.alpha".into(),
-                    playing: true,
-                    recent: 3,
-                },
-            ]
-        };
-
-        let mut players = candidates();
+        let mut tracker = MprisTracker::default();
+        let mut zeta = player("org.mpris.MediaPlayer2.zeta", ":1.1", "Paused");
+        zeta.recent = 40;
+        let mut beta = player("org.mpris.MediaPlayer2.beta", ":1.2", "Playing");
+        beta.recent = 3;
+        let mut alpha = player("org.mpris.MediaPlayer2.alpha", ":1.3", "Playing");
+        alpha.recent = 3;
+        tracker.players = [zeta, beta, alpha]
+            .into_iter()
+            .map(|player| (player.name.clone(), player))
+            .collect();
         assert_eq!(
-            select_mpris_candidate(&mut players),
-            Some("org.mpris.MediaPlayer2.alpha")
+            tracker
+                .select(ConsumerControl::PlayPause)
+                .map(|value| value.name.as_str()),
+            Some("org.mpris.MediaPlayer2.alpha"),
         );
 
-        let mut players = candidates();
-        players[1].recent = 9;
+        tracker
+            .players
+            .get_mut("org.mpris.MediaPlayer2.beta")
+            .unwrap()
+            .recent = 9;
         assert_eq!(
-            select_mpris_candidate(&mut players),
-            Some("org.mpris.MediaPlayer2.beta")
+            tracker
+                .select(ConsumerControl::PlayPause)
+                .map(|value| value.name.as_str()),
+            Some("org.mpris.MediaPlayer2.beta"),
         );
 
-        let mut players = candidates();
-        players.iter_mut().for_each(|player| player.playing = false);
+        tracker
+            .players
+            .values_mut()
+            .for_each(|player| player.status = "Paused".into());
         assert_eq!(
-            select_mpris_candidate(&mut players),
-            Some("org.mpris.MediaPlayer2.zeta")
+            tracker
+                .select(ConsumerControl::PlayPause)
+                .map(|value| value.name.as_str()),
+            Some("org.mpris.MediaPlayer2.zeta"),
         );
     }
 
     #[test]
-    fn mpris_selection_has_a_bounded_empty_result() {
-        assert_eq!(select_mpris_candidate(&mut []), None);
+    fn mpris_capabilities_filter_every_command_without_losing_selection() {
+        let mut tracker = MprisTracker::default();
+        let mut incapable = player("incapable", ":1.1", "Playing");
+        incapable.can_next = false;
+        let capable = player("capable", ":1.2", "Paused");
+        tracker.replace_snapshot(vec![incapable, capable]);
+        assert_eq!(
+            tracker
+                .select(ConsumerControl::Next)
+                .map(|value| value.name.as_str()),
+            Some("capable")
+        );
+        tracker.players.get_mut("capable").unwrap().can_control = false;
+        assert!(tracker.select(ConsumerControl::Next).is_none());
+        assert!(tracker.select(ConsumerControl::VolumeUp).is_none());
     }
 
     #[test]
-    fn mpris_activity_history_evicts_the_oldest_player() {
-        let mut activity = std::collections::HashMap::new();
-        for sequence in 0..=MPRIS_ACTIVITY_CAPACITY {
-            record_mpris_activity(
-                &mut activity,
-                &format!("player-{sequence}"),
-                sequence as u64,
-            );
-        }
-        assert_eq!(activity.len(), MPRIS_ACTIVITY_CAPACITY);
-        assert!(!activity.contains_key("player-0"));
-        assert!(activity.contains_key(&format!("player-{MPRIS_ACTIVITY_CAPACITY}")));
+    fn mpris_snapshots_track_disappearance_owner_replacement_and_bus_restart() {
+        let mut tracker = MprisTracker::default();
+        tracker.replace_snapshot(vec![player("alpha", ":1.1", "Paused")]);
+        tracker.dispatched("alpha", ":1.1");
+        assert_eq!(tracker.players["alpha"].recent, 1);
+
+        tracker.replace_snapshot(vec![player("alpha", ":1.1", "Playing")]);
+        assert_eq!(
+            tracker.players["alpha"].recent, 2,
+            "external status changes count as recent player activity"
+        );
+        tracker.replace_snapshot(vec![player("alpha", ":1.9", "Paused")]);
+        assert_eq!(
+            tracker.players["alpha"].recent, 0,
+            "owner replacement is new session"
+        );
+        tracker.replace_snapshot(Vec::new());
+        assert!(tracker.players.is_empty(), "disappeared names are removed");
+
+        tracker.replace_snapshot(vec![player("beta", ":2.1", "Playing")]);
+        tracker.bus_restarted();
+        assert!(tracker.players.is_empty());
+        assert_eq!(tracker.bus_generation, 1);
+    }
+
+    #[test]
+    fn mpris_snapshot_and_activity_state_are_strictly_bounded() {
+        let mut tracker = MprisTracker::default();
+        tracker.replace_snapshot(
+            (0..MPRIS_PLAYER_CAPACITY + 20)
+                .map(|index| {
+                    player(
+                        &format!("player-{index:03}"),
+                        &format!(":1.{index}"),
+                        "Paused",
+                    )
+                })
+                .collect(),
+        );
+        assert_eq!(tracker.players.len(), MPRIS_PLAYER_CAPACITY);
     }
 }
