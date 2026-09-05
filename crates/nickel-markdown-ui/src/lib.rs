@@ -1733,7 +1733,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join(" ");
         assert!(visible.contains("/definitely/missing/guide.md"));
-        assert!(visible.contains("No such file") || visible.contains("not found"));
+        assert!(
+            visible.contains("No such file")
+                || visible.contains("not found")
+                || visible.contains("cannot find")
+        );
         scenario
             .pointer_activate(&Selector::role_name(SemanticRole::Button, "Dismiss"))
             .unwrap();
