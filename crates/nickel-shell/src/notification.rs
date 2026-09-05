@@ -35,6 +35,28 @@ pub struct DesktopNotification {
     expires_at: Option<Instant>,
 }
 
+#[cfg(feature = "workbench-fixtures")]
+impl DesktopNotification {
+    // The production binary shares this source module but does not compile the fixture registry.
+    #[allow(dead_code)]
+    pub(crate) fn fixture(
+        id: u32,
+        app_name: impl Into<String>,
+        summary: impl Into<String>,
+        body: impl Into<String>,
+        actions: Vec<NotificationAction>,
+    ) -> Self {
+        Self {
+            id,
+            app_name: app_name.into(),
+            summary: summary.into(),
+            body: body.into(),
+            actions,
+            expires_at: None,
+        }
+    }
+}
+
 #[cfg(any(target_os = "linux", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ClosedNotification {

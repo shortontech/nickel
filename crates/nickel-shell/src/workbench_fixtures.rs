@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc};
 
 use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 use nickel_ui::{ActionKind, ControllerFamily, ReadingDirection, SemanticRole};
@@ -16,7 +16,7 @@ use crate::{
     launcher_view::{LauncherApplication, LauncherIconCache, LauncherViewState},
     live_shell::{DesktopApplication, LockApplication, PanelApplication},
     model::{WindowGroup, WindowId},
-    notification::{NotificationAction, NotificationRequest, NotificationStore},
+    notification::{DesktopNotification, NotificationAction},
     notification_view::NotificationApp,
     platform::{AudioStatus, BluetoothStatus, NetworkStatus, WorkspaceSummary},
     screenshot::ScreenshotApp,
@@ -473,21 +473,10 @@ impl Fixture for NotificationFixture {
         } else {
             "The fixture is ready.".into()
         };
-        let mut store = NotificationStore::default();
-        store.notify(
-            0,
-            NotificationRequest {
-                app_name: "Nickel".into(),
-                summary: "Workbench notification".into(),
-                body,
-                actions,
-                expire_timeout_ms: 0,
-            },
-            Instant::now(),
-        );
+        let notification =
+            DesktopNotification::fixture(1, "Nickel", "Workbench notification", body, actions);
         let mut app = NotificationApp::new(palette());
-        let notification = store.newest();
-        app.sync(notification.as_ref(), palette());
+        app.sync(Some(&notification), palette());
         app
     }
     fn surface_size() -> (u32, u32) {
