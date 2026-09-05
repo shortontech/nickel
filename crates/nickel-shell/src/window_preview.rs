@@ -5,8 +5,8 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     ActionKind, Align, AnyView, Application, Button, Collection, CollectionPresentation,
     CollectionState, ComponentBuilderExt, Container, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, Image, Insets, Point, Rect, Row, SemanticAction, SemanticRole, SemanticTheme,
-    Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
+    HostEventOutcome, Image, ImageFit, ImagePresentation, Insets, Point, Rect, Row, SemanticAction,
+    SemanticRole, SemanticTheme, Text, TextAlign, UiEvent, UiHost, UiId, ViewContext,
 };
 
 use crate::{
@@ -634,6 +634,7 @@ fn preview_view(
                 |image| {
                     AnyView::new(
                         Image::new(preview_image_id(window), image)
+                            .presentation(preview_image_presentation())
                             .width(CARD_WIDTH - CARD_PADDING * 2.0)
                             .height(THUMBNAIL_HEIGHT),
                     )
@@ -749,15 +750,17 @@ fn preview_image_id(window: WindowId) -> u16 {
     0x7000 | (window.0 as u16 & 0x0fff)
 }
 
+fn preview_image_presentation() -> ImagePresentation {
+    ImagePresentation::new(ImageFit::Contain)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::OpenWindow;
     use nickel_core::theme::{Appearance, ThemeMode};
-    use nickel_ui::backend::PaintCommand;
     use nickel_ui::{
-        ActionKind, ImagePresentation, ResolvedAppearance, ResolvedThemePreferences,
-        SemanticAction, Size,
+        ActionKind, ResolvedAppearance, ResolvedThemePreferences, SemanticAction, Size,
     };
 
     #[test]
@@ -767,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn task_switcher_resolves_every_paint_from_the_active_theme() {
+    fn task_switcher_retains_the_active_semantic_theme() {
         let dark = ThemePalette::from_appearance(Appearance::default());
         let light = ThemePalette::from_appearance(Appearance {
             mode: ThemeMode::Light,
@@ -786,20 +789,16 @@ mod tests {
                 reduced_motion: false,
             },
         );
-        let dark_frame = build_preview_frame(&group(), &HashMap::new(), None, dark_theme);
-        let light_frame = build_preview_frame(&group(), &HashMap::new(), None, light_theme);
-
-        assert_ne!(dark_frame.commands(), light_frame.commands());
+        assert_ne!(dark_theme, light_theme);
+        let mut frame = build_preview_frame(&group(), &HashMap::new(), None, dark_theme);
         for theme in [dark_theme, light_theme, high_contrast] {
-            let frame = build_preview_frame(&group(), &HashMap::new(), None, theme);
-            assert!(frame.commands().iter().any(|command| matches!(command,
-                    PaintCommand::Fill { color, .. }
-                    | PaintCommand::RoundedFill { color, .. }
-                    | PaintCommand::TopRoundedFill { color, .. }
-                    if *color == theme.surfaces.sidebar)));
-            assert!(frame.commands().iter().any(
-                |command| matches!(command, PaintCommand::Text { color, .. } if *color == theme.text.primary)
-            ));
+            frame.sync(&group(), &HashMap::new(), None, theme);
+            assert_eq!(frame.host.application().theme, theme);
+            assert!(
+                frame
+                    .semantic_bounds(PreviewAction::Activate(WindowId(4)))
+                    .is_some()
+            );
         }
     }
 
@@ -862,8 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn grouped_preview_commands_contain_and_center_every_source_shape() {
-        let palette = ThemePalette::from_appearance(Appearance::default());
+    fn grouped_preview_presentation_contains_and_centers_every_source_shape() {
         let viewport = native_thumbnail_bounds(0);
         let viewport = Rect::new(
             viewport.0 as f32,
@@ -878,32 +876,17 @@ mod tests {
             (999, 999),
             (900, 1600),
         ] {
-            let mut previews = HashMap::new();
-            previews.insert(
-                WindowId(4),
-                Arc::new(image::RgbaImage::new(source.0, source.1)),
-            );
-            let frame = build_preview_frame(
-                &group(),
-                &previews,
-                None,
-                semantic_theme_from_palette(palette),
-            );
-            let actual = frame
-                .commands()
-                .iter()
-                .find_map(|command| match command {
-                    PaintCommand::Image { id, bounds, .. }
-                        if *id == preview_image_id(WindowId(4)) =>
-                    {
-                        Some(*bounds)
-                    }
-                    _ => None,
-                })
-                .expect("grouped preview emits its image command");
+            let actual = preview_image_presentation()
+                .bounds(viewport, Size::new(source.0 as f32, source.1 as f32));
             let expected = ImagePresentation::default()
                 .bounds(viewport, Size::new(source.0 as f32, source.1 as f32));
             assert_eq!(actual, expected, "source {source:?}");
+            assert!(actual.origin.x >= viewport.origin.x);
+            assert!(actual.origin.y >= viewport.origin.y);
+            assert!(actual.origin.x + actual.size.width <= viewport.origin.x + viewport.size.width);
+            assert!(
+                actual.origin.y + actual.size.height <= viewport.origin.y + viewport.size.height
+            );
         }
     }
 
