@@ -58,6 +58,38 @@ pass, and the release binary is installed. A later SDDM/compositor restart must 
 the old shell is reaped and exactly one replacement starts before this native lifecycle criterion is
 closed.
 
+Subsequent installed-desktop testing on 2026-09-05 exposed three more interaction defects. Commit
+`86cb5f0` coalesces consecutive native pointer motion per surface/device without crossing input
+boundaries and routes desktop secondary input through the overlay host; its focused tests and strict
+Shell Clippy pass. Commit `0792c6e` makes repeated secondary presses atomically replace the current
+desktop menu and changes shared UI focus loss to dismiss every host-owned overlay, not only text
+context menus. Repeated right-click, right-click/outside-left-click/right-click, release/motion, and
+blur regressions pass, but installed visual confirmation remains queued. Commit `8db2855` adds
+bounded native launcher icon resolution for Linux `.desktop` and Windows `.lnk`, `.url`, and `.exe`
+entries, with Linux and native Windows tests and strict Clippy passing. Commit `667c9e9` additionally
+caches locale-appropriate freedesktop `Name` metadata in each directory snapshot instead of
+displaying opaque launcher filenames or reparsing files during paint. Its localized/fallback tests,
+full 145-test File suite, and strict Platform/File/Shell Clippy pass. The user confirmed the installed
+Linux desktop now shows human launcher names; icon appearance and menu behavior remain queued.
+
+The same live pass found that `.desktop` activation opened the launcher source in VS Code. Commit
+`238448c` classifies Linux desktop entries as launch targets and delegates execution to `gio launch`
+without shell parsing; ordinary documents retain default-association behavior. Commit `5ce483c`
+makes the desktop overlay own complete pointer transactions so a Rename-row click cannot reach an
+icon geometrically beneath it; the real rendered-row regression, full 263-test Shell suite, and
+strict Shell Clippy pass. Commit `ef3c0ad` fixes repeated artwork disappearance by retaining cached
+icons across metadata-only directory invalidations and evicting only removed or meaningfully changed
+entries. Installed confirmation of launcher execution, click containment, and stable artwork remains
+queued.
+
+Chrome Wayland upload and VS Code dirty-tab close then exposed invisible modal children: window
+grouping admitted a second identity and Alt+` listed it without a preview, while the taskbar preview
+path saw only the presentable parent. Commit `c28a262` fixes initial commits for registered-but-yet-
+unmapped xdg toplevels, advertises `xdg-dialog-v1`, centers/constrains children relative to parents,
+and raises/focuses modal children. The complete Session suite passed 204 tests with one ignored
+release benchmark and strict all-target/all-feature Clippy passed. Native Chrome portal chooser and
+VS Code confirmation acceptance require a compositor/session restart with the installed binary.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
