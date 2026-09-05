@@ -57,6 +57,7 @@ pub struct CompositorShortcutAdapter {
     owned_keys: BTreeSet<KeyCode>,
     switch_active: bool,
     launcher_visible: bool,
+    super_chorded: bool,
 }
 
 impl Default for CompositorShortcutAdapter {
@@ -70,6 +71,7 @@ impl Default for CompositorShortcutAdapter {
             owned_keys: BTreeSet::new(),
             switch_active: false,
             launcher_visible: false,
+            super_chorded: false,
         };
         for registration in compositor_registrations() {
             let action = registration.action;
@@ -85,6 +87,12 @@ impl Default for CompositorShortcutAdapter {
 impl CompositorShortcutAdapter {
     pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
         let suppress_owned = self.event_is_owned(key) || self.owned_keys.contains(&key);
+        if edge == KeyEdge::Pressed
+            && !matches!(key, KeyCode::SuperLeft | KeyCode::SuperRight)
+            && self.engine.modifiers().aggregate(AggregateModifier::Super)
+        {
+            self.super_chorded = true;
+        }
         self.next_order = self.next_order.saturating_add(1);
         let event = InputEvent::Key(shared_key_event(
             key,
@@ -128,6 +136,9 @@ impl CompositorShortcutAdapter {
             self.engine
                 .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperRight, false);
         }
+        if !self.engine.modifiers().aggregate(AggregateModifier::Super) {
+            self.super_chorded = false;
+        }
         match edge {
             KeyEdge::Pressed if suppress => {
                 self.owned_keys.insert(key);
@@ -142,6 +153,9 @@ impl CompositorShortcutAdapter {
 
     pub fn handle_unmapped(&mut self, edge: KeyEdge) -> HotkeyOutcome {
         if edge == KeyEdge::Pressed {
+            if self.engine.modifiers().aggregate(AggregateModifier::Super) {
+                self.super_chorded = true;
+            }
             self.engine.chord_held_modifiers();
         }
         HotkeyOutcome::default()
@@ -167,6 +181,7 @@ impl CompositorShortcutAdapter {
         };
         HotkeySnapshot {
             super_held: self.engine.modifiers().aggregate(AggregateModifier::Super),
+            super_chorded: self.super_chorded,
             alt_held: self.engine.modifiers().aggregate(AggregateModifier::Alt),
             shift_held: self.engine.modifiers().aggregate(AggregateModifier::Shift),
             control_held: self
@@ -182,7 +197,6 @@ impl CompositorShortcutAdapter {
             right_held: held(KeyCode::ArrowRight),
             switch_active: self.switch_active,
             launcher_visible: self.launcher_visible,
-            ..HotkeySnapshot::default()
         }
     }
 
@@ -191,6 +205,7 @@ impl CompositorShortcutAdapter {
             return false;
         }
         self.engine.chord_held_modifiers();
+        self.super_chorded = true;
         true
     }
 
@@ -226,6 +241,7 @@ impl CompositorShortcutAdapter {
     pub fn reset_pressed_state(&mut self) {
         self.engine.reset();
         self.switch_active = false;
+        self.super_chorded = false;
         self.owned_keys.clear();
         self.registrations.reset_edges();
     }
@@ -235,64 +251,17 @@ impl CompositorShortcutAdapter {
     pub fn reset_chord_state_preserving_owned_releases(&mut self) {
         self.engine.reset();
         self.switch_active = false;
+        self.super_chorded = false;
         self.registrations.reset_edges();
     }
 
     fn event_is_owned(&self, key: KeyCode) -> bool {
-        let modifiers = self.engine.modifiers();
-        match key {
-            KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen => {
-                modifiers.aggregate(AggregateModifier::Alt) || key == KeyCode::PrintScreen
-            }
-            KeyCode::KeyR
-            | KeyCode::KeyA
-            | KeyCode::KeyD
-            | KeyCode::KeyE
-            | KeyCode::KeyI
-            | KeyCode::KeyN
-            | KeyCode::KeyP => modifiers.aggregate(AggregateModifier::Super),
-            KeyCode::KeyL => {
-                modifiers.aggregate(AggregateModifier::Super)
-                    || (modifiers.aggregate(AggregateModifier::Control)
-                        && modifiers.aggregate(AggregateModifier::Alt))
-            }
-            KeyCode::ArrowLeft | KeyCode::ArrowRight => {
-                modifiers.aggregate(AggregateModifier::Super)
-                    || (modifiers.aggregate(AggregateModifier::Control)
-                        && modifiers.aggregate(AggregateModifier::Alt))
-            }
-            KeyCode::ArrowUp | KeyCode::ArrowDown => modifiers.aggregate(AggregateModifier::Super),
-            KeyCode::F4 => {
-                modifiers.aggregate(AggregateModifier::Alt)
-                    || (modifiers.aggregate(AggregateModifier::Super)
-                        && modifiers.aggregate(AggregateModifier::Control))
-            }
-            KeyCode::Space => modifiers.aggregate(AggregateModifier::Alt),
-            KeyCode::Digit0
-            | KeyCode::Digit1
-            | KeyCode::Digit2
-            | KeyCode::Digit3
-            | KeyCode::Digit4
-            | KeyCode::Digit5
-            | KeyCode::Digit6
-            | KeyCode::Digit7
-            | KeyCode::Digit8
-            | KeyCode::Digit9
-            | KeyCode::Numpad0
-            | KeyCode::Numpad1
-            | KeyCode::Numpad2
-            | KeyCode::Numpad3
-            | KeyCode::Numpad4
-            | KeyCode::Numpad5
-            | KeyCode::Numpad6
-            | KeyCode::Numpad7
-            | KeyCode::Numpad8
-            | KeyCode::Numpad9 => {
-                modifiers.aggregate(AggregateModifier::Control)
-                    && modifiers.aggregate(AggregateModifier::Alt)
-            }
-            _ => false,
-        }
+        // Exact registered chords are owned by the engine and retained in
+        // `owned_keys` through their release. The modifier-only launcher
+        // gesture is the sole key whose physical edges are independently
+        // owned; guessing ownership from a partial modifier set would swallow
+        // conflicting, unregistered chords.
+        matches!(key, KeyCode::SuperLeft | KeyCode::SuperRight)
     }
 }
 
@@ -353,6 +322,7 @@ impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
     fn reset(&mut self) {
         self.engine.reset();
         self.switch_active = false;
+        self.super_chorded = false;
         self.owned_keys.clear();
         self.registrations.reset_edges();
     }
@@ -746,7 +716,10 @@ mod tests {
         adapter.reset();
         assert_eq!(
             adapter.handle(KeyCode::SuperLeft, KeyEdge::Released),
-            HotkeyOutcome::default()
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
         );
     }
 
@@ -837,14 +810,17 @@ mod tests {
             let mut controller = CompositorShortcutAdapter::default();
             assert_eq!(
                 controller.handle(key, KeyEdge::Pressed),
-                HotkeyOutcome::default()
+                HotkeyOutcome {
+                    action: None,
+                    suppress: true,
+                }
             );
             let released = controller.handle(key, KeyEdge::Released);
             assert_eq!(
                 released,
                 HotkeyOutcome {
                     action: Some(HotkeyAction::ToggleLauncher),
-                    suppress: false,
+                    suppress: true,
                 }
             );
             controller.launcher_visibility_applied(true);
@@ -853,10 +829,35 @@ mod tests {
                 controller.handle(key, KeyEdge::Released),
                 HotkeyOutcome {
                     action: Some(HotkeyAction::ToggleLauncher),
-                    suppress: false,
+                    suppress: true,
                 }
             );
         }
+    }
+
+    #[test]
+    fn super_edges_stay_owned_after_a_completed_chord() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        assert!(
+            adapter
+                .handle(KeyCode::SuperLeft, KeyEdge::Pressed)
+                .suppress
+        );
+        assert_eq!(
+            adapter.handle(KeyCode::KeyE, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::OpenFiles),
+                suppress: true,
+            }
+        );
+        assert!(adapter.handle(KeyCode::KeyE, KeyEdge::Released).suppress);
+        assert_eq!(
+            adapter.handle(KeyCode::SuperLeft, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
     }
 
     #[test]
@@ -869,6 +870,45 @@ mod tests {
                 .handle(KeyCode::SuperLeft, KeyEdge::Released)
                 .action,
             None
+        );
+    }
+
+    #[test]
+    fn super_chord_diagnostics_follow_mapped_unmapped_and_reset_paths() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        adapter.handle(KeyCode::SuperRight, KeyEdge::Pressed);
+        assert!(!adapter.snapshot().super_chorded);
+        adapter.handle_unmapped(KeyEdge::Pressed);
+        assert!(adapter.snapshot().super_chorded);
+        adapter.reset_pressed_state();
+        assert!(!adapter.snapshot().super_chorded);
+
+        adapter.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
+        adapter.handle(KeyCode::KeyE, KeyEdge::Pressed);
+        assert!(adapter.snapshot().super_chorded);
+        adapter.handle(KeyCode::SuperLeft, KeyEdge::Released);
+        assert!(!adapter.snapshot().super_chorded);
+    }
+
+    #[test]
+    fn extra_modifier_does_not_dispatch_a_different_owned_action() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        adapter.handle(KeyCode::SuperLeft, KeyEdge::Pressed);
+        adapter.handle(KeyCode::ControlLeft, KeyEdge::Pressed);
+        assert_eq!(
+            adapter.handle(KeyCode::KeyE, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: None,
+                suppress: false,
+            }
+        );
+        assert!(adapter.snapshot().super_chorded);
+        assert_eq!(
+            adapter.handle(KeyCode::SuperLeft, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
         );
     }
 
@@ -1262,7 +1302,10 @@ mod tests {
         );
         assert_eq!(
             controller.handle(KeyCode::SuperLeft, KeyEdge::Released),
-            HotkeyOutcome::default()
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
         );
     }
 

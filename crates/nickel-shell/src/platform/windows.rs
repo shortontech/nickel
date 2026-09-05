@@ -1165,6 +1165,7 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
         PhysicalKey::Code(key) => Some(key),
         PhysicalKey::Native(_) => None,
     };
+    let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
     if edge == KeyEdge::Released {
         let release_timer = match key {
             Some(KeyCode::SuperLeft | KeyCode::SuperRight) => {
@@ -1181,6 +1182,12 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
             unsafe {
                 let actual_id = SetTimer(None, requested_id, 10, None);
                 timer_id.store(actual_id, Ordering::Release);
+            }
+            // Nickel owns the modifier-only Super gesture. Its release is
+            // reconciled by the timer above, but must not escape to the host
+            // shell while that reconciliation is pending.
+            if super_edge {
+                return LRESULT(1);
             }
             return unsafe { CallNextHookEx(None, code, wparam, lparam) };
         }
@@ -1234,7 +1241,10 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     if key != Some(KeyCode::KeyR) {
         trace_input("key", key, Some(edge), outcome, snapshot);
     }
-    let suppress = outcomes.iter().any(|outcome| outcome.suppress);
+    // The shared modifier-release binding deliberately dispatches only on the
+    // release edge. Ownership still covers the preceding Super press so the
+    // native Start menu cannot open alongside Nickel's launcher.
+    let suppress = super_edge || outcomes.iter().any(|outcome| outcome.suppress);
     send_hotkey_outcomes(outcomes);
     if suppress {
         LRESULT(1)
