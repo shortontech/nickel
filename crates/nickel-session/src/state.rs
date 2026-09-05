@@ -1078,6 +1078,24 @@ fn shell_registration_role_changed(
         .is_some_and(|registration| Some(registration.role) != next_role)
 }
 
+fn shell_registration_is_active(
+    registration: &RegisteredShellRole,
+    output_names: &HashSet<String>,
+    expected_panel_outputs: &HashSet<String>,
+) -> bool {
+    match registration.role {
+        ShellRole::Desktop | ShellRole::Lock => registration
+            .output
+            .as_ref()
+            .is_some_and(|output| output_names.contains(output)),
+        ShellRole::Panel => registration
+            .output
+            .as_ref()
+            .is_some_and(|output| expected_panel_outputs.contains(output)),
+        _ => true,
+    }
+}
+
 pub struct SurfaceBufferCommit {
     pub surface: WlSurface,
     pub render_visible: bool,
@@ -2491,16 +2509,18 @@ impl NickelSession {
         let registry = self.windows.snapshot();
         let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         let output_names = outputs.iter().map(Output::name).collect::<Vec<_>>();
-        self.shell_windows()
+        let mut registered_surfaces = HashSet::new();
+        let mut snapshots = self
+            .shell_windows()
             .filter_map(|window| {
-                let id = window
-                    .wl_surface()
-                    .and_then(|surface| self.surface_windows.get(&surface.id()))?;
+                let surface = window.wl_surface()?;
+                let id = self.surface_windows.get(&surface.id())?;
                 let app_id = registry
                     .iter()
                     .find(|entry| entry.id == *id)
                     .map(|entry| entry.app_id.as_str())?;
                 let role = ShellRole::from_application_id(app_id)?;
+                registered_surfaces.insert(surface.id());
                 let bounds = self.space.element_bbox(window);
                 let geometry = bounds.map(|bounds| ProtocolGeometry {
                     x: bounds.loc.x,
@@ -2540,7 +2560,24 @@ impl NickelSession {
                 })
             })
             .take(nickel_session_protocol::MAX_WINDOWS)
-            .collect()
+            .collect::<Vec<_>>();
+
+        // Registration is the shell protocol's surface authority. During the
+        // startup barrier (and briefly while an output is being retired), a
+        // valid role can exist before its first buffer maps a `Window`.
+        for registration in &self.registered_shell_role_slots {
+            if snapshots.len() == nickel_session_protocol::MAX_WINDOWS {
+                break;
+            }
+            if registered_surfaces.insert(registration.surface.clone()) {
+                snapshots.push(ShellSurfaceSnapshot {
+                    role: registration.role,
+                    geometry: None,
+                    output: registration.output.clone(),
+                });
+            }
+        }
+        snapshots
     }
 
     pub(crate) fn protocol_shell_readiness(
@@ -2562,11 +2599,33 @@ impl NickelSession {
             )
             .unwrap_or(u16::MAX)
         };
+        let output_names = self
+            .space
+            .outputs()
+            .map(|output| output.name())
+            .collect::<HashSet<_>>();
+        let settings = ShellSettings::load_default();
+        let expected_panel_outputs = if settings.bar_on_all_displays {
+            output_names.clone()
+        } else {
+            self.primary_output_name
+                .clone()
+                .or_else(|| output_names.iter().min().cloned())
+                .into_iter()
+                .collect::<HashSet<_>>()
+        };
         let registered_role_count = |role| {
             u16::try_from(
                 self.registered_shell_role_slots
                     .iter()
-                    .filter(|registration| registration.role == role)
+                    .filter(|registration| {
+                        registration.role == role
+                            && shell_registration_is_active(
+                                registration,
+                                &output_names,
+                                &expected_panel_outputs,
+                            )
+                    })
                     .count(),
             )
             .unwrap_or(u16::MAX)
@@ -2602,26 +2661,18 @@ impl NickelSession {
         ]
         .into_iter()
         .all(|role| registered_role_count(role) == 1 && role_count(role) <= 1);
-        let output_names = self
-            .space
-            .outputs()
-            .map(|output| output.name())
-            .collect::<HashSet<_>>();
-        let settings = ShellSettings::load_default();
-        let expected_panel_outputs = if settings.bar_on_all_displays {
-            output_names.clone()
-        } else {
-            self.primary_output_name
-                .clone()
-                .or_else(|| output_names.iter().min().cloned())
-                .into_iter()
-                .collect::<HashSet<_>>()
-        };
         let expected_panels = u16::try_from(expected_panel_outputs.len()).unwrap_or(u16::MAX);
         let registered_role_outputs = |role| {
             self.registered_shell_role_slots
                 .iter()
-                .filter(|registration| registration.role == role)
+                .filter(|registration| {
+                    registration.role == role
+                        && shell_registration_is_active(
+                            registration,
+                            &output_names,
+                            &expected_panel_outputs,
+                        )
+                })
                 .filter_map(|registration| registration.output.clone())
                 .collect::<HashSet<_>>()
         };
@@ -6164,9 +6215,9 @@ mod protocol_tests {
         protocol_preview_from_cached, record_preview_capture_attempt,
         restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
         retire_pointer_surface, retire_shell_surface, reuse_preview_pixels,
-        shell_registration_rejection, shell_registration_role_changed,
-        shell_role_accepts_ordinary_focus, shell_surface_output_from_title,
-        test_control_may_invoke,
+        shell_registration_is_active, shell_registration_rejection,
+        shell_registration_role_changed, shell_role_accepts_ordinary_focus,
+        shell_surface_output_from_title, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
@@ -6298,6 +6349,113 @@ mod protocol_tests {
             &surface,
             None
         ));
+    }
+
+    #[test]
+    fn disconnected_output_roles_are_dormant_until_the_output_returns() {
+        let registrations = [
+            RegisteredShellRole {
+                role: ShellRole::Desktop,
+                output: Some("winit".into()),
+                surface: ObjectId::null(),
+            },
+            RegisteredShellRole {
+                role: ShellRole::Desktop,
+                output: Some("DP-test".into()),
+                surface: ObjectId::null(),
+            },
+            RegisteredShellRole {
+                role: ShellRole::Panel,
+                output: Some("DP-test".into()),
+                surface: ObjectId::null(),
+            },
+            RegisteredShellRole {
+                role: ShellRole::Lock,
+                output: Some("DP-test".into()),
+                surface: ObjectId::null(),
+            },
+        ];
+        let connected = HashSet::from(["winit".to_owned(), "DP-test".to_owned()]);
+        assert!(registrations.iter().all(|registration| {
+            shell_registration_is_active(registration, &connected, &connected)
+        }));
+
+        let after_disconnect = HashSet::from(["winit".to_owned()]);
+        assert!(shell_registration_is_active(
+            &registrations[0],
+            &after_disconnect,
+            &after_disconnect,
+        ));
+        assert!(registrations[1..].iter().all(|registration| {
+            !shell_registration_is_active(registration, &after_disconnect, &after_disconnect)
+        }));
+
+        // Keeping the slots dormant preserves the shell's bounded reconnect
+        // grace: the same native surfaces become authoritative again if the
+        // named output returns instead of requiring an app-id transition.
+        assert!(registrations.iter().all(|registration| {
+            shell_registration_is_active(registration, &connected, &connected)
+        }));
+    }
+
+    #[test]
+    fn panel_registration_tracks_the_configured_output_set() {
+        let registration = RegisteredShellRole {
+            role: ShellRole::Panel,
+            output: Some("DP-test".into()),
+            surface: ObjectId::null(),
+        };
+        let connected = HashSet::from(["winit".to_owned(), "DP-test".to_owned()]);
+        let primary_only = HashSet::from(["winit".to_owned()]);
+        assert!(!shell_registration_is_active(
+            &registration,
+            &connected,
+            &primary_only,
+        ));
+        assert!(shell_registration_is_active(
+            &registration,
+            &connected,
+            &connected,
+        ));
+    }
+
+    #[test]
+    fn locked_test_output_disconnect_projects_readiness_to_live_topology() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "DP-test".into(),
+                logical_width: 640,
+                logical_height: 480,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        for role in [ShellRole::Desktop, ShellRole::Panel, ShellRole::Lock] {
+            session
+                .registered_shell_role_slots
+                .push(RegisteredShellRole {
+                    role,
+                    output: Some("DP-test".into()),
+                    surface: ObjectId::null(),
+                });
+        }
+        let connected = session.protocol_shell_readiness();
+        assert_eq!((connected.outputs, connected.desktops), (1, 1));
+        assert_eq!((connected.panels, connected.locks), (1, 1));
+
+        session.locked = true;
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "DP-test".into(),
+            })
+            .unwrap();
+
+        let disconnected = session.protocol_shell_readiness();
+        assert_eq!((disconnected.outputs, disconnected.desktops), (0, 0));
+        assert_eq!((disconnected.panels, disconnected.locks), (0, 0));
+        assert!(session.registered_shell_role_slots.len() == 3);
     }
 
     #[test]
