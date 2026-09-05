@@ -4,7 +4,7 @@
 //! types. Adapters retain responsibility for converting native events, while
 //! consumers bind normalized shortcuts to their own typed actions.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -13,6 +13,7 @@ pub mod controller;
 pub mod gilrs;
 pub mod global;
 #[cfg(feature = "windows")]
+#[cfg_attr(target_os = "windows", allow(unsafe_code))]
 pub mod windows;
 #[cfg(feature = "winit")]
 pub mod winit;

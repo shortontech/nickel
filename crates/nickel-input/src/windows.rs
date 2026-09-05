@@ -412,11 +412,330 @@ const ALL_FUNCTIONS: [KeyCode; 12] = [
     KeyCode::F12,
 ];
 
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeModifierRelease {
+    SuperOwned,
+    AltForwarded,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn native_modifier_release(virtual_key: u32) -> Option<NativeModifierRelease> {
+    match virtual_key {
+        0x5b | 0x5c => Some(NativeModifierRelease::SuperOwned),
+        0x12 | 0xa4 | 0xa5 => Some(NativeModifierRelease::AltForwarded),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod native_runtime {
+    use std::sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use windows::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        UI::{
+            Input::KeyboardAndMouse::{
+                GetAsyncKeyState, MOD_NOREPEAT, MOD_WIN, RegisterHotKey, UnregisterHotKey,
+            },
+            WindowsAndMessaging::{
+                CallNextHookEx, GetMessageW, KBDLLHOOKSTRUCT, KillTimer, MSG, MSLLHOOKSTRUCT,
+                SetTimer, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WH_MOUSE_LL,
+                WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+            },
+        },
+    };
+
+    use crate::AggregateModifier;
+
+    use super::{KeyEdge, NativeKeyboardEvent, NativeModifierRelease, native_modifier_release};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum HookDisposition {
+        Forward,
+        Suppress,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum NativePointerKind {
+        Moved,
+        PrimaryPressed,
+        PrimaryReleased,
+        SecondaryPressed,
+        SecondaryReleased,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NativePointerEvent {
+        pub kind: NativePointerKind,
+        pub x: i32,
+        pub y: i32,
+        pub time: u32,
+        pub super_physically_held: bool,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NativeHotkeyRegistration {
+        pub id: i32,
+        pub virtual_key: u32,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct NativeHookReadiness {
+        pub registered_hotkey: bool,
+        pub pointer_hook: bool,
+    }
+
+    #[derive(Clone)]
+    pub struct NativeHookCallbacks {
+        pub keyboard: Arc<dyn Fn(NativeKeyboardEvent, bool, bool) -> HookDisposition + Send + Sync>,
+        pub modifier_released: Arc<dyn Fn(AggregateModifier) + Send + Sync>,
+        pub pointer: Arc<dyn Fn(NativePointerEvent) -> HookDisposition + Send + Sync>,
+        pub registered_hotkey: Arc<dyn Fn(i32) + Send + Sync>,
+        pub ready: Arc<dyn Fn(Result<NativeHookReadiness, String>) + Send + Sync>,
+    }
+
+    static CALLBACKS: OnceLock<Mutex<Option<NativeHookCallbacks>>> = OnceLock::new();
+    static REGISTERED_HOTKEY_ID: AtomicUsize = AtomicUsize::new(0);
+    static SUPER_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
+    static ALT_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
+    const SUPER_RELEASE_TIMER: usize = 0x4e04;
+    const ALT_RELEASE_TIMER: usize = 0x4e05;
+
+    fn callbacks() -> &'static Mutex<Option<NativeHookCallbacks>> {
+        CALLBACKS.get_or_init(Default::default)
+    }
+
+    fn with_callbacks<T>(map: impl FnOnce(&NativeHookCallbacks) -> T) -> Option<T> {
+        callbacks().lock().ok()?.as_ref().map(map)
+    }
+
+    unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code < 0 {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
+        // SAFETY: WH_KEYBOARD_LL supplies a KBDLLHOOKSTRUCT pointer for the synchronous callback.
+        let native = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
+        let message = wparam.0 as u32;
+        let edge = if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN) {
+            KeyEdge::Pressed
+        } else if matches!(message, WM_KEYUP | WM_SYSKEYUP) {
+            KeyEdge::Released
+        } else {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        };
+        if edge == KeyEdge::Released {
+            let timer = match native_modifier_release(native.vkCode) {
+                Some(NativeModifierRelease::SuperOwned) => {
+                    Some((SUPER_RELEASE_TIMER, &SUPER_RELEASE_TIMER_ID, true))
+                }
+                Some(NativeModifierRelease::AltForwarded) => {
+                    Some((ALT_RELEASE_TIMER, &ALT_RELEASE_TIMER_ID, false))
+                }
+                _ => None,
+            };
+            if let Some((requested, retained, suppress)) = timer {
+                // SAFETY: this hook thread owns the message queue receiving the timer callback.
+                let timer_id = unsafe { SetTimer(None, requested, 10, None) };
+                retained.store(timer_id, Ordering::Release);
+                if timer_id == 0 {
+                    let modifier = if requested == SUPER_RELEASE_TIMER {
+                        AggregateModifier::Super
+                    } else {
+                        AggregateModifier::Alt
+                    };
+                    with_callbacks(|callbacks| (callbacks.modifier_released)(modifier));
+                }
+                // Nickel owns the Super chord from press through release, preventing the native
+                // Start menu from racing the deferred bare-Super decision. Alt remains visible to
+                // applications while its two physical sides settle.
+                if suppress {
+                    return LRESULT(1);
+                }
+                return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+            }
+        }
+        let event = NativeKeyboardEvent {
+            virtual_key: native.vkCode,
+            scan_code: native.scanCode,
+            extended: native.flags.0 & 1 != 0,
+            edge,
+            injected: native.flags.0 & 0x10 != 0,
+        };
+        let registered = REGISTERED_HOTKEY_ID.load(Ordering::Acquire) != 0 && native.vkCode == 0x52;
+        // SAFETY: this is a read-only query used to reconcile hook ordering.
+        let alt_physically_held = unsafe { GetAsyncKeyState(0x12) < 0 };
+        if with_callbacks(|callbacks| (callbacks.keyboard)(event, registered, alt_physically_held))
+            == Some(HookDisposition::Suppress)
+        {
+            LRESULT(1)
+        } else {
+            unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        }
+    }
+
+    unsafe extern "system" fn pointer_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code < 0 {
+            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        }
+        let kind = match wparam.0 as u32 {
+            WM_MOUSEMOVE => NativePointerKind::Moved,
+            WM_LBUTTONDOWN => NativePointerKind::PrimaryPressed,
+            WM_LBUTTONUP => NativePointerKind::PrimaryReleased,
+            WM_RBUTTONDOWN => NativePointerKind::SecondaryPressed,
+            WM_RBUTTONUP => NativePointerKind::SecondaryReleased,
+            _ => return unsafe { CallNextHookEx(None, code, wparam, lparam) },
+        };
+        // SAFETY: WH_MOUSE_LL supplies an MSLLHOOKSTRUCT pointer for the synchronous callback.
+        let native = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+        // SAFETY: GetAsyncKeyState is a read-only query for the current desktop input state.
+        let super_physically_held =
+            unsafe { GetAsyncKeyState(0x5b) < 0 || GetAsyncKeyState(0x5c) < 0 };
+        let event = NativePointerEvent {
+            kind,
+            x: native.pt.x,
+            y: native.pt.y,
+            time: native.time,
+            super_physically_held,
+        };
+        if with_callbacks(|callbacks| (callbacks.pointer)(event)) == Some(HookDisposition::Suppress)
+        {
+            LRESULT(1)
+        } else {
+            unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        }
+    }
+
+    fn reconcile_modifier_release(timer: usize) {
+        let super_timer = SUPER_RELEASE_TIMER_ID.load(Ordering::Acquire);
+        let alt_timer = ALT_RELEASE_TIMER_ID.load(Ordering::Acquire);
+        // SAFETY: these are read-only physical key-state queries on the hook thread.
+        let released = unsafe {
+            if timer == super_timer && super_timer != 0 {
+                GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0
+            } else if timer == alt_timer && alt_timer != 0 {
+                GetAsyncKeyState(0x12) >= 0
+            } else {
+                return;
+            }
+        };
+        if !released {
+            return;
+        }
+        // SAFETY: timer is a nonzero id returned by SetTimer on this thread.
+        unsafe {
+            let _ = KillTimer(None, timer);
+        }
+        let modifier = if timer == super_timer {
+            SUPER_RELEASE_TIMER_ID.store(0, Ordering::Release);
+            AggregateModifier::Super
+        } else {
+            ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
+            AggregateModifier::Alt
+        };
+        with_callbacks(|callbacks| (callbacks.modifier_released)(modifier));
+    }
+
+    pub fn run_native_hook_loop(
+        callbacks_value: NativeHookCallbacks,
+        hotkey: NativeHotkeyRegistration,
+    ) {
+        let ready = Arc::clone(&callbacks_value.ready);
+        let Ok(mut slot) = callbacks().lock() else {
+            ready(Err("Windows input callback state is poisoned".into()));
+            return;
+        };
+        if slot.is_some() {
+            ready(Err("Windows input hook loop is already active".into()));
+            return;
+        }
+        *slot = Some(callbacks_value);
+        drop(slot);
+
+        // SAFETY: callbacks have process lifetime through CALLBACKS while this loop is active.
+        let keyboard = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_hook), None, 0) };
+        let Ok(keyboard) = keyboard else {
+            *callbacks()
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = None;
+            ready(Err("failed to register the Windows keyboard hook".into()));
+            return;
+        };
+        // SAFETY: same lifetime contract as the keyboard hook.
+        let pointer = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(pointer_hook), None, 0) }.ok();
+        // SAFETY: this thread owns registration and its message queue.
+        let registered =
+            unsafe { RegisterHotKey(None, hotkey.id, MOD_WIN | MOD_NOREPEAT, hotkey.virtual_key) }
+                .is_ok();
+        REGISTERED_HOTKEY_ID.store(
+            if registered { hotkey.id as usize } else { 0 },
+            Ordering::Release,
+        );
+        ready(Ok(NativeHookReadiness {
+            registered_hotkey: registered,
+            pointer_hook: pointer.is_some(),
+        }));
+
+        let mut message = MSG::default();
+        // SAFETY: message is writable storage owned by this thread.
+        while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
+            if message.message == WM_HOTKEY && message.wParam.0 as i32 == hotkey.id {
+                with_callbacks(|callbacks| (callbacks.registered_hotkey)(hotkey.id));
+            } else if message.message == WM_TIMER {
+                reconcile_modifier_release(message.wParam.0);
+            }
+        }
+        REGISTERED_HOTKEY_ID.store(0, Ordering::Release);
+        // SAFETY: these handles were returned to this thread and have not been unhooked.
+        unsafe {
+            if registered {
+                let _ = UnregisterHotKey(None, hotkey.id);
+            }
+            let _ = UnhookWindowsHookEx(keyboard);
+            if let Some(pointer) = pointer {
+                let _ = UnhookWindowsHookEx(pointer);
+            }
+        }
+        *callbacks()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub use native_runtime::{
+    HookDisposition, NativeHookCallbacks, NativeHookReadiness, NativeHotkeyRegistration,
+    NativePointerEvent, NativePointerKind, run_native_hook_loop,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{AggregateModifier, Shortcut, ShortcutKey, ShortcutTrigger};
     use std::collections::BTreeSet;
+
+    #[test]
+    fn native_modifier_release_contract_owns_super_but_forwards_alt() {
+        assert_eq!(
+            native_modifier_release(0x5b),
+            Some(NativeModifierRelease::SuperOwned)
+        );
+        assert_eq!(
+            native_modifier_release(0x5c),
+            Some(NativeModifierRelease::SuperOwned)
+        );
+        for virtual_key in [0x12, 0xa4, 0xa5] {
+            assert_eq!(
+                native_modifier_release(virtual_key),
+                Some(NativeModifierRelease::AltForwarded)
+            );
+        }
+        assert_eq!(native_modifier_release(0x52), None);
+    }
 
     #[test]
     fn translates_modifier_sides_layout_stable_grave_and_unknown_keys() {

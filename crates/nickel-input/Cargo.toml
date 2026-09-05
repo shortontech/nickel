@@ -18,3 +18,10 @@ gilrs = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

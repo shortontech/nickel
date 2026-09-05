@@ -4,7 +4,7 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::PathBuf,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::Ordering,
         mpsc::{self, Receiver, Sender},
     },
@@ -51,8 +51,7 @@ use windows::{
         UI::{
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
-                GetAsyncKeyState, GetCapture, MOD_NOREPEAT, MOD_WIN, RegisterHotKey,
-                ReleaseCapture, SetCapture, SetFocus,
+                GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, SetFocus,
             },
             Shell::{
                 ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
@@ -63,28 +62,25 @@ use windows::{
                 SHGetFileInfoW, ShellExecuteW,
             },
             WindowsAndMessaging::{
-                BringWindowToTop, CallNextHookEx, CallWindowProcW, CopyImage, CreateWindowExW,
-                DI_NORMAL, DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT,
-                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
-                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
-                GetLastActivePopup, GetMessageW, GetSystemMenu, GetSystemMetrics,
-                GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-                GetWindowThreadProcessId, HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT,
-                HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST,
-                IMAGE_ICON, IsIconic, IsWindow, IsWindowVisible, IsZoomed, KBDLLHOOKSTRUCT,
-                KillTimer, LR_COPYFROMRESOURCE, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, PostMessageW,
+                BringWindowToTop, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
+                GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
+                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
+                GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
+                HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
+                HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
+                IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA, PostMessageW,
                 RegisterClassW, RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON,
                 SM_CYICON, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
                 SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
-                SetTimer, SetWindowLongPtrW, SetWindowPos, SetWindowsHookExW, ShowWindow,
-                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
-                WH_KEYBOARD_LL, WH_MOUSE_LL, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-                WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND,
-                WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
-                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
+                WM_CONTEXTMENU, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
+                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
+                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
@@ -96,7 +92,11 @@ use nickel_core::hotkeys::{HotkeyAction, HotkeyOutcome, HotkeySnapshot, KeyCode,
 use nickel_input::{
     AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
-    windows::{NativeKeyboardEvent, SuperPointerGesture, WindowsInputAdapter, physical_key},
+    windows::{
+        HookDisposition, NativeHookCallbacks, NativeHotkeyRegistration, NativeKeyboardEvent,
+        NativePointerEvent, NativePointerKind, SuperPointerGesture, WindowsInputAdapter,
+        physical_key, run_native_hook_loop,
+    },
 };
 
 use crate::{
@@ -927,65 +927,64 @@ fn run_super_key_hook(
 ) {
     SHORTCUT_SENDER.set(sender).ok();
     let run = native_hotkey_requests()[0];
-    let modifiers = MOD_WIN | MOD_NOREPEAT;
-    let run_registered =
-        unsafe { RegisterHotKey(None, run.id, modifiers, run.virtual_key) }.is_ok();
-    let mut registrations = RegistrationTable::default();
-    let run_registration = native_registration(
-        &mut registrations,
-        run_registered,
-        run.key,
-        [AggregateModifier::Super],
-        run.action,
-    );
-    RUN_HOTKEY_REGISTERED.store(run_registered, std::sync::atomic::Ordering::Release);
-    if !run_registered {
-        tracing::warn!("Super+R registration unavailable; using low-level hook fallback");
-    }
-
-    // SAFETY: The callback remains valid for the process lifetime and this thread owns the
-    // message loop required by a low-level keyboard hook.
-    let hook = unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(super_key_hook), None, 0) };
-    let _hook = match hook {
-        Ok(hook) => hook,
-        Err(error) => {
-            let _ = startup.send(nickel_input::global::ShortcutCapability::Unavailable(
-                nickel_input::global::UnavailableReason::Backend(format!(
-                    "failed to register the Windows keyboard hook: {error}"
-                )),
-            ));
-            return;
-        }
-    };
-    let mouse_hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(windows_mouse_hook), None, 0) };
-    let _mouse_hook = match mouse_hook {
-        Ok(hook) => Some(hook),
-        Err(error) => {
-            tracing::warn!(%error, "failed to register Nickel's Windows mouse chord hook");
-            None
-        }
-    };
-    let _ = startup.send(nickel_input::global::ShortcutCapability::Available);
-    let mut message = MSG::default();
-    // SAFETY: message is valid writable storage for each synchronous call.
-    while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
-        if message.message == WM_HOTKEY {
-            match message.wParam.0 as i32 {
-                id if id == run.id => {
+    let registrations = Arc::new(Mutex::new((RegistrationTable::default(), None)));
+    let ready_registrations = Arc::clone(&registrations);
+    let activation_registrations = Arc::clone(&registrations);
+    let ready_run = run;
+    let activation_run = run;
+    run_native_hook_loop(
+        NativeHookCallbacks {
+            keyboard: Arc::new(handle_native_keyboard_hook),
+            modifier_released: Arc::new(handle_native_modifier_release),
+            pointer: Arc::new(handle_native_pointer_hook),
+            registered_hotkey: Arc::new(move |id| {
+                if id == activation_run.id
+                    && let Ok(mut registrations) = activation_registrations.lock()
+                {
+                    let registration = registrations.1;
                     deliver_registered_hotkey(
-                        &mut registrations,
-                        run_registration,
+                        &mut registrations.0,
+                        registration,
                         GlobalShortcutEdge::Activated,
                     );
                 }
-                _ => {}
-            }
-        } else if message.message == WM_TIMER {
-            reconcile_modifier_release(message.wParam.0);
-        }
-    }
-    registrations.clear();
-    RUN_HOTKEY_REGISTERED.store(false, Ordering::Release);
+            }),
+            ready: Arc::new(move |result| match result {
+                Ok(readiness) => {
+                    if !readiness.registered_hotkey {
+                        tracing::warn!(
+                            "Super+R registration unavailable; using low-level hook fallback"
+                        );
+                    }
+                    if !readiness.pointer_hook {
+                        tracing::warn!(
+                            "Windows pointer hook unavailable; Super+pointer gestures disabled"
+                        );
+                    }
+                    if let Ok(mut registrations) = ready_registrations.lock() {
+                        let registration = native_registration(
+                            &mut registrations.0,
+                            readiness.registered_hotkey,
+                            ready_run.key,
+                            [AggregateModifier::Super],
+                            ready_run.action,
+                        );
+                        registrations.1 = registration;
+                    }
+                    let _ = startup.send(nickel_input::global::ShortcutCapability::Available);
+                }
+                Err(error) => {
+                    let _ = startup.send(nickel_input::global::ShortcutCapability::Unavailable(
+                        nickel_input::global::UnavailableReason::Backend(error),
+                    ));
+                }
+            }),
+        },
+        NativeHotkeyRegistration {
+            id: run.id,
+            virtual_key: run.virtual_key,
+        },
+    );
     if let Ok(mut adapter) = windows_input_adapter().lock() {
         adapter.reset();
     }
@@ -1063,16 +1062,8 @@ fn deliver_registered_hotkey(
 static SHORTCUT_SENDER: std::sync::OnceLock<Sender<GlobalShortcut>> = std::sync::OnceLock::new();
 static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<HotkeyAction>>> =
     std::sync::OnceLock::new();
-static RUN_HOTKEY_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-const SUPER_RELEASE_TIMER: usize = 0x4e04;
-const ALT_RELEASE_TIMER: usize = 0x4e05;
-static SUPER_RELEASE_TIMER_ID: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-static ALT_RELEASE_TIMER_ID: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
 static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
@@ -1141,75 +1132,35 @@ struct TrayNotifyIconData {
     balloon_icon: u32,
 }
 
-unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    const VK_R: u32 = 0x52;
-    const VK_MENU: u32 = 0x12;
-
-    if code < 0 {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    }
-    // SAFETY: WH_KEYBOARD_LL supplies a KBDLLHOOKSTRUCT pointer in LPARAM.
-    let event = unsafe { &*(lparam.0 as *const KBDLLHOOKSTRUCT) };
-    let message = wparam.0 as u32;
-    let edge = if message == WM_KEYDOWN || message == WM_SYSKEYDOWN {
-        KeyEdge::Pressed
-    } else if message == WM_KEYUP || message == WM_SYSKEYUP {
-        KeyEdge::Released
-    } else {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    };
+fn handle_native_keyboard_hook(
+    event: NativeKeyboardEvent,
+    registered_hotkey_owned: bool,
+    alt_physically_held: bool,
+) -> HookDisposition {
     // Alt changes the layout-translated virtual key for the physical grave key on some layouts
     // (for example to VK_HANJA). Preserve the physical shortcut using its stable scan code.
-    let translated = physical_key(event.vkCode, event.scanCode, event.flags.0 & 1 != 0);
+    let translated = physical_key(event.virtual_key, event.scan_code, event.extended);
     let key = match translated {
         PhysicalKey::Code(key) => Some(key),
         PhysicalKey::Native(_) => None,
     };
     let super_edge = matches!(key, Some(KeyCode::SuperLeft | KeyCode::SuperRight));
-    if edge == KeyEdge::Released {
-        let release_timer = match key {
-            Some(KeyCode::SuperLeft | KeyCode::SuperRight) => {
-                Some((SUPER_RELEASE_TIMER, &SUPER_RELEASE_TIMER_ID))
-            }
-            Some(KeyCode::AltLeft | KeyCode::AltRight) => {
-                Some((ALT_RELEASE_TIMER, &ALT_RELEASE_TIMER_ID))
-            }
-            _ => None,
-        };
-        if let Some((requested_id, timer_id)) = release_timer {
-            // Taking focus for an overlay can emit an apparent modifier release while the key is
-            // physically held. Confirm the physical state asynchronously before ending a chord.
-            unsafe {
-                let actual_id = SetTimer(None, requested_id, 10, None);
-                timer_id.store(actual_id, Ordering::Release);
-            }
-            // Nickel owns the modifier-only Super gesture. Its release is
-            // reconciled by the timer above, but must not escape to the host
-            // shell while that reconciliation is pending.
-            if super_edge {
-                return LRESULT(1);
-            }
-            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-        }
-    }
-    if key == Some(KeyCode::KeyR)
-        && RUN_HOTKEY_REGISTERED.load(std::sync::atomic::Ordering::Acquire)
-    {
+    if key == Some(KeyCode::KeyR) && registered_hotkey_owned {
         if let Ok(mut adapter) = windows_input_adapter().lock() {
             // RegisterHotKey owns Super+R dispatch. The hook only records that another key joined
             // the Super press, preventing the later release from toggling the launcher.
-            adapter.observe_key_code(KeyCode::KeyR, edge);
+            adapter.observe_key_code(KeyCode::KeyR, event.edge);
         }
         // RegisterHotKey owns dispatch, while the hook owns suppression. The
         // shared adapter observes both edges only to maintain coherent state;
         // it cannot dispatch a second action on this path.
-        return LRESULT(1);
+        return HookDisposition::Suppress;
     }
     if matches!(
         key,
         Some(KeyCode::Tab | KeyCode::Backquote | KeyCode::PrintScreen)
-    ) && edge == KeyEdge::Pressed
-        && unsafe { GetAsyncKeyState(VK_MENU as i32) < 0 }
+    ) && event.edge == KeyEdge::Pressed
+        && alt_physically_held
         && let Ok(mut adapter) = windows_input_adapter().lock()
         && !adapter.modifier_held(AggregateModifier::Alt)
     {
@@ -1218,13 +1169,7 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     let (outcomes, snapshot) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            let dispatch = adapter.handle_native(NativeKeyboardEvent {
-                virtual_key: event.vkCode,
-                scan_code: event.scanCode,
-                extended: event.flags.0 & 1 != 0,
-                edge,
-                injected: event.flags.0 & 0x10 != 0,
-            });
+            let dispatch = adapter.handle_native(event);
             let outcomes = dispatch
                 .map(|dispatch| dispatch.outcomes)
                 .unwrap_or_default();
@@ -1239,7 +1184,7 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
             suppress: item.suppress,
         });
     if key != Some(KeyCode::KeyR) {
-        trace_input("key", key, Some(edge), outcome, snapshot);
+        trace_input("key", key, Some(event.edge), outcome, snapshot);
     }
     // The shared modifier-release binding deliberately dispatches only on the
     // release edge. Ownership still covers the preceding Super press so the
@@ -1247,40 +1192,17 @@ unsafe extern "system" fn super_key_hook(code: i32, wparam: WPARAM, lparam: LPAR
     let suppress = super_edge || outcomes.iter().any(|outcome| outcome.suppress);
     send_hotkey_outcomes(outcomes);
     if suppress {
-        LRESULT(1)
+        HookDisposition::Suppress
     } else {
-        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        HookDisposition::Forward
     }
 }
 
-fn reconcile_modifier_release(timer: usize) {
-    const VK_LWIN: i32 = 0x5b;
-    const VK_RWIN: i32 = 0x5c;
-    const VK_MENU: i32 = 0x12;
-
-    let super_timer = SUPER_RELEASE_TIMER_ID.load(Ordering::Acquire);
-    let alt_timer = ALT_RELEASE_TIMER_ID.load(Ordering::Acquire);
-    let released = unsafe {
-        if timer == super_timer && super_timer != 0 {
-            GetAsyncKeyState(VK_LWIN) >= 0 && GetAsyncKeyState(VK_RWIN) >= 0
-        } else if timer == alt_timer && alt_timer != 0 {
-            GetAsyncKeyState(VK_MENU) >= 0
-        } else {
-            return;
-        }
-    };
-    if !released {
-        return;
-    }
-    unsafe {
-        let _ = KillTimer(None, timer);
-    }
-    let keys = if timer == super_timer {
-        SUPER_RELEASE_TIMER_ID.store(0, Ordering::Release);
-        [KeyCode::SuperLeft, KeyCode::SuperRight]
-    } else {
-        ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
-        [KeyCode::AltLeft, KeyCode::AltRight]
+fn handle_native_modifier_release(modifier: AggregateModifier) {
+    let keys = match modifier {
+        AggregateModifier::Super => [KeyCode::SuperLeft, KeyCode::SuperRight],
+        AggregateModifier::Alt => [KeyCode::AltLeft, KeyCode::AltRight],
+        _ => return,
     };
     let actions = windows_input_adapter()
         .lock()
@@ -1477,18 +1399,19 @@ fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction
     }
 }
 
-unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    if code < 0 {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
-    }
-    let message = wparam.0 as u32;
-    // SAFETY: WH_MOUSE_LL supplies an MSLLHOOKSTRUCT pointer in LPARAM.
-    let event = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
+    let point = POINT {
+        x: event.x,
+        y: event.y,
+    };
     if let Ok(mut drag) = WINDOW_DRAG.lock()
         && let Some(operation) = *drag
     {
-        let release = matches!(message, WM_LBUTTONUP | WM_RBUTTONUP);
-        if message == WM_MOUSEMOVE || release {
+        let release = matches!(
+            event.kind,
+            NativePointerKind::PrimaryReleased | NativePointerKind::SecondaryReleased
+        );
+        if event.kind == NativePointerKind::Moved || release {
             // Moving is inexpensive and should track the compositor closely. Resizing can make
             // applications such as Windows Terminal reflow and redraw their entire contents, so
             // retain a modest cap there without making ordinary dragging feel like 30 FPS.
@@ -1498,7 +1421,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
                 8
             };
             if release || event.time.wrapping_sub(operation.last_update) >= minimum_interval {
-                update_window_drag(operation, event.pt);
+                update_window_drag(operation, point);
                 if !release {
                     drag.as_mut().expect("drag operation exists").last_update = event.time;
                 }
@@ -1516,19 +1439,20 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
                     HotkeyOutcome::default(),
                     snapshot,
                 );
-                return LRESULT(1);
+                return HookDisposition::Suppress;
             }
             // Observe pointer motion without consuming it. Suppressing WM_MOUSEMOVE freezes the
             // real cursor while the window chases coordinates reported by the hook.
-            return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+            return HookDisposition::Forward;
         }
     }
-    if !matches!(message, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+    if !matches!(
+        event.kind,
+        NativePointerKind::PrimaryPressed | NativePointerKind::SecondaryPressed
+    ) {
+        return HookDisposition::Forward;
     }
-    const VK_LWIN: i32 = 0x5b;
-    const VK_RWIN: i32 = 0x5c;
-    let physical_super = unsafe { GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0 };
+    let physical_super = event.super_physically_held;
     let (super_held, gesture) = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
@@ -1539,11 +1463,12 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
                 adapter.observe_key_code(KeyCode::SuperLeft, KeyEdge::Pressed);
             }
             let super_held = adapter.modifier_held(AggregateModifier::Super);
-            let gesture = adapter.begin_pointer_gesture(if message == WM_LBUTTONDOWN {
-                PointerButton::Primary
-            } else {
-                PointerButton::Secondary
-            });
+            let gesture =
+                adapter.begin_pointer_gesture(if event.kind == NativePointerKind::PrimaryPressed {
+                    PointerButton::Primary
+                } else {
+                    PointerButton::Secondary
+                });
             (super_held, gesture)
         })
         .unwrap_or_default();
@@ -1552,7 +1477,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         super_held,
         physical_super,
         chord_started,
-        button = if message == WM_LBUTTONDOWN {
+        button = if event.kind == NativePointerKind::PrimaryPressed {
             "left"
         } else {
             "right"
@@ -1560,7 +1485,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         "Super mouse gesture candidate"
     );
     if !chord_started {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return HookDisposition::Forward;
     }
     let gesture = gesture.expect("a started pointer chord has a typed gesture");
     let snapshot = windows_input_adapter()
@@ -1568,7 +1493,7 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         .map(|adapter| windows_input_snapshot(&adapter))
         .unwrap_or_default();
     trace_input(
-        if message == WM_LBUTTONDOWN {
+        if event.kind == NativePointerKind::PrimaryPressed {
             "mouse-move"
         } else {
             "mouse-resize"
@@ -1582,36 +1507,36 @@ unsafe extern "system" fn windows_mouse_hook(code: i32, wparam: WPARAM, lparam: 
         snapshot,
     );
 
-    let target = unsafe { GetAncestor(WindowFromPoint(event.pt), GA_ROOT) };
+    let target = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
     if target.0.is_null() {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return HookDisposition::Forward;
     }
     let mut process_id = 0;
     unsafe {
         GetWindowThreadProcessId(target, Some(&mut process_id));
     }
     if process_id == unsafe { GetCurrentProcessId() } {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return HookDisposition::Forward;
     }
 
     let mut rectangle = RECT::default();
     if unsafe { GetWindowRect(target, &mut rectangle) }.is_err() {
-        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
+        return HookDisposition::Forward;
     }
     if let Ok(mut drag) = WINDOW_DRAG.lock() {
         *drag = Some(WindowDrag {
             window: target.0 as isize,
-            start: event.pt,
+            start: point,
             rectangle,
             resize_edge: (gesture == SuperPointerGesture::Resize)
-                .then(|| resize_hit_test(target, event.pt)),
+                .then(|| resize_hit_test(target, point)),
             last_update: event.time,
         });
     }
     unsafe {
         let _ = SetForegroundWindow(target);
     }
-    LRESULT(1)
+    HookDisposition::Suppress
 }
 
 fn update_window_drag(operation: WindowDrag, pointer: POINT) {
