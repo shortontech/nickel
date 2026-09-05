@@ -320,6 +320,7 @@ mod tests {
         let metadata = fs::metadata(&path).unwrap();
         let identity = metadata_identity(&path, &metadata);
         let entry = FileEntry {
+            display_name_override: None,
             name: "sample.txt".into(),
             path: path.clone(),
             is_directory: false,
@@ -340,6 +341,7 @@ mod tests {
         fs::create_dir(directory.path().join("child")).unwrap();
         fs::write(directory.path().join("child/large"), vec![0; 4096]).unwrap();
         let entry = FileEntry {
+            display_name_override: None,
             name: "child".into(),
             path: directory.path().join("child"),
             is_directory: true,
@@ -377,6 +379,7 @@ mod tests {
         fs::write(&path, b"data").unwrap();
         let metadata = fs::metadata(&path).unwrap();
         let entry = FileEntry {
+            display_name_override: None,
             name: "visible.txt".into(),
             path: path.clone(),
             is_directory: false,
@@ -405,6 +408,7 @@ mod tests {
                 .readonly()
         );
         let updated_entry = FileEntry {
+            display_name_override: None,
             name: outcome.path.file_name().unwrap().to_owned(),
             path: outcome.path,
             is_directory: false,
@@ -423,6 +427,7 @@ mod tests {
         fs::write(&path, b"source").unwrap();
         fs::write(&hidden, b"keep me").unwrap();
         let entry = FileEntry {
+            display_name_override: None,
             name: "visible.txt".into(),
             path: path.clone(),
             is_directory: false,

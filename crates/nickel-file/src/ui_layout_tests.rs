@@ -315,6 +315,7 @@ fn stale_async_artwork_cannot_replace_current_generation() {
 fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
     let entries = vec![
         FileEntry {
+            display_name_override: None,
             name: "Documents".into(),
             path: PathBuf::from("/fixture/Documents"),
             is_directory: true,
@@ -322,6 +323,7 @@ fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
             modified: None,
         },
         FileEntry {
+            display_name_override: None,
             name: "notes.txt".into(),
             path: PathBuf::from("/fixture/notes.txt"),
             is_directory: false,
@@ -534,6 +536,7 @@ fn selection_status_omits_size_for_containers_and_unknown_metadata() {
     let (_directory, mut app) = selection_app(3);
     app.browser = DirectoryBrowser::fixture(vec![
         FileEntry {
+            display_name_override: None,
             name: "folder".into(),
             path: "/fixture/folder".into(),
             is_directory: true,
@@ -541,6 +544,7 @@ fn selection_status_omits_size_for_containers_and_unknown_metadata() {
             modified: None,
         },
         FileEntry {
+            display_name_override: None,
             name: "known".into(),
             path: "/fixture/known".into(),
             is_directory: false,
@@ -548,6 +552,7 @@ fn selection_status_omits_size_for_containers_and_unknown_metadata() {
             modified: None,
         },
         FileEntry {
+            display_name_override: None,
             name: "unknown".into(),
             path: "/fixture/unknown".into(),
             is_directory: false,
@@ -720,6 +725,7 @@ fn details_view_omits_file_only_metadata_for_directories() {
     let timestamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
     let entries = vec![
         FileEntry {
+            display_name_override: None,
             name: "Folder".into(),
             path: PathBuf::from("/fixture/Folder"),
             is_directory: true,
@@ -727,6 +733,7 @@ fn details_view_omits_file_only_metadata_for_directories() {
             modified: Some(timestamp),
         },
         FileEntry {
+            display_name_override: None,
             name: "report.bin".into(),
             path: PathBuf::from("/fixture/report.bin"),
             is_directory: false,
@@ -818,6 +825,7 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
     let long_name = "A deliberately long file name that wraps across\nmultiple lines.txt";
     let entries = vec![
         FileEntry {
+            display_name_override: None,
             name: long_name.into(),
             path: PathBuf::from("/fixture").join(long_name),
             is_directory: false,
@@ -825,6 +833,7 @@ fn growing_details_name_column_contains_multiline_text_without_row_overlap() {
             modified: None,
         },
         FileEntry {
+            display_name_override: None,
             name: "following.txt".into(),
             path: PathBuf::from("/fixture/following.txt"),
             is_directory: false,
@@ -870,6 +879,7 @@ fn compact_grid_contains_multiline_labels_inside_their_rows() {
                 format!("file-{index}.txt")
             };
             FileEntry {
+                display_name_override: None,
                 path: PathBuf::from("/fixture").join(&name),
                 name: name.into(),
                 is_directory: false,
@@ -1902,6 +1912,7 @@ fn directory_cardinality_does_not_change_shell_geometry_or_mounted_tile_bound() 
         DirectoryBrowser::fixture(
             (0..count)
                 .map(|index| FileEntry {
+                    display_name_override: None,
                     name: format!("item-{index}.txt").into(),
                     path: PathBuf::from(format!("/fixture/item-{index}.txt")),
                     is_directory: false,
@@ -1973,6 +1984,7 @@ fn directory_cardinality_does_not_change_shell_geometry_or_mounted_tile_bound() 
 fn far_offscreen_selection_can_be_revealed_before_its_tile_is_mounted() {
     let entries = (0..4_096)
         .map(|index| FileEntry {
+            display_name_override: None,
             name: format!("item-{index:04}.txt").into(),
             path: PathBuf::from(format!("/fixture/item-{index:04}.txt")),
             is_directory: false,

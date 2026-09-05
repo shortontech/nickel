@@ -52,6 +52,7 @@ mod tests {
 
     fn entry(name: &str, directory: bool, size: Option<u64>) -> FileEntry {
         FileEntry {
+            display_name_override: None,
             name: OsString::from(name),
             path: PathBuf::from(name),
             is_directory: directory,

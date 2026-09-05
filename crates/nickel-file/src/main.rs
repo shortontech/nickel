@@ -561,6 +561,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
             "long-unicode" => FileApp::with_browser(
                 DirectoryBrowser::fixture(vec![
                     FileEntry {
+                        display_name_override: None,
                         name: "Quarterly planning notes with a deliberately long wrapped name.md"
                             .into(),
                         path: PathBuf::from(
@@ -571,6 +572,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                         modified: None,
                     },
                     FileEntry {
+                        display_name_override: None,
                         name: "写真と音楽 🎵".into(),
                         path: PathBuf::from("/fixture/写真と音楽 🎵"),
                         is_directory: true,
@@ -578,6 +580,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                         modified: None,
                     },
                     FileEntry {
+                        display_name_override: None,
                         name: "مرحبا.txt".into(),
                         path: PathBuf::from("/fixture/مرحبا.txt"),
                         is_directory: false,
@@ -591,6 +594,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                 let mut app = FileApp::with_browser(
                     DirectoryBrowser::fixture(vec![
                         FileEntry {
+                            display_name_override: None,
                             name: ".nickel-cache".into(),
                             path: PathBuf::from("/fixture/.nickel-cache"),
                             is_directory: true,
@@ -598,6 +602,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                             modified: None,
                         },
                         FileEntry {
+                            display_name_override: None,
                             name: "report.txt".into(),
                             path: PathBuf::from("/fixture/report.txt"),
                             is_directory: false,
@@ -605,6 +610,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
                             modified: None,
                         },
                         FileEntry {
+                            display_name_override: None,
                             name: "notes.md".into(),
                             path: PathBuf::from("/fixture/notes.md"),
                             is_directory: false,
@@ -1090,6 +1096,7 @@ impl FileApp {
         ]
         .into_iter()
         .map(|(name, is_directory, size)| FileEntry {
+            display_name_override: None,
             name: name.into(),
             path: PathBuf::from("/fixture").join(name),
             is_directory,
@@ -2365,6 +2372,7 @@ impl FileApp {
             FileMessage::ContextCurrentFolderProperties => {
                 let path = self.browser.current().to_path_buf();
                 let entry = FileEntry {
+                    display_name_override: None,
                     name: path.file_name().unwrap_or(path.as_os_str()).to_os_string(),
                     path: path.clone(),
                     is_directory: true,
@@ -2476,6 +2484,7 @@ impl FileApp {
                     if outcome.readonly.is_ok() && outcome.hidden.is_ok() {
                         self.status = "Properties applied".into();
                         let entry = FileEntry {
+                            display_name_override: None,
                             name: outcome.path.file_name().unwrap_or_default().to_owned(),
                             path: outcome.path.clone(),
                             is_directory: outcome.path.is_dir(),

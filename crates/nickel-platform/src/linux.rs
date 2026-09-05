@@ -257,6 +257,30 @@ const MAX_DESKTOP_ENTRY_BYTES: u64 = 256 * 1024;
 const MAX_ICON_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ICON_DECODE_BYTES: u64 = 64 * 1024 * 1024;
 
+pub fn path_display_name(path: &Path) -> Option<String> {
+    let locales = sys_locale::get_locale().into_iter().collect::<Vec<_>>();
+    desktop_entry_display_name_with(path, &locales)
+}
+
+fn desktop_entry_display_name_with<L: AsRef<str>>(path: &Path, locales: &[L]) -> Option<String> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+        || fs::metadata(path).ok()?.len() > MAX_DESKTOP_ENTRY_BYTES
+    {
+        return None;
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    let entry = DesktopEntry::from_str(path.to_path_buf(), &contents, None::<&[&str]>).ok()?;
+    if entry.type_() != Some("Application") {
+        return None;
+    }
+    entry
+        .name(locales)
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty() && name.len() <= 4096)
+}
+
 fn desktop_entry_icon_with<T>(
     path: &Path,
     mut absolute: impl FnMut(&Path) -> Option<T>,
@@ -463,9 +487,30 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        decode_file_uri, desktop_entry_icon_with, icon_name, installed_icon_themes_in, load_icon,
-        path_icon_theme_revision, path_icon_with_theme, value_in_section,
+        decode_file_uri, desktop_entry_display_name_with, desktop_entry_icon_with, icon_name,
+        installed_icon_themes_in, load_icon, path_icon_theme_revision, path_icon_with_theme,
+        value_in_section,
     };
+
+    #[test]
+    fn desktop_entry_display_name_prefers_locale_and_falls_back_to_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let entry = directory.path().join("opaque-launcher.desktop");
+        std::fs::write(
+            &entry,
+            "[Desktop Entry]\nType=Application\nName=Photos and Music\nName[ja]=写真と音楽\nExec=true\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            desktop_entry_display_name_with(&entry, &["ja_JP"]),
+            Some("写真と音楽".into())
+        );
+        assert_eq!(
+            desktop_entry_display_name_with(&entry, &["en_US"]),
+            Some("Photos and Music".into())
+        );
+    }
 
     #[test]
     fn desktop_entry_declared_icon_precedes_application_identity() {

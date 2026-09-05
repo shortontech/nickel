@@ -172,6 +172,7 @@ pub fn copy_into(source: &Path, destination: &Path) -> io::Result<PathBuf> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileEntry {
     pub name: OsString,
+    pub display_name_override: Option<String>,
     pub path: PathBuf,
     pub is_directory: bool,
     pub size: Option<u64>,
@@ -180,7 +181,9 @@ pub struct FileEntry {
 
 impl FileEntry {
     pub fn display_name(&self) -> String {
-        self.name.to_string_lossy().into_owned()
+        self.display_name_override
+            .clone()
+            .unwrap_or_else(|| self.name.to_string_lossy().into_owned())
     }
 }
 
@@ -412,11 +415,15 @@ fn read_entries_with_identities(
             }
             let is_directory = metadata_is_directory(&metadata);
             let path = entry.path();
+            let display_name_override = (!is_directory)
+                .then(|| nickel_platform::path_display_name(&path))
+                .flatten();
             if let Some(identity) = metadata_identity(&path, &metadata) {
                 identities.insert(path.clone(), identity);
             }
             Some(FileEntry {
                 name: entry.file_name(),
+                display_name_override,
                 path,
                 is_directory,
                 size: (!is_directory && metadata.is_file()).then_some(metadata.len()),
@@ -591,9 +598,27 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn directory_entries_cache_desktop_launcher_name_instead_of_opaque_filename() {
+        let root = temporary_directory("desktop-launcher-name");
+        fs::write(
+            root.join("chrome-opaque-Default.desktop"),
+            b"[Desktop Entry]\nType=Application\nName=GitLab\nExec=true\n",
+        )
+        .unwrap();
+
+        let browser = DirectoryBrowser::open(&root).unwrap();
+        assert_eq!(browser.entries()[0].name, "chrome-opaque-Default.desktop");
+        assert_eq!(browser.entries()[0].display_name(), "GitLab");
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn portable_sorting_keeps_directories_first_in_both_directions() {
         let entry = |name: &str, directory: bool, size| FileEntry {
+            display_name_override: None,
             name: name.into(),
             path: std::path::PathBuf::from("/fixture").join(name),
             is_directory: directory,

@@ -7792,6 +7792,7 @@ mod tests {
         desktop.layout.reconcile(vec![(
             nickel_file::FileIdentity(1, 2),
             nickel_file::FileEntry {
+                display_name_override: None,
                 name: OsString::from("document.txt"),
                 path: PathBuf::from("/desktop/document.txt"),
                 is_directory: false,
@@ -7875,6 +7876,7 @@ mod tests {
                     (
                         nickel_file::FileIdentity(41, index as u64 + 1),
                         nickel_file::FileEntry {
+                            display_name_override: None,
                             name: OsString::from(name),
                             path: PathBuf::from("/desktop").join(name),
                             is_directory: false,
@@ -8034,6 +8036,7 @@ mod tests {
         desktop.layout.reconcile(vec![(
             nickel_file::FileIdentity(9, 2),
             nickel_file::FileEntry {
+                display_name_override: None,
                 name: OsString::from("entry.txt"),
                 path: PathBuf::from("/desktop/entry.txt"),
                 is_directory: false,
@@ -8067,6 +8070,7 @@ mod tests {
         desktop.layout.reconcile(vec![(
             nickel_file::FileIdentity(12, 3),
             nickel_file::FileEntry {
+                display_name_override: None,
                 name: OsString::from("drag-me.txt"),
                 path: PathBuf::from("/desktop/drag-me.txt"),
                 is_directory: false,
@@ -8275,6 +8279,7 @@ mod tests {
         desktop.layout.reconcile(vec![(
             nickel_file::FileIdentity(44, 1),
             nickel_file::FileEntry {
+                display_name_override: None,
                 name: OsString::from("selected.txt"),
                 path: PathBuf::from("/desktop/selected.txt"),
                 is_directory: false,

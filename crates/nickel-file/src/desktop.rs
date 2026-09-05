@@ -766,6 +766,7 @@ mod tests {
         (
             FileIdentity(7, id),
             FileEntry {
+                display_name_override: None,
                 name: OsString::from(name),
                 path: PathBuf::from("/desktop").join(name),
                 is_directory: directory,
