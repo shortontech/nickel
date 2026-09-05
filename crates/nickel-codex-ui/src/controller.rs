@@ -527,9 +527,17 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
         let mut projects = list_projects(backend)?;
         let (page, thread_error) = match list_threads(backend) {
             Ok(mut page) => {
-                if import_missing_thread_projects(backend, &projects, &page.threads, &page.runtime)?
-                {
+                let imported = import_missing_thread_projects(
+                    backend,
+                    &projects,
+                    &page.threads,
+                    &page.runtime,
+                )?;
+                if !imported.is_empty() {
                     projects = list_projects(backend)?;
+                    if projects.is_empty() {
+                        projects = imported;
+                    }
                     page = list_threads(backend)?;
                 }
                 (page, None)
@@ -572,7 +580,31 @@ fn project_snapshot(backend: &dyn CodexBackend, provenance: String) -> Controlle
                 cursor: None,
                 limit: Some(100),
             }) {
-                Ok(page) => {
+                Ok(mut page) => {
+                    let imported = match import_missing_thread_projects(
+                        backend,
+                        &projects,
+                        &page.threads,
+                        &page.runtime,
+                    ) {
+                        Ok(imported) => imported,
+                        Err(error) => return ControllerEvent::Failure(error.to_string()),
+                    };
+                    if !imported.is_empty() {
+                        match list_projects(backend) {
+                            Ok(registered) if !registered.is_empty() => projects = registered,
+                            Ok(_) => projects = imported,
+                            Err(error) => {
+                                return ControllerEvent::Failure(error.to_string());
+                            }
+                        }
+                        if let Ok(refreshed) = backend.list_threads(ThreadPage {
+                            cursor: None,
+                            limit: Some(100),
+                        }) {
+                            page = refreshed;
+                        }
+                    }
                     sort_projects_by_recent_threads(&mut projects, &page.threads, &page.runtime);
                     ControllerEvent::Ready {
                         provenance,
@@ -676,7 +708,7 @@ fn import_missing_thread_projects(
     projects: &[Project],
     threads: &[Thread],
     runtime: &HashMap<ThreadId, nickel_codex::ThreadRuntime>,
-) -> Result<bool, nickel_codex::CodexError> {
+) -> Result<Vec<Project>, nickel_codex::CodexError> {
     let registered_roots = projects
         .iter()
         .flat_map(|project| project.roots.iter().cloned())
@@ -701,7 +733,7 @@ fn import_missing_thread_projects(
             .or_default()
             .push(thread.id.clone());
     }
-    let imported = !directories.is_empty();
+    let mut imported = Vec::with_capacity(directories.len());
     for (root, threads) in directories {
         let name = root
             .file_name()
@@ -714,12 +746,12 @@ fn import_missing_thread_projects(
             hash ^= u64::from(*byte);
             hash = hash.wrapping_mul(0x100000001b3);
         }
-        backend.import_project(ImportProject {
+        imported.push(backend.import_project(ImportProject {
             idempotency_key: format!("nickel-import-{hash:016x}"),
             name,
             roots: vec![root],
             threads,
-        })?;
+        })?);
     }
     Ok(imported)
 }
@@ -916,6 +948,29 @@ mod tests {
         assert_eq!(projects.len(), 1);
         assert_eq!(projects[0].id, "nickel");
         assert_eq!(projects[0].name, "Nickel");
+        assert_eq!(projects[0].roots, [PathBuf::from("/projects/nickel")]);
+    }
+
+    #[test]
+    fn project_menu_imports_projects_from_historical_thread_directories() {
+        let backend = ReplayBackend::from_json(
+            r#"{
+                "name":"project-menu-import",
+                "account":{"authenticated":true,"account_type":"chatgpt","email":null},
+                "threads":[{"id":"thread","title":"Nickel work","cwd":"/projects/nickel"}],
+                "thread_runtime":{"thread":{"project_id":null,"status":"Idle","active_flags":[],"can_accept_direct_input":true}}
+            }"#,
+        )
+        .unwrap();
+
+        let ControllerEvent::Ready { projects, .. } =
+            project_snapshot(&backend, "Replay fixture".into())
+        else {
+            panic!("historical projects should remain available");
+        };
+
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].name, "nickel");
         assert_eq!(projects[0].roots, [PathBuf::from("/projects/nickel")]);
     }
 
