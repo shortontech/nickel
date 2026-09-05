@@ -19,13 +19,12 @@ use nickel_core::theme::ThemePalette;
 use nickel_i18n::{ActionLabel, Localizer};
 use nickel_ui::{
     AccountSummaryRow, ActionLegend, ActionLegendActions, ActionLegendEntry, AnyView,
-    Application as UiApplication, Collection, CollectionPresentation, CollectionState, Column,
-    ComponentBuilderExt, Container, ControllerFamily, FallbackAvatar, FilePlaneItem, FrameOverlay,
-    Image, InputModality, Insets, LauncherSearchField, NavigationScope, NavigationTraversal,
-    OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle, ProjectStatusRow, ReadingDirection,
-    Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader, SemanticControllerAction, SemanticTheme,
-    Shortcut, ShortcutRow, ShortcutState, StartMenuNarrowPane, StartMenuShell, Text, TextAlign,
-    UiId, VerticalScroll, ViewContext,
+    Application as UiApplication, Column, ComponentBuilderExt, Container, ControllerFamily,
+    FallbackAvatar, FileGrid, FilePlaneItem, FrameOverlay, Image, InputModality, Insets,
+    LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle,
+    ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
+    SemanticControllerAction, SemanticTheme, Shortcut, ShortcutRow, ShortcutState,
+    StartMenuNarrowPane, StartMenuShell, Text, UiId, VerticalScroll, ViewContext,
 };
 
 const PANEL_MAX_WIDTH: f32 = 920.0;
@@ -675,54 +674,30 @@ fn build_launcher_view_directional(
             })
         })
         .collect::<Vec<_>>();
-    let result_indices = Arc::new(
-        cards
-            .iter()
-            .map(|(index, id, _, _)| (id.clone(), *index))
-            .collect::<HashMap<_, _>>(),
-    );
-    let activation_indices = Arc::clone(&result_indices);
-    let collection = Collection::try_new(
-        CollectionState::Ready(cards),
-        |(_, id, _, _)| id.clone(),
-        move |(_, _, name, icon)| {
-            Container::new()
+    let selected = launcher.selected_result().map(Application::id);
+    let collection = FileGrid::columns(columns)
+        .items(cards.into_iter().map(|(index, id, name, icon)| {
+            let accessible_name = name.clone();
+            let is_selected = selected == Some(id.as_str());
+            FilePlaneItem::new(LauncherAction::ActivateResult(index), name, icon.0, icon.1)
+                .id(id)
                 .min_height(TILE_HEIGHT)
                 .padding(Insets::all(theme.spacing.control))
                 .radius(theme.radii.card)
-                .align_items(nickel_ui::Align::Center)
-                .child(
-                    FilePlaneItem::new(name, icon.0, icon.1)
-                        .icon_size(ICON_SIZE)
-                        .label_height(36.0)
-                        .foreground(theme.text.primary),
-                )
-        },
-    )
-    .expect("launcher result indices must be unique")
-    .id("launcher-search-results")
-    .presentation(CollectionPresentation::UniformGrid { columns })
-    .gap(GRID_GAP)
-    .item_focus_background_tint(theme.borders.focus)
-    .item_controller_focus_background_tint(theme.borders.controller_focus)
-    .item_interaction_backgrounds(
-        theme.surfaces.hover,
-        theme.surfaces.pressed,
-        theme.surfaces.selected,
-    )
-    .navigation_scope(
-        NavigationScope::group()
-            .traversal(NavigationTraversal::Grid)
-            .scroll_owner(UiId::new("launcher-search-scroll")),
-    )
-    .controller_scope_background(theme.surfaces.selected)
-    .on_activate(move |id| {
-        LauncherAction::ActivateResult(
-            *activation_indices
-                .get(id)
-                .expect("collection key must retain its result index"),
-        )
-    });
+                .icon_size(ICON_SIZE)
+                .label_height(36.0)
+                .foreground(theme.text.primary)
+                .selected_background(is_selected, theme.surfaces.selected)
+                .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+                .focus_background_tint(theme.borders.focus)
+                .controller_focus_background_tint(theme.borders.controller_focus)
+                .semantic_role(nickel_ui::SemanticRole::Button)
+                .accessibility_label(accessible_name)
+        }))
+        .id("launcher-search-results")
+        .accessibility_label("Search results")
+        .scroll_owner("launcher-search-scroll")
+        .gap(GRID_GAP);
     let result_content = if launcher.result_count() == 0 {
         AnyView::new(Text::new("No matching applications").color(theme.text.secondary))
     } else {
@@ -959,42 +934,32 @@ fn build_dashboard_view_directional(
         })
         .collect::<Vec<_>>();
     let applications_empty = application_cards.is_empty();
-    let application_collection = Collection::try_new(
-        CollectionState::Ready(application_cards),
-        |(id, _, _)| id.clone(),
-        move |(_, name, icon)| {
-            Container::new()
-                .min_height(104.0)
-                .padding(Insets::all(theme.spacing.control))
-                .gap(theme.spacing.compact)
-                .radius(theme.radii.card)
-                .align_items(nickel_ui::Align::Center)
-                .child(Image::new(icon.0, icon.1).width(48.0).height(48.0))
-                .child(
-                    Text::new(name)
-                        .color(theme.text.primary)
-                        .align(TextAlign::Center)
-                        .max_lines(2)
-                        .ellipsis(true),
-                )
-        },
-    )
-    .expect("launcher application ids must be unique")
-    .id("launcher-applications")
-    .presentation(CollectionPresentation::UniformGrid {
-        columns: if width >= 820.0 { 4 } else { 3 },
-    })
-    .gap(theme.spacing.control)
-    .item_focus_background_tint(theme.borders.focus)
-    .item_controller_focus_background_tint(theme.borders.controller_focus)
-    .item_interaction_backgrounds(
-        theme.surfaces.hover,
-        theme.surfaces.pressed,
-        theme.surfaces.selected,
-    )
-    .navigation_scope(NavigationScope::group().traversal(NavigationTraversal::Grid))
-    .controller_scope_background(theme.surfaces.selected)
-    .on_activate(|id| LauncherAction::LaunchApplication(id.clone()));
+    let application_collection = FileGrid::columns(if width >= 820.0 { 4 } else { 3 })
+        .items(application_cards.into_iter().map(|(id, name, icon)| {
+            let accessible_name = name.clone();
+            FilePlaneItem::new(
+                LauncherAction::LaunchApplication(id.clone()),
+                name,
+                icon.0,
+                icon.1,
+            )
+            .id(id)
+            .min_height(104.0)
+            .padding(Insets::all(theme.spacing.control))
+            .radius(theme.radii.card)
+            .icon_size(48.0)
+            .label_height(36.0)
+            .gap(theme.spacing.compact)
+            .foreground(theme.text.primary)
+            .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
+            .focus_background_tint(theme.borders.focus)
+            .controller_focus_background_tint(theme.borders.controller_focus)
+            .semantic_role(nickel_ui::SemanticRole::Button)
+            .accessibility_label(accessible_name)
+        }))
+        .id("launcher-applications")
+        .gap(theme.spacing.control)
+        .accessibility_label("Applications");
 
     let title = match launcher.view() {
         LauncherView::Favorites => "Home",

@@ -1331,27 +1331,6 @@ impl nickel_ui::Application for DesktopApplication {
             };
             let selected = self.layout.selected().contains(&item.id);
             let focused = self.layout.active() == Some(item.id);
-            let mut tile = Container::new()
-                .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
-                .position(position)
-                .width(cell_width)
-                .height(cell_height - 4.0)
-                .radius(8.0)
-                .message(DesktopMessage::Activate(item.id))
-                .context_message(DesktopMessage::Context(item.id))
-                .semantic_role(SemanticRole::GridCell)
-                .accessibility_label(item.entry.display_name())
-                .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
-                .focus_background_tint(self.palette.accent)
-                .controller_focus_background_tint(self.palette.complement);
-            if selected {
-                tile = tile.background(self.palette.accent_soft);
-            } else if hovered == Some(item.id) || focused {
-                tile = tile.background(self.palette.surface_hover);
-            }
-            if self.pointer_dragged && selected {
-                tile = tile.border(self.palette.accent, 2.0);
-            }
             let icon = self
                 .icon_cache
                 .get(&item.entry.path)
@@ -1364,30 +1343,45 @@ impl nickel_ui::Application for DesktopApplication {
                     ))
                 });
             let label_height = (cell_height - 74.0).max(1.0);
-            let contents = Container::new()
-                .width(cell_width)
-                .height(cell_height - 4.0)
-                .padding(Insets {
-                    top: 6.0,
-                    right: 3.0,
-                    bottom: 8.0,
-                    left: 3.0,
-                })
-                .child(
-                    FilePlaneItem::new_with_generation(
-                        item.entry.display_name(),
-                        10_000_u16.saturating_add(index as u16),
-                        icon,
-                        self.directory_generation,
-                    )
-                    .icon_size(48.0)
-                    .label_height(label_height)
-                    .label_scale(0.85)
-                    .foreground(self.palette.text)
-                    .label_background(self.palette.panel, 5.0)
-                    .gap(8.0),
-                );
-            layer = layer.child(tile.child(contents));
+            let mut tile = FilePlaneItem::new_with_generation(
+                DesktopMessage::Activate(item.id),
+                item.entry.display_name(),
+                10_000_u16.saturating_add(index as u16),
+                icon,
+                self.directory_generation,
+            )
+            .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
+            .position(position)
+            .width(cell_width)
+            .height(cell_height - 4.0)
+            .padding(Insets {
+                top: 6.0,
+                right: 3.0,
+                bottom: 8.0,
+                left: 3.0,
+            })
+            .radius(8.0)
+            .context_message(DesktopMessage::Context(item.id))
+            .semantic_role(SemanticRole::GridCell)
+            .accessibility_label(item.entry.display_name())
+            .interaction_backgrounds(self.palette.surface_hover, self.palette.accent_soft)
+            .selected_background(selected, self.palette.accent_soft)
+            .hovered_background(
+                !selected && (hovered == Some(item.id) || focused),
+                self.palette.surface_hover,
+            )
+            .focus_background_tint(self.palette.accent)
+            .controller_focus_background_tint(self.palette.complement)
+            .icon_size(48.0)
+            .label_height(label_height)
+            .label_scale(0.85)
+            .foreground(self.palette.text)
+            .label_background(self.palette.panel, 5.0)
+            .gap(8.0);
+            if self.pointer_dragged && selected {
+                tile = tile.border(self.palette.accent, 2.0);
+            }
+            layer = layer.child(tile);
         }
         if let Some(start) = self.selection_start {
             let current = self.pointer_position;
@@ -7842,12 +7836,16 @@ mod tests {
             .split("\nmod tests {")
             .next()
             .expect("production source precedes tests");
-        assert!(file.contains("<FileGridItem"));
-        assert!(launcher.contains("FilePlaneItem::new"));
+        assert!(file.contains("FileGridItem::new_with_generation"));
+        assert!(launcher.matches("FilePlaneItem::new").count() >= 2);
         assert!(desktop_production.contains("FilePlaneItem::new_with_generation"));
         let shared = include_str!("../../nickel-ui/src/ui/components.rs");
         assert!(shared.contains("pub struct FilePlaneItem"));
-        assert!(shared.contains("FilePlaneItem::from_image(label, image)"));
+        assert!(shared.contains("fn from_image(message: Message"));
+        assert!(shared.contains("Self::from_image(message, label"));
+        assert!(shared.contains(".message(message)"));
+        assert!(shared.contains("pub fn context_message"));
+        assert!(shared.contains(".semantic_role(SemanticRole::Button)"));
     }
 
     #[test]

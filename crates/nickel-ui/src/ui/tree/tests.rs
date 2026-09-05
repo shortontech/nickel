@@ -853,6 +853,7 @@ fn file_plane_item_contains_long_multiline_labels() {
             .height(104.0)
             .child(
                 FilePlaneItem::new(
+                    TestMessage::Named("long-file"),
                     "monitors_receipt.pdf\nRobert Half - Security Engineer.txt",
                     1,
                     icon,
@@ -885,6 +886,64 @@ fn file_plane_item_contains_long_multiline_labels() {
     assert!(tree.accessibility_nodes().iter().any(|node| {
         node.label.as_deref() == Some("monitors_receipt.pdf\nRobert Half - Security Engineer.txt")
     }));
+}
+
+#[test]
+fn file_plane_item_owns_hit_context_semantics_and_state_visuals() {
+    let icon = Arc::new(RgbaImage::new(16, 16));
+    let build = |selected| {
+        UiFrame::layout(
+            FilePlaneItem::new(TestMessage::Named("open"), "Document", 8, icon.clone())
+                .id("shared-file-item")
+                .width(96.0)
+                .height(104.0)
+                .context_message(TestMessage::Named("context"))
+                .semantic_role(SemanticRole::GridCell)
+                .selected_background(selected, 0x334455)
+                .interaction_backgrounds(0x223344, 0x445566)
+                .focus_background_tint(0x556677)
+                .controller_focus_background_tint(0x667788),
+            Rect::new(0.0, 0.0, 96.0, 104.0),
+        )
+    };
+    let idle = build(false);
+    assert_eq!(
+        idle.message_at(Point { x: 48.0, y: 52.0 }),
+        Some(&TestMessage::Named("open"))
+    );
+    let node = idle
+        .accessibility_nodes()
+        .iter()
+        .find(|node| node.id.as_str().ends_with("shared-file-item"))
+        .expect("shared item semantic node");
+    assert_eq!(node.semantic_role, Some(SemanticRole::GridCell));
+    assert_eq!(node.label.as_deref(), Some("Document"));
+    assert!(node.actions.contains(&ActionKind::Activate));
+    assert!(node.actions.contains(&ActionKind::ContextMenu));
+    assert!(!idle.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::Fill {
+            color: 0x334455,
+            ..
+        }
+    )));
+
+    let mut state = UiStateStore::default();
+    assert_eq!(
+        idle.handle_event(
+            &mut state,
+            UiEvent::PointerContext(Point { x: 48.0, y: 52.0 })
+        )
+        .messages,
+        vec![TestMessage::Named("context")]
+    );
+    assert!(build(true).commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::Fill {
+            color: 0x334455,
+            ..
+        }
+    )));
 }
 
 #[test]

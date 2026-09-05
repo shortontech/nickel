@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
     AnyView, Collection, CollectionPresentation, CollectionState, Component, ComponentBuilderExt,
-    ImageFit, Insets, NavigationScope, SemanticRole, TextField, VerticalScroll, ui,
+    FileGridItem, ImageFit, Insets, NavigationScope, SemanticRole, TextField, VerticalScroll, ui,
 };
 
 use crate::{
@@ -700,14 +700,23 @@ pub(crate) fn grid_item(
     _light_mode: bool,
 ) -> impl Component<FileMessage> + use<> {
     let (icon_id, icon_image) = icon.unwrap_or_else(empty_artwork);
-    ui! {
-        <FileGridItem on_press={FileMessage::Entry(index)} label={entry.display_name()}
-            asset_id={icon_id} image={icon_image} generation={u64::from(icon_id)}
-            borderless_palette={(if selected { palette.accent_soft } else { palette.background }, palette.text)}
-            icon_size={icon_size} focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
-            id={format!("file-entry-{index}")} context_message={FileMessage::ContextEntry(index)}
-            semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()} />
-    }
+    FileGridItem::new_with_generation(
+        FileMessage::Entry(index),
+        entry.display_name(),
+        icon_id,
+        icon_image,
+        u64::from(icon_id),
+    )
+    .selected_background(selected, palette.accent_soft)
+    .interaction_backgrounds(palette.surface_hover, palette.accent_soft)
+    .foreground(palette.text)
+    .icon_size(icon_size)
+    .focus_background_tint(palette.accent)
+    .controller_focus_background_tint(palette.complement)
+    .id(format!("file-entry-{index}"))
+    .context_message(FileMessage::ContextEntry(index))
+    .semantic_role(SemanticRole::Button)
+    .accessibility_label(entry.display_name())
 }
 
 pub(crate) fn details_row(

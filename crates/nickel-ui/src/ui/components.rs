@@ -474,7 +474,8 @@ pub struct FileGrid<Message = String> {
 impl<Message> FileGrid<Message> {
     pub fn columns(columns: usize) -> Self {
         let mut grid = Grid::fixed(columns);
-        grid.0.navigation_scope = Some(crate::NavigationScope::group());
+        grid.0.navigation_scope =
+            Some(crate::NavigationScope::group().traversal(crate::NavigationTraversal::Grid));
         Self { grid }
     }
 
@@ -483,7 +484,8 @@ impl<Message> FileGrid<Message> {
             Track::px(minimum_width.max(1.0)),
             Track::fr(1.0),
         ));
-        grid.0.navigation_scope = Some(crate::NavigationScope::group());
+        grid.0.navigation_scope =
+            Some(crate::NavigationScope::group().traversal(crate::NavigationTraversal::Grid));
         Self { grid }
     }
 
@@ -530,6 +532,18 @@ impl<Message> FileGrid<Message> {
             .accessibility_label(label);
         self
     }
+
+    pub fn scroll_owner(mut self, owner: impl Into<UiId>) -> Self {
+        self.grid.0.navigation_scope = Some(
+            self.grid
+                .0
+                .navigation_scope
+                .take()
+                .unwrap_or_else(crate::NavigationScope::group)
+                .scroll_owner(owner.into()),
+        );
+        self
+    }
 }
 
 impl<Message> Component<Message> for FileGrid<Message> {
@@ -538,117 +552,16 @@ impl<Message> Component<Message> for FileGrid<Message> {
     }
 }
 
-/// Shared visual content for an entry in a file-like plane.
+/// Complete shared entry surface for a file-like plane.
 ///
-/// Selection, activation, ordering, and scrolling remain owned by the containing
-/// collection. This component centralizes the icon/label geometry used by file
-/// manager grids, launcher grids, and desktop icons so each surface configures
-/// one authority instead of maintaining a subtly different tile implementation.
+/// Hosts supply policy (messages, dimensions, colors, and selection state), while
+/// this component owns the hit region, semantics, interaction visuals, icon
+/// containment, and bounded label layout.
 pub struct FilePlaneItem<Message = String> {
-    column: Column<Message>,
+    container: Container<Message>,
 }
 
 impl<Message> FilePlaneItem<Message> {
-    pub fn new(label: impl Into<String>, icon_id: u16, icon: Arc<RgbaImage>) -> Self {
-        Self::from_image(label, Image::new(icon_id, icon))
-    }
-
-    pub fn new_with_generation(
-        label: impl Into<String>,
-        icon_id: u16,
-        icon: Arc<RgbaImage>,
-        generation: u64,
-    ) -> Self {
-        Self::from_image(label, Image::new_with_generation(icon_id, icon, generation))
-    }
-
-    fn from_image(label: impl Into<String>, image: Image<Message>) -> Self {
-        let label = label.into();
-        Self {
-            column: Column::new()
-                .fill_width()
-                .align_items(Align::Center)
-                .gap(5.0)
-                .child(image.height(62.0).fit(ImageFit::Contain))
-                .child(
-                    Container::new()
-                        .height(36.0)
-                        .fill_width()
-                        .overflow_x(Overflow::Clip)
-                        .overflow_y(Overflow::Clip)
-                        .child(
-                            Text::new(label)
-                                .height(36.0)
-                                .wrap(true)
-                                .max_lines(2)
-                                .ellipsis(true)
-                                .align(TextAlign::Center)
-                                .fill_width(),
-                        ),
-                ),
-        }
-    }
-
-    pub fn icon_size(mut self, size: f32) -> Self {
-        if let Some(icon) = self.column.0.children.first_mut() {
-            icon.style.height = Length::Px(size.max(1.0));
-            icon.style.width = Length::Px(size.max(1.0));
-        }
-        self
-    }
-
-    pub fn label_height(mut self, height: f32) -> Self {
-        if let Some(label) = self.column.0.children.get_mut(1) {
-            label.style.height = Length::Px(height.max(1.0));
-            if let Some(text) = label.children.first_mut() {
-                text.style.height = Length::Px(height.max(1.0));
-            }
-        }
-        self
-    }
-
-    pub fn label_scale(mut self, scale: f32) -> Self {
-        if let Some(label) = self.column.0.children.get_mut(1)
-            && let Some(text) = label.children.first_mut()
-            && let Kind::Text { scale: value, .. } = &mut text.kind
-        {
-            *value = scale.max(0.1);
-        }
-        self
-    }
-
-    pub fn foreground(mut self, color: Color) -> Self {
-        if let Some(label) = self.column.0.children.get_mut(1)
-            && let Some(text) = label.children.first_mut()
-        {
-            text.style.foreground = Some(color);
-        }
-        self
-    }
-
-    pub fn label_background(mut self, color: Color, radius: f32) -> Self {
-        if let Some(label) = self.column.0.children.get_mut(1) {
-            label.style.background = Some(Background::Solid(color));
-            label.style.corner_radius = radius.max(0.0);
-        }
-        self
-    }
-
-    pub fn gap(mut self, gap: f32) -> Self {
-        self.column.0.style.gap = gap.max(0.0);
-        self
-    }
-}
-
-impl<Message> Component<Message> for FilePlaneItem<Message> {
-    fn into_element(self) -> Element<Message> {
-        self.column.into_element()
-    }
-}
-
-pub struct FileGridItem<Message = String>(Container<Message>);
-
-impl<Message> FileGridItem<Message> {
     pub fn new(
         message: Message,
         label: impl Into<String>,
@@ -658,8 +571,6 @@ impl<Message> FileGridItem<Message> {
         Self::from_image(message, label, Image::new(icon_id, icon))
     }
 
-    /// Creates a file item whose icon pixels are identified by a source-owned
-    /// generation, avoiding a content fingerprint on every UI rebuild.
     pub fn new_with_generation(
         message: Message,
         label: impl Into<String>,
@@ -675,8 +586,9 @@ impl<Message> FileGridItem<Message> {
     }
 
     fn from_image(message: Message, label: impl Into<String>, image: Image<Message>) -> Self {
-        Self(
-            Container::new()
+        let label = label.into();
+        Self {
+            container: Container::new()
                 .padding(Insets {
                     top: 8.0,
                     right: 6.0,
@@ -684,61 +596,211 @@ impl<Message> FileGridItem<Message> {
                     left: 6.0,
                 })
                 .message(message)
-                .child(FilePlaneItem::from_image(label, image)),
-        )
-    }
-
-    pub fn colors(mut self, background: Color, border: Color, foreground: Color) -> Self {
-        self.0 = self.0.background(background).border(border, 1.0);
-        if let Some(column) = self.0.0.children.first_mut()
-            && let Some(label) = column.children.get_mut(1)
-            && let Some(text) = label.children.first_mut()
-        {
-            text.style.foreground = Some(foreground);
+                .semantic_role(SemanticRole::Button)
+                .accessibility_label(label.clone())
+                .child(
+                    Column::new()
+                        .fill_width()
+                        .align_items(Align::Center)
+                        .gap(5.0)
+                        .child(image.height(62.0).fit(ImageFit::Contain))
+                        .child(
+                            Container::new()
+                                .height(36.0)
+                                .fill_width()
+                                .overflow_x(Overflow::Clip)
+                                .overflow_y(Overflow::Clip)
+                                .child(
+                                    Text::new(label)
+                                        .height(36.0)
+                                        .wrap(true)
+                                        .max_lines(2)
+                                        .ellipsis(true)
+                                        .align(TextAlign::Center)
+                                        .fill_width(),
+                                ),
+                        ),
+                ),
         }
-        self
     }
 
-    pub fn borderless_colors(mut self, background: Color, foreground: Color) -> Self {
-        self.0 = self.0.background(background);
-        if let Some(column) = self.0.0.children.first_mut()
-            && let Some(label) = column.children.get_mut(1)
-            && let Some(text) = label.children.first_mut()
-        {
-            text.style.foreground = Some(foreground);
-        }
-        self
+    fn content_mut(&mut self) -> Option<&mut Element<Message>> {
+        self.container.0.children.first_mut()
     }
 
-    pub fn borderless_palette(self, colors: (Color, Color)) -> Self {
-        self.borderless_colors(colors.0, colors.1)
+    fn label_box_mut(&mut self) -> Option<&mut Element<Message>> {
+        self.content_mut()?.children.get_mut(1)
     }
 
     pub fn icon_size(mut self, size: f32) -> Self {
-        if let Some(column) = self.0.0.children.first_mut()
-            && let Some(icon) = column.children.first_mut()
+        if let Some(icon) = self
+            .content_mut()
+            .and_then(|content| content.children.first_mut())
         {
             icon.style.height = Length::Px(size.max(1.0));
         }
         self
     }
 
+    pub fn label_height(mut self, height: f32) -> Self {
+        if let Some(label) = self.label_box_mut() {
+            label.style.height = Length::Px(height.max(1.0));
+            if let Some(text) = label.children.first_mut() {
+                text.style.height = Length::Px(height.max(1.0));
+            }
+        }
+        self
+    }
+
+    pub fn label_scale(mut self, scale: f32) -> Self {
+        if let Some(label) = self.label_box_mut()
+            && let Some(text) = label.children.first_mut()
+            && let Kind::Text { scale: value, .. } = &mut text.kind
+        {
+            *value = scale.max(0.1);
+        }
+        self
+    }
+
+    pub fn foreground(mut self, color: Color) -> Self {
+        if let Some(label) = self.label_box_mut()
+            && let Some(text) = label.children.first_mut()
+        {
+            text.style.foreground = Some(color);
+        }
+        self
+    }
+
+    pub fn label_background(mut self, color: Color, radius: f32) -> Self {
+        if let Some(label) = self.label_box_mut() {
+            label.style.background = Some(Background::Solid(color));
+            label.style.corner_radius = radius.max(0.0);
+        }
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        if let Some(content) = self.content_mut() {
+            content.style.gap = gap.max(0.0);
+        }
+        self
+    }
+
+    pub fn padding(mut self, padding: Insets) -> Self {
+        self.container = self.container.padding(padding);
+        self
+    }
+
+    pub fn width(mut self, width: f32) -> Self {
+        self.container = self.container.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: f32) -> Self {
+        self.container = self.container.height(height);
+        self
+    }
+
+    pub fn min_height(mut self, height: f32) -> Self {
+        self.container = self.container.min_height(height);
+        self
+    }
+
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.container = self.container.radius(radius);
+        self
+    }
+
+    pub fn position(mut self, position: Point) -> Self {
+        self.container = self.container.position(position);
+        self
+    }
+
+    pub fn id(mut self, id: impl Into<UiId>) -> Self {
+        self.container = self.container.id(id);
+        self
+    }
+
+    pub fn context_message(mut self, message: Message) -> Self {
+        self.container = self.container.context_message(message);
+        self
+    }
+
     pub fn focus_background_tint(mut self, color: Color) -> Self {
-        self.0 = self.0.focus_background_tint(color);
+        self.container = self.container.focus_background_tint(color);
         self
     }
 
     pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
-        self.0 = self.0.controller_focus_background_tint(color);
+        self.container = self.container.controller_focus_background_tint(color);
         self
+    }
+
+    pub fn interaction_backgrounds(mut self, hover: Color, pressed: Color) -> Self {
+        self.container = self.container.interaction_backgrounds(hover, pressed);
+        self
+    }
+
+    pub fn selected_background(mut self, selected: bool, color: Color) -> Self {
+        if selected {
+            self.container = self.container.background(color);
+        }
+        self
+    }
+
+    pub fn hovered_background(self, hovered: bool, color: Color) -> Self {
+        self.selected_background(hovered, color)
+    }
+
+    pub fn border(mut self, color: Color, width: f32) -> Self {
+        self.container = self.container.border(color, width);
+        self
+    }
+
+    pub fn semantic_role(mut self, role: SemanticRole) -> Self {
+        self.container = self.container.semantic_role(role);
+        self
+    }
+
+    pub fn accessibility_label(mut self, label: impl Into<String>) -> Self {
+        self.container = self.container.accessibility_label(label);
+        self
+    }
+
+    // Compatibility policy adapters for existing declarative file-grid call sites.
+    pub fn colors(self, background: Color, border: Color, foreground: Color) -> Self {
+        self.selected_background(true, background)
+            .border(border, 1.0)
+            .foreground(foreground)
+    }
+
+    pub fn borderless_colors(self, background: Color, foreground: Color) -> Self {
+        self.selected_background(true, background)
+            .foreground(foreground)
+    }
+
+    pub fn borderless_palette(self, colors: (Color, Color)) -> Self {
+        self.borderless_colors(colors.0, colors.1)
+    }
+
+    pub fn file_grid_defaults(self) -> Self {
+        self.padding(Insets {
+            top: 8.0,
+            right: 6.0,
+            bottom: 4.0,
+            left: 6.0,
+        })
     }
 }
 
-impl<Message> Component<Message> for FileGridItem<Message> {
+impl<Message> Component<Message> for FilePlaneItem<Message> {
     fn into_element(self) -> Element<Message> {
-        self.0.into_element()
+        self.container.into_element()
     }
 }
+
+/// Compatibility name for the shared file-plane authority.
+pub type FileGridItem<Message = String> = FilePlaneItem<Message>;
 
 pub struct StyledText<Message = String>(Element<Message>);
 

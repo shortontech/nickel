@@ -344,7 +344,6 @@ impl Launcher {
         self.refresh();
     }
 
-    #[cfg(test)]
     pub fn selected_result(&self) -> Option<&Application> {
         self.result_at(self.selected)
     }
