@@ -135,13 +135,14 @@ the interactive acceptance below. The same cross-platform package set also passe
 Clippy across all targets with warnings denied.
 
 On 2026-09-05, an isolated native Windows release shell launched in interactive session 1 and
-remained responsive. After commit `1b4b052`, its replacement reached first shell in 1.59 seconds;
-the wallpaper adapter logged an unavailable COM class and then successfully loaded the Windows
-`TranscodedWallpaper` fallback at 1920 by 1200. The focused native wallpaper suite passed six tests
-and production-binary Clippy passed. This proves the fallback and runtime path, but visual wallpaper
-presence still requires observation on the attached display. A separate all-feature fixture-only
-configuration defect found by the broader Clippy command remains open until its Windows-gated
-notification imports are corrected.
+remained responsive. Its replacement, built from wallpaper commit `ad8e0cf` (integrated into master
+as `1b4b052`), reached first shell in 1.59 seconds; the wallpaper adapter logged an unavailable COM
+class and then successfully loaded the Windows `TranscodedWallpaper` fallback at 1920 by 1200. The
+focused native wallpaper suite passed six tests and production-binary Clippy passed. This proves the
+fallback and runtime path, but the replacement predates the shared file-plane commit and visual
+wallpaper presence still requires observation on the attached display. A separate all-feature
+fixture-only configuration defect found by the broader Clippy command remains open until its
+Windows-gated notification imports are corrected.
 
 - **0136:** test every owned non-terminal shortcut and conflict/failure path, including controller
   equivalents and exact focus restoration. Unsupported virtual-desktop operations must remain
