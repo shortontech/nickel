@@ -4234,6 +4234,7 @@ impl LiveShell {
                 self.launch_named_application("Nickel Settings")
             }
             platform::GlobalShortcut::ShowControlCenter => {
+                self.control_host.application_mut().show_control_center();
                 self.set_control_visible(true);
                 true
             }
@@ -4258,7 +4259,15 @@ impl LiveShell {
                 send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
             }
             platform::GlobalShortcut::ProjectDisplays => {
+                self.control_host
+                    .application_mut()
+                    .show_projection_chooser();
                 self.set_control_visible(true);
+                self.sync_control_host(420, 320);
+                self.step_control_host(HostBatch {
+                    events: vec![HostEvent::Controller(ControllerAction::Down)],
+                    ..HostBatch::default()
+                });
                 true
             }
             platform::GlobalShortcut::ShowWindowMenu => self.open_active_window_menu(),
@@ -4532,6 +4541,9 @@ impl LiveShell {
             return;
         }
         self.control_visible = visible;
+        if !visible {
+            self.control_host.application_mut().show_control_center();
+        }
     }
 
     fn apply_launcher_signal(&mut self, visible: bool) {
@@ -5253,6 +5265,31 @@ impl LiveShell {
     }
 }
 
+fn supported_projection_modes() -> Vec<nickel_core::display_projection::ProjectionMode> {
+    #[cfg(target_os = "linux")]
+    {
+        use nickel_core::display_projection::{ProjectionChooser, ProjectionOutput};
+        let Ok(outputs) = platform::projection_outputs() else {
+            return Vec::new();
+        };
+        let outputs = outputs
+            .into_iter()
+            .map(|output| ProjectionOutput {
+                internal: output.name.starts_with("eDP") || output.name.starts_with("LVDS"),
+                name: output.name,
+                width: output.geometry.width,
+                height: output.geometry.height,
+                scale: nickel_core::dpi::Scale120::new(output.scale_120).unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        ProjectionChooser::supported(&outputs)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Vec::new()
+    }
+}
+
 fn window_belongs_to_panel(
     all_windows: bool,
     panel_output: Option<&str>,
@@ -5480,11 +5517,13 @@ impl PanelApplication {
 
 impl LiveShell {
     fn sync_control_host(&mut self, width: u32, height: u32) {
+        let supported_projection_modes = supported_projection_modes();
         self.control_host.application_mut().sync(
             &self.network,
             &self.bluetooth,
             &self.audio,
             &self.workspaces,
+            &supported_projection_modes,
         );
         self.step_control_host(HostBatch {
             surface_size: Some((width, height)),
@@ -5694,7 +5733,13 @@ impl LiveShell {
                     ShellCommand::RemoveWorkspace(workspace),
                 );
             }
-            ControlAction::PreviewProjection(mode) => self.preview_projection(mode),
+            ControlAction::PreviewProjection(mode) => {
+                if !self.preview_projection(mode) {
+                    self.control_host
+                        .application_mut()
+                        .projection_preview_failed();
+                }
+            }
             ControlAction::ConfirmProjection => {
                 self.projection_chooser.confirm();
                 self.projection_rollback_deadline = None;
@@ -5710,14 +5755,17 @@ impl LiveShell {
         let _ = self.refresh();
     }
 
-    fn preview_projection(&mut self, mode: nickel_core::display_projection::ProjectionMode) {
+    fn preview_projection(
+        &mut self,
+        mode: nickel_core::display_projection::ProjectionMode,
+    ) -> bool {
         #[cfg(target_os = "linux")]
         {
             use nickel_core::display_projection::{
                 ProjectionChooser, ProjectionOutput, ProjectionPlacement,
             };
             let Ok(outputs) = platform::projection_outputs() else {
-                return;
+                return false;
             };
             let topology = outputs
                 .iter()
@@ -5730,7 +5778,7 @@ impl LiveShell {
                 })
                 .collect::<Vec<_>>();
             let Some(plan) = ProjectionChooser::plan(mode, &topology) else {
-                return;
+                return false;
             };
             let previous = outputs
                 .iter()
@@ -5777,10 +5825,15 @@ impl LiveShell {
             if send_session_command("preview-projection", ShellCommand::ApplyOutputs(layout)) {
                 self.projection_chooser.preview(previous, plan);
                 self.projection_rollback_deadline = Some(Instant::now() + Duration::from_secs(15));
+                return true;
             }
+            false
         }
         #[cfg(not(target_os = "linux"))]
-        let _ = mode;
+        {
+            let _ = mode;
+            false
+        }
     }
 
     fn rollback_projection(&mut self) {
@@ -6054,7 +6107,8 @@ mod tests {
     use nickel_ui_testkit::{Scenario, Selector};
 
     use super::{
-        HostRuntimeSamples, LiveShell, initial_wallpaper, panel_status_layout, panel_tray_icons,
+        ControlAction, HostRuntimeSamples, LiveShell, initial_wallpaper, panel_status_layout,
+        panel_tray_icons,
         platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
         semantic_theme_from_palette, session_feed_status_label, shortcut_capability_status,
@@ -6911,6 +6965,21 @@ mod tests {
         assert!(keyboard.control_key(Some(KeyCode::Escape), 420, 600));
         assert!(controller.control_controller(nickel_ui::ControllerAction::Cancel, 420, 600));
         assert_eq!(controller.control_visible, keyboard.control_visible);
+    }
+
+    #[test]
+    fn project_displays_shortcut_opens_dedicated_projection_view() {
+        let mut shell = LiveShell::new().unwrap();
+
+        assert!(shell.global_shortcut(GlobalShortcut::ProjectDisplays));
+        assert!(shell.control_visible);
+        assert!(
+            shell
+                .control_host
+                .semantic_targets_for_message(&ControlAction::ToggleShowDesktop)
+                .is_empty(),
+            "Super+P must not open the generic Control Center"
+        );
     }
 
     #[test]

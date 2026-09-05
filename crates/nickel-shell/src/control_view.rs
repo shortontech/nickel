@@ -61,6 +61,9 @@ pub struct ControlViewState {
     pub audio_expanded: bool,
     pub pending_session_action: Option<SessionAction>,
     pub pending_projection: Option<ProjectionMode>,
+    /// Super+P opens the projection chooser directly instead of burying it in
+    /// the general-purpose Control Center.
+    pub projection_only: bool,
 }
 
 pub struct ControlCenterApp {
@@ -68,6 +71,7 @@ pub struct ControlCenterApp {
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
     workspaces: Vec<WorkspaceSummary>,
+    supported_projection_modes: Vec<ProjectionMode>,
     state: ControlViewState,
     effects: Vec<ControlAction>,
     dirty: bool,
@@ -85,6 +89,12 @@ impl ControlCenterApp {
             bluetooth,
             audio,
             workspaces,
+            supported_projection_modes: vec![
+                ProjectionMode::InternalOnly,
+                ProjectionMode::Duplicate,
+                ProjectionMode::Extend,
+                ProjectionMode::ExternalOnly,
+            ],
             state: ControlViewState::default(),
             effects: Vec::new(),
             dirty: false,
@@ -97,16 +107,39 @@ impl ControlCenterApp {
         bluetooth: &BluetoothStatus,
         audio: &AudioStatus,
         workspaces: &[WorkspaceSummary],
+        supported_projection_modes: &[ProjectionMode],
     ) {
         if self.network != *network
             || self.bluetooth != *bluetooth
             || self.audio != *audio
             || self.workspaces != workspaces
+            || self.supported_projection_modes != supported_projection_modes
         {
             self.network = network.clone();
             self.bluetooth = bluetooth.clone();
             self.audio = audio.clone();
             self.workspaces = workspaces.to_vec();
+            self.supported_projection_modes = supported_projection_modes.to_vec();
+            self.dirty = true;
+        }
+    }
+
+    pub fn show_projection_chooser(&mut self) {
+        self.state.projection_only = true;
+        self.state.pending_projection = None;
+        self.dirty = true;
+    }
+
+    pub fn show_control_center(&mut self) {
+        if self.state.projection_only {
+            self.state.projection_only = false;
+            self.state.pending_projection = None;
+            self.dirty = true;
+        }
+    }
+
+    pub fn projection_preview_failed(&mut self) {
+        if self.state.pending_projection.take().is_some() {
             self.dirty = true;
         }
     }
@@ -162,9 +195,9 @@ impl Application for ControlCenterApp {
             &self.bluetooth,
             &self.audio,
             &self.workspaces,
+            &self.supported_projection_modes,
             self.state,
-            context.viewport.size.width,
-            context.viewport.size.height,
+            context,
         )
     }
 
@@ -184,13 +217,21 @@ fn control_center_view(
     bluetooth: &BluetoothStatus,
     audio: &AudioStatus,
     workspaces: &[WorkspaceSummary],
+    supported_projection_modes: &[ProjectionMode],
     state: ControlViewState,
-    width: f32,
-    height: f32,
+    context: ViewContext,
 ) -> AnyView<ControlAction> {
-    let width = width.max(280.0);
-    let height = height.max(240.0);
+    let width = context.viewport.size.width.max(280.0);
+    let height = context.viewport.size.height.max(240.0);
     let viewport_height = height - HEADER;
+    if state.projection_only {
+        return projection_chooser_view(
+            state.pending_projection,
+            supported_projection_modes,
+            width,
+            height,
+        );
+    }
     let cards = vec![
         wifi(network, state.wifi_expanded),
         bluetooth_view(bluetooth, state.bluetooth_expanded),
@@ -211,7 +252,7 @@ fn control_center_view(
                     ),
             )],
         ),
-        projection_view(state.pending_projection),
+        projection_view(state.pending_projection, supported_projection_modes),
         session_view(state.pending_session_action),
     ];
     let content = Column::new()
@@ -250,7 +291,7 @@ fn control_center_view(
     )
 }
 
-fn projection_view(pending: Option<ProjectionMode>) -> Card {
+fn projection_view(pending: Option<ProjectionMode>, supported: &[ProjectionMode]) -> Card {
     if pending.is_some() {
         return card(
             82.0,
@@ -276,16 +317,55 @@ fn projection_view(pending: Option<ProjectionMode>) -> Card {
         vec![
             AnyView::new(Text::new("Project displays").color(PRIMARY)),
             AnyView::new(
-                Row::new()
-                    .gap(6.0)
-                    .children(modes.into_iter().map(|(label, mode)| {
-                        AnyView::new(button(
-                            action(ControlAction::PreviewProjection(mode)),
-                            label,
-                        ))
-                    })),
+                Row::new().gap(6.0).children(
+                    modes
+                        .into_iter()
+                        .filter(|(_, mode)| supported.contains(mode))
+                        .map(|(label, mode)| {
+                            AnyView::new(button(
+                                action(ControlAction::PreviewProjection(mode)),
+                                label,
+                            ))
+                        }),
+                ),
             ),
         ],
+    )
+}
+
+fn projection_chooser_view(
+    pending: Option<ProjectionMode>,
+    supported: &[ProjectionMode],
+    width: f32,
+    height: f32,
+) -> AnyView<ControlAction> {
+    let content = if supported.is_empty() {
+        AnyView::new(
+            Column::new()
+                .gap(8.0)
+                .child(
+                    Text::new("Project displays")
+                        .scale(3.0)
+                        .bold(true)
+                        .color(PRIMARY),
+                )
+                .child(
+                    Text::new(
+                        "No display projection modes are available for the current topology.",
+                    )
+                    .color(SECONDARY),
+                ),
+        )
+    } else {
+        projection_view(pending, supported).view
+    };
+    AnyView::new(
+        Container::new()
+            .width(width.max(280.0))
+            .height(height.max(240.0))
+            .padding(24.0)
+            .background(LinearGradient::vertical(TOP, BOTTOM))
+            .child(content),
     )
 }
 
@@ -871,6 +951,57 @@ mod tests {
         ] {
             assert!(has_action(&host, &ControlAction::PreviewProjection(mode)));
         }
+    }
+
+    #[test]
+    fn projection_shortcut_view_contains_only_topology_supported_modes() {
+        let mut host = build(&[]);
+        host.application_mut().sync(
+            &NetworkStatus::default(),
+            &BluetoothStatus::default(),
+            &AudioStatus::default(),
+            &[],
+            &[ProjectionMode::Duplicate, ProjectionMode::Extend],
+        );
+        host.application_mut().show_projection_chooser();
+        host.poll();
+
+        assert!(has_action(
+            &host,
+            &ControlAction::PreviewProjection(ProjectionMode::Duplicate)
+        ));
+        assert!(has_action(
+            &host,
+            &ControlAction::PreviewProjection(ProjectionMode::Extend)
+        ));
+        assert!(!has_action(
+            &host,
+            &ControlAction::PreviewProjection(ProjectionMode::InternalOnly)
+        ));
+        assert!(!has_action(
+            &host,
+            &ControlAction::PreviewProjection(ProjectionMode::ExternalOnly)
+        ));
+        assert!(!has_action(&host, &ControlAction::ToggleShowDesktop));
+    }
+
+    #[test]
+    fn failed_projection_preview_returns_to_the_mode_chooser() {
+        let mut host = build(&[]);
+        host.application_mut().show_projection_chooser();
+        Application::update(
+            host.application_mut(),
+            ControlAction::PreviewProjection(ProjectionMode::Extend),
+        );
+        host.application_mut().projection_preview_failed();
+        host.poll();
+
+        assert!(!has_action(&host, &ControlAction::ConfirmProjection));
+        assert!(!has_action(&host, &ControlAction::CancelProjection));
+        assert!(has_action(
+            &host,
+            &ControlAction::PreviewProjection(ProjectionMode::Extend)
+        ));
     }
     #[test]
     fn pending_action_exposes_only_cancel_and_confirm() {
