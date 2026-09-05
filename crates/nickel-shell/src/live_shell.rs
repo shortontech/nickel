@@ -5542,7 +5542,7 @@ mod tests {
 
     use super::{
         HostRuntimeSamples, LiveShell, panel_status_layout, panel_tray_icons,
-        platform::{FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
+        platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
         preview_refresh_due, secure_storage_status_label, semantic_theme_from_palette,
         session_feed_status_label, visible_tray_item, window_belongs_to_panel,
     };
@@ -7123,6 +7123,10 @@ mod tests {
     #[test]
     fn confirmed_audio_changes_coalesce_one_bounded_volume_osd() {
         let mut shell = LiveShell::new().unwrap();
+        // The production constructor may discover the developer machine's live
+        // default output. Keep this state-machine test independent of that
+        // ambient device while the explicit-output case below covers labeling.
+        shell.audio = AudioStatus::default();
         assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
 
         shell.global_shortcut(GlobalShortcut::AudioChanged {
