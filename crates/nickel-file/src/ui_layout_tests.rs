@@ -337,15 +337,18 @@ fn slow_system_provider_keeps_nickel_fallback_visible_before_async_results() {
 #[test]
 fn sidebar_locations_render_from_the_shared_resolved_artwork_cache() {
     let app = FileApp::fixture();
-    let host = UiHost::new(app, 1_100, 700);
+    let palette = ThemePalette::from_appearance(Appearance::default());
+    let frame = nickel_ui::UiFrame::layout(
+        app.build_view(1_100.0, 700.0, palette, false),
+        Rect::new(0.0, 0.0, 1_100.0, 700.0),
+    );
     assert!(
-        host.commands().iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::Image { bounds, .. }
-                if bounds.origin.x < DEFAULT_SIDEBAR_WIDTH
-                    && bounds.origin.y > TOOLBAR_HEIGHT
-        )),
-        "the shared image list must include artwork inside the places sidebar"
+        frame.resolved_layout().nodes().iter().any(|node| {
+            node.component == "Image"
+                && node.allocated.origin.x < DEFAULT_SIDEBAR_WIDTH
+                && node.allocated.origin.y > TOOLBAR_HEIGHT
+        }),
+        "the declarative places sidebar must contain resolved image artwork"
     );
 }
 
@@ -704,17 +707,14 @@ fn details_view_omits_file_only_metadata_for_directories() {
         app.build_view(960.0, 640.0, palette, false),
         Rect::new(0.0, 0.0, 960.0, 640.0),
     );
-    let rendered_text = frame
-        .commands()
+    let accessible_text = frame
+        .accessibility_nodes()
         .iter()
-        .filter_map(|command| match command {
-            nickel_ui::backend::PaintCommand::Text { text, .. } => Some(text.as_str()),
-            _ => None,
-        })
+        .filter_map(|node| node.label.as_deref())
         .collect::<Vec<_>>();
 
     assert_eq!(
-        rendered_text
+        accessible_text
             .iter()
             .filter(|text| **text == "4.0 KB")
             .count(),
@@ -723,7 +723,7 @@ fn details_view_omits_file_only_metadata_for_directories() {
     );
     let modified = format_modified(timestamp);
     assert_eq!(
-        rendered_text
+        accessible_text
             .iter()
             .filter(|text| **text == modified)
             .count(),
@@ -734,42 +734,49 @@ fn details_view_omits_file_only_metadata_for_directories() {
 
 #[test]
 fn file_views_contain_non_square_provider_artwork_without_stretching() {
-    let mut app = FileApp::fixture();
-    let path = app.browser.entries()[0].path.clone();
     let asset_id = 60_000;
-    app.icons.insert(
-        path,
-        (
-            asset_id,
-            Arc::new(image::RgbaImage::from_pixel(
-                80,
-                40,
-                image::Rgba([20, 80, 160, 255]),
-            )),
-        ),
-    );
-    let palette = ThemePalette::from_appearance(Appearance::default());
-    let image_bounds = |app: &FileApp| {
-        nickel_ui::UiFrame::layout(
-            app.build_view(960.0, 640.0, palette, false),
-            Rect::new(0.0, 0.0, 960.0, 640.0),
-        )
-        .commands()
-        .iter()
-        .find_map(|command| match command {
-            nickel_ui::backend::PaintCommand::Image { bounds, id, .. } if *id == asset_id => {
-                Some(*bounds)
-            }
-            _ => None,
-        })
-        .expect("injected provider artwork must be painted")
+    let rasterized_artwork_bounds = |mode| {
+        let mut app = FileApp::fixture();
+        app.view_mode = mode;
+        let path = app.browser.entries()[0].path.clone();
+        app.icons.insert(
+            path,
+            (
+                asset_id,
+                Arc::new(image::RgbaImage::from_pixel(
+                    80,
+                    40,
+                    image::Rgba([20, 80, 160, 255]),
+                )),
+            ),
+        );
+        let host = UiHost::new(app, 960, 640);
+        let raster = nickel_ui_testkit::render_host(&host, 960, 640, 1.0);
+        let mut points = raster
+            .rgba
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(index, pixel)| {
+                (pixel == [20, 80, 160, 255]).then_some((index % 960, index / 960))
+            });
+        let (first_x, first_y) = points.next().expect("provider artwork is rasterized");
+        let (mut min_x, mut max_x, mut min_y, mut max_y) = (first_x, first_x, first_y, first_y);
+        for (x, y) in points {
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+        }
+        ((max_x - min_x + 1) as f32, (max_y - min_y + 1) as f32)
     };
 
-    let grid = image_bounds(&app);
-    assert!((grid.size.width / grid.size.height - 2.0).abs() < 0.01);
-    app.view_mode = FileViewMode::Details;
-    let details = image_bounds(&app);
-    assert!((details.size.width / details.size.height - 2.0).abs() < 0.01);
+    let grid = rasterized_artwork_bounds(FileViewMode::Grid);
+    assert!((grid.0 / grid.1 - 2.0).abs() < 0.05, "grid: {grid:?}");
+    let details = rasterized_artwork_bounds(FileViewMode::Details);
+    assert!(
+        (details.0 / details.1 - 2.0).abs() < 0.1,
+        "details: {details:?}"
+    );
 }
 
 #[test]

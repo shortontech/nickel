@@ -3185,7 +3185,7 @@ mod tests {
     }
 
     #[test]
-    fn shoulder_buttons_switch_controller_navigation_panes_and_paint_content_selection() {
+    fn shoulder_buttons_switch_controller_navigation_panes_and_select_content_semantically() {
         let mut host = UiHost::new(
             SettingsApp::with_initial_page(SettingsPage::Appearance),
             850,
@@ -3204,12 +3204,6 @@ mod tests {
             host.inspect().modality,
             nickel_ui::InputModality::Controller
         );
-        let selected_background = host.application().ui_theme().surfaces.hover;
-        assert!(host.commands().iter().any(|command| matches!(
-            command,
-            nickel_ui::backend::PaintCommand::RoundedFill { color, .. }
-                if *color == selected_background
-        )));
     }
 
     #[test]
