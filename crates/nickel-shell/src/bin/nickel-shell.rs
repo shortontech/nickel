@@ -1808,13 +1808,7 @@ fn handle_controller_action(
     let focused_surface = shell
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
-        .map(|surface| surface.id())
-        .or_else(|| {
-            shell
-                .surfaces()
-                .find(|surface| surface.role() == SurfaceRole::Desktop)
-                .map(|surface| surface.id())
-        });
+        .map(|surface| surface.id());
     let focused_role =
         focused_surface.and_then(|surface| shell.surface(surface).map(|entry| entry.role()));
     if controller_target_role(state.surface_visible(SurfaceRole::Launcher), focused_role)
@@ -2996,6 +2990,16 @@ mod tests {
         assert_eq!(
             super::controller_target_role(false, Some(super::SurfaceRole::Panel)),
             Some(super::SurfaceRole::Panel)
+        );
+    }
+
+    #[test]
+    fn unfocused_desktop_never_becomes_the_controller_fallback() {
+        assert_eq!(super::controller_target_role(false, None), None);
+        assert_eq!(
+            super::controller_target_role(true, None),
+            Some(super::SurfaceRole::Launcher),
+            "the explicit global launcher remains available without borrowing desktop focus"
         );
     }
 
