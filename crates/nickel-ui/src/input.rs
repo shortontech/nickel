@@ -208,11 +208,7 @@ impl FocusedInputDispatcher {
                 let shift = event.modifiers.aggregate(AggregateModifier::Shift);
                 let control = event.modifiers.aggregate(AggregateModifier::Control);
                 let text_editing = context.text_focused && !context.navigation_active;
-                let command_modifier = if cfg!(target_os = "macos") {
-                    event.modifiers.aggregate(AggregateModifier::Super)
-                } else {
-                    control
-                };
+                let command_modifier = control;
                 // AltGr is commonly reported as Control+Alt. It produces text and must not be
                 // mistaken for an editing shortcut merely because Control is present.
                 let command =

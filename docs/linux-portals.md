@@ -7,7 +7,7 @@ session bus. It does not launch desktop-specific helper programs.
 
 - Linux file dialogs call `org.freedesktop.portal.FileChooser` directly through the Rust platform
   adapter. A missing portal is an explicit dialog failure; Nickel cannot fall back to Zenity or
-  another desktop helper. Windows and macOS continue to use SDL's native dialog adapters.
+  another desktop helper. Windows continues to use SDL's native dialog adapter.
 - HTTP and HTTPS links are submitted directly to `org.freedesktop.portal.OpenURI` on the session bus.
 - The session installer supplies `nickel-portals.conf`. It selects the GTK implementation by default,
   retains KWallet as the Secret portal implementation where it is installed, and selects

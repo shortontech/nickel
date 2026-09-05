@@ -2156,10 +2156,6 @@ fn main() -> Result<(), String> {
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
     let mut controller = ControllerInput::new();
     let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
-    #[cfg(target_os = "macos")]
-    let mut focused_overlays = HashSet::new();
-    #[cfg(target_os = "macos")]
-    let mut overlay_focus_loss: Option<(SurfaceId, SurfaceRole, Instant)> = None;
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
     let mut diagnostic_overdue_after_poll = Vec::new();
@@ -2212,10 +2208,6 @@ fn main() -> Result<(), String> {
         let next_deadline = shell
             .next_output_retirement_deadline()
             .map(|deadline| deadline.min(next_deadline))
-            .unwrap_or(next_deadline);
-        #[cfg(target_os = "macos")]
-        let next_deadline = overlay_focus_loss
-            .map(|(_, _, deadline)| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
         let timeout = next_deadline.saturating_duration_since(Instant::now());
         let event = shell.wait_event_timeout(timeout);
@@ -2383,19 +2375,7 @@ fn main() -> Result<(), String> {
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
             // window. Explicit dismissal and Escape remain authoritative.
-            Some(ShellEvent::FocusChanged {
-                surface: _surface,
-                focused: false,
-            }) => {
-                #[cfg(target_os = "macos")]
-                if let Some(role @ (SurfaceRole::Launcher | SurfaceRole::ControlCenter)) =
-                    shell.surface(_surface).map(|entry| entry.role())
-                    && focused_overlays.remove(&_surface)
-                {
-                    overlay_focus_loss =
-                        Some((_surface, role, Instant::now() + Duration::from_millis(100)));
-                }
-            }
+            Some(ShellEvent::FocusChanged { focused: false, .. }) => {}
             Some(ShellEvent::FocusChanged {
                 surface,
                 focused: true,
@@ -2407,19 +2387,6 @@ fn main() -> Result<(), String> {
                 {
                     state.focus_launcher_search();
                     shell.start_text_input(surface);
-                }
-                #[cfg(target_os = "macos")]
-                if shell.surface(surface).is_some_and(|entry| {
-                    matches!(
-                        entry.role(),
-                        SurfaceRole::Launcher | SurfaceRole::ControlCenter
-                    )
-                }) {
-                    focused_overlays.insert(surface);
-                }
-                #[cfg(target_os = "macos")]
-                if overlay_focus_loss.is_some_and(|(pending, _, _)| pending == surface) {
-                    overlay_focus_loss = None;
                 }
             }
             Some(ShellEvent::PointerEntered {
@@ -2545,13 +2512,6 @@ fn main() -> Result<(), String> {
             && let Some((role, _)) = hover_repaint.take()
         {
             render_role(&mut shell, &mut state, role)?;
-        }
-        #[cfg(target_os = "macos")]
-        if overlay_focus_loss.is_some_and(|(_, _, deadline)| Instant::now() >= deadline)
-            && let Some((_, role, _)) = overlay_focus_loss.take()
-            && state.hide_overlay(role)
-        {
-            sync_visibility(&mut shell, &state);
         }
         if fast_subscription.is_due(Instant::now()) {
             let refresh_now = Instant::now();

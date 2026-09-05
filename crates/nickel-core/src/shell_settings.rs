@@ -310,10 +310,6 @@ mod tests {
             FileIconPreference::default_for_os("linux"),
             FileIconPreference::Nickel
         );
-        assert_eq!(
-            FileIconPreference::default_for_os("macos"),
-            FileIconPreference::Nickel
-        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 use std::io;
 
 pub(crate) fn publish_text_clipboard(text: &str) -> Result<(), String> {
@@ -262,30 +262,11 @@ mod clipboard_contract_tests {
     }
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn publish_file_clipboard(paths: &[PathBuf], _cut: bool) -> Result<(), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
-    clipboard
-        .set()
-        .file_list(paths)
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(target_os = "macos")]
-pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
-    let mut clipboard = arboard::Clipboard::new().map_err(|error| error.to_string())?;
-    clipboard
-        .get()
-        .file_list()
-        .map(|paths| (false, paths))
-        .map_err(|error| error.to_string())
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) fn publish_file_clipboard(_paths: &[PathBuf], _cut: bool) -> Result<(), String> {
     Err("native file clipboard adapter unavailable".into())
 }
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) fn read_file_clipboard() -> Result<(bool, Vec<PathBuf>), String> {
     Err("native file clipboard adapter unavailable".into())
 }
@@ -295,7 +276,7 @@ pub(crate) enum OpenPathError {
     AssociationMissing,
     PermissionDenied,
     TargetMissing,
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     Unsupported,
     Platform(String),
 }
@@ -306,7 +287,7 @@ impl fmt::Display for OpenPathError {
             Self::AssociationMissing => formatter.write_str("no default application is available"),
             Self::PermissionDenied => formatter.write_str("permission was denied"),
             Self::TargetMissing => formatter.write_str("the target no longer exists"),
-            #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+            #[cfg(not(any(target_os = "windows", target_os = "linux")))]
             Self::Unsupported => {
                 formatter.write_str("opening files is unsupported on this platform")
             }
@@ -315,7 +296,7 @@ impl fmt::Display for OpenPathError {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn spawn_open_error(error: io::Error) -> OpenPathError {
     match error.kind() {
         io::ErrorKind::NotFound => OpenPathError::AssociationMissing,
@@ -534,25 +515,6 @@ pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), O
         })
 }
 
-#[cfg(target_os = "macos")]
-pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
-    if !launcher.exists() || !source.exists() {
-        return Err(OpenPathError::TargetMissing);
-    }
-    std::process::Command::new("open")
-        .arg("-a")
-        .arg(launcher)
-        .arg(source)
-        .status()
-        .map_err(spawn_open_error)
-        .and_then(|status| {
-            status
-                .success()
-                .then_some(())
-                .ok_or_else(|| OpenPathError::Platform(format!("open -a exited with {status}")))
-        })
-}
-
 #[cfg(target_os = "windows")]
 pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), OpenPathError> {
     if !launcher.exists() || !source.exists() {
@@ -596,7 +558,7 @@ pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), O
     }
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn open_with_launcher(_launcher: &Path, _source: &Path) -> Result<(), OpenPathError> {
     Err(OpenPathError::Unsupported)
 }

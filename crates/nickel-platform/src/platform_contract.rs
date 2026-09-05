@@ -2,7 +2,6 @@
 pub enum PlatformFamily {
     Linux,
     Windows,
-    MacOs,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -110,36 +109,6 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         "Explorer registry preference",
         "platform_contract::tests::matrix_is_complete_and_truthful",
     ),
-    fixture(
-        PlatformFamily::MacOs,
-        AdapterCapability::ImageFileDialog,
-        "unsupported until a native adapter is implemented",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
-    ),
-    fixture(
-        PlatformFamily::MacOs,
-        AdapterCapability::ExternalUrl,
-        "macOS open command",
-        "macos::tests::external_url_command_preserves_the_argument",
-    ),
-    fixture(
-        PlatformFamily::MacOs,
-        AdapterCapability::PathIcon,
-        "unsupported fallback",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
-    ),
-    fixture(
-        PlatformFamily::MacOs,
-        AdapterCapability::Appearance,
-        "portable default appearance",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
-    ),
-    fixture(
-        PlatformFamily::MacOs,
-        AdapterCapability::HiddenFilesPreference,
-        "portable false fallback",
-        "platform_contract::tests::matrix_is_complete_and_truthful",
-    ),
 ];
 
 #[cfg(test)]
@@ -160,7 +129,7 @@ mod tests {
                 ContractEvidence::LiveVerified => assert!(contract.live_evidence.is_some()),
             }
         }
-        assert_eq!(keys.len(), 3 * 5);
+        assert_eq!(keys.len(), 2 * 5);
     }
 
     #[test]

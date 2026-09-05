@@ -202,8 +202,6 @@ pub fn association_backend() -> Box<dyn AssociationBackend> {
     return Box::new(LinuxAssociations);
     #[cfg(target_os = "windows")]
     return Box::new(WindowsAssociations);
-    #[cfg(target_os = "macos")]
-    return Box::new(MacAssociations);
     #[allow(unreachable_code)]
     Box::new(UnsupportedAssociations)
 }
@@ -285,21 +283,7 @@ pub fn open_once_with(path: &Path, handler: &ApplicationHandler) -> Result<(), A
             .then_some(())
             .ok_or_else(|| AssociationError(format!("{} exited with {status}", handler.name)))
     }
-    #[cfg(target_os = "macos")]
-    {
-        let status = std::process::Command::new("/usr/bin/open")
-            .args(["-b", &handler.id])
-            .arg(path)
-            .status()
-            .map_err(|error| {
-                AssociationError(format!("could not launch {}: {error}", handler.name))
-            })?;
-        status
-            .success()
-            .then_some(())
-            .ok_or_else(|| AssociationError(format!("{} exited with {status}", handler.name)))
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (path, handler);
         Err(AssociationError(
@@ -367,13 +351,9 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
             ))),
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        let program = if cfg!(target_os = "linux") {
-            "xdg-open"
-        } else {
-            "/usr/bin/open"
-        };
+        let program = "xdg-open";
         let status = std::process::Command::new(program)
             .arg(path)
             .status()
@@ -384,7 +364,7 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
             })?;
         if status.success() {
             Ok(())
-        } else if cfg!(target_os = "linux") && status.code() == Some(3) {
+        } else if status.code() == Some(3) {
             Err(DefaultLaunchError::AssociationMissing)
         } else {
             Err(DefaultLaunchError::Platform(format!(
@@ -392,7 +372,7 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
             )))
         }
     }
-    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         Err(DefaultLaunchError::Platform(
             "default application launch is unavailable on this platform".into(),
@@ -401,7 +381,7 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
 }
 
 pub const fn open_once_supported() -> bool {
-    cfg!(any(target_os = "linux", target_os = "macos"))
+    cfg!(target_os = "linux")
 }
 
 #[cfg(target_os = "linux")]
@@ -696,32 +676,6 @@ impl AssociationBackend for WindowsAssociations {
         Ok(ChangeOutcome::NativeConsentRequired {
             detail: "Windows Default apps was opened; choose the application there, then refresh"
                 .into(),
-        })
-    }
-}
-
-#[cfg(target_os = "macos")]
-struct MacAssociations;
-
-#[cfg(target_os = "macos")]
-impl AssociationBackend for MacAssociations {
-    fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
-        Ok(AssociationSnapshot {
-            target: target.clone(),
-            effective: None,
-            handlers: Vec::new(),
-            capability: AssociationCapability::ReadOnly,
-            scope: AssociationScope::System,
-            detail: "No public supported setter is available in this Nickel build".into(),
-        })
-    }
-    fn request_change(
-        &self,
-        _: &AssociationTarget,
-        _: &str,
-    ) -> Result<ChangeOutcome, AssociationError> {
-        Ok(ChangeOutcome::Rejected {
-            detail: "Change this association with the macOS Open With workflow".into(),
         })
     }
 }

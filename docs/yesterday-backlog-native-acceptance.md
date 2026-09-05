@@ -56,7 +56,7 @@ an installed native session, physical hardware, or visual inspection.
 
 - **0122:** test physical Linux keyboard/headset controls against PipeWire and at least two MPRIS
   applications, including held repeat, lock, USB/Bluetooth output changes, and Wayland/XWayland.
-  Repeat available physical media and volume keys on Windows and record macOS ownership support.
+  Repeat available physical media and volume keys on Windows.
   Do not inject these keys in a supposedly isolated nested session: Nickel currently controls the
   host PipeWire and MPRIS buses.
 
@@ -72,7 +72,7 @@ an installed native session, physical hardware, or visual inspection.
 
 ## Native file operations and desktop
 
-- **0165:** on Linux, Windows, and supported macOS, test rename, copy, cut, paste, and multi-item drag
+- **0165:** on Linux and Windows, test rename, copy, cut, paste, and multi-item drag
   with external file managers, cross-filesystem moves, conflicts, cancellation, and external drops.
 - **0167:** change a harmless association, re-query the effective handler, launch through it, and
   restore it on every claimed platform.
@@ -106,12 +106,6 @@ Clippy across all targets with warnings denied.
 
 ## Native visual, Settings, and default handlers
 
-Cross-target evidence recorded on 2026-09-04: the cross-platform package set listed in the Windows
-section passes strict Clippy for `x86_64-apple-darwin` with warnings denied. Screenshot capture and
-image clipboard operations remain explicitly unsupported on macOS rather than silently claiming an
-implementation. This is compile-time boundary evidence only, not native macOS or interactive
-acceptance.
-
 - **0171:** inspect Codex selector and task switcher under every supported theme, including live theme
   changes and forward/reverse switching.
 - **0173:** audit Linux and Windows at low/high DPI under dark, light, high-contrast, and custom
@@ -119,7 +113,7 @@ acceptance.
 - **0174:** exercise the real Wi-Fi switch and representative migrated Settings controls on Linux
   and Windows without presenting unsupported operations as available.
 - **0191:** change and restore Linux MIME/URI and Nickel terminal/file-manager handlers; exercise and
-  verify supported Windows and macOS consent workflows and effective handlers.
+  verify supported Windows consent workflows and effective handlers.
 
 ## Physical mixed-DPI session
 
@@ -151,4 +145,4 @@ recorded. Registered hidden surfaces now remain visible in diagnostic output wit
 as active-topology readiness roles.
 
 This closes only nested structural coverage. It does not close any physical-display, native toolkit,
-hardware-input, visual, PAM, file-manager interoperability, live Codex, Windows, or macOS item above.
+hardware-input, visual, PAM, file-manager interoperability, live Codex, or Windows item above.

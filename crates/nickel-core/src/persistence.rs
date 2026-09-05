@@ -12,15 +12,7 @@ pub(crate) fn config_path(file_name: &str) -> io::Result<PathBuf> {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is not set"))?;
         Ok(PathBuf::from(root).join("Nickel").join(file_name))
     }
-    #[cfg(target_os = "macos")]
-    {
-        let root = std::env::var_os("HOME")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "HOME is not set"))?;
-        Ok(PathBuf::from(root)
-            .join("Library/Application Support/Nickel")
-            .join(file_name))
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
         let root = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)

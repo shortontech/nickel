@@ -21,7 +21,6 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
 | Windows | SDL / Win32 | x86_64 | untested | untested | keyboard / pointer | focused input and registered global shortcuts | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
 | Windows | SDL / Win32 | x86_64 | untested | untested | Xbox-class controller | normalized navigation | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
 | Windows | Nickel shell | x86_64 | untested | untested | keyboard / pointer | Print Screen crop, clipboard, save, modified capture | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
-| macOS | native runtime | untested | untested | untested | all | focused/global/controller/screenshot acceptance | untested | untested | not applicable | unsupported | 2026-08-30 |
 | BSD | native runtime | untested | untested | untested | all | focused/global/controller/screenshot acceptance | untested | untested | not applicable | unsupported | 2026-08-30 |
 
 ## Recorded automated and build evidence
@@ -122,7 +121,7 @@ rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says o
 - Live Windows focused input, registered shortcuts, controller navigation, and screenshot pixels,
   clipboard, save, and reopen workflow.
 - Xbox-class controller navigation on Linux and Windows.
-- Native macOS and BSD implementations and hosts; these remain unsupported rather than inferred
+- Native BSD implementations and hosts; these remain unsupported rather than inferred
   from foreign builds.
 
 Acceptance artifacts must not retain typed text, clipboard contents, credentials, or private

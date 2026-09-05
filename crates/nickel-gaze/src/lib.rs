@@ -11,5 +11,5 @@ mod grid_application;
 
 pub use grid_application::{GazeGridApplication, GazeGridFixtureProvider, GazeGridFixtureState};
 
-#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod camera;

@@ -4,7 +4,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-#[cfg(not(target_os = "macos"))]
 use jiff::Zoned;
 use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
@@ -22,12 +21,10 @@ use nickel_file::{
     },
 };
 use nickel_session_protocol::ShellRole;
-#[cfg(any(target_os = "linux", all(test, not(target_os = "macos"))))]
-use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 #[cfg(any(target_os = "linux", test))]
 use nickel_session_protocol::{
-    PointerInteraction, PreviewTargetAction, ResolvedShellTarget, ShellSemanticTarget,
-    WindowMenuTargetAction,
+    AnchorSide, Geometry, PointerInteraction, PreviewTargetAction, ResolvedShellTarget,
+    ShellPopoverAnchor, ShellSemanticTarget, WindowMenuTargetAction,
 };
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
@@ -72,9 +69,8 @@ fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) 
 }
 
 const PANEL_ITEM_WIDTH: f32 = 52.0;
-#[cfg(not(target_os = "macos"))]
 const PANEL_CLOCK_WIDTH: f32 = 96.0;
-#[cfg(all(test, not(target_os = "macos")))]
+#[cfg(test)]
 const PANEL_CONTROL_GAP: f32 = 8.0;
 const PANEL_TRAY_WIDTH: f32 = 28.0;
 const PANEL_TRAY_ICON_SIZE: u32 = 18;
@@ -131,7 +127,6 @@ enum PanelHover {
     Task(usize),
     Codex,
     Tray(usize),
-    #[cfg(not(target_os = "macos"))]
     Control,
 }
 
@@ -147,7 +142,6 @@ pub enum PanelAction {
     Codex,
     Tray(String),
     TrayContext(String),
-    #[cfg(not(target_os = "macos"))]
     Control,
 }
 
@@ -1841,18 +1835,11 @@ impl PanelApplication {
 }
 
 fn panel_clock_text() -> (String, String) {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let now = Zoned::now();
-        (
-            now.strftime("%-I:%M %p").to_string(),
-            now.strftime("%-m/%-d/%Y").to_string(),
-        )
-    }
-    #[cfg(target_os = "macos")]
-    {
-        (String::new(), String::new())
-    }
+    let now = Zoned::now();
+    (
+        now.strftime("%-I:%M %p").to_string(),
+        now.strftime("%-m/%-d/%Y").to_string(),
+    )
 }
 
 fn duration_until_next_minute() -> Duration {
@@ -2415,10 +2402,6 @@ impl LiveShell {
 
     pub fn refresh_fast(&mut self) -> bool {
         let mut changed = false;
-        #[cfg(target_os = "macos")]
-        if self.launcher_visible || self.control_visible {
-            return false;
-        }
         let windows = self.window_feed.snapshot(&self.launcher);
         if update_feed_status(&mut self.window_feed_status, windows.status(), "windows") {
             changed = true;
@@ -2540,10 +2523,6 @@ impl LiveShell {
     }
 
     pub fn refresh_system(&mut self) -> bool {
-        #[cfg(target_os = "macos")]
-        if self.launcher_visible || self.control_visible {
-            return false;
-        }
         let mut changed = false;
         #[cfg(target_os = "linux")]
         {
@@ -3134,7 +3113,6 @@ impl LiveShell {
     fn apply_panel_action(&mut self, action: PanelAction) {
         let anchored_role = match &action {
             PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),
-            #[cfg(not(target_os = "macos"))]
             PanelAction::Control => Some((ShellRole::ControlCenter, "panel-control")),
             _ => None,
         };
@@ -3252,7 +3230,6 @@ impl LiveShell {
             }
             PanelAction::Tray(id) => self.tray_feed.activate(&id),
             PanelAction::TrayContext(id) => self.tray_feed.context_menu(&id),
-            #[cfg(not(target_os = "macos"))]
             PanelAction::Control => {
                 if self.launcher_visible {
                     self.set_launcher_visible(false);
@@ -3421,7 +3398,6 @@ impl LiveShell {
                 .position(|item| item.id == id.as_str())
                 .map(PanelHover::Tray)
                 .unwrap_or(PanelHover::Tray(0)),
-            #[cfg(not(target_os = "macos"))]
             PanelAction::Control => PanelHover::Control,
         })
     }
@@ -3440,7 +3416,7 @@ impl LiveShell {
             .flatten()
     }
 
-    #[cfg(any(target_os = "linux", all(test, not(target_os = "macos"))))]
+    #[cfg(any(target_os = "linux", test))]
     pub fn popover_anchor(&self, preferred: AnchorSide) -> Option<(ShellRole, ShellPopoverAnchor)> {
         let anchor = self.pending_popover_anchor.as_ref()?;
         let visible = match anchor.role {
@@ -5234,46 +5210,43 @@ impl PanelApplication {
                     ),
             );
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            row = row.child(
-                Container::new()
-                    .id("panel-control")
-                    .accessibility_label("Open Quick Settings")
-                    .semantic_role(SemanticRole::Button)
-                    .message(PanelAction::Control)
-                    .width(PANEL_CLOCK_WIDTH)
-                    .height(height)
-                    .padding(Insets {
-                        top: 6.0,
-                        right: 8.0,
-                        bottom: 8.0,
-                        left: 0.0,
-                    })
-                    .background(interactive_background(
-                        self.panel_hover == Some(PanelHover::Control),
-                        self.control_visible,
-                    ))
-                    .radius(8.0)
-                    .child(
-                        Column::new()
-                            .child(
-                                Text::new(&self.clock)
-                                    .height(22.0)
-                                    .scale(1.0)
-                                    .color(self.palette.text)
-                                    .align(TextAlign::Center),
-                            )
-                            .child(
-                                Text::new(&self.date)
-                                    .height(20.0)
-                                    .scale(0.72)
-                                    .color(self.palette.text)
-                                    .align(TextAlign::Center),
-                            ),
-                    ),
-            );
-        }
+        row = row.child(
+            Container::new()
+                .id("panel-control")
+                .accessibility_label("Open Quick Settings")
+                .semantic_role(SemanticRole::Button)
+                .message(PanelAction::Control)
+                .width(PANEL_CLOCK_WIDTH)
+                .height(height)
+                .padding(Insets {
+                    top: 6.0,
+                    right: 8.0,
+                    bottom: 8.0,
+                    left: 0.0,
+                })
+                .background(interactive_background(
+                    self.panel_hover == Some(PanelHover::Control),
+                    self.control_visible,
+                ))
+                .radius(8.0)
+                .child(
+                    Column::new()
+                        .child(
+                            Text::new(&self.clock)
+                                .height(22.0)
+                                .scale(1.0)
+                                .color(self.palette.text)
+                                .align(TextAlign::Center),
+                        )
+                        .child(
+                            Text::new(&self.date)
+                                .height(20.0)
+                                .scale(0.72)
+                                .color(self.palette.text)
+                                .align(TextAlign::Center),
+                        ),
+                ),
+        );
         Container::new()
             .width(width)
             .height(height)
@@ -5758,14 +5731,7 @@ fn wallpaper_cache_target(current: (u32, u32), requested: (u32, u32)) -> Option<
 
 #[cfg(test)]
 fn panel_control_start(width: u32) -> f32 {
-    #[cfg(target_os = "macos")]
-    {
-        width as f32
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        width as f32 - PANEL_CLOCK_WIDTH - PANEL_CONTROL_GAP
-    }
+    width as f32 - PANEL_CLOCK_WIDTH - PANEL_CONTROL_GAP
 }
 
 fn panel_tray_icons(items: &[TrayItem]) -> Vec<Arc<image::RgbaImage>> {
@@ -5834,10 +5800,8 @@ mod tests {
 
     use image::{Rgba, RgbaImage};
     use nickel_input::KeyCode;
-    #[cfg(not(target_os = "macos"))]
-    use nickel_session_protocol::AnchorSide;
     use nickel_session_protocol::{
-        PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
+        AnchorSide, PointerInteraction, PreviewTargetAction, ScreenshotTargetAction, ShellRole,
         ShellSemanticTarget, WindowMenuTargetAction,
     };
     use nickel_ui::{
@@ -6484,7 +6448,6 @@ mod tests {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
     #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
@@ -6799,7 +6762,6 @@ mod tests {
         };
         assert!(shell.panel_pointer_moved(center.x, 1280));
         assert_eq!(shell.panel_hover, Some(super::PanelHover::Launcher));
-        #[cfg(not(target_os = "macos"))]
         assert!(
             shell
                 .panel_host

@@ -79,14 +79,12 @@ pub fn default_cache_root() -> Result<PathBuf, CacheError> {
     let home = env::var_os("HOME")
         .or_else(|| env::var_os("USERPROFILE"))
         .ok_or(CacheError::MissingHome)?;
-    #[cfg(target_os = "macos")]
-    return Ok(PathBuf::from(home).join("Library/Caches/nickel/models"));
     #[cfg(target_os = "windows")]
     return Ok(env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(home).join("AppData/Local"))
         .join("Nickel/models"));
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(target_os = "windows"))]
     Ok(PathBuf::from(home).join(".cache/nickel/models"))
 }
 

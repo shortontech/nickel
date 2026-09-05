@@ -457,27 +457,9 @@ pub use windows::{
     toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 mod unsupported;
-#[cfg(target_os = "macos")]
-pub use macos::{
-    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
-    application_discovery, application_icon, applications, audio_status, bluetooth_status,
-    capture_active_window, capture_active_window_to_file, capture_desktop, capture_pointer,
-    configure_volume_osd_window, configured_primary_output, copy_image_to_clipboard,
-    copy_temp_image_path, execute_run_command, handle_consumer_control, handle_focused_shortcut,
-    launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
-    launcher_visibility_applied, network_status, register_session_shell, release_pointer,
-    select_audio_device, send_shell_command, set_audio_volume, set_bluetooth_discovery,
-    set_bluetooth_powered, set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
-    update_panel_fullscreen_state, wallpaper,
-};
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-mod unsupported;
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub use unsupported::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, active_display_point,
     application_discovery, application_icon, applications, audio_status, bluetooth_status,

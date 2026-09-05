@@ -25,8 +25,3 @@ association metadata for it.
 No Windows file-association metadata is supplied or claimed in this version. The ShellExecuteW URL
 adapter compiles behind its Windows target boundary, but association and native presentation remain
 untested.
-
-## macOS
-
-No macOS file-association metadata is supplied or claimed in this version. The `open` URL adapter
-compiles behind its macOS target boundary, but association and native presentation remain untested.

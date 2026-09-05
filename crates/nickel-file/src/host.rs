@@ -52,12 +52,8 @@ fn navigation_shortcut(key: KeyCode, alt_down: bool) -> Option<NavigationShortcu
     }
 }
 
-fn selection_command_modifier(modifiers: &nickel_input::ModifierState, macos: bool) -> bool {
-    modifiers.aggregate(if macos {
-        AggregateModifier::Super
-    } else {
-        AggregateModifier::Control
-    })
+fn selection_command_modifier(modifiers: &nickel_input::ModifierState) -> bool {
+    modifiers.aggregate(AggregateModifier::Control)
 }
 
 fn adjacent_tab_index(active: usize, count: usize, reverse: bool) -> Option<usize> {
@@ -107,8 +103,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         match event.clone() {
             InputEvent::Key(key) => {
                 let app = host.application_mut();
-                app.control_down =
-                    selection_command_modifier(&key.modifiers, cfg!(target_os = "macos"));
+                app.control_down = selection_command_modifier(&key.modifiers);
                 app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
                 let alt_down = key.modifiers.aggregate(AggregateModifier::Alt);
                 if key.edge != KeyEdge::Pressed || key.repeat {
@@ -419,16 +414,14 @@ mod tests {
     }
 
     #[test]
-    fn selection_command_modifier_maps_both_physical_sides_and_platforms() {
+    fn selection_command_modifier_maps_both_control_sides() {
         for modifier in [Modifier::ControlLeft, Modifier::ControlRight] {
             let state = ModifierState::from_sides([modifier]);
-            assert!(selection_command_modifier(&state, false));
-            assert!(!selection_command_modifier(&state, true));
+            assert!(selection_command_modifier(&state));
         }
         for modifier in [Modifier::SuperLeft, Modifier::SuperRight] {
             let state = ModifierState::from_sides([modifier]);
-            assert!(selection_command_modifier(&state, true));
-            assert!(!selection_command_modifier(&state, false));
+            assert!(!selection_command_modifier(&state));
         }
     }
 }

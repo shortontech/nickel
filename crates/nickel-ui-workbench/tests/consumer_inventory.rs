@@ -169,7 +169,7 @@ fn consumer_inventory_is_explicit_evidence_bearing_and_honest() {
         }
         assert!(matches!(
             row[6],
-            "cross_platform" | "linux_primary_windows_macos_contract"
+            "cross_platform" | "linux_primary_windows_contract"
         ));
 
         for fixture in row[12].split(',') {

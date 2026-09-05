@@ -34,9 +34,9 @@ pub enum FileDialogOutcome {
 
 /// Opens the platform-native image chooser.
 ///
-/// Linux uses the XDG portal directly. Windows and macOS report that the
-/// capability is unavailable until their native adapters are implemented.
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+/// Linux uses the XDG portal directly. Windows reports that the capability is
+/// unavailable until its native adapter is implemented.
+#[cfg(target_os = "windows")]
 pub fn choose_image_file(
     _callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
 ) -> Result<(), String> {
@@ -46,7 +46,7 @@ pub fn choose_image_file(
     ))
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn choose_image_file(
     _callback: Box<dyn Fn(FileDialogOutcome) + Send + 'static>,
 ) -> Result<(), String> {
@@ -65,9 +65,6 @@ mod windows;
 
 #[cfg(target_os = "linux")]
 mod linux;
-
-#[cfg(target_os = "macos")]
-mod macos;
 
 #[cfg(target_os = "windows")]
 pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_files};
@@ -206,12 +203,7 @@ pub fn open_external_url(url: &str) -> Result<(), String> {
     linux::open_external_url(url)
 }
 
-#[cfg(target_os = "macos")]
-pub fn open_external_url(url: &str) -> Result<(), String> {
-    macos::open_external_url(url)
-}
-
-#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub fn open_external_url(_url: &str) -> Result<(), String> {
     Err("opening external URLs is unsupported on this platform".into())
 }

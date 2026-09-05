@@ -42,18 +42,14 @@ pub fn text_context_actions(
     editor: &TextEditor,
     policy: TextContextPolicy,
 ) -> Vec<TextContextAction> {
-    let (undo, redo, cut, copy, paste, select_all) = if cfg!(target_os = "macos") {
-        ("Cmd+Z", "Cmd+Shift+Z", "Cmd+X", "Cmd+C", "Cmd+V", "Cmd+A")
-    } else {
-        (
-            "Ctrl+Z",
-            "Ctrl+Shift+Z",
-            "Ctrl+X",
-            "Ctrl+C",
-            "Ctrl+V",
-            "Ctrl+A",
-        )
-    };
+    let (undo, redo, cut, copy, paste, select_all) = (
+        "Ctrl+Z",
+        "Ctrl+Shift+Z",
+        "Ctrl+X",
+        "Ctrl+C",
+        "Ctrl+V",
+        "Ctrl+A",
+    );
     let selection = editor.selection().is_some();
     let action = |command, label, enabled, shortcut| TextContextAction {
         command,
@@ -168,11 +164,7 @@ pub(crate) fn internal_read_only_text_context_menu<Message: Clone>(
     copy_enabled: bool,
     select_all_enabled: bool,
 ) -> OverlayMenu<Message> {
-    let (copy, select_all) = if cfg!(target_os = "macos") {
-        ("Cmd+C", "Cmd+A")
-    } else {
-        ("Ctrl+C", "Ctrl+A")
-    };
+    let (copy, select_all) = ("Ctrl+C", "Ctrl+A");
     OverlayMenu::new(id, anchor)
         .item(
             OverlayMenuItem::text_command("copy", "Copy", TextEditCommand::Copy, copy_enabled)

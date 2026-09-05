@@ -2,12 +2,12 @@
 
 ## Project Structure & Module Organization
 
-Nickel is an all-Rust, cross-platform desktop shell targeting Windows, Linux, and macOS. Organize it as a Cargo workspace with small crates under `crates/`:
+Nickel is an all-Rust, cross-platform desktop shell targeting Windows and Linux. Organize it as a Cargo workspace with small crates under `crates/`:
 
 - `crates/nickel-core/`: platform-neutral application state and domain logic.
 - `crates/nickel-search/`: indexing, fuzzy matching, and result ranking.
 - `crates/nickel-ui/`: `winit` event handling, `wgpu` rendering, and widgets.
-- `crates/nickel-platform/`: narrow Windows, Linux, and macOS adapters.
+- `crates/nickel-platform/`: narrow Windows and Linux adapters.
 - `assets/`: fonts, shaders, icons, and test fixtures with compatible licenses.
 - `tests/`: workspace-level integration and platform contract tests.
 - `specs/`: active design specifications; move completed specifications to `specs/done/`.
