@@ -48,6 +48,16 @@ tree, and the combined Shell suite passed 258 tests with eight explicitly ignore
 checks. Visual label containment and interaction on installed Linux and Windows shells remain native
 acceptance rather than being inferred from those tests.
 
+An SDDM restart later exposed a separate lifecycle defect: the prior shell survived its compositor
+as a PID-1-owned orphan and retried a terminal winit pump about 1.18 million times per second while
+querying its retired session socket. The replacement shell remained healthy at roughly 67 scheduled
+iterations per second. Commit `a83a3ce` preserves ordinary Linux surface-close and headless-output
+policy but turns winit's terminal `PumpStatus::Exit` into a distinct process-terminal event that
+supersedes buffered input. Its focused regression and strict all-target/all-feature Shell Clippy
+pass, and the release binary is installed. A later SDDM/compositor restart must still confirm that
+the old shell is reaped and exactly one replacement starts before this native lifecycle criterion is
+closed.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
