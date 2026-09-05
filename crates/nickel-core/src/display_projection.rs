@@ -12,13 +12,16 @@ pub struct ProjectionOutput {
     pub internal: bool,
     pub width: i32,
     pub height: i32,
+    pub scale_120: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectionPlacement {
     pub name: String,
     pub x: i32,
+    pub y: i32,
     pub enabled: bool,
+    pub scale_120: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -66,7 +69,9 @@ impl ProjectionChooser {
                 let placement = ProjectionPlacement {
                     name: output.name.clone(),
                     x: if mode == ProjectionMode::Extend { x } else { 0 },
+                    y: 0,
                     enabled,
+                    scale_120: output.scale_120,
                 };
                 if enabled && mode == ProjectionMode::Extend {
                     x += output.width.max(1);
@@ -104,12 +109,14 @@ mod tests {
                 internal: true,
                 width: 1920,
                 height: 1080,
+                scale_120: 120,
             },
             ProjectionOutput {
                 name: "DP-1".into(),
                 internal: false,
                 width: 2560,
                 height: 1440,
+                scale_120: 180,
             },
         ]
     }
@@ -130,7 +137,9 @@ mod tests {
         let old = vec![ProjectionPlacement {
             name: "eDP-1".into(),
             x: -1920,
+            y: 48,
             enabled: true,
+            scale_120: 144,
         }];
         let plan = ProjectionChooser::plan(ProjectionMode::Extend, &outputs()).unwrap();
         let mut chooser = ProjectionChooser::default();

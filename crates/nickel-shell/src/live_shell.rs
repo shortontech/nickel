@@ -5525,6 +5525,7 @@ impl LiveShell {
                     internal: output.name.starts_with("eDP") || output.name.starts_with("LVDS"),
                     width: output.geometry.width,
                     height: output.geometry.height,
+                    scale_120: output.scale_120,
                 })
                 .collect::<Vec<_>>();
             let Some(plan) = ProjectionChooser::plan(mode, &topology) else {
@@ -5535,7 +5536,9 @@ impl LiveShell {
                 .map(|output| ProjectionPlacement {
                     name: output.name.clone(),
                     x: output.geometry.x,
+                    y: output.geometry.y,
                     enabled: output.enabled,
+                    scale_120: output.scale_120,
                 })
                 .collect();
             let primary = outputs
@@ -5564,8 +5567,9 @@ impl LiveShell {
                     .map(|entry| nickel_session_protocol::OutputPlacement {
                         name: entry.name.clone(),
                         x: entry.x,
-                        y: 0,
+                        y: entry.y,
                         enabled: entry.enabled,
+                        scale_120: entry.scale_120,
                     })
                     .collect(),
             };
@@ -5605,8 +5609,9 @@ impl LiveShell {
                     .map(|entry| nickel_session_protocol::OutputPlacement {
                         name: entry.name,
                         x: entry.x,
-                        y: 0,
+                        y: entry.y,
                         enabled: entry.enabled,
+                        scale_120: entry.scale_120,
                     })
                     .collect(),
             };
