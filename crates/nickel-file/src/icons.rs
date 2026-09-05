@@ -129,6 +129,9 @@ impl ArtworkCache {
         self.keys.get(&key.entry) == Some(key)
     }
 
+    // The application binary uses this for live cache diagnostics; the
+    // separately compiled library target intentionally has no caller.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.entries.len()
     }
