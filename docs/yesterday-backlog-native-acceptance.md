@@ -93,8 +93,11 @@ VS Code confirmation acceptance require a compositor/session restart with the in
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
-- **0162 — reuse audit:** make the complete workspace green, including the declarative display-list
-  and hit-authority audit, without increasing exception baselines.
+
+Specification 0162 is complete and archived. Its refreshed source inventory, reuse-authority tests,
+declarative display-list audit, parallel-hit-authority audit, and bounded custom-paint audit all pass
+without increasing either exception baseline. Its platform-neutral consolidations retain no native
+acceptance dependency.
 
 ## Installed Nickel Linux session
 
