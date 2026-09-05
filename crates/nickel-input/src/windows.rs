@@ -428,6 +428,11 @@ fn native_modifier_release(virtual_key: u32) -> Option<NativeModifierRelease> {
     }
 }
 
+#[cfg(any(test, target_os = "windows"))]
+fn registered_hotkey_owns_key(registered_id: usize, virtual_key: u32, super_held: bool) -> bool {
+    registered_id != 0 && virtual_key == 0x52 && super_held
+}
+
 #[cfg(target_os = "windows")]
 mod native_runtime {
     use std::sync::{
@@ -452,7 +457,10 @@ mod native_runtime {
 
     use crate::AggregateModifier;
 
-    use super::{KeyEdge, NativeKeyboardEvent, NativeModifierRelease, native_modifier_release};
+    use super::{
+        KeyEdge, NativeKeyboardEvent, NativeModifierRelease, native_modifier_release,
+        registered_hotkey_owns_key,
+    };
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum HookDisposition {
@@ -566,9 +574,18 @@ mod native_runtime {
             edge,
             injected: native.flags.0 & 0x10 != 0,
         };
-        let registered = REGISTERED_HOTKEY_ID.load(Ordering::Acquire) != 0 && native.vkCode == 0x52;
-        // SAFETY: this is a read-only query used to reconcile hook ordering.
-        let alt_physically_held = unsafe { GetAsyncKeyState(0x12) < 0 };
+        // SAFETY: these are read-only queries used to reconcile independent native delivery paths.
+        let (alt_physically_held, super_physically_held) = unsafe {
+            (
+                GetAsyncKeyState(0x12) < 0,
+                GetAsyncKeyState(0x5b) < 0 || GetAsyncKeyState(0x5c) < 0,
+            )
+        };
+        let registered = registered_hotkey_owns_key(
+            REGISTERED_HOTKEY_ID.load(Ordering::Acquire),
+            native.vkCode,
+            super_physically_held,
+        );
         if with_callbacks(|callbacks| (callbacks.keyboard)(event, registered, alt_physically_held))
             == Some(HookDisposition::Suppress)
         {
@@ -735,6 +752,14 @@ mod tests {
             );
         }
         assert_eq!(native_modifier_release(0x52), None);
+    }
+
+    #[test]
+    fn registered_hotkey_only_owns_super_r_chord() {
+        assert!(registered_hotkey_owns_key(7, 0x52, true));
+        assert!(!registered_hotkey_owns_key(7, 0x52, false));
+        assert!(!registered_hotkey_owns_key(7, 0x41, true));
+        assert!(!registered_hotkey_owns_key(0, 0x52, true));
     }
 
     #[test]
