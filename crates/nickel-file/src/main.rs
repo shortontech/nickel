@@ -2775,26 +2775,18 @@ impl FileApp {
     }
 
     fn create_new_folder(&mut self, parent: &std::path::Path) {
-        for suffix in 0..10_000 {
-            let name = if suffix == 0 {
-                "New folder".to_owned()
-            } else {
-                format!("New folder ({suffix})")
-            };
-            let path = parent.join(&name);
-            if path.exists() {
-                continue;
+        match nickel_file::create_new_folder(parent) {
+            Ok(path) => {
+                self.status = format!(
+                    "Created {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+                self.refresh_directory(self.browser.show_hidden());
             }
-            match std::fs::create_dir(&path) {
-                Ok(()) => {
-                    self.status = format!("Created {name}");
-                    self.refresh_directory(self.browser.show_hidden());
-                }
-                Err(error) => self.status = format!("Could not create folder: {error}"),
+            Err(error) => {
+                self.status = format!("Could not create folder: {error}");
             }
-            return;
         }
-        self.status = "Could not choose an unused folder name".into();
     }
 
     fn poll_transfer(&mut self) -> bool {

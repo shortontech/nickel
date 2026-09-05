@@ -1960,8 +1960,8 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let initial_page = match cli::parse(std::env::args_os().skip(1)) {
-        Ok(cli::Action::Run(page)) => page,
+    let (initial_page, initial_output) = match cli::parse(std::env::args_os().skip(1)) {
+        Ok(cli::Action::Run { page, output }) => (page, output),
         Ok(cli::Action::Help) => {
             print!("{}", cli::HELP);
             return Ok(());
@@ -1973,7 +1973,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let _log_path = nickel_logging::init("nickel-settings").ok();
     nickel_ui::run_with_adapter(
-        SettingsApp::with_initial_page(initial_page),
+        {
+            let mut app = SettingsApp::with_initial_page(initial_page);
+            if let Some(output) = initial_output
+                && let Some(index) = app
+                    .displays
+                    .iter()
+                    .position(|display| display.connector == output)
+            {
+                app.selected = index;
+            }
+            app
+        },
         SettingsHostAdapter::default(),
     )
 }

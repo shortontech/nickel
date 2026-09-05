@@ -169,8 +169,64 @@ pub struct DesktopApplication {
     pointer_dragged: bool,
     last_click: Option<(DesktopEntryId, Instant)>,
     modifiers: SelectionModifiers,
-    context_menu: Option<(DesktopPoint, Option<DesktopEntryId>)>,
+    context_menu: Option<DesktopMenuContext>,
+    topology_generation: u64,
+    directory_generation: u64,
+    outputs: Vec<DesktopOutput>,
+    workspace: Option<u64>,
+    persist_layout: bool,
+    operation_tx: std::sync::mpsc::Sender<Result<String, String>>,
+    operation_rx: std::sync::mpsc::Receiver<Result<String, String>>,
+    paste_in_progress: bool,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DesktopMenuContext {
+    anchor: Option<DesktopPoint>,
+    entry: Option<DesktopEntryId>,
+    output: String,
+    topology_generation: u64,
+    directory_generation: u64,
+    selection: std::collections::HashSet<DesktopEntryId>,
+    workspace: Option<u64>,
+    paste_available: bool,
+    desktop_writable: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DesktopCommand {
+    IconsVisible(bool),
+    IconSize(f32, f32),
+    Sort(DesktopSortKey, DesktopSortDirection),
+    Manual,
+    AlignGrid,
+    AutoArrange,
+    Refresh,
+    Paste,
+    NewFolder,
+    DisplaySettings,
+    Personalize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum SettingsDestination {
+    Appearance,
+    Display { output: String },
+}
+
+impl SettingsDestination {
+    fn arguments(&self) -> Vec<String> {
+        match self {
+            Self::Appearance => vec!["--screen".into(), "appearance".into()],
+            Self::Display { output } => vec![
+                "--screen".into(),
+                "display".into(),
+                "--output".into(),
+                output.clone(),
+            ],
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -181,10 +237,13 @@ pub enum DesktopMessage {
     Copy(DesktopEntryId),
     Rename(DesktopEntryId),
     Properties(DesktopEntryId),
+    BackgroundContext,
+    Command(DesktopCommand),
 }
 
 impl DesktopApplication {
     fn new(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
+        let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         let path = nickel_file::desktop_directory();
         let browser = DirectoryBrowser::open(&path).ok();
         let watch = DirectoryWatch::start(&path).ok();
@@ -211,6 +270,14 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            topology_generation: 0,
+            directory_generation: 0,
+            outputs: Vec::new(),
+            workspace: None,
+            persist_layout: true,
+            operation_tx,
+            operation_rx,
+            paste_in_progress: false,
             error: None,
         }
     }
@@ -231,6 +298,14 @@ impl DesktopApplication {
             Ok(()) => {
                 let snapshot = desktop_snapshot(browser);
                 self.layout.reconcile(snapshot);
+                self.directory_generation = self.directory_generation.wrapping_add(1);
+                if self
+                    .context_menu
+                    .as_ref()
+                    .is_some_and(|menu| menu.directory_generation != self.directory_generation)
+                {
+                    self.context_menu = None;
+                }
                 self.icon_cache.retain(|path, _| {
                     self.layout
                         .items()
@@ -248,22 +323,57 @@ impl DesktopApplication {
     }
 
     fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        if self.outputs == outputs {
+            return;
+        }
+        self.topology_generation = self.topology_generation.wrapping_add(1);
+        let menu_output_exists = self
+            .context_menu
+            .as_ref()
+            .is_none_or(|menu| outputs.iter().any(|output| output.id == menu.output));
+        self.outputs.clone_from(&outputs);
         self.layout.set_outputs(outputs);
+        if self.context_menu.as_ref().is_some_and(|menu| {
+            menu.topology_generation != self.topology_generation || !menu_output_exists
+        }) {
+            self.context_menu = None;
+        }
     }
 
     fn set_active_output(&mut self, id: String, origin: DesktopPoint, scale: f32) {
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|menu| menu.output != id)
+        {
+            self.context_menu = None;
+        }
         self.active_output = id;
         self.output_origin = origin;
         self.active_scale = scale.max(1.0);
     }
 
+    fn set_workspace(&mut self, workspace: Option<u64>) {
+        if self.workspace != workspace {
+            self.workspace = workspace;
+            self.context_menu = None;
+        }
+    }
+
     fn save_layout(&mut self) {
+        if !self.persist_layout {
+            return;
+        }
         if let Err(error) = self.layout.save(desktop_layout_path()) {
             self.error = Some(format!("Desktop arrangement could not be saved: {error}"));
         }
     }
 
     fn hit(&self, local: DesktopPoint) -> Option<DesktopEntryId> {
+        if !self.layout.icons_visible() {
+            return None;
+        }
+        let (cell_width, cell_height) = self.layout.grid();
         let global = DesktopPoint {
             x: local.x + self.output_origin.x,
             y: local.y + self.output_origin.y,
@@ -275,9 +385,9 @@ impl DesktopApplication {
             .find(|item| {
                 item.output == self.active_output
                     && global.x >= item.position.x
-                    && global.x < item.position.x + 96.0
+                    && global.x < item.position.x + cell_width
                     && global.y >= item.position.y
-                    && global.y < item.position.y + 112.0
+                    && global.y < item.position.y + cell_height
             })
             .map(|item| item.id)
     }
@@ -297,7 +407,18 @@ impl DesktopApplication {
             {
                 self.layout.select(id, SelectionModifiers::default());
             }
-            self.context_menu = Some((local, hit));
+            self.context_menu = Some(DesktopMenuContext {
+                anchor: Some(local),
+                entry: hit,
+                output: self.active_output.clone(),
+                topology_generation: self.topology_generation,
+                directory_generation: self.directory_generation,
+                selection: self.layout.selected().clone(),
+                workspace: self.workspace,
+                paste_available: hit.is_none() && nickel_file::native_file_clipboard_available(),
+                desktop_writable: hit.is_none()
+                    && nickel_file::directory_is_writable(&nickel_file::desktop_directory()),
+            });
             return true;
         }
         self.context_menu = None;
@@ -393,9 +514,13 @@ impl DesktopApplication {
     }
 
     fn context_click(&mut self, local: DesktopPoint) -> bool {
-        let Some((origin, entry)) = self.context_menu else {
+        let Some(context) = self.context_menu.clone() else {
             return false;
         };
+        let Some(origin) = context.anchor else {
+            return false;
+        };
+        let entry = context.entry;
         if local.x < origin.x || local.x > origin.x + 190.0 || local.y < origin.y {
             self.context_menu = None;
             return true;
@@ -513,6 +638,128 @@ impl DesktopApplication {
         true
     }
 
+    fn open_background_context(&mut self, anchor: Option<DesktopPoint>) {
+        self.context_menu = Some(DesktopMenuContext {
+            anchor,
+            entry: None,
+            output: self.active_output.clone(),
+            topology_generation: self.topology_generation,
+            directory_generation: self.directory_generation,
+            selection: self.layout.selected().clone(),
+            workspace: self.workspace,
+            paste_available: nickel_file::native_file_clipboard_available(),
+            desktop_writable: nickel_file::directory_is_writable(&nickel_file::desktop_directory()),
+        });
+    }
+
+    fn open_keyboard_context(&mut self) {
+        if let Some(id) = self.layout.selected().iter().copied().next()
+            && self.layout.items().iter().any(|item| item.id == id)
+        {
+            self.context_menu = Some(DesktopMenuContext {
+                anchor: None,
+                entry: Some(id),
+                output: self.active_output.clone(),
+                topology_generation: self.topology_generation,
+                directory_generation: self.directory_generation,
+                selection: self.layout.selected().clone(),
+                workspace: self.workspace,
+                paste_available: false,
+                desktop_writable: false,
+            });
+        } else {
+            self.open_background_context(None);
+        }
+    }
+
+    fn apply_desktop_command(&mut self, command: DesktopCommand) {
+        let Some(context) = self.context_menu.clone() else {
+            return;
+        };
+        if context.output != self.active_output
+            || context.topology_generation != self.topology_generation
+            || context.directory_generation != self.directory_generation
+            || context.selection != *self.layout.selected()
+            || context.workspace != self.workspace
+        {
+            self.context_menu = None;
+            return;
+        }
+        match command {
+            DesktopCommand::IconsVisible(value) => self.layout.set_icons_visible(value),
+            DesktopCommand::IconSize(width, height) => self.layout.set_grid(width, height),
+            DesktopCommand::Sort(key, direction) => self.layout.set_arrangement(
+                DesktopArrangement::Sorted { key, direction },
+                FolderGrouping::FoldersFirst,
+            ),
+            DesktopCommand::Manual => self
+                .layout
+                .set_arrangement(DesktopArrangement::Manual, FolderGrouping::FoldersFirst),
+            DesktopCommand::AlignGrid => self.layout.align_to_grid(),
+            DesktopCommand::AutoArrange => self.layout.clean_up(),
+            DesktopCommand::Refresh => {
+                self.refresh_directory(true);
+            }
+            DesktopCommand::Paste => {
+                if !self.paste_in_progress {
+                    self.paste_in_progress = true;
+                    let sender = self.operation_tx.clone();
+                    let destination = nickel_file::desktop_directory();
+                    std::thread::spawn(move || {
+                        let result = nickel_file::paste_native_file_clipboard(&destination)
+                            .map(|count| format!("Pasted {count} item(s)"))
+                            .map_err(|error| format!("Could not paste: {error}"));
+                        let _ = sender.send(result);
+                    });
+                }
+            }
+            DesktopCommand::NewFolder => {
+                match nickel_file::create_new_folder(&nickel_file::desktop_directory()) {
+                    Ok(_) => {
+                        self.refresh_directory(true);
+                    }
+                    Err(error) => self.error = Some(format!("Could not create folder: {error}")),
+                }
+            }
+            DesktopCommand::DisplaySettings => self.launch_settings(SettingsDestination::Display {
+                output: context.output.clone(),
+            }),
+            DesktopCommand::Personalize => self.launch_settings(SettingsDestination::Appearance),
+        }
+        if !matches!(
+            command,
+            DesktopCommand::Refresh
+                | DesktopCommand::Paste
+                | DesktopCommand::NewFolder
+                | DesktopCommand::DisplaySettings
+                | DesktopCommand::Personalize
+        ) {
+            self.save_layout();
+        }
+        self.context_menu = None;
+    }
+
+    fn launch_settings(&mut self, destination: SettingsDestination) {
+        let result = std::env::current_exe()
+            .map_err(|error| error.to_string())
+            .and_then(|exe| {
+                let exe = exe.with_file_name(if cfg!(target_os = "windows") {
+                    "nickel-settings.exe"
+                } else {
+                    "nickel-settings"
+                });
+                let mut command = std::process::Command::new(exe);
+                command.args(destination.arguments());
+                command
+                    .spawn()
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            });
+        if let Err(error) = result {
+            self.error = Some(format!("Could not open Settings: {error}"));
+        }
+    }
+
     fn key(&mut self, key: &nickel_input::KeyEvent) -> bool {
         use nickel_input::{AggregateModifier, PhysicalKey};
         self.modifiers = SelectionModifiers {
@@ -529,6 +776,25 @@ impl DesktopApplication {
         };
         let move_selected = key.modifiers.aggregate(AggregateModifier::Alt);
         match code {
+            KeyCode::ContextMenu | KeyCode::F10
+                if code == KeyCode::ContextMenu || self.modifiers.range =>
+            {
+                self.open_keyboard_context();
+            }
+            KeyCode::F5 => {
+                self.open_background_context(None);
+                self.apply_desktop_command(DesktopCommand::Refresh);
+            }
+            KeyCode::KeyV if self.modifiers.toggle => {
+                self.open_background_context(None);
+                self.apply_desktop_command(DesktopCommand::Paste);
+            }
+            KeyCode::KeyD if self.modifiers.toggle && self.modifiers.range => {
+                self.open_background_context(None);
+                self.apply_desktop_command(DesktopCommand::IconsVisible(
+                    !self.layout.icons_visible(),
+                ));
+            }
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
             KeyCode::ArrowLeft if move_selected => self.move_selected_by(-96.0, 0.0),
             KeyCode::ArrowRight if move_selected => self.move_selected_by(96.0, 0.0),
@@ -562,6 +828,10 @@ impl DesktopApplication {
 
     fn paint_icons(&mut self) -> Vec<PaintCommand> {
         let mut commands = Vec::new();
+        if !self.layout.icons_visible() {
+            return commands;
+        }
+        let (cell_width, cell_height) = self.layout.grid();
         let hovered = self
             .pointer_seen
             .then(|| self.hit(self.pointer_position))
@@ -577,7 +847,7 @@ impl DesktopApplication {
             let y = item.position.y - self.output_origin.y;
             if self.layout.selected().contains(&item.id) || hovered == Some(item.id) {
                 commands.push(PaintCommand::RoundedFill {
-                    rect: Rect::new(x, y, 96.0, 108.0),
+                    rect: Rect::new(x, y, cell_width, cell_height - 4.0),
                     color: if self.layout.selected().contains(&item.id) {
                         self.palette.accent_soft
                     } else {
@@ -588,7 +858,7 @@ impl DesktopApplication {
             }
             if self.pointer_dragged && self.layout.selected().contains(&item.id) {
                 commands.push(PaintCommand::Stroke {
-                    rect: Rect::new(x, y, 96.0, 108.0),
+                    rect: Rect::new(x, y, cell_width, cell_height - 4.0),
                     color: self.palette.accent,
                     width: 2.0,
                 });
@@ -619,19 +889,19 @@ impl DesktopApplication {
                     .pixels
                 });
             commands.push(PaintCommand::Image {
-                bounds: Rect::new(x + 24.0, y + 6.0, 48.0, 48.0),
+                bounds: Rect::new(x + (cell_width - 48.0) / 2.0, y + 6.0, 48.0, 48.0),
                 id: 10_000_u16.saturating_add(index as u16),
                 generation: 0,
                 image: Arc::clone(pixels),
                 high_density: None,
             });
             commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(x + 3.0, y + 62.0, 90.0, 38.0),
+                rect: Rect::new(x + 3.0, y + 62.0, cell_width - 6.0, cell_height - 74.0),
                 color: self.palette.panel,
                 radius: 5.0,
             });
             commands.push(PaintCommand::Text {
-                bounds: Rect::new(x + 5.0, y + 64.0, 86.0, 34.0),
+                bounds: Rect::new(x + 5.0, y + 64.0, cell_width - 10.0, cell_height - 78.0),
                 text: item.entry.display_name(),
                 scale: 0.85,
                 color: self.palette.text,
@@ -639,42 +909,6 @@ impl DesktopApplication {
                 bold: false,
                 wrap: true,
             });
-        }
-        if let Some((origin, None)) = self.context_menu {
-            let labels: &[&str] = &[
-                "Name (ascending)",
-                "Name (descending)",
-                "Kind (ascending)",
-                "Kind (descending)",
-                "Size (ascending)",
-                "Size (descending)",
-                "Modified (ascending)",
-                "Modified (descending)",
-                "Manual arrangement",
-                "Align to Grid",
-                "Clean Up",
-            ];
-            commands.push(PaintCommand::RoundedFill {
-                rect: Rect::new(origin.x, origin.y, 190.0, labels.len() as f32 * 30.0),
-                color: self.palette.surface,
-                radius: 8.0,
-            });
-            commands.push(PaintCommand::Stroke {
-                rect: Rect::new(origin.x, origin.y, 190.0, labels.len() as f32 * 30.0),
-                color: self.palette.muted,
-                width: 1.0,
-            });
-            for (index, label) in labels.iter().enumerate() {
-                commands.push(PaintCommand::Text {
-                    bounds: Rect::new(origin.x + 12.0, origin.y + index as f32 * 30.0, 166.0, 30.0),
-                    text: (*label).into(),
-                    scale: 0.9,
-                    color: self.palette.text,
-                    align: TextAlign::Start,
-                    bold: false,
-                    wrap: false,
-                });
-            }
         }
         if let Some(start) = self.selection_start {
             let current = self.pointer_position;
@@ -789,13 +1023,20 @@ impl nickel_ui::Application for DesktopApplication {
             DesktopMessage::Activate(id) => self.activate(id),
             DesktopMessage::Context(id) => {
                 if let Some(item) = self.layout.items().iter().find(|item| item.id == id) {
-                    self.context_menu = Some((
-                        DesktopPoint {
+                    self.context_menu = Some(DesktopMenuContext {
+                        anchor: Some(DesktopPoint {
                             x: item.position.x - self.output_origin.x,
                             y: item.position.y - self.output_origin.y,
-                        },
-                        Some(id),
-                    ));
+                        }),
+                        entry: Some(id),
+                        output: self.active_output.clone(),
+                        topology_generation: self.topology_generation,
+                        directory_generation: self.directory_generation,
+                        selection: self.layout.selected().clone(),
+                        workspace: self.workspace,
+                        paste_available: false,
+                        desktop_writable: false,
+                    });
                 }
             }
             DesktopMessage::Cut(id) | DesktopMessage::Copy(id) => {
@@ -835,13 +1076,287 @@ impl nickel_ui::Application for DesktopApplication {
                 }
                 self.context_menu = None;
             }
+            DesktopMessage::BackgroundContext => self.open_background_context(None),
+            DesktopMessage::Command(command) => self.apply_desktop_command(command),
         }
     }
 
-    fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
-        let Some((_, Some(id))) = self.context_menu else {
+    fn frame_overlays(&self, view_context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let Some(context) = &self.context_menu else {
             return Vec::new();
         };
+        if context.entry.is_none() {
+            let anchor = context.anchor.map_or_else(
+                || OverlayAnchor::InvocationTargetCenter(UiId::new("desktop")),
+                |point| OverlayAnchor::Point {
+                    invocation_target: UiId::new("desktop"),
+                    point: Point {
+                        x: point.x,
+                        y: point.y,
+                    },
+                },
+            );
+            let visible = self.layout.icons_visible();
+            let grid = self.layout.grid();
+            let arrangement = self.layout.arrangement();
+            let checked = |selected: bool, label: &str| {
+                if selected {
+                    format!("✓ {label}")
+                } else {
+                    label.to_owned()
+                }
+            };
+            let paste = if self.paste_in_progress {
+                OverlayMenuItem::disabled_with_reason(
+                    "paste",
+                    "Paste",
+                    "A desktop paste is already in progress",
+                )
+                .shortcut("Ctrl+V")
+            } else if context.paste_available {
+                OverlayMenuItem::action(
+                    "paste",
+                    "Paste",
+                    DesktopMessage::Command(DesktopCommand::Paste),
+                )
+                .shortcut("Ctrl+V")
+            } else {
+                OverlayMenuItem::disabled_with_reason("paste", "Paste", "File clipboard is empty")
+                    .shortcut("Ctrl+V")
+            };
+            let new_folder = if context.desktop_writable {
+                OverlayMenuItem::action(
+                    "new-folder",
+                    "New Folder",
+                    DesktopMessage::Command(DesktopCommand::NewFolder),
+                )
+                .separator_before(true)
+            } else {
+                OverlayMenuItem::disabled_with_reason(
+                    "new-folder",
+                    "New Folder",
+                    "Desktop location is not writable",
+                )
+                .separator_before(true)
+            };
+            let mut menu = OverlayMenu::new("desktop-background-context", anchor)
+                .item(
+                    OverlayMenuItem::action(
+                        "show-icons",
+                        if visible {
+                            "Hide desktop icons"
+                        } else {
+                            "Show desktop icons"
+                        },
+                        DesktopMessage::Command(DesktopCommand::IconsVisible(!visible)),
+                    )
+                    .shortcut("Ctrl+Shift+D"),
+                )
+                .item(OverlayMenuItem::action(
+                    "small-icons",
+                    if grid.0 <= 72.0 {
+                        "✓ Small icons"
+                    } else {
+                        "Small icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(72.0, 88.0)),
+                ))
+                .item(OverlayMenuItem::action(
+                    "medium-icons",
+                    if grid.0 > 72.0 && grid.0 < 128.0 {
+                        "✓ Medium icons"
+                    } else {
+                        "Medium icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(96.0, 112.0)),
+                ))
+                .item(OverlayMenuItem::action(
+                    "large-icons",
+                    if grid.0 >= 128.0 {
+                        "✓ Large icons"
+                    } else {
+                        "Large icons"
+                    },
+                    DesktopMessage::Command(DesktopCommand::IconSize(128.0, 144.0)),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "sort-name",
+                        checked(
+                            arrangement
+                                == DesktopArrangement::Sorted {
+                                    key: DesktopSortKey::Name,
+                                    direction: DesktopSortDirection::Ascending,
+                                },
+                            "Name (ascending)",
+                        ),
+                        DesktopMessage::Command(DesktopCommand::Sort(
+                            DesktopSortKey::Name,
+                            DesktopSortDirection::Ascending,
+                        )),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "sort-name-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Name,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Name (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Name,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-kind",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Kind,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Type (ascending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Kind,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-kind-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Kind,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Type (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Kind,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-size",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Size,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Size (ascending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Size,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-size-descending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Size,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Size (descending)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Size,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-modified",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Modified,
+                                direction: DesktopSortDirection::Descending,
+                            },
+                        "Modified (newest first)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Modified,
+                        DesktopSortDirection::Descending,
+                    )),
+                ))
+                .item(OverlayMenuItem::action(
+                    "sort-modified-ascending",
+                    checked(
+                        arrangement
+                            == DesktopArrangement::Sorted {
+                                key: DesktopSortKey::Modified,
+                                direction: DesktopSortDirection::Ascending,
+                            },
+                        "Modified (oldest first)",
+                    ),
+                    DesktopMessage::Command(DesktopCommand::Sort(
+                        DesktopSortKey::Modified,
+                        DesktopSortDirection::Ascending,
+                    )),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "manual",
+                        checked(
+                            arrangement == DesktopArrangement::Manual,
+                            "Manual arrangement",
+                        ),
+                        DesktopMessage::Command(DesktopCommand::Manual),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "align",
+                    "Align to Grid",
+                    DesktopMessage::Command(DesktopCommand::AlignGrid),
+                ))
+                .item(OverlayMenuItem::action(
+                    "auto-arrange",
+                    "Auto Arrange",
+                    DesktopMessage::Command(DesktopCommand::AutoArrange),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "refresh",
+                        "Refresh",
+                        DesktopMessage::Command(DesktopCommand::Refresh),
+                    )
+                    .shortcut("F5")
+                    .separator_before(true),
+                )
+                .item(paste)
+                .item(new_folder)
+                .item(
+                    OverlayMenuItem::action(
+                        "display-settings",
+                        "Display Settings",
+                        DesktopMessage::Command(DesktopCommand::DisplaySettings),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "personalize",
+                    "Personalize",
+                    DesktopMessage::Command(DesktopCommand::Personalize),
+                ));
+            menu.background = self.palette.surface;
+            menu.border = self.palette.muted;
+            menu.foreground = self.palette.text;
+            menu.item_hover = Some(self.palette.surface_hover);
+            menu.item_selected = Some(self.palette.accent_soft);
+            menu.row_height = ((view_context.viewport.size.height - 8.0) / menu.items.len() as f32)
+                .clamp(18.0, menu.row_height);
+            return vec![FrameOverlay::Menu(menu)];
+        }
+        let id = context.entry.unwrap();
         let anchor = UiId::new(format!("desktop-entry-{}-{}", id.0.0, id.0.1));
         vec![FrameOverlay::Menu(
             OverlayMenu::new(
@@ -904,7 +1419,7 @@ impl nickel_ui::Application for DesktopApplication {
             .layout
             .items()
             .iter()
-            .filter(|item| item.output == self.active_output)
+            .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
         {
             let position = Point {
                 x: item.position.x - self.output_origin.x,
@@ -914,8 +1429,8 @@ impl nickel_ui::Application for DesktopApplication {
                 Container::new()
                     .id(format!("desktop-entry-{}-{}", item.id.0.0, item.id.0.1))
                     .position(position)
-                    .width(96.0)
-                    .height(108.0)
+                    .width(self.layout.grid().0)
+                    .height(self.layout.grid().1 - 4.0)
                     .message(DesktopMessage::Activate(item.id))
                     .context_message(DesktopMessage::Context(item.id))
                     .semantic_role(SemanticRole::GridCell)
@@ -929,6 +1444,7 @@ impl nickel_ui::Application for DesktopApplication {
             .id("desktop")
             .semantic_role(SemanticRole::ApplicationPresentation)
             .accessibility_label("Desktop")
+            .context_message(DesktopMessage::BackgroundContext)
             .background(self.palette.background)
             .width(width)
             .height(height)
@@ -940,7 +1456,14 @@ impl nickel_ui::Application for DesktopApplication {
     }
 
     fn poll(&mut self) -> bool {
-        self.refresh_directory(false)
+        let mut changed = self.refresh_directory(false);
+        while let Ok(result) = self.operation_rx.try_recv() {
+            self.paste_in_progress = false;
+            self.error = Some(result.unwrap_or_else(|error| error));
+            self.refresh_directory(true);
+            changed = true;
+        }
+        changed
     }
 
     fn poll_interval(&self) -> Option<Duration> {
@@ -1105,6 +1628,7 @@ impl nickel_ui::Application for PanelApplication {
 impl DesktopApplication {
     #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
     pub fn fixture(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
+        let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         Self {
             wallpaper,
             palette,
@@ -1132,6 +1656,14 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            topology_generation: 0,
+            directory_generation: 0,
+            outputs: Vec::new(),
+            workspace: None,
+            persist_layout: false,
+            operation_tx,
+            operation_rx,
+            paste_in_progress: false,
             error: None,
         }
     }
@@ -1834,6 +2366,12 @@ impl LiveShell {
             && workspaces != self.workspaces
         {
             self.workspaces = workspaces;
+            self.desktop_host.application_mut().set_workspace(
+                self.workspaces
+                    .iter()
+                    .find(|workspace| workspace.active)
+                    .map(|workspace| workspace.id),
+            );
             if self.window_menu.is_none() {
                 self.close_window_preview();
             }
@@ -2026,6 +2564,23 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+        if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+            self.desktop_host.application_mut().context_menu = None;
+        }
+        if self.desktop_host.application().context_menu.is_some()
+            || matches!(event, nickel_input::InputEvent::Touch(_))
+        {
+            let outcome = self.desktop_host.step(HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: event,
+                    clipboard_text: None,
+                }],
+                ..HostBatch::default()
+            });
+            self.desktop_change_token = outcome.change_token;
+            self.desktop_deadline = outcome.next_deadline;
+            return outcome.changed;
+        }
         let application = self.desktop_host.application_mut();
         match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
@@ -2069,6 +2624,12 @@ impl LiveShell {
     }
 
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
+        if action == ControllerAction::ContextMenu {
+            self.desktop_host
+                .application_mut()
+                .open_keyboard_context();
+            return true;
+        }
         let outcome = self.desktop_host.step(HostBatch {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -3360,6 +3921,7 @@ impl LiveShell {
                 application.password.zeroize();
                 application.status = None;
                 if locked {
+                    self.desktop_host.application_mut().context_menu = None;
                     self.launcher_visible = false;
                     self.control_visible = false;
                     self.codex_project_menu_visible = false;
@@ -4973,9 +5535,10 @@ mod tests {
     };
     use nickel_ui::backend::PaintCommand;
     use nickel_ui::{
-        ActionKind, ControllerAction, HostBatch, HostEvent, HostTelemetry, Point, Rect,
-        SemanticAction, SemanticRole, SemanticSelector, SemanticValueInput, SemanticValueSnapshot,
-        Shortcut, UiEvent, UiHost,
+        ActionKind, Application as _, ControllerAction, FrameOverlay, HostBatch, HostEvent,
+        HostTelemetry, InputModality, OverlayAnchor, Point, Rect, SemanticAction, SemanticRole,
+        SemanticSelector, SemanticValueInput, SemanticValueSnapshot, Shortcut, UiEvent, UiHost,
+        ViewContext,
     };
     use nickel_ui_testkit::{Scenario, Selector};
 
@@ -6693,5 +7256,224 @@ mod tests {
         assert_eq!(entry.rect.size.width, 96.0);
         assert!(entry.actions.contains(&ActionKind::Activate));
         assert!(entry.actions.contains(&ActionKind::ContextMenu));
+    }
+
+    #[test]
+    fn desktop_icon_secondary_hit_takes_precedence_and_background_preserves_selection() {
+        use std::{ffi::OsString, path::PathBuf};
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(9, 2),
+            nickel_file::FileEntry {
+                name: OsString::from("entry.txt"),
+                path: PathBuf::from("/desktop/entry.txt"),
+                is_directory: false,
+                size: Some(2),
+                modified: None,
+            },
+        )]);
+        let item = desktop.layout.items()[0].clone();
+        let local = nickel_file::desktop::Point {
+            x: item.position.x + 4.0,
+            y: item.position.y + 4.0,
+        };
+        desktop.pointer_press(local, true, Default::default());
+        assert_eq!(desktop.context_menu.as_ref().unwrap().entry, Some(item.id));
+        assert!(desktop.layout.selected().contains(&item.id));
+
+        desktop.pointer_press(
+            nickel_file::desktop::Point { x: 700.0, y: 500.0 },
+            true,
+            Default::default(),
+        );
+        assert_eq!(desktop.context_menu.as_ref().unwrap().entry, None);
+        assert!(desktop.layout.selected().contains(&item.id));
+    }
+
+    #[test]
+    fn desktop_background_menu_captures_pointer_and_uses_shared_accessible_overlay() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        let anchor = nickel_file::desktop::Point { x: 372.0, y: 214.0 };
+        assert!(desktop.pointer_press(anchor, true, Default::default()));
+        desktop.pointer_motion(nickel_file::desktop::Point { x: 40.0, y: 60.0 });
+
+        let overlays = desktop.frame_overlays(ViewContext::new(
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+            InputModality::Pointer,
+        ));
+        let menu = overlays
+            .into_iter()
+            .find_map(|overlay| match overlay {
+                FrameOverlay::Menu(menu) => Some(menu),
+                _ => None,
+            })
+            .expect("background context menu");
+        assert!(
+            matches!(menu.anchor, OverlayAnchor::Point { point, .. } if point == Point { x: 372.0, y: 214.0 })
+        );
+        assert!(menu.items.iter().any(|item| item.label == "Personalize"));
+        assert!(
+            menu.items
+                .iter()
+                .any(|item| item.label == "Display Settings")
+        );
+        assert!(menu.items.iter().any(|item| item.label == "Refresh"));
+        assert!(menu.row_height * menu.items.len() as f32 <= 600.0);
+        assert_ne!(menu.background, 0x000000);
+        assert_ne!(menu.border, menu.background);
+        assert!(
+            menu.items
+                .iter()
+                .all(|item| item.accessible_name.is_some() || !item.label.is_empty())
+        );
+
+        let host = UiHost::new(desktop, 800, 600);
+        let root = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Desktop"))
+            .unwrap();
+        assert!(root.actions.contains(&ActionKind::ContextMenu));
+    }
+
+    #[test]
+    fn desktop_background_menu_uses_keyboard_controller_and_accessibility_routes() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        assert!(desktop.key(&nickel_input::KeyEvent {
+            device: nickel_input::DeviceId(1),
+            order: nickel_input::EventOrder(1),
+            physical: nickel_input::PhysicalKey::Code(KeyCode::ContextMenu),
+            logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ContextMenu),
+            location: nickel_input::KeyLocation::Standard,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            modifiers: nickel_input::ModifierState::default(),
+        }));
+        assert_eq!(desktop.context_menu.as_ref().unwrap().output, "primary");
+
+        let desktop = super::DesktopApplication::fixture(None, palette);
+        let mut host = UiHost::new(desktop, 800, 600);
+        let root = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Desktop"))
+            .unwrap()
+            .id
+            .clone();
+        let outcome = host.perform_accessibility_action(
+            root,
+            SemanticAction::Invoke(ActionKind::ContextMenu),
+        );
+        assert!(outcome.failures.is_empty());
+        assert!(host.application().context_menu.is_some());
+
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.open_keyboard_context();
+        assert!(desktop.context_menu.is_some(), "controller uses this command model");
+    }
+
+    #[test]
+    fn stale_desktop_menu_command_is_rejected_after_topology_change() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.open_background_context(None);
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "new-output".into(),
+            work_area: nickel_file::desktop::Rect {
+                x: -500.0,
+                y: 0.0,
+                width: 500.0,
+                height: 700.0,
+            },
+            scale: 1.5,
+        }]);
+        desktop.apply_desktop_command(super::DesktopCommand::IconsVisible(false));
+        assert!(desktop.layout.icons_visible());
+        assert!(desktop.context_menu.is_none());
+    }
+
+    #[test]
+    fn desktop_presentation_commands_persist_authoritative_live_state() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+
+        desktop.open_background_context(None);
+        desktop.apply_desktop_command(super::DesktopCommand::IconsVisible(false));
+        assert!(!desktop.layout.icons_visible());
+
+        desktop.open_background_context(None);
+        desktop.apply_desktop_command(super::DesktopCommand::IconSize(128.0, 144.0));
+        assert_eq!(desktop.layout.grid(), (128.0, 144.0));
+
+        desktop.open_background_context(None);
+        desktop.apply_desktop_command(super::DesktopCommand::Sort(
+            nickel_file::desktop::SortKey::Size,
+            nickel_file::desktop::SortDirection::Descending,
+        ));
+        assert_eq!(
+            desktop.layout.arrangement(),
+            nickel_file::desktop::Arrangement::Sorted {
+                key: nickel_file::desktop::SortKey::Size,
+                direction: nickel_file::desktop::SortDirection::Descending,
+            }
+        );
+
+        desktop.open_background_context(None);
+        desktop.apply_desktop_command(super::DesktopCommand::Manual);
+        assert_eq!(
+            desktop.layout.arrangement(),
+            nickel_file::desktop::Arrangement::Manual
+        );
+    }
+
+    #[test]
+    fn desktop_menu_rejects_selection_workspace_and_output_staleness() {
+        use std::{ffi::OsString, path::PathBuf};
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(44, 1),
+            nickel_file::FileEntry {
+                name: OsString::from("selected.txt"),
+                path: PathBuf::from("/desktop/selected.txt"),
+                is_directory: false,
+                size: Some(1),
+                modified: None,
+            },
+        )]);
+        desktop.open_background_context(None);
+        desktop.layout.select(
+            nickel_file::desktop::DesktopEntryId(nickel_file::FileIdentity(44, 1)),
+            Default::default(),
+        );
+        desktop.apply_desktop_command(super::DesktopCommand::IconsVisible(false));
+        assert!(desktop.layout.icons_visible());
+        assert!(desktop.context_menu.is_none());
+
+        desktop.open_background_context(None);
+        desktop.set_workspace(Some(2));
+        assert!(desktop.context_menu.is_none());
+
+        desktop.open_background_context(None);
+        desktop.set_active_output("other".into(), nickel_file::desktop::Point::default(), 1.0);
+        assert!(desktop.context_menu.is_none());
+    }
+
+    #[test]
+    fn desktop_settings_destinations_are_typed_and_keep_the_invoking_output() {
+        assert_eq!(
+            super::SettingsDestination::Appearance.arguments(),
+            ["--screen", "appearance"]
+        );
+        assert_eq!(
+            super::SettingsDestination::Display {
+                output: "DP-2".into()
+            }
+            .arguments(),
+            ["--screen", "display", "--output", "DP-2"]
+        );
     }
 }

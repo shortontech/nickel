@@ -95,6 +95,7 @@ pub struct DesktopLayout {
     arrangement: Arrangement,
     grouping: FolderGrouping,
     cell: (f32, f32),
+    icons_visible: bool,
     remembered_outputs: HashMap<DesktopEntryId, String>,
     locale: String,
 }
@@ -109,6 +110,7 @@ impl DesktopLayout {
             arrangement: Arrangement::Manual,
             grouping: FolderGrouping::Mixed,
             cell: (96.0, 112.0),
+            icons_visible: true,
             remembered_outputs: HashMap::new(),
             locale: sys_locale::get_locale().unwrap_or_else(|| "en-US".into()),
         }
@@ -124,6 +126,18 @@ impl DesktopLayout {
 
     pub fn arrangement(&self) -> Arrangement {
         self.arrangement
+    }
+
+    pub fn grid(&self) -> (f32, f32) {
+        self.cell
+    }
+
+    pub fn icons_visible(&self) -> bool {
+        self.icons_visible
+    }
+
+    pub fn set_icons_visible(&mut self, visible: bool) {
+        self.icons_visible = visible;
     }
 
     pub fn set_grid(&mut self, width: f32, height: f32) {
@@ -352,12 +366,15 @@ impl DesktopLayout {
             fs::create_dir_all(parent)?;
         }
         let mut body = format!(
-            "v1\narrangement={}\ngrouping={}\n",
+            "v1\narrangement={}\ngrouping={}\ngrid={}:{}\nicons-visible={}\n",
             encode_arrangement(self.arrangement),
             match self.grouping {
                 FolderGrouping::Mixed => "mixed",
                 FolderGrouping::FoldersFirst => "folders-first",
-            }
+            },
+            self.cell.0,
+            self.cell.1,
+            self.icons_visible,
         );
         for item in &self.items {
             let output = self
@@ -392,6 +409,16 @@ impl DesktopLayout {
                 } else {
                     FolderGrouping::Mixed
                 };
+            } else if let Some(value) = line.strip_prefix("grid=") {
+                if let Some((width, height)) = value.split_once(':')
+                    && let (Ok(width), Ok(height)) = (width.parse(), height.parse())
+                {
+                    self.cell = (width, height);
+                }
+            } else if let Some(value) = line.strip_prefix("icons-visible=") {
+                if let Ok(visible) = value.parse() {
+                    self.icons_visible = visible;
+                }
             } else if let Some(value) = line.strip_prefix("item=") {
                 let fields = value.split(':').collect::<Vec<_>>();
                 if fields.len() == 5
@@ -847,6 +874,8 @@ mod tests {
         layout.reconcile(vec![entry(1, "a", false, 1)]);
         let id = DesktopEntryId(FileIdentity(7, 1));
         layout.move_group(id, Point { x: 40.0, y: 120.0 }, "right");
+        layout.set_grid(128.0, 144.0);
+        layout.set_icons_visible(false);
         layout.set_outputs(vec![output("left", -300.0)]);
         assert_eq!(layout.items()[0].output, "left");
         layout.set_outputs(vec![output("left", -300.0), output("right", 100.0)]);
@@ -860,6 +889,8 @@ mod tests {
         restored.reconcile(vec![entry(1, "a", false, 1)]);
         restored.restore(&path).unwrap();
         assert_eq!(restored.items()[0].output, "right");
+        assert_eq!(restored.grid(), (128.0, 144.0));
+        assert!(!restored.icons_visible());
         assert!(
             !path
                 .with_extension(format!("tmp-{}", std::process::id()))

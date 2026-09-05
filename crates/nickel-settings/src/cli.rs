@@ -2,17 +2,21 @@ use std::ffi::OsString;
 
 use crate::SettingsPage;
 
-pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, default-apps, optional-features, keyboard-shortcuts, about]\n  -h, --help             Print help\n";
+pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, default-apps, optional-features, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n  -h, --help             Print help\n";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Action {
-    Run(SettingsPage),
+    Run {
+        page: SettingsPage,
+        output: Option<String>,
+    },
     Help,
 }
 
 pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, String> {
     let mut args = args.into_iter();
     let mut screen = None;
+    let mut output = None;
 
     while let Some(argument) = args.next() {
         let argument = argument
@@ -38,11 +42,31 @@ pub(super) fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Action, 
                 }
                 screen = Some(parse_screen(&argument["--screen=".len()..])?);
             }
+            "--output" => {
+                if output.is_some() {
+                    return Err("--output may only be specified once".into());
+                }
+                output = Some(
+                    args.next()
+                        .ok_or_else(|| "--output requires a value".to_owned())?
+                        .into_string()
+                        .map_err(|_| "the --output value must be valid Unicode".to_owned())?,
+                );
+            }
+            _ if argument.starts_with("--output=") => {
+                if output.is_some() {
+                    return Err("--output may only be specified once".into());
+                }
+                output = Some(argument["--output=".len()..].to_owned());
+            }
             _ => return Err(format!("unexpected argument '{argument}'")),
         }
     }
 
-    Ok(Action::Run(screen.unwrap_or(SettingsPage::Display)))
+    Ok(Action::Run {
+        page: screen.unwrap_or(SettingsPage::Display),
+        output,
+    })
 }
 
 fn parse_screen(value: &str) -> Result<SettingsPage, String> {
@@ -72,7 +96,13 @@ mod tests {
 
     #[test]
     fn no_arguments_selects_display() {
-        assert_eq!(parse_strings(&[]), Ok(Action::Run(SettingsPage::Display)));
+        assert_eq!(
+            parse_strings(&[]),
+            Ok(Action::Run {
+                page: SettingsPage::Display,
+                output: None
+            })
+        );
     }
 
     #[test]
@@ -95,7 +125,7 @@ mod tests {
         for (name, page) in cases {
             assert_eq!(
                 parse_strings(&["--screen", name]),
-                Ok(Action::Run(page)),
+                Ok(Action::Run { page, output: None }),
                 "failed to parse {name}"
             );
         }
@@ -105,11 +135,28 @@ mod tests {
     fn short_and_equals_forms_are_supported() {
         assert_eq!(
             parse_strings(&["-s", "network"]),
-            Ok(Action::Run(SettingsPage::Network))
+            Ok(Action::Run {
+                page: SettingsPage::Network,
+                output: None
+            })
         );
         assert_eq!(
             parse_strings(&["--screen=appearance"]),
-            Ok(Action::Run(SettingsPage::Appearance))
+            Ok(Action::Run {
+                page: SettingsPage::Appearance,
+                output: None
+            })
+        );
+    }
+
+    #[test]
+    fn output_connector_is_typed_and_composes_with_display_page() {
+        assert_eq!(
+            parse_strings(&["--screen", "display", "--output", "DP-3"]),
+            Ok(Action::Run {
+                page: SettingsPage::Display,
+                output: Some("DP-3".into()),
+            })
         );
     }
 

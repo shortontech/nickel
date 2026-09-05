@@ -55,6 +55,77 @@ pub fn publish_file_clipboard(paths: &[PathBuf], cut: bool) -> Result<(), String
     platform::publish_file_clipboard(paths, cut).map_err(|error| error.to_string())
 }
 
+/// Applies the native file clipboard through Nickel File's bounded operation planner.
+pub fn paste_native_file_clipboard(destination: &Path) -> Result<usize, String> {
+    use operations::{
+        ClipboardOffer, ConflictPolicy, ItemCapabilities, TransferIntent, TransferSource,
+        execute_local_transfer, plan_paste,
+    };
+    let (cut, paths) = platform::read_file_clipboard()?;
+    let intent = if cut {
+        TransferIntent::Move
+    } else {
+        TransferIntent::Copy
+    };
+    let sources = paths
+        .into_iter()
+        .enumerate()
+        .map(|(index, path)| TransferSource {
+            provider: "native".into(),
+            identity: FileIdentity(0, index as u64),
+            path,
+            capabilities: ItemCapabilities {
+                readable: true,
+                removable: cut,
+            },
+        })
+        .collect();
+    let offer = ClipboardOffer::new(intent, sources)
+        .map_err(|error| format!("invalid clipboard offer: {error:?}"))?;
+    let effect = plan_paste(&offer, "local", destination, true, ConflictPolicy::Ask)
+        .map_err(|error| format!("invalid paste target: {error:?}"))?;
+    let report = execute_local_transfer(
+        &effect,
+        &std::sync::atomic::AtomicBool::new(false),
+        |_, _| {},
+    );
+    if report.failed.is_empty() {
+        Ok(report.affected.len())
+    } else {
+        Err(format!("{} item(s) failed", report.failed.len()))
+    }
+}
+
+pub fn native_file_clipboard_available() -> bool {
+    platform::read_file_clipboard().is_ok_and(|(_, paths)| !paths.is_empty())
+}
+
+pub fn directory_is_writable(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.permissions().readonly())
+}
+
+/// Creates a conventionally named folder through the shared file-operation boundary.
+pub fn create_new_folder(parent: &Path) -> Result<PathBuf, String> {
+    for suffix in 0..10_000 {
+        let name = if suffix == 0 {
+            "New folder".to_owned()
+        } else {
+            format!("New folder ({suffix})")
+        };
+        let path = parent.join(name);
+        if path.exists() {
+            continue;
+        }
+        match std::fs::create_dir(&path) {
+            Ok(()) => return Ok(path),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("could not choose an unused folder name".into())
+}
+
 pub fn file_identity(path: &Path) -> io::Result<FileIdentity> {
     let metadata = fs::metadata(path)?;
     metadata_identity(path, &metadata).ok_or_else(|| {
@@ -676,5 +747,15 @@ mod tests {
         assert!(!super::is_application_launcher(std::path::Path::new(
             "notes.txt"
         )));
+    }
+
+    #[test]
+    fn shared_new_folder_operation_uses_conventional_collision_names() {
+        let root = temporary_directory("new-folder");
+        let first = super::create_new_folder(&root).unwrap();
+        let second = super::create_new_folder(&root).unwrap();
+        assert_eq!(first.file_name().unwrap(), "New folder");
+        assert_eq!(second.file_name().unwrap(), "New folder (1)");
+        fs::remove_dir_all(root).unwrap();
     }
 }

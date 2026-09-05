@@ -217,6 +217,12 @@ impl FocusedInputDispatcher {
                 let command =
                     command_modifier && !event.modifiers.aggregate(AggregateModifier::Alt);
                 let command = match (&event.logical, &event.physical) {
+                    (LogicalKey::Named(NamedKey::ContextMenu), _)
+                    | (_, PhysicalKey::Code(KeyCode::ContextMenu))
+                        if !event.repeat =>
+                    {
+                        InputCommand::Ui(UiEvent::KeyboardContextMenu)
+                    }
                     (_, PhysicalKey::Code(KeyCode::F10)) if shift && !event.repeat => {
                         InputCommand::Ui(UiEvent::KeyboardContextMenu)
                     }
@@ -591,6 +597,18 @@ mod tests {
                 }),
                 KeyCode::F10,
                 &[Modifier::ShiftLeft]
+            )),
+            [InputCommand::Ui(UiEvent::KeyboardContextMenu)]
+        );
+    }
+
+    #[test]
+    fn context_menu_key_dispatches_the_shared_context_action() {
+        assert_eq!(
+            FocusedInputDispatcher::default().dispatch(&key(
+                LogicalKey::Named(NamedKey::ContextMenu),
+                KeyCode::ContextMenu,
+                &[]
             )),
             [InputCommand::Ui(UiEvent::KeyboardContextMenu)]
         );

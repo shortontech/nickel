@@ -250,6 +250,7 @@ pub fn virtual_key_to_key_code(vk: u32, extended: bool) -> Option<KeyCode> {
         0x2c => KeyCode::PrintScreen,
         0x2d => KeyCode::Insert,
         0x2e => KeyCode::Delete,
+        0x5d => KeyCode::ContextMenu,
         0x60..=0x69 => ALL_NUMPAD[(vk - 0x60) as usize],
         0x6a => KeyCode::NumpadMultiply,
         0x6b => KeyCode::NumpadAdd,
@@ -430,6 +431,10 @@ mod tests {
         assert_eq!(
             physical_key(0x19, 0x29, false),
             PhysicalKey::Code(KeyCode::Backquote)
+        );
+        assert_eq!(
+            physical_key(0x5d, 0x5d, true),
+            PhysicalKey::Code(KeyCode::ContextMenu)
         );
         assert!(matches!(
             physical_key(0xff, 0x77, true),
