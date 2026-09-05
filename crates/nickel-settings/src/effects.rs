@@ -587,7 +587,6 @@ impl SettingsApp {
                     );
                 }
             }
-            return;
         }
 
         #[cfg(not(target_os = "windows"))]

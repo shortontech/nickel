@@ -585,9 +585,15 @@ pub(crate) fn open_with_launcher(launcher: &Path, source: &Path) -> Result<(), O
             SW_SHOWNORMAL,
         )
     };
-    (result.0 as isize > 32).then_some(()).ok_or_else(|| {
-        OpenPathError::Platform(format!("Windows shell error {}", result.0 as isize))
-    })
+    let code = result.0 as isize;
+    match code {
+        value if value > 32 => Ok(()),
+        5 => Err(OpenPathError::PermissionDenied),
+        31 => Err(OpenPathError::AssociationMissing),
+        _ => Err(OpenPathError::Platform(format!(
+            "Windows shell error {code}"
+        ))),
+    }
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
