@@ -1775,10 +1775,10 @@ fn surface_geometry(
         ),
         SurfaceRole::Screenshot => (
             SCREENSHOT_TITLE,
-            geometry.x + (geometry.width.saturating_sub(1200) / 2) as i32,
-            geometry.y + (geometry.height.saturating_sub(760) / 2) as i32,
-            1200.min(geometry.width),
-            760.min(geometry.height),
+            geometry.x,
+            geometry.y,
+            geometry.width,
+            geometry.height,
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
@@ -2045,6 +2045,21 @@ mod tests {
         if cfg!(target_os = "linux") {
             assert!(surface_is_borderless(SurfaceRole::Screenshot));
         }
+    }
+
+    #[test]
+    fn screenshot_surface_covers_the_complete_active_output() {
+        let display = DisplayGeometry {
+            x: 1920,
+            y: -120,
+            width: 2560,
+            height: 1440,
+            scale: 1.5,
+        };
+        let (_, x, y, width, height, initially_hidden) =
+            surface_geometry(SurfaceRole::Screenshot, display, PanelEdge::Bottom);
+        assert_eq!((x, y, width, height), (1920, -120, 2560, 1440));
+        assert!(initially_hidden);
     }
 
     #[test]

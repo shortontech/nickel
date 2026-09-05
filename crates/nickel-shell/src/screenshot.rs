@@ -944,6 +944,33 @@ mod tests {
     }
 
     #[test]
+    fn production_pointer_path_selects_from_bottom_right_to_top_left() {
+        let mut tool = ScreenshotTool::default();
+        tool.show(RgbaImage::new(800, 450));
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let _ = tool.scene(1280, 720, palette);
+        let preview = tool.host.application().image_rect();
+        let start = (
+            preview.origin.x + preview.size.width - 12.0,
+            preview.origin.y + preview.size.height - 12.0,
+        );
+        let end = (preview.origin.x + 18.0, preview.origin.y + 16.0);
+
+        assert!(tool.pointer_pressed(start.0, start.1, 1280, 720));
+        tool.queue_pointer_moved(end.0, end.1, 1280, 720);
+        assert!(tool.pointer_released());
+
+        let selection = tool
+            .host
+            .application()
+            .selection
+            .expect("reverse selection");
+        assert_eq!(selection.origin, nickel_ui::Point { x: end.0, y: end.1 });
+        assert!((selection.size.width - (start.0 - end.0)).abs() < 0.01);
+        assert!((selection.size.height - (start.1 - end.1)).abs() < 0.01);
+    }
+
+    #[test]
     fn crop_maps_preview_selection_back_to_source_pixels() {
         let mut image = RgbaImage::new(4, 2);
         for y in 0..2 {

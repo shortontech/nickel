@@ -2389,6 +2389,17 @@ fn main() -> Result<(), String> {
             // surface is waiting for the compositor's focus configure. Hiding
             // an overlay here races its first frame and leaves a brief blank
             // window. Explicit dismissal and Escape remain authoritative.
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
+            {
+                if state.hide_overlay(SurfaceRole::Screenshot) {
+                    sync_visibility(&mut shell, &state);
+                }
+            }
             Some(ShellEvent::FocusChanged { focused: false, .. }) => {}
             Some(ShellEvent::FocusChanged {
                 surface,
