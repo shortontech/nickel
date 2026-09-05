@@ -360,8 +360,12 @@ mod tests {
         );
         let env =
             toolkit_launch_environment(ApplicationScalePolicy::Custom(Scale120::new(150).unwrap()));
-        assert_eq!(env["QT_SCALE_FACTOR"], "1.250000");
-        assert_eq!(env["GDK_SCALE"], "2");
-        assert_eq!(env["GDK_DPI_SCALE"], "0.625000");
+        if cfg!(target_os = "linux") {
+            assert_eq!(env["QT_SCALE_FACTOR"], "1.250000");
+            assert_eq!(env["GDK_SCALE"], "2");
+            assert_eq!(env["GDK_DPI_SCALE"], "0.625000");
+        } else {
+            assert!(env.is_empty());
+        }
     }
 }

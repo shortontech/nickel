@@ -225,11 +225,12 @@ mod external_url_tests {
     #[test]
     fn directories_delegate_to_the_sibling_nickel_file() {
         let command = nickel_file_command(Path::new("/tmp/example folder"));
+        let expected_program = format!("nickel-file{}", std::env::consts::EXE_SUFFIX);
         assert_eq!(
             Path::new(command.get_program())
                 .file_name()
                 .and_then(|name| name.to_str()),
-            Some("nickel-file")
+            Some(expected_program.as_str())
         );
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
