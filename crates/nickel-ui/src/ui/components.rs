@@ -232,6 +232,11 @@ impl<Message> VerticalScroll<Message> {
         self
     }
 
+    pub fn navigation_scope(mut self, scope: crate::NavigationScope) -> Self {
+        self.0 = self.0.navigation_scope(scope);
+        self
+    }
+
     pub fn on_scroll(mut self, map: fn(f32) -> Message) -> Self {
         self.0 = self.0.on_scroll(map);
         self

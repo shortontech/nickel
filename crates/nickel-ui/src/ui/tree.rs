@@ -3000,6 +3000,22 @@ impl<Message: Clone> UiFrame<Message> {
                             clipboard_text: None,
                         };
                     }
+                    // A scroll owner can also be a navigation waypoint. Confirm
+                    // must enter adjustment mode so its advertised value actions
+                    // remain operable; directional navigation still enters the
+                    // nested scope through `enter_selected_controller_scope`.
+                    if (node.controller_value.is_some() && node.adjustment_step > 0.0)
+                        || (self.scrolls.iter().any(|scroll| scroll.id == node.id)
+                            && node.semantic_actions.iter().any(|action| {
+                                matches!(action, ActionKind::Increment | ActionKind::Decrement)
+                            }))
+                    {
+                        return EventOutcome {
+                            messages: outcome.messages,
+                            invalidation: state.navigation_mut().set_controller_editing(true),
+                            clipboard_text: None,
+                        };
+                    }
                     if node.navigation_scope.is_some() {
                         let scope = node.id.clone();
                         state.navigation_mut().set_controller_scope(Some(scope));
@@ -3013,24 +3029,6 @@ impl<Message: Clone> UiFrame<Message> {
                         return EventOutcome {
                             messages: outcome.messages,
                             invalidation: invalidation.merge(dropdown_invalidation),
-                            clipboard_text: None,
-                        };
-                    }
-                    if node.controller_value.is_some() && node.adjustment_step > 0.0 {
-                        return EventOutcome {
-                            messages: outcome.messages,
-                            invalidation: state.navigation_mut().set_controller_editing(true),
-                            clipboard_text: None,
-                        };
-                    }
-                    if self.scrolls.iter().any(|scroll| scroll.id == node.id)
-                        && node.semantic_actions.iter().any(|action| {
-                            matches!(action, ActionKind::Increment | ActionKind::Decrement)
-                        })
-                    {
-                        return EventOutcome {
-                            messages: outcome.messages,
-                            invalidation: state.navigation_mut().set_controller_editing(true),
                             clipboard_text: None,
                         };
                     }

@@ -483,6 +483,7 @@ pub(crate) fn command_surface(
     .controlled(true)
     .height(results_height)
     .id("file-command-results")
+    .navigation_scope(NavigationScope::group())
     .child(results);
     AnyView::new(ui! {
         <Container id={"file-command-surface"} grow={1.0} background={palette.background}

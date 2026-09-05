@@ -1626,6 +1626,44 @@ fn minimum_command_surface_keeps_search_fixed_and_all_results_scrollable() {
 }
 
 #[test]
+fn command_results_scrollbar_is_controller_reachable_and_adjustable() {
+    let mut app = FileApp::fixture();
+    app.command_surface_open = true;
+    let mut host = UiHost::new(app, 560, 360);
+    let results = UiId::from("root/file-layout/file-command-surface/#0/file-command-results");
+
+    for _ in 0..32 {
+        if host.inspect().controller_target.as_ref() == Some(&results) {
+            break;
+        }
+        host.handle_event(nickel_ui::UiEvent::ControllerNext);
+    }
+
+    assert_eq!(host.inspect().controller_target.as_ref(), Some(&results));
+    assert_eq!(host.application().command_scroll_offset, 0.0);
+    host.handle_controller_action(nickel_ui::ControllerAction::Confirm);
+    assert!(host.inspect().controller_editing);
+    let outcome = host.handle_event(nickel_ui::UiEvent::ControllerAdjust(1.0));
+    assert!(outcome.changed);
+    assert!(host.application().command_scroll_offset > 0.0);
+
+    host.handle_controller_action(nickel_ui::ControllerAction::Cancel);
+    host.handle_controller_action(nickel_ui::ControllerAction::Right);
+    assert!(
+        host.inspect()
+            .controller_scope
+            .as_ref()
+            .is_some_and(|scope| scope.as_str().ends_with("/file-command-results"))
+    );
+    assert!(
+        host.inspect()
+            .controller_target
+            .as_ref()
+            .is_some_and(|target| target.as_str().contains("/file-command-collection"))
+    );
+}
+
+#[test]
 fn every_file_fixture_asset_matches_its_admitted_source_master() {
     let repository = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     for asset in FILE_FIXTURE_ASSETS {
@@ -1736,6 +1774,38 @@ fn every_advertised_controller_action_has_a_bounded_production_path() {
             .filter(|path| !path.reached)
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn command_surface_variants_have_complete_controller_routes() {
+    use nickel_ui_testkit::{FixtureProvider, ReachabilityModality, ReachabilityPolicy};
+
+    let mut registry = nickel_ui_testkit::FixtureRegistry::new();
+    FileFixtureProvider.register(&mut registry).unwrap();
+    let entry = registry.finish().remove(0);
+    for variant in ["command-surface", "minimum-command-surface"] {
+        let session = entry.open_variant(variant).unwrap();
+        let report = session.reachability_report(&ReachabilityPolicy {
+            modalities: [ReachabilityModality::Controller].into_iter().collect(),
+            wall_time_ms: 15_000,
+            ..ReachabilityPolicy::default()
+        });
+
+        assert!(
+            report.issues.is_empty(),
+            "{variant} controller issues: {:#?}",
+            report.issues
+        );
+        assert!(
+            report.paths.iter().all(|path| path.reached),
+            "{variant} unreached controller paths: {:#?}",
+            report
+                .paths
+                .iter()
+                .filter(|path| !path.reached)
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 fn pixel(raster: &nickel_ui_testkit::HeadlessRaster, x: u32, y: u32) -> [u8; 4] {

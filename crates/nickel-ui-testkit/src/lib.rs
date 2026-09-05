@@ -3938,6 +3938,23 @@ fn route_controller_scroll<A: Application>(
                 .as_ref()
                 .map_or("root", UiId::as_str),
         ));
+        if inspection.controller_target.as_ref() == Some(&target.id) {
+            scenario
+                .host
+                .handle_controller_action(ControllerAction::Confirm);
+            let direction = if action == ActionKind::Increment {
+                1.0
+            } else {
+                -1.0
+            };
+            scenario
+                .host
+                .handle_event(UiEvent::ControllerAdjust(direction));
+            steps.push(format!(
+                "controller_Adjust({direction}):{}",
+                target.id.as_str()
+            ));
+        }
         let current = scenario
             .semantic_nodes()
             .into_iter()
