@@ -1,3 +1,5 @@
+use crate::dpi::Scale120;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProjectionMode {
     InternalOnly,
@@ -12,7 +14,7 @@ pub struct ProjectionOutput {
     pub internal: bool,
     pub width: i32,
     pub height: i32,
-    pub scale_120: u32,
+    pub scale: Scale120,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,7 +23,7 @@ pub struct ProjectionPlacement {
     pub x: i32,
     pub y: i32,
     pub enabled: bool,
-    pub scale_120: u32,
+    pub scale: Scale120,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,7 +73,7 @@ impl ProjectionChooser {
                     x: if mode == ProjectionMode::Extend { x } else { 0 },
                     y: 0,
                     enabled,
-                    scale_120: output.scale_120,
+                    scale: output.scale,
                 };
                 if enabled && mode == ProjectionMode::Extend {
                     x += output.width.max(1);
@@ -109,14 +111,14 @@ mod tests {
                 internal: true,
                 width: 1920,
                 height: 1080,
-                scale_120: 120,
+                scale: Scale120::ONE,
             },
             ProjectionOutput {
                 name: "DP-1".into(),
                 internal: false,
                 width: 2560,
                 height: 1440,
-                scale_120: 180,
+                scale: Scale120::new(180).unwrap(),
             },
         ]
     }
@@ -139,7 +141,7 @@ mod tests {
             x: -1920,
             y: 48,
             enabled: true,
-            scale_120: 144,
+            scale: Scale120::new(144).unwrap(),
         }];
         let plan = ProjectionChooser::plan(ProjectionMode::Extend, &outputs()).unwrap();
         let mut chooser = ProjectionChooser::default();

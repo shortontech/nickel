@@ -1,2 +1,2 @@
-# file	max_references	category	semantic_owner	reason	review
+# file	expected_references	category	semantic_owner	reason	review
 crates/nickel-ui-workbench/src/fixture_inventory.rs	2	bounded_custom_paint	custom-paint fixture	Exercises the allocated-rectangle CustomPaint contract with frame-owned semantics and no parallel hit authority	Review if the graphical fixture can be expressed by a higher-level declarative primitive

@@ -1,0 +1,24 @@
+# crate	rust_sources
+nickel-codex	11
+nickel-codex-fixture	3
+nickel-codex-ui	7
+nickel-core	28
+nickel-file	15
+nickel-gaze	8
+nickel-i18n	1
+nickel-i18n-lint	2
+nickel-input	7
+nickel-logging	1
+nickel-markdown	1
+nickel-markdown-ui	4
+nickel-platform	7
+nickel-render-assets	1
+nickel-session	34
+nickel-session-protocol	1
+nickel-settings	10
+nickel-shapes-test	5
+nickel-shell	36
+nickel-ui	29
+nickel-ui-testkit	1
+nickel-ui-workbench	4
+ui-declarative-macros	1

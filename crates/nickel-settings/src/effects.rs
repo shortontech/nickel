@@ -168,7 +168,7 @@ impl SettingsApp {
                     },
                     primary: output.primary,
                     enabled: output.enabled,
-                    scale_120: output.scale_120,
+                    scale: nickel_core::dpi::Scale120::new(output.scale_120).unwrap_or_default(),
                 }
             })
             .collect();
@@ -262,7 +262,10 @@ impl SettingsApp {
                     },
                     primary: primary.as_ref() == Some(&monitor),
                     enabled: true,
-                    scale_120: (monitor.scale_factor() * 120.0).round() as u32,
+                    scale: nickel_core::dpi::Scale120::new(
+                        (monitor.scale_factor() * 120.0).round() as u32,
+                    )
+                    .unwrap_or_default(),
                 }
             })
             .collect();
@@ -601,7 +604,7 @@ impl SettingsApp {
                     x,
                     y,
                     enabled: display.enabled,
-                    scale_120: display.scale_120,
+                    scale_120: display.scale.units(),
                 })
                 .collect(),
         };

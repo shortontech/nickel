@@ -1,18 +1,23 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04. Scope: every production Rust source under `crates/` (215 Rust files at the
-audit baseline). Candidates were grouped by behavior, then traced through callers and tests;
-same-named trait implementations and platform translations were not treated as duplication.
+Audit date: 2026-09-04; refreshed after the backlog integration wave on 2026-09-05. Scope: every
+checked-in Rust source under `crates/` (217 files after the consolidation below). The exact per-crate
+inventory is checked in at `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever
+a source or crate appears or disappears without an audit refresh. Candidates were grouped by
+behavior, then traced through callers and tests; same-named trait implementations and platform
+translations were not treated as duplication.
 
 | Candidate locations | Shared behavior | Intended authority | Disposition | Migration order / evidence | Tests | Status |
 |---|---|---|---|---|---|---|
-| `nickel-core::{shell_settings,wallpaper_settings,launcher_preferences,optional_features}` | Resolve Nickel's per-user configuration directory | `nickel-core::persistence::config_path` | consolidate | Introduce authority, migrate all four callers, and prohibit new environment/path copies. | `reuse_authority`, each settings round trip | complete |
-| Same four modules | Create parents and replace a complete small settings file | `nickel-core::persistence::atomic_write` | consolidate | Introduce atomic primitive, migrate five preference/runtime writers, remove direct non-atomic writes. | atomic replacement plus existing round trips | complete |
+| `nickel-core::{shell_settings,wallpaper_settings,launcher_preferences,optional_features,dpi}` | Resolve Nickel's per-user configuration directory | `nickel-core::persistence::config_path` | consolidate | Introduce authority, migrate all five callers, and prohibit new environment/path copies. The refreshed audit added DPI persistence to the enforcement inventory. | `reuse_authority`, each settings round trip | complete |
+| Same five modules | Create parents and replace a complete small settings file | `nickel-core::persistence::atomic_write` | consolidate | Introduce atomic primitive, migrate seven preference/runtime writers, remove direct non-atomic writes, and enumerate every consumer in the authority guard. | atomic replacement plus existing round trips | complete |
 | `nickel-ui::{input,text_editor,text_context_menu,ui::tree}` and application text fields | Editing shortcuts and context actions | `nickel-ui::TextEditCommand` and retained editor | consolidate | Spec 0178 supplies the shared command authority and universal `TextField` adoption; retaining app-owned validation mappers is intentional. | editor/menu parity and secure-field suites | complete (0178) |
 | `nickel-ui::{overlay,state,ui::tree,runtime}` and shell/file consumers | Menu focus, dismissal, placement, event containment | `nickel-ui::OverlayMenu` lifecycle | consolidate | Consumers declare menus; UI owns stack, focus return, collision, and accessibility. Direct native menu ownership has no production caller. | overlay matrix and semantic scenario suites | complete |
 | `nickel-input::{lib,winit,windows,global}`; session and UI consumers | Native input normalization and shortcut suppression | `nickel-input` normalized events; `nickel-ui::FocusedInputDispatcher` for widget policy | adapter-only | Native scan codes/COM details remain in adapters. Moving widget focus policy down would create a dependency inversion. | adapter traces and correlated-text tests | complete |
 | `nickel-core::{hotkeys,window_input,workspaces}` | Shell shortcut meaning | `nickel-core` reducers | share-primitive | Chord normalization is shared; workspace/window policy remains separate reducers because their state/effects differ. | hotkey and workspace tables | complete |
 | `nickel-core::{active_output,output_layout}`; session shell layout; UI overlay geometry | Output selection versus rectangle placement | Core active-output/output-layout policy and UI popup collision | keep-distinct | Similar rectangle operations have different coordinate spaces and owners: compositor global outputs versus application-local popup work areas. Combining them would import compositor semantics into UI. | mixed-output core and overlay placement matrices | verified distinct |
+| `nickel-core::dpi`, `nickel-session::shell_layout`, `nickel-shell::platform::linux` | Signed logical-rectangle intersection area | `nickel-core::geometry::LogicalRect` | share-primitive | The refreshed audit found three byte-for-byte-equivalent overlap algorithms. Domain-specific placement and capture policy remain separate, while arithmetic and hostile-coordinate handling now have one portable authority. | core extreme-coordinate tests plus existing DPI, placement, and capture selection tests | complete |
+| `nickel-core::{display_projection,dpi}`, Nickel Settings, and session-protocol translations | Fractional display scale representation | `nickel-core::dpi::Scale120`; raw `u32` only at native/wire translations | share-primitive | Projection and Settings presentation policy now store the validated scale type instead of parallel raw-number representations. Session protocol and monitor snapshots retain integer fields as translation boundaries and validate them before policy or compositor application. | projection plan/rollback, Settings scale/apply, scale conversion, session layout validation | complete |
 | `nickel-session` DRM/udev backends | Connector discovery | session backend contract | adapter-only | DRM object enumeration and udev lifecycle are native mechanics; portable state consumes typed output facts. | scanner/udev contract tests | complete |
 | `nickel-shell::platform::{linux,windows,unsupported}` | Launch, enumerate apps, tray/audio/control effects | shell platform trait | adapter-only | Repeated method names are required trait translations. Policy is in launcher/model/live-shell; adapters contain only OS effects. | synthetic platform and native contract tests | complete |
 | `nickel-shell::{launcher,model,places,desktop_entries}` | Application discovery, ranking, places | launcher model | share-primitive | Desktop-entry parsing is Linux-specific input; ranking and presentation consume canonical application records. Places are locations, not applications, so merging indexes would erase semantics. | launcher ranking/discovery tests | complete |
@@ -39,5 +44,24 @@ reduction of 19 production lines. Its more important effect is one configuration
 atomic replacement for every migrated public preference file and removal of prior path duplication
 disagreement. The enforcement test makes both authorities non-regressive.
 
+The refresh consolidates three overlap algorithms and two logical-rectangle definitions into one
+primitive, and replaces the projection policy's two raw scale fields with the existing validated
+scale type. The portable overflow-safe primitive makes the executable implementation nine lines
+larger after removing the copies; its focused inline tests add another 37 lines. Combined with the
+original slice, the audit's executable production-code impact remains a net reduction of ten lines.
+
 No compatibility shims or deferred consolidation candidates remain. Native adapter implementations
 and product fixtures remain intentionally distinct for the evidence stated above.
+
+## Authority exception baselines
+
+- Consumer display-list authority: one reviewed file,
+  `nickel-ui-workbench/src/fixture_inventory.rs`, bounded to two `PaintCommand` references for the
+  custom-paint contract fixture. The executable audit requires the exact reviewed count, rejecting
+  increases, silent decreases, unlisted consumers, duplicate rows, and stale exceptions.
+- Parallel consumer hit authority: zero files and zero references. The executable audit rejects the
+  first unlisted authority and stale exceptions.
+- The UI authority audit recursively scans every crate rather than a hand-maintained consumer list;
+  it excludes `nickel-ui` itself because that crate is the intended display-list and hit-test owner.
+
+The 2026-09-05 refresh did not increase either exception baseline.

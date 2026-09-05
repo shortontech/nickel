@@ -5520,7 +5520,7 @@ impl LiveShell {
                     internal: output.name.starts_with("eDP") || output.name.starts_with("LVDS"),
                     width: output.geometry.width,
                     height: output.geometry.height,
-                    scale_120: output.scale_120,
+                    scale: nickel_core::dpi::Scale120::new(output.scale_120).unwrap_or_default(),
                 })
                 .collect::<Vec<_>>();
             let Some(plan) = ProjectionChooser::plan(mode, &topology) else {
@@ -5533,7 +5533,7 @@ impl LiveShell {
                     x: output.geometry.x,
                     y: output.geometry.y,
                     enabled: output.enabled,
-                    scale_120: output.scale_120,
+                    scale: nickel_core::dpi::Scale120::new(output.scale_120).unwrap_or_default(),
                 })
                 .collect();
             let primary = outputs
@@ -5564,7 +5564,7 @@ impl LiveShell {
                         x: entry.x,
                         y: entry.y,
                         enabled: entry.enabled,
-                        scale_120: entry.scale_120,
+                        scale_120: entry.scale.units(),
                     })
                     .collect(),
             };
@@ -5606,7 +5606,7 @@ impl LiveShell {
                         x: entry.x,
                         y: entry.y,
                         enabled: entry.enabled,
-                        scale_120: entry.scale_120,
+                        scale_120: entry.scale.units(),
                     })
                     .collect(),
             };

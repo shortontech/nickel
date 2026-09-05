@@ -342,7 +342,7 @@ struct DisplayCard {
     rect: Rect,
     primary: bool,
     enabled: bool,
-    scale_120: u32,
+    scale: nickel_core::dpi::Scale120,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1096,7 +1096,9 @@ impl SettingsApp {
             }
             SettingsMessage::SetDisplayScale(step) => {
                 // Supported quarter-step scales from 50% through 400%.
-                self.displays[self.selected].scale_120 = 60 + step.min(14) * 30;
+                self.displays[self.selected].scale =
+                    nickel_core::dpi::Scale120::new(60 + step.min(14) * 30)
+                        .expect("bounded scale slider always produces a positive value");
                 self.applied = false;
                 self.status = self.localizer.text("settings-status-changes-not-applied");
             }
@@ -2307,7 +2309,7 @@ mod tests {
     fn risky_display_changes_have_explicit_keep_and_revert_state() {
         let mut app = SettingsApp::default();
         let original = app.displays.clone();
-        app.displays[0].scale_120 = 180;
+        app.displays[0].scale = nickel_core::dpi::Scale120::new(180).unwrap();
         app.display_apply_succeeded();
         assert!(app.pending_display_revert.is_some());
         assert!(Application::poll_interval(&app).is_some());
@@ -2315,7 +2317,7 @@ mod tests {
         app.revert_display_layout();
         // The platform request is unavailable in tests, but the requested
         // model is restored before adapter execution.
-        assert_eq!(app.displays[0].scale_120, original[0].scale_120);
+        assert_eq!(app.displays[0].scale, original[0].scale);
     }
 
     #[test]

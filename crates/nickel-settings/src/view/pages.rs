@@ -318,8 +318,8 @@ impl SettingsApp {
             theme,
             "Scale",
             "Logical size on this display. Applications may need to redraw.",
-            format!("{}%", selected.scale_120 * 100 / 120),
-            (selected.scale_120.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
+            format!("{}%", selected.scale.units() * 100 / 120),
+            (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
             display_scale_message,
         )
         .id("display-scale");

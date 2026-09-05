@@ -116,7 +116,7 @@ impl Default for SettingsApp {
                 },
                 primary: false,
                 enabled: true,
-                scale_120: 120,
+                scale: nickel_core::dpi::Scale120::ONE,
             },
             DisplayCard {
                 connector: "DP-3".into(),
@@ -132,7 +132,7 @@ impl Default for SettingsApp {
                 },
                 primary: true,
                 enabled: true,
-                scale_120: 120,
+                scale: nickel_core::dpi::Scale120::ONE,
             },
         ];
         let mut shell_settings = load_shell_settings();

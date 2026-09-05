@@ -24,7 +24,7 @@ fn workspace_root() -> PathBuf {
 fn exceptions(root: &Path) -> BTreeMap<String, Exception> {
     let source = fs::read_to_string(root.join("assets/ui-authority-exceptions.tsv"))
         .expect("UI authority exception inventory must be readable");
-    source
+    let rows = source
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .map(|line| {
@@ -65,7 +65,17 @@ fn exceptions(root: &Path) -> BTreeMap<String, Exception> {
                 },
             )
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let exceptions = rows.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        exceptions.len(),
+        source
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        "UI authority exception paths must be unique"
+    );
+    exceptions
 }
 
 fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
@@ -185,9 +195,9 @@ fn consumers_cannot_grow_or_create_display_list_authority() {
         }
         observed.insert(relative.clone());
         match exceptions.get(&relative) {
-            Some(exception) if references <= exception.maximum => {}
+            Some(exception) if references == exception.maximum => {}
             Some(exception) => violations.push(format!(
-                "{relative}: {references} PaintCommand references exceed admitted maximum {} ({}, owner {}, {}; review {})",
+                "{relative}: {references} PaintCommand references differ from admitted baseline {} ({}, owner {}, {}; review {})",
                 exception.maximum, exception.category, exception.owner, exception.reason, exception.review
             )),
             None => violations.push(format!(
@@ -218,7 +228,7 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
     let root = workspace_root();
     let source = fs::read_to_string(root.join("assets/ui-hit-authority-exceptions.tsv"))
         .expect("hit authority exception inventory must be readable");
-    let admitted = source
+    let rows = source
         .lines()
         .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
         .map(|line| {
@@ -229,12 +239,23 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
                 "hit exception must have five fields: {line}"
             );
             assert!(fields[2..].iter().all(|field| !field.is_empty()));
-            (
-                fields[0].to_owned(),
-                fields[1].parse::<usize>().expect("hit bound is an integer"),
-            )
+            let baseline = fields[1].parse::<usize>().expect("hit bound is an integer");
+            assert!(
+                baseline > 0,
+                "hit authority baseline must be positive: {line}"
+            );
+            (fields[0].to_owned(), baseline)
         })
-        .collect::<BTreeMap<_, _>>();
+        .collect::<Vec<_>>();
+    let admitted = rows.into_iter().collect::<BTreeMap<_, _>>();
+    assert_eq!(
+        admitted.len(),
+        source
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+            .count(),
+        "hit authority exception paths must be unique"
+    );
     let mut files = Vec::new();
     rust_files(&root.join("crates"), &mut files);
     let mut observed = BTreeSet::new();
@@ -255,9 +276,9 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
         }
         observed.insert(relative.clone());
         match admitted.get(&relative) {
-            Some(maximum) if count <= *maximum => {}
+            Some(maximum) if count == *maximum => {}
             Some(maximum) => violations.push(format!(
-                "{relative}: {count} parallel hit-authority references exceed {maximum}"
+                "{relative}: {count} parallel hit-authority references differ from baseline {maximum}"
             )),
             None => violations.push(format!(
                 "{relative}: {count} unadmitted parallel hit-authority references"

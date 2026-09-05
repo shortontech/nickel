@@ -151,8 +151,12 @@ fn capture_active_window_image() -> Result<image::RgbaImage, String> {
         .outputs
         .iter()
         .filter(|output| output.enabled)
-        .max_by_key(|output| intersection_area(geometry, output.geometry))
-        .filter(|output| intersection_area(geometry, output.geometry) > 0)
+        .max_by_key(|output| {
+            logical_rect(geometry).intersection_area(logical_rect(output.geometry))
+        })
+        .filter(|output| {
+            logical_rect(geometry).intersection_area(logical_rect(output.geometry)) > 0
+        })
         .ok_or_else(|| "the focused application is not on a capturable output".to_string())?;
     let capture = capture_output(Some(&output.name))?;
     crop_output_geometry(capture.image, output.geometry, geometry)
@@ -207,13 +211,13 @@ pub fn projection_outputs() -> Result<Vec<nickel_session_protocol::OutputSnapsho
     session_snapshot().map(|snapshot| snapshot.outputs)
 }
 
-fn intersection_area(
-    left: nickel_session_protocol::Geometry,
-    right: nickel_session_protocol::Geometry,
-) -> i64 {
-    let width = (left.x + left.width).min(right.x + right.width) - left.x.max(right.x);
-    let height = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
-    i64::from(width.max(0)) * i64::from(height.max(0))
+fn logical_rect(geometry: nickel_session_protocol::Geometry) -> nickel_core::geometry::LogicalRect {
+    nickel_core::geometry::LogicalRect {
+        x: geometry.x,
+        y: geometry.y,
+        width: geometry.width,
+        height: geometry.height,
+    }
 }
 
 fn crop_output_geometry(
@@ -1993,7 +1997,7 @@ mod tests {
     use super::{
         MAX_PROTOCOL_ERROR_MESSAGE_CHARS, SubscriptionState, bounded_notification_text,
         capture_active_window, capture_active_window_to_file, command_response,
-        crop_output_geometry, intersection_area, notification_actions, notification_name_owned,
+        crop_output_geometry, logical_rect, notification_actions, notification_name_owned,
         owning_output, parse_window, pixmap_to_rgba, resolve_application_id, response_for_request,
         response_message, secure_storage_response, secure_storage_retry_response,
         session_receive_error, shell_command_payload, subscription_shortcut, tray_retry_delay,
@@ -2126,8 +2130,14 @@ mod tests {
             width: 1000,
             height: 800,
         };
-        assert_eq!(intersection_area(window, left), 40_000);
-        assert_eq!(intersection_area(window, right), 160_000);
+        assert_eq!(
+            logical_rect(window).intersection_area(logical_rect(left)),
+            40_000
+        );
+        assert_eq!(
+            logical_rect(window).intersection_area(logical_rect(right)),
+            160_000
+        );
     }
 
     #[test]

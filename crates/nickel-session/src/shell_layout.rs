@@ -1,12 +1,6 @@
 pub const PANEL_HEIGHT: i32 = 56;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Geometry {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
+pub type Geometry = nickel_core::geometry::LogicalRect;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlacementOutput {
@@ -55,7 +49,7 @@ pub fn resolve_window_output(
     if let Some(requested) = requested_geometry {
         let overlap = outputs
             .iter()
-            .map(|output| (intersection_area(requested, output.work_area), output))
+            .map(|output| (requested.intersection_area(output.work_area), output))
             .filter(|(area, _)| *area > 0)
             .max_by(|(left_area, left), (right_area, right)| {
                 left_area
@@ -81,16 +75,10 @@ pub fn resolve_window_output(
         .map(|output| decision(output, PlacementReason::EnabledOutputFallback))
 }
 
-fn intersection_area(left: Geometry, right: Geometry) -> i64 {
-    let width = (left.x + left.width).min(right.x + right.width) - left.x.max(right.x);
-    let height = (left.y + left.height).min(right.y + right.height) - left.y.max(right.y);
-    i64::from(width.max(0)) * i64::from(height.max(0))
-}
-
 pub fn is_reachable(geometry: Geometry, areas: &[PlacementOutput]) -> bool {
     areas
         .iter()
-        .any(|output| intersection_area(geometry, output.work_area) > 0)
+        .any(|output| geometry.intersection_area(output.work_area) > 0)
 }
 
 pub fn panel(output: Geometry) -> Geometry {
@@ -117,7 +105,7 @@ pub fn output_for_window(window: Geometry, outputs: &[Geometry]) -> Option<Geome
     outputs
         .iter()
         .copied()
-        .map(|output| (intersection_area(window, output), output))
+        .map(|output| (window.intersection_area(output), output))
         .filter(|(area, _)| *area > 0)
         .max_by_key(|(area, _)| *area)
         .map(|(_, output)| output)

@@ -2,6 +2,7 @@ pub mod active_output;
 pub mod display_projection;
 pub mod dpi;
 pub mod focus;
+pub mod geometry;
 pub mod hotkeys;
 pub mod idle;
 pub mod launcher;

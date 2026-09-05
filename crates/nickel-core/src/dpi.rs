@@ -6,6 +6,7 @@ use std::{
     path::Path,
 };
 
+pub use crate::geometry::LogicalRect;
 use crate::persistence::{atomic_write, config_path};
 
 /// Wayland fractional-scale units. 120 units are exactly one logical-to-physical pixel ratio.
@@ -40,24 +41,6 @@ impl Scale120 {
 impl Default for Scale120 {
     fn default() -> Self {
         Self::ONE
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct LogicalRect {
-    pub x: i32,
-    pub y: i32,
-    pub width: i32,
-    pub height: i32,
-}
-
-impl LogicalRect {
-    pub fn intersection_area(self, other: Self) -> u64 {
-        let left = i64::from(self.x.max(other.x));
-        let top = i64::from(self.y.max(other.y));
-        let right = i64::from((self.x + self.width).min(other.x + other.width));
-        let bottom = i64::from((self.y + self.height).min(other.y + other.height));
-        u64::try_from((right - left).max(0) * (bottom - top).max(0)).unwrap_or_default()
     }
 }
 
