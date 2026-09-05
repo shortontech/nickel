@@ -180,6 +180,11 @@ pub trait Fixture: Send + Sync + 'static {
     fn default_activation() -> Option<Selector> {
         None
     }
+
+    /// Semantic action exercised by the fixture's default interaction.
+    fn default_action() -> ActionKind {
+        ActionKind::Activate
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -328,7 +333,7 @@ impl<F: Fixture> ErasedFixtureSession for TypedFixtureSession<F> {
         let selector = F::default_activation()
             .ok_or(FixtureSessionError::NoDefaultActivation { fixture_id })?;
         self.scenario
-            .activate_via(via, &selector)
+            .invoke_via(via, &selector, F::default_action())
             .map(|_| ())
             .map_err(|source| FixtureSessionError::Activation {
                 fixture_id,
@@ -805,6 +810,9 @@ pub enum ScenarioOperation {
     TouchActivate {
         target: String,
         contact: u64,
+    },
+    TouchContext {
+        target: String,
     },
     TouchDrag {
         from: String,
@@ -1994,6 +2002,62 @@ impl<A: Application> Scenario<A> {
         Ok(self)
     }
 
+    pub fn invoke_via(
+        &mut self,
+        via: ActivationVia,
+        selector: &Selector,
+        action: ActionKind,
+    ) -> Result<&mut Self, ScenarioError> {
+        if action == ActionKind::Activate {
+            return self.activate_via(via, selector);
+        }
+        if action != ActionKind::ContextMenu {
+            return Err(ScenarioError::SemanticActionFailed);
+        }
+        match via {
+            ActivationVia::Semantic => {
+                self.perform(selector, SemanticAction::Invoke(ActionKind::ContextMenu))?;
+            }
+            ActivationVia::Pointer => {
+                self.pointer_context(selector)?;
+            }
+            ActivationVia::Touch => {
+                self.touch_context(selector)?;
+            }
+            ActivationVia::Keyboard => {
+                let target = self.resolve_target(selector)?.id;
+                for _ in 0..=self.semantic_nodes().len() {
+                    if self.host.inspect().keyboard_focus.as_ref() == Some(&target) {
+                        self.keyboard_context_focused()?;
+                        return Ok(self);
+                    }
+                    self.keyboard_focus(FocusDirection::Next)?;
+                }
+                return Err(ScenarioError::SemanticActionFailed);
+            }
+            ActivationVia::Controller => {
+                let target = self.resolve_target(selector)?.id;
+                for _ in 0..=self.semantic_nodes().len() {
+                    if self.host.inspect().controller_target.as_ref() == Some(&target) {
+                        let outcome = self
+                            .host
+                            .handle_controller_action(ControllerAction::ContextMenu);
+                        if outcome.changed && outcome.semantic_failures.is_empty() {
+                            return Ok(self);
+                        }
+                        return Err(ScenarioError::SemanticActionFailed);
+                    }
+                    self.host.handle_controller_action(ControllerAction::Down);
+                }
+                return Err(ScenarioError::SemanticActionFailed);
+            }
+            ActivationVia::Accessibility => {
+                self.accessibility_action(selector, ActionKind::ContextMenu)?;
+            }
+        }
+        Ok(self)
+    }
+
     pub fn activate(&mut self, selector: &Selector) -> Result<&mut Self, ScenarioError> {
         self.perform(selector, SemanticAction::Invoke(ActionKind::Activate))
     }
@@ -2153,6 +2217,27 @@ impl<A: Application> Scenario<A> {
         let outcome = self.host.handle_event(UiEvent::PointerContext(route.point));
         self.push_operation(
             ScenarioOperation::PointerContext {
+                target: target.id.as_str().into(),
+            },
+            Some(target.id),
+            vec![[route.point.x, route.point.y]],
+            before,
+            outcome,
+        )?;
+        Ok(self)
+    }
+
+    pub fn touch_context(&mut self, selector: &Selector) -> Result<&mut Self, ScenarioError> {
+        self.begin_operation()?;
+        let target = self.resolve_target(selector)?;
+        let route = self
+            .host
+            .resolve_effective_target(&target.id, ActionKind::ContextMenu)
+            .map_err(|_| ScenarioError::SemanticActionFailed)?;
+        let before = self.state_snapshot();
+        let outcome = self.host.handle_event(UiEvent::TouchLongPress(route.point));
+        self.push_operation(
+            ScenarioOperation::TouchContext {
                 target: target.id.as_str().into(),
             },
             Some(target.id),
@@ -3176,6 +3261,9 @@ impl<A: Application> Scenario<A> {
             ScenarioOperation::TouchActivate { target, contact } => {
                 self.touch_activate(&Selector::id(target.as_str()), *contact)?;
             }
+            ScenarioOperation::TouchContext { target } => {
+                self.touch_context(&Selector::id(target.as_str()))?;
+            }
             ScenarioOperation::TouchDrag { from, to, contact } => {
                 self.touch_drag(
                     &Selector::id(from.as_str()),
@@ -4073,6 +4161,7 @@ fn operation_kind(operation: &ScenarioOperation) -> &'static str {
         ScenarioOperation::PointerDrag { .. } => "pointer_drag",
         ScenarioOperation::PointerScroll { .. } => "pointer_scroll",
         ScenarioOperation::TouchActivate { .. } => "touch_activate",
+        ScenarioOperation::TouchContext { .. } => "touch_context",
         ScenarioOperation::TouchDrag { .. } => "touch_drag",
         ScenarioOperation::TouchCancel { .. } => "touch_cancel",
         ScenarioOperation::KeyboardFocus { .. } => "keyboard_focus",

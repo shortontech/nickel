@@ -2036,14 +2036,13 @@ fn pointer_keyboard_controller_and_accessibility_share_typed_activation() {
 }
 
 #[test]
-fn pointer_keyboard_controller_and_accessibility_share_typed_context_action() {
+fn context_only_target_supports_every_invocation_route() {
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(
             Container::new()
                 .id("application")
                 .width(180.0)
                 .height(48.0)
-                .message(TestMessage::Named("launch"))
                 .context_message(TestMessage::Named("context"))
                 .child(Text::new("Application")),
             Rect::new(0.0, 0.0, 180.0, 48.0),

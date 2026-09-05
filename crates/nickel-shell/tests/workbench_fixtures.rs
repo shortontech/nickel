@@ -1,8 +1,8 @@
 #![cfg(feature = "workbench-fixtures")]
 
 use nickel_shell::ShellFixtureProvider;
-use nickel_ui::{SemanticRole, Size};
-use nickel_ui_testkit::{FixtureProvider, FixtureRegistry};
+use nickel_ui::{ActionKind, SemanticRole, Size};
+use nickel_ui_testkit::{ActivationVia, FixtureProvider, FixtureRegistry};
 
 #[test]
 fn registers_every_shell_surface_fixture() {
@@ -127,7 +127,7 @@ fn registers_every_shell_surface_fixture() {
 }
 
 #[test]
-fn desktop_variants_expose_only_the_named_presentation_to_accessibility() {
+fn desktop_variants_expose_named_context_interactive_presentation() {
     let mut registry = FixtureRegistry::new();
     ShellFixtureProvider.register(&mut registry).unwrap();
     let entry = registry
@@ -156,9 +156,13 @@ fn desktop_variants_expose_only_the_named_presentation_to_accessibility() {
         );
         assert_eq!(semantic[0].name.as_deref(), Some("Desktop"));
         assert_eq!(semantic[0].bounds.size, Size::new(960.0, 540.0));
-        assert!(semantic[0].actions.is_empty());
+        assert_eq!(semantic[0].actions, vec![ActionKind::ContextMenu]);
 
         let accessibility = session.accessibility_nodes();
+        let accessibility = accessibility
+            .iter()
+            .filter(|node| node.semantic_role.is_some())
+            .collect::<Vec<_>>();
         assert_eq!(accessibility.len(), 1, "{} accessibility nodes", variant.id);
         assert_eq!(
             accessibility[0].semantic_role,
@@ -167,8 +171,22 @@ fn desktop_variants_expose_only_the_named_presentation_to_accessibility() {
         assert_eq!(accessibility[0].role.as_deref(), Some("application"));
         assert_eq!(accessibility[0].label.as_deref(), Some("Desktop"));
         assert_eq!(accessibility[0].rect.size, Size::new(960.0, 540.0));
-        assert!(!accessibility[0].interactive);
-        assert!(accessibility[0].actions.is_empty());
+        assert!(accessibility[0].interactive);
+        assert_eq!(accessibility[0].actions, vec![ActionKind::ContextMenu]);
+
+        for via in [
+            ActivationVia::Semantic,
+            ActivationVia::Pointer,
+            ActivationVia::Touch,
+            ActivationVia::Keyboard,
+            ActivationVia::Controller,
+            ActivationVia::Accessibility,
+        ] {
+            let mut session = entry.open_configuration(*variant);
+            session
+                .activate(via)
+                .unwrap_or_else(|error| panic!("{} {via:?}: {error}", variant.id));
+        }
     }
 }
 

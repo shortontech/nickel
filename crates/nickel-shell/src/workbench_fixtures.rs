@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
-use nickel_ui::{ControllerFamily, ReadingDirection, SemanticRole};
+use nickel_ui::{ActionKind, ControllerFamily, ReadingDirection, SemanticRole};
 use nickel_ui_testkit::{
     DEFAULT_ACCESSIBILITY, DEFAULT_LOCALE, DEFAULT_SCALE, Fixture, FixtureMetadata,
     FixtureProvider, FixtureRegistry, FixtureSource, FixtureTheme, FixtureVariant, RegistryError,
@@ -252,7 +252,7 @@ metadata!(
     "Shell runtime",
     "Production shell-owned UiHost surface lifecycle representative",
     RUNTIME_VARIANTS,
-    &["shell", "runtime", "lifecycle", "noninteractive"]
+    &["shell", "runtime", "lifecycle", "context-interactive"]
 );
 metadata!(
     LAUNCHER_DASHBOARD_METADATA,
@@ -268,7 +268,7 @@ metadata!(
     "Desktop",
     "Production desktop application",
     DESKTOP_VARIANTS,
-    &["shell", "desktop", "noninteractive"]
+    &["shell", "desktop", "context-interactive"]
 );
 metadata!(
     PANEL_METADATA,
@@ -383,6 +383,15 @@ impl Fixture for RuntimeFixture {
     fn surface_size() -> (u32, u32) {
         (960, 540)
     }
+    fn default_activation() -> Option<Selector> {
+        Some(Selector::role_name(
+            SemanticRole::ApplicationPresentation,
+            "Desktop",
+        ))
+    }
+    fn default_action() -> ActionKind {
+        ActionKind::ContextMenu
+    }
 }
 
 impl Fixture for DesktopFixture {
@@ -404,6 +413,15 @@ impl Fixture for DesktopFixture {
     }
     fn surface_size() -> (u32, u32) {
         (960, 540)
+    }
+    fn default_activation() -> Option<Selector> {
+        Some(Selector::role_name(
+            SemanticRole::ApplicationPresentation,
+            "Desktop",
+        ))
+    }
+    fn default_action() -> ActionKind {
+        ActionKind::ContextMenu
     }
 }
 

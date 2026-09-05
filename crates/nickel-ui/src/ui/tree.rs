@@ -3724,6 +3724,7 @@ impl<Message: Clone> UiFrame<Message> {
                     matches!(
                         action,
                         ActionKind::Activate
+                            | ActionKind::ContextMenu
                             | ActionKind::SetValue
                             | ActionKind::Increment
                             | ActionKind::Decrement
@@ -5465,6 +5466,23 @@ fn emit_element<Message: Clone>(
             message: message.clone(),
             message_mapper: None,
         });
+        if element.message.is_none()
+            && !is_scroll_container(element)
+            && let Some(hit_rect) = node
+                .clip
+                .map(|clip| intersection(rect, clip))
+                .unwrap_or(Some(rect))
+        {
+            tree.resolved.nodes[node_index].hit_stack = Some(tree.hits.len());
+            tree.hits.push(HitRegion {
+                id: node.id.clone(),
+                rect: hit_rect,
+                target_bounds: rect,
+                message: None,
+                message_mapper: None,
+                drag_mapper: element.drag_mapper,
+            });
+        }
     }
     if let Some(map) = element.text_mapper
         && let Kind::Text {
@@ -6008,7 +6026,8 @@ fn layout_element<Message: Clone>(
     let preferred = measure_element(element, Constraints::loose(bounds.size));
     let node_index = tree.resolved.nodes.len();
     let interaction = InteractionState {
-        interactive: element.message.is_some() && !is_scroll_container(element)
+        interactive: (element.message.is_some() || element.context_message.is_some())
+            && !is_scroll_container(element)
             || element.text_mapper.is_some(),
         ..InteractionState::default()
     };
