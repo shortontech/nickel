@@ -1116,6 +1116,47 @@ fn scrollbar_hit_target_is_wider_than_its_visible_thumb() {
 }
 
 #[test]
+fn scrollbar_chrome_uses_the_injected_live_semantic_theme() {
+    let dark = crate::SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+        0x101114, 0x15171b, 0x1b1e23, 0x32363e, 0x3c414b, 0xf2f3f5, 0xa8abb2, 0x9b62e8, 0x45305f,
+        0x55b982, 0x55b982,
+    ));
+    let light = crate::SemanticTheme::from_tokens(crate::SemanticTokenSet::standard(
+        0xf4f5f7, 0xe7e9ed, 0xffffff, 0xdfe3e8, 0xd4d9e0, 0x17191d, 0x555b66, 0x7440bd, 0xe5d8f7,
+        0x207a4b, 0x207a4b,
+    ));
+    let build = |theme| {
+        UiFrame::<()>::layout(
+            VerticalScroll::new((), 0.0)
+                .theme(theme)
+                .child(Spacer::vertical(240.0)),
+            Rect::new(0.0, 0.0, 200.0, 100.0),
+        )
+    };
+
+    let dark_frame = build(dark);
+    let light_frame = build(light);
+    for (frame, expected) in [
+        (&dark_frame, dark.scrollbar_palette().idle),
+        (&light_frame, light.scrollbar_palette().idle),
+    ] {
+        assert!(frame.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == expected.track
+        )));
+        assert!(frame.commands().iter().any(|command| matches!(
+            command,
+            PaintCommand::RoundedFill { color, .. } if *color == expected.thumb
+        )));
+    }
+    assert_ne!(
+        dark.scrollbar_palette(),
+        light.scrollbar_palette(),
+        "theme changes must invalidate every scrollbar state palette"
+    );
+}
+
+#[test]
 fn scrollbar_thumb_uses_the_full_acquisition_width() {
     let mut state = UiStateStore::default();
     let build = |state: &mut UiStateStore| {
@@ -1155,14 +1196,16 @@ fn scrollbar_chrome_reflects_hover_press_and_keyboard_focus() {
     let hovered = UiFrame::layout_with_state(root(), bounds, &mut state);
     assert!(hovered.commands().iter().any(|command| matches!(
         command,
-        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_HOVERED.thumb
+        PaintCommand::RoundedFill { color, .. }
+            if *color == crate::theme::FALLBACK_SCROLLBAR_PALETTE.hovered.thumb
     )));
 
     state.set_pressed(Some(id));
     let pressed = UiFrame::layout_with_state(root(), bounds, &mut state);
     assert!(pressed.commands().iter().any(|command| matches!(
         command,
-        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_PRESSED.thumb
+        PaintCommand::RoundedFill { color, .. }
+            if *color == crate::theme::FALLBACK_SCROLLBAR_PALETTE.pressed.thumb
     )));
 
     state.set_pressed(None);
@@ -1171,7 +1214,8 @@ fn scrollbar_chrome_reflects_hover_press_and_keyboard_focus() {
     let focused = UiFrame::layout_with_state(root(), bounds, &mut state);
     assert!(focused.commands().iter().any(|command| matches!(
         command,
-        PaintCommand::RoundedFill { color, .. } if *color == SCROLLBAR_FOCUSED.thumb
+        PaintCommand::RoundedFill { color, .. }
+            if *color == crate::theme::FALLBACK_SCROLLBAR_PALETTE.focused.thumb
     )));
 }
 

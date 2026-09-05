@@ -58,9 +58,10 @@ pub use text_editor::TextEditor;
 pub use theme::{
     AccentColors, AccessibilityPreferences, AppearancePreference, BorderColors, ContrastPreference,
     EasingCurve, FontWeight, MotionPreference, MotionScale, PlatformThemePreferences, RadiusScale,
-    ResolvedAppearance, ResolvedThemePreferences, SemanticTheme, SemanticTokenSet, SizingScale,
-    SpacingScale, SurfaceColors, TextColors, TextStyle, ThemePreferences, TransparencyPreference,
-    TypographyScale, focused_surface, focused_surface_with_foreground,
+    ResolvedAppearance, ResolvedThemePreferences, ScrollbarPalette, ScrollbarStateColors,
+    SemanticTheme, SemanticTokenSet, SizingScale, SpacingScale, SurfaceColors, TextColors,
+    TextStyle, ThemePreferences, TransparencyPreference, TypographyScale, focused_surface,
+    focused_surface_with_foreground,
 };
 pub use ui::{
     ACTION_LEGEND_COMPACT_BREAKPOINT, AccessibilityNode, AccountSummaryRow, ActionKind,

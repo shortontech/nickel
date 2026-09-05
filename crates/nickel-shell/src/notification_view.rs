@@ -180,6 +180,7 @@ impl Application for NotificationApp {
                             NotificationMessage::Scroll(self.history_offset),
                             self.history_offset,
                         )
+                        .theme(self.palette.into())
                         .on_scroll(NotificationMessage::Scroll)
                         .height((context.viewport.size.height - 24.0).max(1.0))
                         .child(

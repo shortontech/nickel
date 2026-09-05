@@ -132,6 +132,7 @@ pub(crate) fn properties_dialog(
         FileMessage::PropertiesScroll(app.properties_scroll),
         app.properties_scroll,
     )
+    .theme(palette.into())
     .on_scroll(FileMessage::PropertiesScroll)
     .controlled(true)
     .height(576.0)
@@ -477,6 +478,7 @@ pub(crate) fn command_surface(
         FileMessage::CommandScroll(app.command_scroll_offset),
         app.command_scroll_offset,
     )
+    .theme(palette.into())
     .on_scroll(FileMessage::CommandScroll)
     .controlled(true)
     .height(results_height)

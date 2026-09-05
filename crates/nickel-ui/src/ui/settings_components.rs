@@ -431,6 +431,7 @@ impl<Message> SettingsNavigation<Message> {
                 .fill_height()
                 .border(theme.borders.subtle, 1.0)
                 .overflow_y(Overflow::Auto)
+                .scrollbar_theme(theme)
                 .navigation_scope(NavigationScope::pane(false))
                 .controller_scope_background(crate::focused_surface(
                     theme.surfaces.sidebar,

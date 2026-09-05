@@ -979,6 +979,21 @@ pub fn viewer_view_with_palette(
     )
     .on_scroll(ViewerMessage::Scroll)
     .controlled(true)
+    .theme(nickel_ui::SemanticTheme::from_tokens(
+        nickel_ui::SemanticTokenSet::standard(
+            palette.background,
+            palette.panel,
+            palette.panel,
+            palette.border,
+            palette.border,
+            palette.text,
+            palette.muted,
+            palette.accent,
+            palette.panel,
+            palette.accent,
+            palette.error,
+        ),
+    ))
     .id(scroll_id)
     .grow(1.0)
     .child(

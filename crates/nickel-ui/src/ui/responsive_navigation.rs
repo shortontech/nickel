@@ -241,6 +241,7 @@ where
             .gap(self.theme.spacing.compact)
             .padding(Insets::all(self.theme.spacing.content))
             .overflow_y(Overflow::Auto)
+            .scrollbar_theme(self.theme)
             .background(self.theme.surfaces.sidebar)
             .semantic_role(SemanticRole::List)
             .navigation_scope(NavigationScope::pane(active.is_none()))

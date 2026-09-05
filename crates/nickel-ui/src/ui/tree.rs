@@ -224,6 +224,7 @@ struct ScrollRegion<Message> {
     rect: Rect,
     clip: Rect,
     extent: ScrollExtent,
+    scrollbar: crate::ScrollbarPalette,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,29 +240,6 @@ const SCROLLBAR_HIT_THICKNESS: f32 = 20.0;
 const SCROLLBAR_INSET: f32 = 3.0;
 const SCROLLBAR_MIN_THUMB: f32 = 32.0;
 const SCROLLBAR_GUTTER: f32 = SCROLLBAR_THICKNESS + SCROLLBAR_INSET * 2.0;
-
-#[derive(Clone, Copy)]
-struct ScrollbarColors {
-    track: Color,
-    thumb: Color,
-}
-
-const SCROLLBAR_IDLE: ScrollbarColors = ScrollbarColors {
-    track: 0x66343b48,
-    thumb: 0xd0aeb8c7,
-};
-const SCROLLBAR_HOVERED: ScrollbarColors = ScrollbarColors {
-    track: 0x88434c5b,
-    thumb: 0xffd3dae5,
-};
-const SCROLLBAR_PRESSED: ScrollbarColors = ScrollbarColors {
-    track: 0xaa465262,
-    thumb: 0xffeef3fa,
-};
-const SCROLLBAR_FOCUSED: ScrollbarColors = ScrollbarColors {
-    track: 0xcc176b87,
-    thumb: 0xff6fd7f7,
-};
 
 fn scrollbar_id(id: &UiId, axis: ScrollbarAxis) -> UiId {
     id.scoped(match axis {
@@ -2235,17 +2213,17 @@ impl<Message: Clone> UiFrame<Message> {
                     continue;
                 }
                 let id = scrollbar_id(&scroll.id, axis);
-                let colors = state.map_or(SCROLLBAR_IDLE, |state| {
+                let colors = state.map_or(scroll.scrollbar.idle, |state| {
                     if state.pressed() == Some(&id) || state.captured() == Some(&id) {
-                        SCROLLBAR_PRESSED
+                        scroll.scrollbar.pressed
                     } else if state.hovered() == Some(&id) {
-                        SCROLLBAR_HOVERED
+                        scroll.scrollbar.hovered
                     } else if state.focused() == Some(&scroll.id)
                         || state.navigation().controller_selected() == Some(&scroll.id)
                     {
-                        SCROLLBAR_FOCUSED
+                        scroll.scrollbar.focused
                     } else {
-                        SCROLLBAR_IDLE
+                        scroll.scrollbar.idle
                     }
                 });
                 self.commands.push(PaintCommand::PushClip(scroll.clip));
@@ -6404,6 +6382,7 @@ fn layout_element<Message: Clone>(
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
+                    scrollbar: element.style.scrollbar_palette,
                 });
                 clamped
             } else {
@@ -6425,6 +6404,7 @@ fn layout_element<Message: Clone>(
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
+                    scrollbar: element.style.scrollbar_palette,
                 });
             }
             let layout_content = Rect::new(
@@ -6494,6 +6474,7 @@ fn layout_element<Message: Clone>(
                         rect: viewport,
                         clip,
                         extent,
+                        scrollbar: element.style.scrollbar_palette,
                     });
                 }
                 child_indices.push(layout_element(
@@ -6623,6 +6604,7 @@ fn layout_element<Message: Clone>(
                     rect: scroll_rect,
                     clip: descendant_clip.unwrap_or(scroll_rect),
                     extent,
+                    scrollbar: element.style.scrollbar_palette,
                 });
             }
             for (index, child) in element.children.iter().enumerate() {
@@ -6790,6 +6772,7 @@ fn apply_transient_state<Message>(
             Kind::VerticalScroll {
                 offset,
                 controlled: false,
+                ..
             } => *offset = scroll_offset.max(0.0),
             Kind::Dropdown {
                 expanded,

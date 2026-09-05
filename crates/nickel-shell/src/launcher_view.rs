@@ -735,6 +735,7 @@ fn build_launcher_view_directional(
         AnyView::new(
             VerticalScroll::new(LauncherAction::SearchScroll, 0.0)
                 .id("launcher-search-scroll")
+                .theme(theme)
                 .grow(1.0)
                 .child(collection),
         )

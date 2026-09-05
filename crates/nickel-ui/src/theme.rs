@@ -7,6 +7,43 @@ pub const FALLBACK_FOCUS_SURFACE: Color = 0x202630;
 pub const FALLBACK_KEYBOARD_FOCUS_CUE: Color = 0x8b5cf6;
 pub const FALLBACK_CONTROLLER_FOCUS_CUE: Color = 0x55d98b;
 
+/// Theme-resolved colors for one scrollbar interaction state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollbarStateColors {
+    pub track: Color,
+    pub thumb: Color,
+}
+
+/// Shared scrollbar chrome derived from semantic surface and state tokens.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScrollbarPalette {
+    pub idle: ScrollbarStateColors,
+    pub hovered: ScrollbarStateColors,
+    pub pressed: ScrollbarStateColors,
+    pub focused: ScrollbarStateColors,
+}
+
+/// Canonical fallback for scroll regions that have not yet received an
+/// application theme. Production consumers should inject their live theme.
+pub const FALLBACK_SCROLLBAR_PALETTE: ScrollbarPalette = ScrollbarPalette {
+    idle: ScrollbarStateColors {
+        track: 0x66343b48,
+        thumb: 0xd0aeb8c7,
+    },
+    hovered: ScrollbarStateColors {
+        track: 0x88434c5b,
+        thumb: 0xffd3dae5,
+    },
+    pressed: ScrollbarStateColors {
+        track: 0xaa465262,
+        thumb: 0xffeef3fa,
+    },
+    focused: ScrollbarStateColors {
+        track: 0xcc176b87,
+        thumb: 0xff6fd7f7,
+    },
+};
+
 /// Resolve a keyboard/controller focus cue into a child-surface color.
 ///
 /// Saturated surfaces borrow the semantic cue's hue. As the surface becomes
@@ -537,6 +574,51 @@ impl SemanticTheme {
         }
         theme
     }
+
+    /// Resolve scrollbar states from this theme instead of embedding a local
+    /// light- or dark-only palette in the renderer.
+    pub fn scrollbar_palette(self) -> ScrollbarPalette {
+        ScrollbarPalette {
+            idle: ScrollbarStateColors {
+                track: with_alpha(compliant_surface(self.borders.subtle), 0x66),
+                thumb: with_alpha(compliant_surface(self.text.secondary), 0xd0),
+            },
+            hovered: ScrollbarStateColors {
+                track: with_alpha(compliant_surface(self.borders.ordinary), 0x88),
+                thumb: compliant_surface(self.text.primary),
+            },
+            pressed: ScrollbarStateColors {
+                track: with_alpha(compliant_surface(self.borders.strong), 0xaa),
+                thumb: compliant_surface(self.accent.hover),
+            },
+            focused: ScrollbarStateColors {
+                track: with_alpha(compliant_surface(self.accent.soft), 0xcc),
+                thumb: compliant_surface(self.accent.ordinary),
+            },
+        }
+    }
+}
+
+impl From<nickel_core::theme::ThemePalette> for SemanticTheme {
+    fn from(palette: nickel_core::theme::ThemePalette) -> Self {
+        Self::from_tokens(SemanticTokenSet::standard(
+            palette.background,
+            palette.panel,
+            palette.surface,
+            palette.surface_hover,
+            palette.surface_hover,
+            palette.text,
+            palette.muted,
+            palette.accent,
+            palette.accent_soft,
+            palette.complement,
+            palette.complement,
+        ))
+    }
+}
+
+const fn with_alpha(color: Color, alpha: u32) -> Color {
+    (alpha << 24) | (color & 0x00ff_ffff)
 }
 
 /// Canonical last-resort surface colors for imported or platform-provided themes.
@@ -775,6 +857,32 @@ mod tests {
         for (base, foreground) in [(0x202020, 0xf0f0f0), (0xe8e8e8, 0x111111)] {
             let focused = focused_surface_with_foreground(base, 0x9050e0, foreground);
             assert!(contrast_ratio(focused, foreground) >= 4.5);
+        }
+    }
+
+    #[test]
+    fn scrollbar_palette_is_theme_resolved_and_never_uses_extreme_fills() {
+        let dark = SemanticTheme::from_tokens(tokens());
+        let mut light_tokens = tokens();
+        light_tokens.surfaces.window = 0xffffff;
+        light_tokens.surfaces.sidebar = 0xf6f6f4;
+        light_tokens.surfaces.card = 0xf0f0ed;
+        light_tokens.text.primary = 0x000000;
+        light_tokens.text.secondary = 0x333333;
+        let light = SemanticTheme::from_tokens(light_tokens);
+        assert_ne!(dark.scrollbar_palette(), light.scrollbar_palette());
+
+        for palette in [dark.scrollbar_palette(), light.scrollbar_palette()] {
+            for state in [
+                palette.idle,
+                palette.hovered,
+                palette.pressed,
+                palette.focused,
+            ] {
+                for color in [state.track, state.thumb] {
+                    assert!(!matches!(color & 0x00ff_ffff, 0x000000 | 0xffffff));
+                }
+            }
         }
     }
 

@@ -172,6 +172,7 @@ pub(crate) fn build_view(
             FileMessage::FileScroll(app.file_scroll_offset),
             app.file_scroll_offset,
         )
+        .theme(palette.into())
         .on_scroll(FileMessage::FileScroll)
         .controlled(true)
         .height(viewport_height)

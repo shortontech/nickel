@@ -861,6 +861,8 @@ pub struct Style {
     pub focus_background_tint: Option<Color>,
     /// Semantic hue/lightness cue applied to the current controller target.
     pub controller_focus_background_tint: Option<Color>,
+    /// Shared semantic scrollbar chrome for this element's viewport.
+    pub scrollbar_palette: crate::ScrollbarPalette,
     /// Semantic background applied to a selected or entered controller scope.
     pub controller_scope_background: Option<Background>,
     pub text_align: TextAlign,
@@ -925,6 +927,7 @@ impl Default for Style {
             pressed_background: None,
             focus_background_tint: None,
             controller_focus_background_tint: None,
+            scrollbar_palette: crate::theme::FALLBACK_SCROLLBAR_PALETTE,
             controller_scope_background: None,
             text_align: TextAlign::Start,
             padding: Insets::default(),
@@ -1216,6 +1219,11 @@ impl<Message> Element<Message> {
 
     pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
         self.style.controller_focus_background_tint = Some(color);
+        self
+    }
+
+    pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.style.scrollbar_palette = theme.scrollbar_palette();
         self
     }
 
@@ -1941,6 +1949,10 @@ pub trait ComponentBuilderExt<Message>: Component<Message> + Sized {
     fn follow_scroll_end(self, follow: bool) -> Element<Message> {
         self.into_element().follow_scroll_end(follow)
     }
+
+    fn scrollbar_theme(self, theme: crate::SemanticTheme) -> Element<Message> {
+        self.into_element().scrollbar_theme(theme)
+    }
 }
 
 impl<Message, T> ComponentBuilderExt<Message> for T where T: Component<Message> {}
@@ -2112,6 +2124,11 @@ macro_rules! flex_component {
 
             pub fn overflow_y(mut self, overflow: Overflow) -> Self {
                 self.0 = self.0.overflow_y(overflow);
+                self
+            }
+
+            pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+                self.0 = self.0.scrollbar_theme(theme);
                 self
             }
 

@@ -248,6 +248,12 @@ impl<Message> VerticalScroll<Message> {
         self
     }
 
+    /// Paint this shared scrollbar from the application's live semantic theme.
+    pub fn theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0.style.scrollbar_palette = theme.scrollbar_palette();
+        self
+    }
+
     pub fn background(mut self, background: impl Into<Background>) -> Self {
         self.0 = self.0.background(background);
         self
@@ -425,6 +431,11 @@ impl<Message> Grid<Message> {
 
     pub fn overflow_y(mut self, overflow: Overflow) -> Self {
         self.0 = self.0.overflow_y(overflow);
+        self
+    }
+
+    pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0 = self.0.scrollbar_theme(theme);
         self
     }
 
@@ -1516,6 +1527,11 @@ impl<Message> Container<Message> {
 
     pub fn overflow_y(mut self, overflow: Overflow) -> Self {
         self.0 = self.0.overflow_y(overflow);
+        self
+    }
+
+    pub fn scrollbar_theme(mut self, theme: crate::SemanticTheme) -> Self {
+        self.0 = self.0.scrollbar_theme(theme);
         self
     }
 

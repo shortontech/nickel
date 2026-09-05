@@ -284,7 +284,7 @@ impl SettingsApp {
         );
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
-                <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0}>
+                <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0} theme={theme}>
                     <Column gap={10.0}>{note}{terminal}{file_manager}{advanced}<Column gap={8.0} children={rows} /></Column>
                 </VerticalScroll>
             </Column>
@@ -599,7 +599,7 @@ impl SettingsApp {
                 top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
             }}>
                 <VerticalScroll id={"network-list"} on_scroll={SettingsMessage::NetworkScroll}
-                    offset={0.0}>{content}</VerticalScroll>
+                    offset={0.0} theme={theme}>{content}</VerticalScroll>
             </Column>
         }
     }
@@ -765,7 +765,7 @@ impl SettingsApp {
                 top: 20.0, right: 40.0, bottom: 20.0, left: 20.0,
             }}>
                 <VerticalScroll id={"bluetooth-list"} on_scroll={SettingsMessage::BluetoothScroll}
-                    offset={0.0}>{content}</VerticalScroll>
+                    offset={0.0} theme={theme}>{content}</VerticalScroll>
             </Column>
         }
     }
@@ -1187,7 +1187,7 @@ impl SettingsApp {
                 top: 16.0, right: 24.0, bottom: 20.0, left: 20.0,
             }} gap={10.0}>
                 <VerticalScroll id={"appearance-list"} on_scroll={SettingsMessage::AppearanceScroll}
-                    offset={0.0}>{general}</VerticalScroll>
+                    offset={0.0} theme={theme}>{general}</VerticalScroll>
             </Column>
         }
     }

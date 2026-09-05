@@ -6,8 +6,8 @@ use crate::platform::{
 use nickel_core::display_projection::ProjectionMode;
 use nickel_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
-    Length, LinearGradient, Row, SemanticRole, Slider, Spacer, Text, UiHost, VerticalScroll,
-    ViewContext,
+    Length, LinearGradient, Row, SemanticRole, SemanticTheme, SemanticTokenSet, Slider, Spacer,
+    Text, UiHost, VerticalScroll, ViewContext,
 };
 
 const TOP: u32 = 0x202b43;
@@ -21,6 +21,12 @@ const GOOD: u32 = 0x6ee7a8;
 const WARNING: u32 = 0xf6c76e;
 const HEADER: f32 = 66.0;
 const ROW: f32 = 46.0;
+
+fn control_theme() -> SemanticTheme {
+    SemanticTheme::from_tokens(SemanticTokenSet::standard(
+        BOTTOM, TOP, CARD, BORDER, BORDER, PRIMARY, SECONDARY, ACCENT, CARD, GOOD, WARNING,
+    ))
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ControlAction {
@@ -237,6 +243,7 @@ fn control_center_view(
             .child(
                 VerticalScroll::new(ControlAction::ToggleWifiSection, 0.0)
                     .id("control-center-scroll")
+                    .theme(control_theme())
                     .height(viewport_height)
                     .child(content),
             ),

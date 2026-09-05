@@ -576,6 +576,23 @@ impl Default for MarkdownPalette {
     }
 }
 
+#[cfg(feature = "view")]
+fn semantic_theme(palette: MarkdownPalette) -> nickel_ui::SemanticTheme {
+    nickel_ui::SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
+        palette.surface,
+        palette.surface,
+        palette.surface,
+        palette.border,
+        palette.border,
+        palette.foreground,
+        palette.muted,
+        palette.accent,
+        palette.surface,
+        palette.accent,
+        palette.accent,
+    ))
+}
+
 /// Render a parsed document as one selectable, declarative Nickel UI stream.
 ///
 /// Link labels remain part of selectable prose. Each destination is also exposed
@@ -710,6 +727,7 @@ where
                             .id(UiId::new(format!("markdown-code-{id}")))
                             .fill_width()
                             .overflow_x(Overflow::Auto)
+                            .scrollbar_theme(semantic_theme(palette))
                             .child(
                                 Text::new(text)
                                     .color(palette.code)
@@ -794,6 +812,7 @@ where
                     .id(UiId::new(format!("markdown-table-{id}")))
                     .fill_width()
                     .overflow_x(Overflow::Auto)
+                    .scrollbar_theme(semantic_theme(palette))
                     .child(
                         Grid::fixed(columns)
                             .min_width(columns as f32 * 140.0)
