@@ -81,6 +81,7 @@ pub enum FileMessage {
     ContextCopyPath,
     ContextRename,
     ContextProperties,
+    ContextCurrentFolderProperties,
     CloseProperties,
     DiscardProperties,
     PropertiesSelectHandler(usize),
@@ -2093,6 +2094,40 @@ impl FileApp {
         self.properties_scroll = 0.0;
     }
 
+    fn open_properties(&mut self, entry: &FileEntry, identity: Option<crate::FileIdentity>) {
+        if self.properties.is_some() {
+            return;
+        }
+        self.status.clear();
+        match crate::properties::EntryProperties::load(entry, identity) {
+            Ok(properties) => {
+                self.properties_edits = Some(crate::properties::PropertyEdits {
+                    readonly: properties.readonly,
+                    hidden: properties.hidden,
+                });
+                self.properties = Some(properties);
+            }
+            Err(error) => {
+                self.status = format!("Could not read properties: {error}");
+                return;
+            }
+        }
+        if entry.is_directory {
+            self.properties_association_status.clear();
+            return;
+        }
+        let path = entry.path.clone();
+        let (sender, receiver) = mpsc::channel();
+        self.properties_association_rx = Some(receiver);
+        self.properties_association_status = "Loading applications…".into();
+        std::thread::spawn(move || {
+            let result = nickel_platform::association_target_for_file(&path)
+                .and_then(|target| nickel_platform::association_service().inspect(&target))
+                .map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+    }
+
     pub(crate) fn ensure_selection_visible(&mut self) {
         self.pending_ensure_visible = self.selected.is_some();
     }
@@ -2231,10 +2266,6 @@ impl FileApp {
                 }
             }
             FileMessage::ContextProperties => {
-                if self.properties.is_some() {
-                    return;
-                }
-                self.status.clear();
                 let target = if let Some(path) = self.context_target.as_ref() {
                     self.browser
                         .entries()
@@ -2253,36 +2284,23 @@ impl FileApp {
                         })
                         .flatten()
                 };
-                if let Some((index, entry)) = target {
-                    match crate::properties::EntryProperties::load(
-                        entry,
-                        self.browser.identity_at(index),
-                    ) {
-                        Ok(properties) => {
-                            self.properties_edits = Some(crate::properties::PropertyEdits {
-                                readonly: properties.readonly,
-                                hidden: properties.hidden,
-                            });
-                            self.properties = Some(properties);
-                        }
-                        Err(error) => self.status = format!("Could not read properties: {error}"),
-                    }
+                if let Some((index, entry)) = target.map(|(index, entry)| (index, entry.clone())) {
+                    self.open_properties(&entry, self.browser.identity_at(index));
                 } else {
                     self.status = "The selected item is no longer available".into();
                 }
-                if let Some(path) = self.properties.as_ref().map(|value| value.path.clone()) {
-                    let (sender, receiver) = mpsc::channel();
-                    self.properties_association_rx = Some(receiver);
-                    self.properties_association_status = "Loading applications…".into();
-                    std::thread::spawn(move || {
-                        let result = nickel_platform::association_target_for_file(&path)
-                            .and_then(|target| {
-                                nickel_platform::association_service().inspect(&target)
-                            })
-                            .map_err(|error| error.to_string());
-                        let _ = sender.send(result);
-                    });
-                }
+            }
+            FileMessage::ContextCurrentFolderProperties => {
+                let path = self.browser.current().to_path_buf();
+                let entry = FileEntry {
+                    name: path.file_name().unwrap_or(path.as_os_str()).to_os_string(),
+                    path: path.clone(),
+                    is_directory: true,
+                    size: None,
+                    modified: None,
+                };
+                let identity = crate::file_identity(&path).ok();
+                self.open_properties(&entry, identity);
             }
             FileMessage::CloseProperties => {
                 let dirty = self
@@ -3142,10 +3160,10 @@ impl Application for FileApp {
                 "New Folder",
                 FileMessage::ContextNewFolder,
             ))
-            .item(OverlayMenuItem::disabled_with_reason(
+            .item(OverlayMenuItem::action(
                 "properties",
                 "Properties",
-                "Folder properties are not implemented yet",
+                FileMessage::ContextCurrentFolderProperties,
             )),
         )));
         if let Some(start) = self.selection_drag {

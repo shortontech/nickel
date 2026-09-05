@@ -2260,6 +2260,60 @@ fn properties_action_opens_one_parented_semantic_dialog() {
 }
 
 #[test]
+fn current_folder_properties_are_actionable_without_file_association_lookup() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("child.txt"), b"child").unwrap();
+    let mut host = UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+
+    host.application_mut()
+        .update(FileMessage::ContextCurrentFolderProperties);
+    let properties = host.application().properties.as_ref().unwrap();
+    assert_eq!(properties.path, directory.path());
+    assert_eq!(properties.kind, "Folder");
+    assert!(host.application().properties_association_rx.is_none());
+    assert!(host.application().properties_association_status.is_empty());
+
+    host.application_mut().update(FileMessage::CloseProperties);
+    let background = host
+        .semantic_nodes()
+        .into_iter()
+        .find(|node| node.id.as_str().ends_with("/file-content"))
+        .unwrap()
+        .id;
+    host.perform_semantic_action(
+        background,
+        nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+    );
+    let properties_item = host
+        .query(&nickel_ui::SemanticSelector::Role(
+            nickel_ui::SemanticRole::MenuItem,
+        ))
+        .into_iter()
+        .find(|node| node.name.as_deref() == Some("Properties"))
+        .expect("background context exposes current-folder Properties");
+    assert!(
+        properties_item
+            .actions
+            .contains(&nickel_ui::ActionKind::Activate)
+    );
+}
+
+#[test]
+fn selected_folder_properties_do_not_offer_file_associations() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join("folder")).unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.selected = Some(0);
+    app.selected_entries.insert(0);
+
+    app.update(FileMessage::ContextProperties);
+
+    assert_eq!(app.properties.as_ref().unwrap().kind, "Folder");
+    assert!(app.properties_association_rx.is_none());
+    assert!(app.properties_association_status.is_empty());
+}
+
+#[test]
 fn controller_context_uses_target_geometry_not_stale_pointer_position() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("report.txt"), b"x").unwrap();
