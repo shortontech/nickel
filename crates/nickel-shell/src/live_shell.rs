@@ -512,6 +512,13 @@ impl DesktopApplication {
         true
     }
 
+    fn cancel_pointer_transaction(&mut self) -> bool {
+        let changed = self.pointer_down.take().is_some() || self.selection_start.take().is_some();
+        self.drag_commit_position = None;
+        self.pointer_dragged = false;
+        changed
+    }
+
     fn activate(&mut self, id: DesktopEntryId) {
         if let Some(action) = self.layout.activate(id) {
             let result = match action {
@@ -1966,6 +1973,11 @@ pub struct LiveShell {
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
     desktop_change_token: HostChangeToken,
     desktop_deadline: Option<Instant>,
+    /// Button whose current press/release transaction belongs to a desktop
+    /// overlay.  Application messages may close the overlay on release, so
+    /// routing cannot be inferred independently from the menu's current
+    /// visibility without risking a half transaction reaching the file plane.
+    desktop_overlay_pointer_capture: Option<nickel_input::PointerButton>,
     panel_icon: Arc<image::RgbaImage>,
     codex_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
@@ -2310,6 +2322,7 @@ impl LiveShell {
             desktop_host,
             desktop_change_token: HostChangeToken::default(),
             desktop_deadline: None,
+            desktop_overlay_pointer_capture: None,
             panel_icon,
             codex_icon,
             palette,
@@ -2648,9 +2661,18 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
-        let focus_lost = matches!(event, nickel_input::InputEvent::FocusLost { .. });
-        if focus_lost {
-            self.desktop_host.application_mut().context_menu = None;
+        let pointer_cancelled = matches!(
+            event,
+            nickel_input::InputEvent::FocusLost { .. }
+                | nickel_input::InputEvent::DeviceRemoved { .. }
+        );
+        if pointer_cancelled {
+            let application = self.desktop_host.application_mut();
+            if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+                application.context_menu = None;
+            }
+            application.cancel_pointer_transaction();
+            self.desktop_overlay_pointer_capture = None;
         }
         if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
             button: nickel_input::PointerButton::Secondary,
@@ -2666,6 +2688,7 @@ impl LiveShell {
                 });
             }
             let application = self.desktop_host.application_mut();
+            application.cancel_pointer_transaction();
             application.pointer_press(
                 DesktopPoint {
                     x: position.x as f32,
@@ -2680,28 +2703,54 @@ impl LiveShell {
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
+            self.desktop_overlay_pointer_capture = Some(nickel_input::PointerButton::Secondary);
+        } else if let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            button,
+            edge: nickel_input::KeyEdge::Pressed,
+            ..
+        }) = &event
+            && (self.desktop_host.inspect().open_overlay.is_some()
+                || self.desktop_host.application().context_menu.is_some())
+        {
+            self.desktop_host
+                .application_mut()
+                .cancel_pointer_transaction();
+            self.desktop_overlay_pointer_capture = Some(button.clone());
         }
-        if self.desktop_host.application().context_menu.is_some()
+        let captured_release = matches!(
+            &event,
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                button,
+                edge: nickel_input::KeyEdge::Released,
+                ..
+            }) if self.desktop_overlay_pointer_capture.as_ref() == Some(button)
+        );
+        let overlay_owns_event = self.desktop_host.application().context_menu.is_some()
+            || self.desktop_host.inspect().open_overlay.is_some()
+            || self.desktop_overlay_pointer_capture.is_some()
             || matches!(event, nickel_input::InputEvent::Touch(_))
-            || focus_lost
+            || pointer_cancelled
             || matches!(
                 event,
                 nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
                     button: nickel_input::PointerButton::Secondary,
                     ..
                 })
-            )
-        {
+            );
+        if overlay_owns_event {
             let outcome = self.desktop_host.step(HostBatch {
                 events: vec![HostEvent::Normalized {
                     input: event,
                     clipboard_text: None,
                 }],
-                application_changed: focus_lost,
+                application_changed: pointer_cancelled,
                 ..HostBatch::default()
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
+            if captured_release {
+                self.desktop_overlay_pointer_capture = None;
+            }
             return outcome.changed;
         }
         let application = self.desktop_host.application_mut();
@@ -8005,6 +8054,130 @@ mod tests {
         }));
         assert!(shell.desktop_host.application().context_menu.is_none());
         assert!(shell.desktop_host.inspect().open_overlay.is_none());
+    }
+
+    #[test]
+    fn desktop_live_host_keeps_rename_click_transaction_out_of_the_file_plane() {
+        use std::{ffi::OsString, path::PathBuf};
+
+        let mut shell = LiveShell::new().unwrap();
+        let application = shell.desktop_host.application_mut();
+        application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            scale: 1.0,
+        }]);
+        application.set_active_output(
+            "primary".into(),
+            nickel_file::desktop::Point::default(),
+            1.0,
+        );
+        application.layout.reconcile(
+            (0..48)
+                .map(|index| {
+                    let name = format!("item-{index:02}.txt");
+                    (
+                        nickel_file::FileIdentity(83, index + 1),
+                        nickel_file::FileEntry {
+                            name: OsString::from(&name),
+                            path: PathBuf::from("/desktop").join(name),
+                            is_directory: false,
+                            size: Some(1),
+                            modified: None,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let _ = shell.desktop_host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        let event = |button, edge, order, point| {
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(order),
+                button,
+                edge,
+                position: Some(point),
+            })
+        };
+
+        assert!(shell.desktop_input(event(
+            nickel_input::PointerButton::Secondary,
+            nickel_input::KeyEdge::Pressed,
+            1,
+            nickel_input::Point { x: 4.0, y: 4.0 },
+        )));
+        let _ = shell.desktop_input(event(
+            nickel_input::PointerButton::Secondary,
+            nickel_input::KeyEdge::Released,
+            2,
+            nickel_input::Point { x: 4.0, y: 4.0 },
+        ));
+        let selected = shell
+            .desktop_host
+            .application()
+            .layout
+            .active()
+            .expect("secondary click selects its desktop item");
+
+        let rename = shell
+            .desktop_host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Rename"))
+            .expect("the live desktop host exposes the rendered Rename row")
+            .rect;
+        let point = nickel_input::Point {
+            x: (rename.origin.x + rename.size.width / 2.0) as f64,
+            y: (rename.origin.y + rename.size.height / 2.0) as f64,
+        };
+        let underneath = shell
+            .desktop_host
+            .application()
+            .hit(nickel_file::desktop::Point {
+                x: point.x as f32,
+                y: point.y as f32,
+            });
+        assert_ne!(
+            underneath, None,
+            "fixture must place a desktop item below Rename"
+        );
+        assert_ne!(underneath, Some(selected));
+
+        assert!(shell.desktop_input(event(
+            nickel_input::PointerButton::Primary,
+            nickel_input::KeyEdge::Pressed,
+            3,
+            point,
+        )));
+        assert!(shell.desktop_host.inspect().pointer_capture.is_some());
+        assert!(shell.desktop_host.application().pointer_down.is_none());
+        assert_eq!(
+            shell.desktop_host.application().layout.active(),
+            Some(selected)
+        );
+
+        assert!(shell.desktop_input(event(
+            nickel_input::PointerButton::Primary,
+            nickel_input::KeyEdge::Released,
+            4,
+            point,
+        )));
+        assert!(shell.desktop_host.application().context_menu.is_none());
+        assert!(shell.desktop_host.inspect().pointer_capture.is_none());
+        assert!(shell.desktop_host.application().pointer_down.is_none());
+        assert_eq!(
+            shell.desktop_host.application().layout.active(),
+            Some(selected)
+        );
+        assert_ne!(shell.desktop_host.application().layout.active(), underneath);
     }
 
     #[test]
