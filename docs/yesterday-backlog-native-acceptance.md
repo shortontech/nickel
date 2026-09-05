@@ -8,6 +8,14 @@ an installed native session, physical hardware, or visual inspection.
 
 ## Automated gates before native acceptance
 
+The post-integration completeness audit on 2026-09-04 rechecked every scoped implementation against
+its specification rather than treating existing tests as sufficient. It fixed concurrent and
+repeated editing-shortcut suppression, current-folder Properties, rejected Codex-model recovery,
+winit launcher placement on the active display, bounded deterministic MPRIS dispatch, and Windows
+association-query translation. The combined tree passes the full Linux workspace test suite and
+strict all-target/all-feature Clippy. The affected cross-platform package set also passes native
+Windows tests and strict all-target Clippy after these fixes.
+
 - **0136 — conventional shortcuts:** integrate and pass the complete non-terminal shortcut suite,
   including snap/restore, Show Desktop, notification history, display projection, controller/menu
   equivalents, suppression, and focus restoration.
