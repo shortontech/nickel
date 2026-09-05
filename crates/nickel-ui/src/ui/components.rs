@@ -21,10 +21,12 @@ impl<Message> Layer<Message> {
         self.0 = self.0.children(children);
         self
     }
+
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
         self
     }
+
     pub fn height(mut self, height: f32) -> Self {
         self.0 = self.0.height(height);
         self
@@ -364,6 +366,11 @@ impl<Message> Grid<Message> {
 
     pub fn children(mut self, children: impl IntoIterator<Item = impl Component<Message>>) -> Self {
         self.0 = self.0.children(children);
+        self
+    }
+
+    pub fn child(mut self, child: impl Component<Message>) -> Self {
+        self.0 = self.0.child(child);
         self
     }
 
@@ -2769,6 +2776,11 @@ impl<Message> Slider<Message> {
 
     pub fn width(mut self, width: f32) -> Self {
         self.0 = self.0.width(width);
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.0 = self.0.grow(grow);
         self
     }
 

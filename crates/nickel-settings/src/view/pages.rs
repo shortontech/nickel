@@ -1,5 +1,8 @@
 use super::*;
-use nickel_ui::{ComponentBuilderExt, RadioGroup, RadioOption, Row, SettingsListCard, TextField};
+use nickel_ui::{
+    Column, ComponentBuilderExt, GridColumnSpec, RadioGroup, RadioOption, Row, SettingsListCard,
+    TextField, Track,
+};
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
@@ -291,7 +294,10 @@ impl SettingsApp {
         }
     }
 
-    pub(super) fn display_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+    pub(super) fn display_components(
+        &self,
+        content_width: f32,
+    ) -> impl nickel_ui::Component<SettingsMessage> {
         let palette = self.palette();
         let theme = self.ui_theme();
         let selected = &self.displays[self.selected];
@@ -301,14 +307,14 @@ impl SettingsApp {
             self.localizer.text("settings-display-identify"),
             ButtonPresentation::Secondary,
         )
-        .width(135.0);
+        .max_lines(3);
         let make_primary = Button::semantic(
             theme,
             SettingsMessage::DisplayPrimary,
             self.localizer.text("settings-display-make-primary"),
             ButtonPresentation::Secondary,
         )
-        .width(145.0);
+        .max_lines(3);
         let enabled = SettingsRow::new(theme, "Display enabled", "").trailing(
             Switch::new(selected.enabled, SettingsMessage::DisplayEnabled, theme)
                 .id("display-enabled")
@@ -322,7 +328,8 @@ impl SettingsApp {
             (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
             display_scale_message,
         )
-        .id("display-scale");
+        .id("display-scale")
+        .stacked();
         let app_scale_units = match self.application_scale_policy {
             ApplicationScalePolicy::Custom(scale) => scale.units(),
             _ => 120,
@@ -372,7 +379,8 @@ impl SettingsApp {
                 (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
                 application_scale_message,
             )
-            .id("application-custom-scale"),
+            .id("application-custom-scale")
+            .stacked(),
         )
         .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let apply = Button::semantic(
@@ -381,7 +389,7 @@ impl SettingsApp {
             self.localizer.text("settings-display-apply"),
             ButtonPresentation::Primary,
         )
-        .width(105.0);
+        .max_lines(3);
         let confirmation: AnyView<SettingsMessage> = if self.pending_display_revert.is_some() {
             AnyView::new(
                 Row::new()
@@ -402,6 +410,7 @@ impl SettingsApp {
         } else {
             AnyView::new(nickel_ui::Container::new())
         };
+        let compact_cards = content_width < 520.0;
         let display_cards = self.displays.iter().enumerate().map(|(index, display)| {
             let selected = index == self.selected;
             let detail = if display.enabled {
@@ -423,8 +432,9 @@ impl SettingsApp {
             };
             ui! {
                 <Container id={format!("display-card-{index}")}
-                    width={display.rect.w as f32} height={display.rect.h as f32}
-                    min_width={160.0} min_height={104.0}
+                    width={if compact_cards { (content_width - 120.0).max(120.0) } else { display.rect.w as f32 }}
+                    height={if compact_cards { 220.0 } else { display.rect.h as f32 }}
+                    min_width={if compact_cards { 120.0 } else { 160.0 }} min_height={220.0}
                     background={if !display.enabled { palette.background }
                         else if selected { palette.accent_soft } else { palette.surface }}
                     border={(border_color, border_width)} radius={theme.radii.card}
@@ -435,53 +445,64 @@ impl SettingsApp {
                     accessibility_label={format!("{} display, {}", display.name, detail)}
                     accessibility_state={if selected { "selected" } else { "not selected" }}>
                     <Column gap={8.0}>
-                        <Text scale={1.5} color={palette.text}>{&display.name}</Text>
-                        <Text color={palette.muted}>{detail}</Text>
+                        <Text scale={1.5} color={palette.text} wrap={true}>{&display.name}</Text>
+                        <Text color={palette.muted} wrap={true}>{detail}</Text>
                         <Text bold={true} color={palette.accent}>
                             {if display.primary { "PRIMARY" } else { "" }}
                         </Text>
                     </Column>
                 </Container>
             }
-        });
+        }).collect::<Vec<_>>();
+        let display_layout = if compact_cards {
+            AnyView::new(Column::new().gap(12.0).children(display_cards))
+        } else {
+            AnyView::new(Row::new().gap(12.0).children(display_cards))
+        };
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 20.0, right: 32.0, bottom: 20.0, left: 20.0,
-            }} gap={12.0}>
-                <Container id={"display-plane"} grow={1.0} min_height={300.0}
-                    background={palette.surface} border={(palette.muted, 1.0)}
-                    padding={Insets::all(20.0)} align_items={nickel_ui::Align::Center}
-                    justify_content={nickel_ui::Justify::Center}
-                    semantic_role={SemanticRole::TabPanel}
-                    accessibility_label={"Display arrangement"}>
-                    <Row gap={12.0} children={display_cards} />
-                </Container>
-                <Container background={palette.surface} border={(palette.muted, 1.0)}
-                    padding={Insets::all(12.0)}>
-                    <Column gap={10.0}>
-                        <Row height={36.0} gap={12.0}>
-                            <Column grow={1.0} gap={3.0}>
-                                <Text color={palette.text}>{&selected.name}</Text>
-                                <Text scale={0.9} color={palette.muted}>{&selected.detail}</Text>
+            }}>
+                <VerticalScroll id={"display-page-scroll"} on_scroll={SettingsMessage::DisplayScroll}
+                    grow={1.0}
+                    offset={0.0} theme={theme}>
+                    <Column gap={12.0}>
+                        <Container id={"display-plane"} min_height={300.0}
+                            background={palette.surface} border={(palette.muted, 1.0)}
+                            padding={Insets::all(20.0)} align_items={nickel_ui::Align::Center}
+                            justify_content={nickel_ui::Justify::Center}
+                            semantic_role={SemanticRole::TabPanel}
+                            accessibility_label={"Display arrangement"}>
+                            {display_layout}
+                        </Container>
+                        <Container background={palette.surface} border={(palette.muted, 1.0)}
+                            padding={Insets::all(12.0)}>
+                            <Column gap={10.0}>
+                                <Row gap={12.0}>
+                                    <Column grow={1.0} gap={3.0}>
+                                        <Text color={palette.text} wrap={true}>{&selected.name}</Text>
+                                        <Text scale={0.9} color={palette.muted} wrap={true}>{&selected.detail}</Text>
+                                    </Column>
+                                    <Text bold={true} wrap={true} color={if selected.primary { palette.accent } else { palette.muted }}>
+                                        {if selected.primary {
+                                            self.localizer.text("settings-display-primary")
+                                        } else { String::new() }}
+                                    </Text>
+                                </Row>
+                                {enabled}
+                                {scale}
+                                <Grid columns={GridColumnSpec::AutoFit(Track::minmax(120.0, Track::fr(1.0)))} gap={12.0}>
+                                    {identify}{make_primary}{apply}
+                                </Grid>
+                                {confirmation}
                             </Column>
-                            <Text bold={true} color={if selected.primary { palette.accent } else { palette.muted }}>
-                                {if selected.primary {
-                                    self.localizer.text("settings-display-primary")
-                                } else { String::new() }}
-                            </Text>
-                        </Row>
-                        {enabled}
-                        {scale}
-                        <Row height={42.0} gap={12.0}>
-                            {identify}{make_primary}{apply}
-                        </Row>
-                        {confirmation}
+                        </Container>
+                        <Text color={if self.applied { palette.complement } else { palette.muted }} wrap={true}>
+                            {&self.status}
+                        </Text>
+                        {app_scale}
                     </Column>
-                </Container>
-                <Text color={if self.applied { palette.complement } else { palette.muted }} height={18.0}>
-                    {&self.status}
-                </Text>
-                {app_scale}
+                </VerticalScroll>
             </Column>
         }
     }

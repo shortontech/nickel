@@ -19,7 +19,7 @@ impl<Message> PageHeader<Message> {
         Self(
             Container::new()
                 .fill_width()
-                .min_height(76.0)
+                .shrink(0.0)
                 .padding(Insets::symmetric(
                     theme.spacing.section,
                     theme.spacing.content,
@@ -970,6 +970,13 @@ impl<Message> SettingsRow<Message> {
         self
     }
 
+    /// Stack the descriptive and control regions when a setting needs the
+    /// control's full intrinsic width at compact viewport sizes.
+    pub fn stacked(mut self) -> Self {
+        self.0.kind = super::Kind::Flex(super::Axis::Vertical);
+        self
+    }
+
     /// Makes the row itself activatable. Use only when this is semantically
     /// identical to activating its trailing control.
     pub fn activate(self, message: Message) -> AnyView<Message> {
@@ -1009,7 +1016,7 @@ impl<Message> SliderField<Message> {
     ) -> Self {
         let label = label.into();
         let control = Row::new()
-            .width(420.0)
+            .grow(1.0)
             .gap(theme.spacing.content)
             .align_items(Align::Center)
             .child(
@@ -1021,7 +1028,7 @@ impl<Message> SliderField<Message> {
                     )
                     .focus_background_tint(theme.borders.focus)
                     .controller_focus_background_tint(theme.borders.controller_focus)
-                    .width(330.0)
+                    .grow(1.0)
                     .accessibility_label(label.clone()),
             )
             .child(
@@ -1035,6 +1042,11 @@ impl<Message> SliderField<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn stacked(mut self) -> Self {
+        self.0 = self.0.stacked();
         self
     }
 }

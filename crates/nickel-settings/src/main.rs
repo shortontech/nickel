@@ -517,6 +517,7 @@ enum SettingsMessage {
     BarDisplayWindows,
     BarAllWindows,
     SetDesktopCount(u8),
+    DisplayScroll,
     DisplayIdentify,
     SelectDisplay(usize),
     DisplayDrag {
@@ -1164,7 +1165,8 @@ impl SettingsApp {
             }
             SettingsMessage::DisplayRevert => self.revert_display_layout(),
             SettingsMessage::WifiNetwork(index) => self.connect_windows_wifi(index),
-            SettingsMessage::BluetoothScroll
+            SettingsMessage::DisplayScroll
+            | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
             | SettingsMessage::DefaultAppsScroll
             | SettingsMessage::AppearanceScroll => {}
@@ -2989,6 +2991,81 @@ mod tests {
             1,
             "only the explicit trailing button toggles the device"
         );
+    }
+
+    #[test]
+    fn display_page_scrolls_and_reflows_controls_at_compact_localized_sizes() {
+        fn overlaps(left: nickel_ui::Rect, right: nickel_ui::Rect) -> bool {
+            left.origin.x < right.origin.x + right.size.width
+                && left.origin.x + left.size.width > right.origin.x
+                && left.origin.y < right.origin.y + right.size.height
+                && left.origin.y + left.size.height > right.origin.y
+        }
+
+        for (locale, width, height, scale) in [
+            ("de-DE", 850.0, 580.0, 1.0),
+            ("es", 560.0, 580.0, 2.0),
+            ("en-US", 360.0, 580.0, 1.5),
+        ] {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+            app.localizer = nickel_i18n::Localizer::for_locale(Some(locale));
+            app.displays[0].name =
+                "A deliberately long localized display heading that wraps".into();
+            app.displays[0].detail =
+                "3840 × 2160 — detailed compatibility description on multiple lines".into();
+            let tree = app.build_ui_with_diagnostics(width, height);
+            assert!(
+                tree.scroll_extent(&SettingsMessage::DisplayScroll)
+                    .is_some_and(|extent| extent.can_scroll()),
+                "Display content must remain reachable at {locale} {width}x{height}"
+            );
+            let diagnostics = tree
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| {
+                    diagnostic.kind != nickel_ui::DiagnosticKind::ClippedInteraction
+                })
+                .collect::<Vec<_>>();
+            assert!(diagnostics.is_empty(), "{locale}: {diagnostics:#?}");
+
+            let buttons = [
+                SettingsMessage::DisplayIdentify,
+                SettingsMessage::DisplayPrimary,
+                SettingsMessage::DisplayApply,
+            ]
+            .iter()
+            .flat_map(|message| tree.semantic_targets_for_message(message))
+            .map(|target| target.bounds)
+            .collect::<Vec<_>>();
+            assert_eq!(
+                buttons.len(),
+                3,
+                "localized display actions remain semantic"
+            );
+            assert!(
+                buttons
+                    .iter()
+                    .all(|rect| rect.size.width > 0.0 && rect.size.height >= 40.0)
+            );
+            for (index, left) in buttons.iter().enumerate() {
+                for right in &buttons[index + 1..] {
+                    assert!(
+                        !overlaps(*left, *right),
+                        "display actions must reflow, not overlap"
+                    );
+                }
+            }
+
+            let physical_width = (width * scale) as u32;
+            let physical_height = (height * scale) as u32;
+            let mut renderer = nickel_ui::SoftwareRenderer::new_pixel_buffer(
+                physical_width,
+                physical_height,
+                scale,
+            );
+            renderer.render(tree.commands());
+            assert!(renderer.pixels().iter().any(|pixel| pixel.a > 0));
+        }
     }
 
     #[test]

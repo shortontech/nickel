@@ -65,7 +65,7 @@ impl SettingsApp {
                 AnyView::new(
                     nickel_ui::Row::new()
                         .fill_width()
-                        .min_height(76.0)
+                        .shrink(0.0)
                         .child(
                             Button::semantic(
                                 theme,
@@ -310,7 +310,11 @@ impl SettingsApp {
                 SettingsPage::Display,
                 display_label,
                 SettingsMessage::Navigate(SettingsPage::Display),
-                self.display_components(),
+                self.display_components(if width < 720.0 {
+                    width
+                } else {
+                    (width - SIDEBAR_WIDTH as f32).max(0.0)
+                }),
             )
             .header(destination_header(SettingsPage::Display))
             .leading(sidebar_icon(SidebarIconKind::Display))
