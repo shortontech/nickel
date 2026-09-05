@@ -119,3 +119,19 @@ resource diagnostics. It necessarily creates a visible host window today; Nickel
 start-hidden/minimized nested mode. Test credentials must be read from the supervised shell child's
 environment without printing or persisting them, and the disposable session/process group and
 temporary sockets must be removed after the run.
+
+### Recorded nested evidence
+
+On 2026-09-04, an isolated `backend-winit --test-control` run reached a healthy one-output baseline,
+added a rotated `1024 x 768` output at `180/120` scale, and converged to exactly two desktops, two
+panels, two lock surfaces, and one launcher. It remained ready while locked, then converged
+immediately back to the exact one-output role set when the secondary output was disconnected.
+Reconnecting while locked restored the two-output set. The workspace command created a fifth stable
+workspace, cache diagnostics stayed within their declared zero-preview baseline, and all disposable
+processes, sockets, logs, and the synthetic output were removed afterward. A defect found during the
+run—readiness counting dormant reconnect-grace surfaces—was corrected before this evidence was
+recorded. Registered hidden surfaces now remain visible in diagnostic output without being counted
+as active-topology readiness roles.
+
+This closes only nested structural coverage. It does not close any physical-display, native toolkit,
+hardware-input, visual, PAM, file-manager interoperability, live Codex, Windows, or macOS item above.
