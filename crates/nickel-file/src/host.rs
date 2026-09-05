@@ -32,6 +32,7 @@ fn set_nickel_file_icon(window: &Window) {
 
 pub(crate) struct FileHostAdapter {
     sync_requested: bool,
+    drop_hover_deadline: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -165,17 +166,71 @@ fn drop_destination_at(
         .then(|| app.browser.current().to_path_buf())
 }
 
+const DROP_HOVER_OPEN_DELAY: std::time::Duration = std::time::Duration::from_millis(700);
+
+fn update_drop_hover(
+    app: &mut FileApp,
+    destination: Option<std::path::PathBuf>,
+    now: Instant,
+) -> bool {
+    let changed = app.native_drop_destination != destination;
+    app.native_drop_destination = destination.clone();
+    if app.drag_hover.is_none() || destination.as_deref() == Some(app.browser.current()) {
+        app.native_drop_hover_started = None;
+        return changed;
+    }
+    if app
+        .native_drop_hover_started
+        .as_ref()
+        .is_none_or(|(path, _)| Some(path) != destination.as_ref())
+    {
+        app.native_drop_hover_started = destination.map(|path| (path, now));
+    }
+    changed
+}
+
+fn open_drop_hover_target(app: &mut FileApp, now: Instant) -> bool {
+    let Some((path, started)) = app.native_drop_hover_started.clone() else {
+        return false;
+    };
+    if now.duration_since(started) < DROP_HOVER_OPEN_DELAY
+        || app.native_drop_destination.as_ref() != Some(&path)
+        || app.drag_hover.is_none()
+    {
+        return false;
+    }
+    app.native_drop_hover_started = None;
+    if let Some(index) = (0..app.tabs.len()).find(|index| {
+        if *index == app.active_tab {
+            false
+        } else {
+            app.inactive_tab(*index)
+                .is_some_and(|tab| tab.browser.current() == path)
+        }
+    }) {
+        app.switch_tab(index);
+    } else if path != app.browser.current() {
+        app.navigate_to(path);
+    }
+    true
+}
+
 impl Default for FileHostAdapter {
     fn default() -> Self {
         Self {
             sync_requested: true,
+            drop_hover_deadline: None,
         }
     }
 }
 
 impl HostAdapter<FileApp> for FileHostAdapter {
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
-        self.sync_requested.then_some(now)
+        self.sync_requested
+            .then_some(now)
+            .into_iter()
+            .chain(self.drop_hover_deadline)
+            .min()
     }
 
     fn started(
@@ -344,7 +399,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     drop_destination_at(&host.semantic_nodes(), cursor, host.application());
                 let app = host.application_mut();
                 app.cursor = cursor;
-                app.native_drop_destination = drop_destination;
+                changed |= update_drop_hover(app, drop_destination, Instant::now());
                 app.begin_file_drag_if_threshold(cursor);
                 if let Some(entries) = selected_entries {
                     app.selected_entries = entries;
@@ -357,7 +412,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 if resizing_details {
                     app.resize_details_column_to(cursor.x);
                 }
-                changed = selection_drag.is_some() || resizing || resizing_details;
+                changed |= selection_drag.is_some() || resizing || resizing_details;
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Secondary,
@@ -426,6 +481,11 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             _ => {}
         }
         self.sync_requested |= changed;
+        self.drop_hover_deadline = host
+            .application()
+            .native_drop_hover_started
+            .as_ref()
+            .map(|(_, started)| *started + DROP_HOVER_OPEN_DELAY);
         Ok(AdapterOutcome {
             changed,
             consume,
@@ -445,6 +505,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
         let selected = host.application().selected;
         let scroll_offset = host.application().file_scroll_offset;
         let mut changed = false;
+        changed |= open_drop_hover_target(host.application_mut(), Instant::now());
+        self.drop_hover_deadline = host
+            .application()
+            .native_drop_hover_started
+            .as_ref()
+            .map(|(_, started)| *started + DROP_HOVER_OPEN_DELAY);
         if pending_ensure && let Some(selected) = selected {
             let columns = host.application().resolved_grid_columns();
             let row_height = 54.0 + (host.application().tile_width * 0.42).clamp(42.0, 96.0);
@@ -495,8 +561,9 @@ impl HostAdapter<FileApp> for FileHostAdapter {
 #[cfg(test)]
 mod tests {
     use super::{
-        NavigationShortcut, adjacent_tab_index, cancel_transient_input_on_focus_loss,
-        drop_destination_at, navigation_shortcut, selection_command_modifier,
+        DROP_HOVER_OPEN_DELAY, NavigationShortcut, adjacent_tab_index,
+        cancel_transient_input_on_focus_loss, drop_destination_at, navigation_shortcut,
+        open_drop_hover_target, selection_command_modifier, update_drop_hover,
     };
     use crate::{FileApp, FileMessage};
     use nickel_input::{KeyCode, Modifier, ModifierState};
@@ -581,5 +648,33 @@ mod tests {
             drop_destination_at(&host.semantic_nodes(), point, host.application()),
             Some(folder)
         );
+    }
+
+    #[test]
+    fn native_drop_hover_is_delayed_cancellable_and_opens_once() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("destination");
+        std::fs::create_dir(&folder).unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.drag_hover = Some(directory.path().join("source.txt"));
+        let started = std::time::Instant::now();
+        assert!(update_drop_hover(&mut app, Some(folder.clone()), started));
+        assert!(!open_drop_hover_target(
+            &mut app,
+            started + DROP_HOVER_OPEN_DELAY - std::time::Duration::from_millis(1)
+        ));
+        assert!(open_drop_hover_target(
+            &mut app,
+            started + DROP_HOVER_OPEN_DELAY
+        ));
+        assert!(app.navigation_pending());
+        assert!(app.native_drop_hover_started.is_none());
+
+        app.native_drop_hover_started = Some((folder.clone(), started));
+        app.drag_hover = None;
+        assert!(!open_drop_hover_target(
+            &mut app,
+            started + DROP_HOVER_OPEN_DELAY
+        ));
     }
 }

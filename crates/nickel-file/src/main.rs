@@ -203,6 +203,7 @@ pub struct FileApp {
     native_drop_deadline: Option<Instant>,
     pub(crate) native_drop_destination: Option<PathBuf>,
     native_drop_batch_destination: Option<PathBuf>,
+    pub(crate) native_drop_hover_started: Option<(PathBuf, Instant)>,
     pub(crate) outbound_drag: Option<DragOffer>,
     pub(crate) primary_down: bool,
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
@@ -966,6 +967,7 @@ impl FileApp {
             native_drop_deadline: None,
             native_drop_destination: None,
             native_drop_batch_destination: None,
+            native_drop_hover_started: None,
             outbound_drag: None,
             primary_down: false,
             transfer_rx: None,
@@ -1316,7 +1318,7 @@ impl FileApp {
         }
     }
 
-    fn navigate_to(&mut self, path: PathBuf) {
+    pub(crate) fn navigate_to(&mut self, path: PathBuf) {
         let label = path.display().to_string();
         self.start_navigation(
             format!("Opening {label}"),
@@ -3042,6 +3044,7 @@ impl Application for FileApp {
             nickel_ui::FileDragEvent::HoverCancelled => {
                 self.drag_hover = None;
                 self.native_drop_destination = None;
+                self.native_drop_hover_started = None;
             }
             nickel_ui::FileDragEvent::Dropped(path) => {
                 self.drag_hover = None;
@@ -3053,6 +3056,7 @@ impl Application for FileApp {
                 }
                 self.native_drop_batch.push(path);
                 self.native_drop_destination = None;
+                self.native_drop_hover_started = None;
                 // Winit reports one DroppedFile event per path. Coalesce the
                 // burst so a native multi-file drag becomes one bounded operation.
                 self.native_drop_deadline = Some(Instant::now() + Duration::from_millis(25));
@@ -3428,6 +3432,9 @@ impl Application for FileApp {
             self.rename_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.native_drop_deadline
                 .map(|deadline| deadline.saturating_duration_since(Instant::now())),
+            self.native_drop_hover_started.as_ref().map(|(_, started)| {
+                (*started + Duration::from_millis(700)).saturating_duration_since(Instant::now())
+            }),
             (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
             self.location_groups_rx
                 .as_ref()
