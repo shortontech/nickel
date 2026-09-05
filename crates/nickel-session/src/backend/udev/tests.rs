@@ -8,8 +8,16 @@ use super::{
     mark_disabled_outputs_absent, normalize_capture_rows, paced_render_delay,
     parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
     published_disabled_outputs, render_primary_available, renderer_retained_reason,
-    switcher_visible_range, union_rectangles,
+    should_attempt_scanned_connector, switcher_visible_range, union_rectangles,
 };
+
+#[test]
+fn duplicate_active_connector_is_not_retried_on_every_hotplug_scan() {
+    assert!(should_attempt_scanned_connector(false, false));
+    assert!(!should_attempt_scanned_connector(false, true));
+    assert!(!should_attempt_scanned_connector(true, false));
+    assert!(!should_attempt_scanned_connector(true, true));
+}
 
 #[test]
 fn task_switcher_preview_containment_preserves_aspect_and_centers() {

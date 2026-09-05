@@ -1657,7 +1657,25 @@ impl NickelSession {
                         .native
                         .as_ref()
                         .is_some_and(|native| native.disabled_outputs.contains_key(&name));
-                    if !administratively_disabled {
+                    let already_active = self.native.as_ref().is_some_and(|native| {
+                        native.devices.values().any(|device| {
+                            device
+                                .surfaces
+                                .values()
+                                .any(|surface| surface.output.name() == name)
+                        })
+                    });
+                    if !should_attempt_scanned_connector(administratively_disabled, already_active)
+                    {
+                        if !already_active {
+                            continue;
+                        }
+                        // EVDI can expose the same connector name from several DRM nodes while
+                        // display-manager ownership settles.  The output is already represented,
+                        // so treating this as a failed connection and removing it from the
+                        // scanner makes every subsequent udev Changed event rediscover it forever.
+                        tracing::debug!(%node, output = %name, "ignoring duplicate active DRM connector");
+                    } else {
                         let handle = connector.handle();
                         if let Err(error) = self.connect_output(node, connector, crtc) {
                             if let Some(device) = self
@@ -3847,6 +3865,10 @@ fn copy_mapped_region_to_strided(
             .copy_from_slice(&mapped[source_start..source_start + row_bytes]);
     }
     Ok(expected)
+}
+
+fn should_attempt_scanned_connector(administratively_disabled: bool, already_active: bool) -> bool {
+    !administratively_disabled && !already_active
 }
 
 #[cfg(test)]
