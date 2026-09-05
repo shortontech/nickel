@@ -141,10 +141,10 @@ fn project_window_name(path: &std::path::Path) -> String {
 
 fn approval_policy_label(policy: ApprovalPolicy) -> &'static str {
     match policy {
-        ApprovalPolicy::Untrusted => "Ask for untrusted commands",
-        ApprovalPolicy::OnFailure => "Ask after sandbox failure",
-        ApprovalPolicy::OnRequest => "Ask when Codex requests",
-        ApprovalPolicy::Never => "Never ask automatically",
+        ApprovalPolicy::Untrusted => "Ask for unknown commands",
+        ApprovalPolicy::OnFailure => "Ask on failure",
+        ApprovalPolicy::OnRequest => "Ask as needed",
+        ApprovalPolicy::Never => "Never ask",
     }
 }
 
@@ -1545,7 +1545,7 @@ fn configured_chat_view(
                         AnyView::new(ui! {
                             <Container grow={1.0} fill_width padding={Insets::all(28.0)}>
                                 <Text scale={2.0} color={theme.text.primary}>{"What are we building?"}</Text>
-                                <Text color={theme.text.secondary}>{"Start a conversation with Codex. Tool requests always require an explicit decision."}</Text>
+                            <Text color={theme.text.secondary}>{"Start a conversation with Codex. Approvals follow the policy below."}</Text>
                             </Container>
                         })
                     } else {
@@ -1613,7 +1613,7 @@ fn configured_chat_view(
                         <TextField id={id!(chat_draft)} value={&state.draft} on_change={draft_changed}
                             color={theme.text.primary} wrap={true} />
                     </Container>
-                    <Row shrink={0.0} gap={8.0}>
+                    <Row id={id!(composer_controls)} shrink={0.0} gap={8.0}>
                         {Menu::new(
                             ChatMessage::ToggleCommandPicker,
                             "Commands",
@@ -1632,10 +1632,13 @@ fn configured_chat_view(
                                 MenuItem::disabled("/feedback — unavailable in this client"),
                                 MenuItem::disabled("/logout — unavailable: manage the Codex CLI account externally"),
                             ],
-                        ).id(id!(command_picker)).width(460.0).expanded(command_picker_open)
+                        ).id(id!(command_picker)).width(220.0).expanded(command_picker_open)
                             .accessibility_label("Commands")
                             .colors(theme.surfaces.card, theme.surfaces.sidebar, theme.text.primary)}
-                        <Button on_press={ChatMessage::ToggleResumePicker} background={theme.surfaces.hover} color={theme.text.primary}>{"Resume"}</Button>
+                        <Button id={id!(resume_button)} on_press={ChatMessage::ToggleResumePicker}
+                            background={theme.surfaces.hover} color={theme.text.primary} shrink={0.0}>{"Resume"}</Button>
+                    </Row>
+                    <Row id={id!(composer_status)} shrink={0.0} gap={8.0} align_items={Align::Center}>
                         {Dropdown::new(
                             ChatMessage::ToggleModelPicker,
                             state.models.iter()
@@ -1685,24 +1688,23 @@ fn configured_chat_view(
                                 approval_policy_label(state.effective_approval_policy),
                             ))
                             .semantic_role(SemanticRole::Button)}
-                        <Column gap={2.0} grow={1.0}>
-                            <Text color={theme.text.secondary}>{if state.active_turn.is_some() {
+                        <Column min_width={0.0} gap={2.0} grow={1.0}>
+                            <Text color={theme.text.secondary} wrap={true}>{if state.active_turn.is_some() {
                                 "Codex is working…".to_owned()
                             } else if state.selected_approval_policy != state.effective_approval_policy {
-                                format!("Applies to the next turn; effective now: {}", approval_policy_label(state.effective_approval_policy))
+                                format!("Next turn; now: {}", approval_policy_label(state.effective_approval_policy))
                             } else {
-                                format!("Approval policy: {}", approval_policy_label(state.effective_approval_policy))
+                                format!("Current: {}", approval_policy_label(state.effective_approval_policy))
                             }}</Text>
-                            <Text color={theme.text.secondary} scale={0.72}>{"Approval only; sandbox and filesystem access are unchanged"}</Text>
-                            <Text color={theme.text.secondary} scale={0.72}>{&state.provenance}</Text>
+                            <Text color={theme.text.secondary} scale={0.72} wrap={true}>{format!("Sandbox/file access unchanged · {}", state.provenance)}</Text>
                         </Column>
-                        <Spacer fill />
                         {if state.interrupt_requested {
                             ui! { <Text color={theme.text.secondary}>{"Interrupting…"}</Text> }
                         } else if state.active_turn.is_some() {
                             ui! { <Button on_press={ChatMessage::Interrupt} background={theme.surfaces.hover} color={theme.text.danger}>{"Interrupt"}</Button> }
                         } else if state.can_send() {
-                            ui! { <Button on_press={ChatMessage::Send} background={theme.accent.ordinary} color={theme.accent.on_accent}>{"Send"}</Button> }
+                            ui! { <Button id={id!(send_button)} on_press={ChatMessage::Send}
+                                background={theme.accent.ordinary} color={theme.accent.on_accent} shrink={0.0}>{"Send"}</Button> }
                         } else {
                             ui! { <Text color={theme.text.secondary}>{"Enter a message"}</Text> }
                         }}

@@ -739,6 +739,18 @@ mod tests {
     fn long_transcript_cannot_crush_sidebarless_composer() {
         let mut state = ChatState::default();
         state.status = ConnectionStatus::Ready;
+        state.draft = "How are you doing?".into();
+        state.models = vec![Model {
+            id: "gpt-5.6-sol".into(),
+            display_name: "GPT-5.6-Sol".into(),
+            default_reasoning_effort: Some("low".into()),
+            supported_reasoning_efforts: vec![nickel_codex::ReasoningEffortOption {
+                reasoning_effort: "low".into(),
+                description: "Fast".into(),
+            }],
+        }];
+        state.selected_model = Some("gpt-5.6-sol".into());
+        state.selected_reasoning_effort = Some("low".into());
         state.threads = (0..12)
             .map(|index| nickel_codex::Thread {
                 id: ThreadId(format!("thread-{index}")),
@@ -762,7 +774,12 @@ mod tests {
                 complete: true,
             });
         }
-        for (width, height) in [(640.0, 480.0), (1120.0, 760.0), (2240.0, 1520.0)] {
+        for (width, height) in [
+            (640.0, 480.0),
+            (1120.0, 760.0),
+            (1318.0, 889.0),
+            (2240.0, 1520.0),
+        ] {
             let tree = UiFrame::layout(view::chat_view(&state), Rect::new(0.0, 0.0, width, height));
             let find = |suffix: &str| {
                 tree.resolved_layout()
@@ -774,6 +791,10 @@ mod tests {
             let conversation = find("conversation");
             let composer = find("composer");
             let draft = find("chat-draft");
+            let controls = find("composer-controls");
+            let status = find("composer-status");
+            let resume = find("resume-button");
+            let send = find("send-button");
             assert!(composer.allocated.size.height >= 70.0);
             assert!(draft.allocated.size.height > 0.0);
             assert!(
@@ -781,6 +802,25 @@ mod tests {
                     <= composer.allocated.origin.y + 0.01
             );
             assert!(composer.allocated.origin.y + composer.allocated.size.height <= height + 0.01);
+            assert!(
+                controls.allocated.origin.y + controls.allocated.size.height
+                    <= status.allocated.origin.y + 0.01
+            );
+            assert!(
+                resume.allocated.size.width >= 60.0,
+                "resume: {:?}",
+                resume.allocated
+            );
+            assert!(
+                send.allocated.size.width >= 48.0,
+                "send: {:?}",
+                send.allocated
+            );
+            assert!(
+                send.allocated.origin.x + send.allocated.size.width <= width - 17.0,
+                "send escapes the padded composer: {:?}",
+                send.allocated
+            );
         }
     }
 
@@ -1216,7 +1256,7 @@ mod tests {
                         via,
                         &Selector::role_name(
                             SemanticRole::MenuItem,
-                            "Never ask automatically — Codex cannot pause to request approval",
+                            "Never ask — Codex cannot pause to request approval",
                         ),
                     )
                     .unwrap();
