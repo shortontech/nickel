@@ -3969,6 +3969,7 @@ impl LiveShell {
         let focused_menu = self.window_menu.is_some();
         self.close_window_preview();
         if focused_menu {
+            #[cfg(target_os = "linux")]
             let _ = send_session_command(
                 "restore-window-menu-focus",
                 ShellCommand::RestoreApplicationFocus,
