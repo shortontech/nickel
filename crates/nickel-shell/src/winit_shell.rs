@@ -372,6 +372,53 @@ fn record_pump_status(pending: &mut VecDeque<ShellEvent>, status: PumpStatus) {
     pending.push_back(ShellEvent::RuntimeTerminated { code });
 }
 
+fn queue_shell_input(pending: &mut VecDeque<ShellEvent>, surface: SurfaceId, event: InputEvent) {
+    let InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+        device,
+        order,
+        position,
+        delta,
+    }) = event
+    else {
+        pending.push_back(ShellEvent::Input { surface, event });
+        return;
+    };
+    if let Some(ShellEvent::Input {
+        surface: queued_surface,
+        event:
+            InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+                device: queued_device,
+                order: queued_order,
+                position: queued_position,
+                delta: queued_delta,
+            }),
+    }) = pending.back_mut()
+        && *queued_surface == surface
+        && *queued_device == device
+    {
+        *queued_order = order;
+        *queued_position = position;
+        *queued_delta = match (*queued_delta, delta) {
+            (Some(previous), Some(next)) => Some(nickel_input::Vector {
+                x: previous.x + next.x,
+                y: previous.y + next.y,
+            }),
+            (None, next) => next,
+            (previous, None) => previous,
+        };
+        return;
+    }
+    pending.push_back(ShellEvent::Input {
+        surface,
+        event: InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+            device,
+            order,
+            position,
+            delta,
+        }),
+    });
+}
+
 pub struct ShellSurface {
     id: SurfaceId,
     role: SurfaceRole,
@@ -1359,10 +1406,7 @@ impl WinitShell {
                     let device = devices.get_or_insert(native_device);
                     let adapter = adapters.entry(window_id).or_default();
                     for input in adapter.normalize_at_scale(device, scale, &event) {
-                        pending.push_back(ShellEvent::Input {
-                            surface,
-                            event: input,
-                        });
+                        queue_shell_input(pending, surface, input);
                     }
                     if let Some(event) = translate_window_event(surface, scale as f32, &event) {
                         pending.push_back(event);
@@ -1814,10 +1858,14 @@ mod tests {
         OUTPUT_CREATION_RETRY_MIN, OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry,
         OutputRetirementTracker, PANEL_TITLE, PanelEdge, ShellEvent, SurfaceRole,
         desired_output_surfaces, durable_presenter_peak, output_name_at, output_role_is_retired,
-        panel_outputs, parse_proc_status_rss, preferred_output_index, record_pump_status,
-        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
+        panel_outputs, parse_proc_status_rss, preferred_output_index, queue_shell_input,
+        record_pump_status, require_displays, shell_surface_title, surface_geometry,
+        surface_is_borderless,
     };
 
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, KeyEdge, Point, PointerButton, PointerEvent, Vector,
+    };
     use nickel_ui::AggregatePresenterCacheDiagnostics;
     use std::collections::{HashSet, VecDeque};
     use std::time::{Duration, Instant};
@@ -1835,6 +1883,74 @@ mod tests {
             pending.front(),
             Some(ShellEvent::RuntimeTerminated { code: 1 })
         ));
+    }
+
+    #[test]
+    fn shell_pointer_motion_keeps_latest_position_and_accumulated_delta() {
+        let surface = super::SurfaceId(winit::window::WindowId::dummy());
+        let mut pending = VecDeque::new();
+        for (order, position, delta) in [
+            (1, Point { x: 10.0, y: 20.0 }, Vector { x: 1.0, y: 2.0 }),
+            (2, Point { x: 14.0, y: 26.0 }, Vector { x: 4.0, y: 6.0 }),
+        ] {
+            queue_shell_input(
+                &mut pending,
+                surface,
+                InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(7),
+                    order: EventOrder(order),
+                    position,
+                    delta: Some(delta),
+                }),
+            );
+        }
+
+        assert_eq!(pending.len(), 1);
+        assert!(matches!(
+            pending.front(),
+            Some(ShellEvent::Input {
+                surface: queued_surface,
+                event: InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(7),
+                    order: EventOrder(2),
+                    position: Point { x: 14.0, y: 26.0 },
+                    delta: Some(Vector { x: 5.0, y: 8.0 }),
+                }),
+            }) if *queued_surface == surface
+        ));
+    }
+
+    #[test]
+    fn shell_pointer_motion_never_crosses_button_or_device_boundaries() {
+        let surface = super::SurfaceId(winit::window::WindowId::dummy());
+        let motion = |device, order| {
+            InputEvent::Pointer(PointerEvent::Motion {
+                device: DeviceId(device),
+                order: EventOrder(order),
+                position: Point {
+                    x: order as f64,
+                    y: 0.0,
+                },
+                delta: Some(Vector { x: 1.0, y: 0.0 }),
+            })
+        };
+        let mut pending = VecDeque::new();
+        queue_shell_input(&mut pending, surface, motion(1, 1));
+        queue_shell_input(&mut pending, surface, motion(2, 2));
+        queue_shell_input(
+            &mut pending,
+            surface,
+            InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(2),
+                order: EventOrder(3),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Released,
+                position: Some(Point { x: 2.0, y: 0.0 }),
+            }),
+        );
+        queue_shell_input(&mut pending, surface, motion(2, 4));
+
+        assert_eq!(pending.len(), 4);
     }
 
     #[test]

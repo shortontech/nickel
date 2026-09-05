@@ -2656,8 +2656,39 @@ impl LiveShell {
         if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
             self.desktop_host.application_mut().context_menu = None;
         }
+        if self.desktop_host.application().context_menu.is_none()
+            && let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                button: nickel_input::PointerButton::Secondary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(position),
+                ..
+            }) = &event
+        {
+            let application = self.desktop_host.application_mut();
+            application.pointer_press(
+                DesktopPoint {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                },
+                true,
+                application.modifiers,
+            );
+            let outcome = self.desktop_host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            self.desktop_change_token = outcome.change_token;
+            self.desktop_deadline = outcome.next_deadline;
+        }
         if self.desktop_host.application().context_menu.is_some()
             || matches!(event, nickel_input::InputEvent::Touch(_))
+            || matches!(
+                event,
+                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                    button: nickel_input::PointerButton::Secondary,
+                    ..
+                })
+            )
         {
             let outcome = self.desktop_host.step(HostBatch {
                 events: vec![HostEvent::Normalized {
@@ -2684,11 +2715,7 @@ impl LiveShell {
                     y: position.y as f32,
                 };
                 if edge == nickel_input::KeyEdge::Pressed {
-                    application.pointer_press(
-                        point,
-                        button == nickel_input::PointerButton::Secondary,
-                        application.modifiers,
-                    )
+                    application.pointer_press(point, false, application.modifiers)
                 } else if button == nickel_input::PointerButton::Primary {
                     application.pointer_release(point, Instant::now())
                 } else {
@@ -7896,6 +7923,40 @@ mod tests {
             ))
         );
         assert_ne!(shell.desktop_change_token, pointer_token);
+    }
+
+    #[test]
+    fn desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion() {
+        let mut shell = LiveShell::new().unwrap();
+        let point = nickel_input::Point { x: 300.0, y: 300.0 };
+        let button = |edge, order| {
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(order),
+                button: nickel_input::PointerButton::Secondary,
+                edge,
+                position: Some(point),
+            })
+        };
+
+        assert!(shell.desktop_host.application().layout.icons_visible());
+        assert!(shell.desktop_input(button(nickel_input::KeyEdge::Pressed, 1)));
+        assert!(shell.desktop_host.application().context_menu.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
+
+        let _ = shell.desktop_input(button(nickel_input::KeyEdge::Released, 2));
+        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(3),
+                position: nickel_input::Point { x: 300.0, y: 260.0 },
+                delta: Some(nickel_input::Vector { x: 0.0, y: -40.0 }),
+            },
+        ));
+
+        assert!(shell.desktop_host.application().layout.icons_visible());
+        assert!(shell.desktop_host.application().context_menu.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
     }
 
     #[test]
