@@ -204,6 +204,7 @@ pub struct FileApp {
     pub(crate) native_drop_destination: Option<PathBuf>,
     native_drop_batch_destination: Option<PathBuf>,
     pub(crate) native_drop_hover_started: Option<(PathBuf, Instant)>,
+    native_drop_intent: TransferIntent,
     pub(crate) outbound_drag: Option<DragOffer>,
     pub(crate) primary_down: bool,
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
@@ -968,6 +969,7 @@ impl FileApp {
             native_drop_destination: None,
             native_drop_batch_destination: None,
             native_drop_hover_started: None,
+            native_drop_intent: TransferIntent::Copy,
             outbound_drag: None,
             primary_down: false,
             transfer_rx: None,
@@ -2997,11 +2999,13 @@ impl FileApp {
                 path,
                 capabilities: ItemCapabilities {
                     readable: true,
-                    removable: false,
+                    removable: self.native_drop_intent == TransferIntent::Move,
                 },
             })
             .collect();
-        match ClipboardOffer::new(TransferIntent::Copy, sources) {
+        let intent = self.native_drop_intent;
+        self.native_drop_intent = TransferIntent::Copy;
+        match ClipboardOffer::new(intent, sources) {
             Ok(offer) => {
                 let destination = self
                     .native_drop_batch_destination
@@ -3045,6 +3049,17 @@ impl Application for FileApp {
                 self.drag_hover = None;
                 self.native_drop_destination = None;
                 self.native_drop_hover_started = None;
+                self.native_drop_intent = TransferIntent::Copy;
+            }
+            nickel_ui::FileDragEvent::ActionChanged(action) => {
+                // Native backends can negotiate an action before URI payload
+                // transfer; this also marks the hover lifecycle active so
+                // semantic target affordances and delayed navigation work.
+                self.drag_hover.get_or_insert_with(PathBuf::new);
+                self.native_drop_intent = match action {
+                    nickel_ui::FileDragAction::Copy => TransferIntent::Copy,
+                    nickel_ui::FileDragAction::Move => TransferIntent::Move,
+                };
             }
             nickel_ui::FileDragEvent::Dropped(path) => {
                 self.drag_hover = None;
@@ -3737,6 +3752,34 @@ mod live_reconciliation_tests {
         }
         assert!(destination.path().join("a.txt").exists());
         assert!(destination.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn native_drop_honors_the_compositor_negotiated_move_action() {
+        let source = tempfile::tempdir().unwrap();
+        let source_path = source.path().join("move.txt");
+        fs::write(&source_path, b"move").unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(destination.path().to_path_buf());
+        <FileApp as nickel_ui::Application>::file_drag_event(
+            &mut app,
+            nickel_ui::FileDragEvent::ActionChanged(nickel_ui::FileDragAction::Move),
+        );
+        <FileApp as nickel_ui::Application>::file_drag_event(
+            &mut app,
+            nickel_ui::FileDragEvent::Dropped(source_path.clone()),
+        );
+        app.native_drop_deadline = Some(Instant::now());
+        assert!(app.poll_native_drop());
+        while app.transfer_rx.is_some() {
+            app.poll_transfer();
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!source_path.exists());
+        assert_eq!(
+            fs::read(destination.path().join("move.txt")).unwrap(),
+            b"move"
+        );
     }
 
     #[test]

@@ -7,7 +7,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use windows_sys::core::{IUnknown, GUID, HRESULT};
 use windows_sys::Win32::Foundation::{DV_E_FORMATETC, HWND, POINTL, S_OK};
 use windows_sys::Win32::System::Com::{IDataObject, DVASPECT_CONTENT, FORMATETC, TYMED_HGLOBAL};
-use windows_sys::Win32::System::Ole::{CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_NONE};
+use windows_sys::Win32::System::Ole::{
+    CF_HDROP, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+};
 use windows_sys::Win32::UI::Shell::{DragFinish, DragQueryFileW, HDROP};
 
 use tracing::debug;
@@ -27,6 +29,7 @@ pub struct FileDropHandlerData {
     window: HWND,
     send_event: Box<dyn Fn(Event<()>)>,
     cursor_effect: u32,
+    allowed_effects: u32,
     hovered_is_valid: bool, /* If the currently hovered item is not valid there must not be any
                              * `HoveredFileCancelled` emitted */
 }
@@ -37,6 +40,41 @@ pub struct FileDropHandler {
 
 #[allow(non_snake_case)]
 impl FileDropHandler {
+    fn negotiated_effect(allowed: u32, key_state: u32) -> u32 {
+        const MK_SHIFT: u32 = 0x0004;
+        const MK_CONTROL: u32 = 0x0008;
+        let requested = if key_state & MK_CONTROL != 0 {
+            DROPEFFECT_COPY
+        } else if key_state & MK_SHIFT != 0 {
+            DROPEFFECT_MOVE
+        } else if allowed & DROPEFFECT_COPY != 0 {
+            DROPEFFECT_COPY
+        } else {
+            DROPEFFECT_MOVE
+        };
+        if allowed & requested != 0 {
+            requested
+        } else if allowed & DROPEFFECT_COPY != 0 {
+            DROPEFFECT_COPY
+        } else if allowed & DROPEFFECT_MOVE != 0 {
+            DROPEFFECT_MOVE
+        } else {
+            DROPEFFECT_NONE
+        }
+    }
+
+    fn emit_effect(drop_handler: &FileDropHandlerData, effect: u32) {
+        let action = if effect == DROPEFFECT_MOVE {
+            crate::event::FileDropAction::Move
+        } else {
+            crate::event::FileDropAction::Copy
+        };
+        drop_handler.send_event(Event::WindowEvent {
+            window_id: RootWindowId(WindowId(drop_handler.window)),
+            event: crate::event::WindowEvent::FileDropActionChanged(action),
+        });
+    }
+
     pub fn new(window: HWND, send_event: Box<dyn Fn(Event<()>)>) -> FileDropHandler {
         let data = Box::new(FileDropHandlerData {
             interface: IDropTarget { lpVtbl: &DROP_TARGET_VTBL as *const IDropTargetVtbl },
@@ -44,6 +82,7 @@ impl FileDropHandler {
             window,
             send_event,
             cursor_effect: DROPEFFECT_NONE,
+            allowed_effects: DROPEFFECT_NONE,
             hovered_is_valid: false,
         });
         FileDropHandler { data: Box::into_raw(data) }
@@ -79,7 +118,7 @@ impl FileDropHandler {
     pub unsafe extern "system" fn DragEnter(
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         _pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
@@ -94,8 +133,15 @@ impl FileDropHandler {
             })
         };
         drop_handler.hovered_is_valid = hdrop.is_some();
-        drop_handler.cursor_effect =
-            if drop_handler.hovered_is_valid { DROPEFFECT_COPY } else { DROPEFFECT_NONE };
+        drop_handler.allowed_effects = unsafe { *pdwEffect };
+        drop_handler.cursor_effect = if drop_handler.hovered_is_valid {
+            Self::negotiated_effect(drop_handler.allowed_effects, grfKeyState)
+        } else {
+            DROPEFFECT_NONE
+        };
+        if drop_handler.cursor_effect != DROPEFFECT_NONE {
+            Self::emit_effect(drop_handler, drop_handler.cursor_effect);
+        }
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
         }
@@ -105,11 +151,16 @@ impl FileDropHandler {
 
     pub unsafe extern "system" fn DragOver(
         this: *mut IDropTarget,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         _pt: *const POINTL,
         pdwEffect: *mut u32,
     ) -> HRESULT {
         let drop_handler = unsafe { Self::from_interface(this) };
+        let effect = Self::negotiated_effect(drop_handler.allowed_effects, grfKeyState);
+        if effect != drop_handler.cursor_effect && effect != DROPEFFECT_NONE {
+            drop_handler.cursor_effect = effect;
+            Self::emit_effect(drop_handler, effect);
+        }
         unsafe {
             *pdwEffect = drop_handler.cursor_effect;
         }
@@ -133,12 +184,20 @@ impl FileDropHandler {
     pub unsafe extern "system" fn Drop(
         this: *mut IDropTarget,
         pDataObj: *const IDataObject,
-        _grfKeyState: u32,
+        grfKeyState: u32,
         _pt: *const POINTL,
-        _pdwEffect: *mut u32,
+        pdwEffect: *mut u32,
     ) -> HRESULT {
         use crate::event::WindowEvent::DroppedFile;
         let drop_handler = unsafe { Self::from_interface(this) };
+        drop_handler.cursor_effect =
+            Self::negotiated_effect(drop_handler.allowed_effects, grfKeyState);
+        if drop_handler.cursor_effect != DROPEFFECT_NONE {
+            Self::emit_effect(drop_handler, drop_handler.cursor_effect);
+        }
+        unsafe {
+            *pdwEffect = drop_handler.cursor_effect;
+        }
         let hdrop = unsafe {
             Self::iterate_filenames(pDataObj, |filename| {
                 drop_handler.send_event(Event::WindowEvent {

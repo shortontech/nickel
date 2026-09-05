@@ -1,13 +1,15 @@
 use std::cell::RefCell;
 use std::fs::File;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use ahash::AHashMap;
 
-use sctk::reexports::calloop::LoopHandle;
+use sctk::reexports::calloop::{LoopHandle, PostAction, RegistrationToken};
 use sctk::reexports::client::backend::ObjectId;
 use sctk::reexports::client::globals::GlobalList;
 use sctk::reexports::client::protocol::wl_output::WlOutput;
@@ -16,7 +18,7 @@ use sctk::reexports::client::{Connection, Proxy, QueueHandle};
 
 use sctk::compositor::{CompositorHandler, CompositorState};
 use sctk::data_device_manager::{
-    data_device::DataDeviceHandler,
+    data_device::{DataDevice, DataDeviceHandler},
     data_offer::{DataOfferHandler, DragOffer},
     data_source::{DataSourceHandler, DragSource},
     DataDeviceManagerState, WritePipe,
@@ -49,6 +51,15 @@ use crate::platform_impl::wayland::types::xdg_activation::XdgActivationState;
 use crate::platform_impl::wayland::window::{WindowRequests, WindowState};
 use crate::platform_impl::wayland::{WaylandError, WindowId};
 use crate::platform_impl::OsError;
+use crate::event::{FileDropAction, WindowEvent};
+
+struct IncomingFileDrop {
+    offer: DragOffer,
+    bytes: Vec<u8>,
+    _token: Option<RegistrationToken>,
+    window_id: WindowId,
+    action: DndAction,
+}
 
 /// Winit's Wayland state.
 pub struct WinitState {
@@ -69,7 +80,10 @@ pub struct WinitState {
 
     /// Data-device protocol state and live outbound file drag sources.
     pub data_device_manager_state: Option<Arc<DataDeviceManagerState>>,
+    pub data_devices: AHashMap<ObjectId, DataDevice>,
     pub file_drag_sources: Arc<Mutex<Vec<(DragSource, Arc<Vec<u8>>)>>>,
+    incoming_file_drops: Vec<IncomingFileDrop>,
+    file_drag_windows: AHashMap<ObjectId, WindowId>,
 
     /// The shm for software buffers, such as cursors.
     pub shm: Shm,
@@ -164,8 +178,12 @@ impl WinitState {
             .map(Arc::new);
 
         let mut seats = AHashMap::default();
+        let mut data_devices = AHashMap::default();
         for seat in seat_state.seats() {
             seats.insert(seat.id(), WinitSeatState::new());
+            if let Some(manager) = data_device_manager_state.as_ref() {
+                data_devices.insert(seat.id(), manager.get_data_device(queue_handle, &seat));
+            }
         }
 
         let (viewporter_state, fractional_scaling_manager) =
@@ -185,7 +203,10 @@ impl WinitState {
             output_state,
             seat_state,
             data_device_manager_state,
+            data_devices,
             file_drag_sources: Default::default(),
+            incoming_file_drops: Vec::new(),
+            file_drag_windows: AHashMap::default(),
             shm,
             custom_cursor_pool,
 
@@ -460,17 +481,273 @@ impl DataSourceHandler for WinitState {
     fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
 }
 
+fn file_paths_from_uri_list(bytes: &[u8]) -> Vec<std::path::PathBuf> {
+    bytes
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty() && !line.starts_with(b"#"))
+        .filter_map(|line| {
+            let encoded = line.strip_prefix(b"file://")?;
+            let encoded = encoded.strip_prefix(b"localhost").unwrap_or(encoded);
+            if !encoded.starts_with(b"/") {
+                return None;
+            }
+            let mut decoded = Vec::with_capacity(encoded.len());
+            let mut index = 0;
+            while index < encoded.len() {
+                if encoded[index] == b'%' {
+                    let hex = encoded.get(index + 1..index + 3)?;
+                    let value = std::str::from_utf8(hex).ok()?;
+                    decoded.push(u8::from_str_radix(value, 16).ok()?);
+                    index += 3;
+                } else {
+                    decoded.push(encoded[index]);
+                    index += 1;
+                }
+            }
+            #[cfg(unix)]
+            return Some(std::path::PathBuf::from(std::ffi::OsString::from_vec(decoded)));
+            #[cfg(not(unix))]
+            String::from_utf8(decoded).ok().map(std::path::PathBuf::from)
+        })
+        .collect()
+}
+
+fn negotiated_file_action(action: DndAction) -> FileDropAction {
+    if action.contains(DndAction::Move) {
+        FileDropAction::Move
+    } else {
+        FileDropAction::Copy
+    }
+}
+
+fn supported_file_actions(actions: DndAction) -> DndAction {
+    let actions = actions & (DndAction::Copy | DndAction::Move);
+    if actions.is_empty() {
+        DndAction::Copy | DndAction::Move
+    } else {
+        actions
+    }
+}
+
 impl DataOfferHandler for WinitState {
-    fn source_actions(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
-    fn selected_action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &mut DragOffer, _: DndAction) {}
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        offer: &mut DragOffer,
+        actions: DndAction,
+    ) {
+        let supported = supported_file_actions(actions);
+        let preferred = if supported == DndAction::Move {
+            DndAction::Move
+        } else {
+            DndAction::Copy
+        };
+        offer.set_actions(supported, preferred);
+    }
+
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        offer: &mut DragOffer,
+        action: DndAction,
+    ) {
+        if action.intersects(DndAction::Copy | DndAction::Move) {
+            self.events_sink.push_window_event(
+                WindowEvent::FileDropActionChanged(negotiated_file_action(action)),
+                crate::platform_impl::wayland::make_wid(&offer.surface),
+            );
+        }
+    }
 }
 
 impl DataDeviceHandler for WinitState {
-    fn enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64, _: &WlSurface) {}
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
-    fn motion(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice, _: f64, _: f64) {}
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+        x: f64,
+        y: f64,
+        surface: &WlSurface,
+    ) {
+        let Some(device) = self
+            .data_devices
+            .values()
+            .find(|device| device.inner() == data_device)
+        else {
+            return;
+        };
+        let Some(offer) = device.data().drag_offer() else {
+            return;
+        };
+        let accepts_uri_list = offer.with_mime_types(|types| {
+            types.iter().any(|mime| mime.eq_ignore_ascii_case("text/uri-list"))
+        });
+        if !accepts_uri_list {
+            offer.accept_mime_type(offer.serial, None);
+            return;
+        }
+        offer.accept_mime_type(offer.serial, Some("text/uri-list".into()));
+        let supported = supported_file_actions(offer.source_actions);
+        let preferred = if supported == DndAction::Move {
+            DndAction::Move
+        } else {
+            DndAction::Copy
+        };
+        offer.set_actions(supported, preferred);
+        let window_id = crate::platform_impl::wayland::make_wid(surface);
+        self.file_drag_windows.insert(data_device.id(), window_id);
+        self.events_sink.push_window_event(
+            WindowEvent::FileDropActionChanged(negotiated_file_action(preferred)),
+            window_id,
+        );
+        if let Some(window) = self.windows.get_mut().get_mut(&window_id) {
+            let scale = window.lock().unwrap().scale_factor();
+            self.events_sink.push_window_event(
+                WindowEvent::CursorMoved {
+                    device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
+                        crate::platform_impl::wayland::DeviceId,
+                    )),
+                    position: crate::dpi::LogicalPosition::new(x, y).to_physical(scale),
+                },
+                window_id,
+            );
+        }
+    }
+
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, data_device: &WlDataDevice) {
+        if let Some(window_id) = self.file_drag_windows.remove(&data_device.id()) {
+            self.events_sink
+                .push_window_event(WindowEvent::HoveredFileCancelled, window_id);
+        }
+    }
+
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+        x: f64,
+        y: f64,
+    ) {
+        let Some(device) = self
+            .data_devices
+            .values()
+            .find(|device| device.inner() == data_device)
+        else {
+            return;
+        };
+        let Some(offer) = device.data().drag_offer() else {
+            return;
+        };
+        let window_id = self
+            .file_drag_windows
+            .get(&data_device.id())
+            .copied()
+            .unwrap_or_else(|| crate::platform_impl::wayland::make_wid(&offer.surface));
+        if let Some(window) = self.windows.get_mut().get_mut(&window_id) {
+            let scale = window.lock().unwrap().scale_factor();
+            self.events_sink.push_window_event(
+                WindowEvent::CursorMoved {
+                    device_id: crate::event::DeviceId(crate::platform_impl::DeviceId::Wayland(
+                        crate::platform_impl::wayland::DeviceId,
+                    )),
+                    position: crate::dpi::LogicalPosition::new(x, y).to_physical(scale),
+                },
+                window_id,
+            );
+        }
+    }
     fn selection(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
-    fn drop_performed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataDevice) {}
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        data_device: &WlDataDevice,
+    ) {
+        let Some(device) = self
+            .data_devices
+            .values()
+            .find(|device| device.inner() == data_device)
+        else {
+            return;
+        };
+        let Some(offer) = device.data().drag_offer() else {
+            return;
+        };
+        let Ok(pipe) = offer.receive("text/uri-list".into()) else {
+            return;
+        };
+        let window_id = self
+            .file_drag_windows
+            .remove(&data_device.id())
+            .unwrap_or_else(|| crate::platform_impl::wayland::make_wid(&offer.surface));
+        let action = offer.selected_action;
+        self.incoming_file_drops.push(IncomingFileDrop {
+            offer: offer.clone(),
+            bytes: Vec::new(),
+            _token: None,
+            window_id,
+            action,
+        });
+        let tracked = offer.clone();
+        if let Ok(token) = self.loop_handle.insert_source(pipe, move |_, pipe, state| {
+            let Some(index) = state
+                .incoming_file_drops
+                .iter()
+                .position(|drop| drop.offer == tracked)
+            else {
+                return PostAction::Remove;
+            };
+            // SAFETY: calloop retains ownership of the read pipe for the callback.
+            let file = unsafe { pipe.get_mut() };
+            let mut reader = BufReader::new(file);
+            match reader.fill_buf() {
+                Ok([]) => {
+                    let drop = state.incoming_file_drops.remove(index);
+                    state.events_sink.push_window_event(
+                        WindowEvent::FileDropActionChanged(negotiated_file_action(drop.action)),
+                        drop.window_id,
+                    );
+                    for path in file_paths_from_uri_list(&drop.bytes) {
+                        state
+                            .events_sink
+                            .push_window_event(WindowEvent::HoveredFile(path.clone()), drop.window_id);
+                        state
+                            .events_sink
+                            .push_window_event(WindowEvent::DroppedFile(path), drop.window_id);
+                    }
+                    drop.offer.finish();
+                    drop.offer.destroy();
+                    PostAction::Remove
+                }
+                Ok(bytes) => {
+                    let consumed = bytes.len();
+                    state.incoming_file_drops[index].bytes.extend_from_slice(bytes);
+                    reader.consume(consumed);
+                    PostAction::Continue
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => PostAction::Continue,
+                Err(_) => {
+                    let drop = state.incoming_file_drops.remove(index);
+                    drop.offer.finish();
+                    drop.offer.destroy();
+                    PostAction::Remove
+                }
+            }
+        }) {
+            if let Some(drop) = self
+                .incoming_file_drops
+                .iter_mut()
+                .find(|drop| drop.offer == offer)
+            {
+                drop._token = Some(token);
+            }
+        }
+    }
 }
 
 // The window update coming from the compositor.
@@ -487,6 +764,38 @@ pub struct WindowCompositorUpdate {
 
     /// Close the window.
     pub close_window: bool,
+}
+
+#[cfg(test)]
+mod file_drop_tests {
+    use super::{file_paths_from_uri_list, negotiated_file_action};
+    use crate::event::FileDropAction;
+    use sctk::reexports::client::protocol::wl_data_device_manager::DndAction;
+
+    #[test]
+    fn uri_list_decodes_paths_and_rejects_remote_authorities() {
+        assert_eq!(
+            file_paths_from_uri_list(
+                b"# files\r\nfile:///tmp/a%20b.txt\r\nfile://localhost/tmp/caf%C3%A9\r\nfile://remote/tmp/no\r\n"
+            ),
+            [
+                std::path::PathBuf::from("/tmp/a b.txt"),
+                std::path::PathBuf::from("/tmp/caf\u{e9}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn negotiated_move_is_not_flattened_to_copy() {
+        assert_eq!(
+            negotiated_file_action(DndAction::Move),
+            FileDropAction::Move
+        );
+        assert_eq!(
+            negotiated_file_action(DndAction::Copy),
+            FileDropAction::Copy
+        );
+    }
 }
 
 impl WindowCompositorUpdate {

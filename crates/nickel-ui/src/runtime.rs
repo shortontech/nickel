@@ -223,7 +223,14 @@ pub enum Shortcut {
 pub enum FileDragEvent {
     Hovered(std::path::PathBuf),
     HoverCancelled,
+    ActionChanged(FileDragAction),
     Dropped(std::path::PathBuf),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileDragAction {
+    Copy,
+    Move,
 }
 
 /// An application request to begin a native outbound file drag.
@@ -2395,6 +2402,18 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 if self.host.as_mut().is_some_and(|host| {
                     host.application_mut()
                         .file_drag_event(FileDragEvent::HoverCancelled)
+                }) {
+                    self.scheduler.invalidate();
+                }
+            }
+            WindowEvent::FileDropActionChanged(action) => {
+                let action = match action {
+                    winit::event::FileDropAction::Copy => FileDragAction::Copy,
+                    winit::event::FileDropAction::Move => FileDragAction::Move,
+                };
+                if self.host.as_mut().is_some_and(|host| {
+                    host.application_mut()
+                        .file_drag_event(FileDragEvent::ActionChanged(action))
                 }) {
                     self.scheduler.invalidate();
                 }

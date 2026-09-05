@@ -179,6 +179,11 @@ pub enum WindowEvent {
     /// separately.
     DroppedFile(PathBuf),
 
+    /// The compositor-negotiated action for the current native file drag.
+    /// Emitted before [`WindowEvent::DroppedFile`] when the platform exposes
+    /// copy/move negotiation.
+    FileDropActionChanged(FileDropAction),
+
     /// A file is being hovered over the window.
     ///
     /// When the user hovers multiple files at once, this event will be emitted for each file
@@ -435,6 +440,13 @@ pub enum WindowEvent {
     /// Winit will aggregate duplicate redraw requests into a single event, to
     /// help avoid duplicating rendering work.
     RedrawRequested,
+}
+
+/// A compositor-negotiated native file drag action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDropAction {
+    Copy,
+    Move,
 }
 
 /// Identifier of an input device.
