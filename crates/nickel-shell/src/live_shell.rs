@@ -313,12 +313,7 @@ impl DesktopApplication {
                 {
                     self.context_menu = None;
                 }
-                self.icon_cache.retain(|path, _| {
-                    self.layout
-                        .items()
-                        .iter()
-                        .any(|item| &item.entry.path == path)
-                });
+                self.icon_cache.clear();
                 self.error = None;
                 true
             }

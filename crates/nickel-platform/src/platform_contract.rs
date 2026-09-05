@@ -64,8 +64,8 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
     fixture(
         PlatformFamily::Linux,
         AdapterCapability::PathIcon,
-        "freedesktop icon themes",
-        "linux::tests::icon_names_follow_path_kind",
+        "freedesktop icon themes and desktop-entry application identity",
+        "linux::tests::desktop_entry_declared_icon_precedes_application_identity",
     ),
     fixture(
         PlatformFamily::Linux,
@@ -95,7 +95,7 @@ pub const PLATFORM_CONTRACTS: &[PlatformContract] = &[
         PlatformFamily::Windows,
         AdapterCapability::PathIcon,
         "Windows Shell and shortcut icon resolver",
-        "windows::tests::utf16_helpers_terminate_and_measure_paths",
+        "windows::tests::installed_shortcut_icon_has_visible_pixels",
     ),
     fixture(
         PlatformFamily::Windows,

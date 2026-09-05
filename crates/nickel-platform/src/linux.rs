@@ -2,10 +2,13 @@ use std::{
     collections::HashMap,
     env, fs,
     hash::{DefaultHasher, Hash, Hasher},
+    io::BufReader,
     path::{Component, Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     thread,
 };
+
+use freedesktop_desktop_entry::DesktopEntry;
 
 use image::RgbaImage;
 
@@ -212,8 +215,27 @@ pub fn path_icon_with_theme_at_size(
     theme: Option<&str>,
     physical_size: u32,
 ) -> Option<RgbaImage> {
-    let name = icon_name(path);
-    let theme = theme.filter(|theme| !theme.trim().is_empty())?;
+    let physical_size = physical_size.clamp(16, 512);
+    if let Some(icon) = desktop_entry_icon_with(
+        path,
+        |icon_path| load_icon(icon_path, physical_size),
+        |name| themed_icon(name, theme, physical_size),
+    ) {
+        return Some(icon);
+    }
+    themed_icon(icon_name(path), theme, physical_size)
+}
+
+fn themed_icon(name: &str, theme: Option<&str>, physical_size: u32) -> Option<RgbaImage> {
+    let system_theme;
+    let theme = match theme {
+        Some(theme) if !theme.trim().is_empty() => theme,
+        Some(_) => return None,
+        None => {
+            system_theme = system_icon_theme();
+            &system_theme
+        }
+    };
     let mut components = Path::new(theme).components();
     if !matches!(components.next(), Some(Component::Normal(_)))
         || components.next().is_some()
@@ -224,11 +246,60 @@ pub fn path_icon_with_theme_at_size(
         return None;
     }
     freedesktop_icons::lookup(name)
-        .with_size(physical_size.max(1) as u16)
+        .with_size(physical_size as u16)
         .with_theme(theme)
         .with_cache()
         .find()
-        .and_then(|path| load_icon(&path, physical_size.max(1)))
+        .and_then(|path| load_icon(&path, physical_size))
+}
+
+const MAX_DESKTOP_ENTRY_BYTES: u64 = 256 * 1024;
+const MAX_ICON_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_ICON_DECODE_BYTES: u64 = 64 * 1024 * 1024;
+
+fn desktop_entry_icon_with<T>(
+    path: &Path,
+    mut absolute: impl FnMut(&Path) -> Option<T>,
+    mut themed: impl FnMut(&str) -> Option<T>,
+) -> Option<T> {
+    if !path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+        || fs::metadata(path).ok()?.len() > MAX_DESKTOP_ENTRY_BYTES
+    {
+        return None;
+    }
+    let contents = fs::read_to_string(path).ok()?;
+    let entry = DesktopEntry::from_str(path.to_path_buf(), &contents, None::<&[&str]>).ok()?;
+    if entry.type_() != Some("Application") {
+        return None;
+    }
+    if let Some(icon) = entry.icon().map(str::trim).filter(|icon| !icon.is_empty()) {
+        let icon_path = Path::new(icon);
+        if icon_path.is_absolute() {
+            if let Some(image) = absolute(icon_path) {
+                return Some(image);
+            }
+        } else if safe_icon_name(icon)
+            && let Some(image) = themed(icon)
+        {
+            return Some(image);
+        }
+    }
+    path.file_stem()
+        .and_then(|identity| identity.to_str())
+        .filter(|identity| safe_icon_name(identity))
+        .and_then(themed)
+}
+
+fn safe_icon_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 255
+        && matches!(
+            Path::new(name).components().next(),
+            Some(Component::Normal(_))
+        )
+        && Path::new(name).components().nth(1).is_none()
 }
 
 pub fn installed_icon_themes() -> Vec<String> {
@@ -354,6 +425,9 @@ fn icon_name(path: &Path) -> &'static str {
 }
 
 fn load_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
+    if fs::metadata(path).ok()?.len() > MAX_ICON_FILE_BYTES {
+        return None;
+    }
     if path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
@@ -373,7 +447,14 @@ fn load_icon(path: &Path, physical_size: u32) -> Option<RgbaImage> {
         );
         RgbaImage::from_raw(width, height, pixmap.data().to_vec())
     } else {
-        image::open(path).ok().map(image::DynamicImage::into_rgba8)
+        let file = fs::File::open(path).ok()?;
+        let mut reader = image::ImageReader::new(BufReader::new(file))
+            .with_guessed_format()
+            .ok()?;
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(MAX_ICON_DECODE_BYTES);
+        reader.limits(limits);
+        reader.decode().ok().map(image::DynamicImage::into_rgba8)
     }
 }
 
@@ -382,9 +463,98 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        decode_file_uri, icon_name, installed_icon_themes_in, load_icon, path_icon_theme_revision,
-        path_icon_with_theme, value_in_section,
+        decode_file_uri, desktop_entry_icon_with, icon_name, installed_icon_themes_in, load_icon,
+        path_icon_theme_revision, path_icon_with_theme, value_in_section,
     };
+
+    #[test]
+    fn desktop_entry_declared_icon_precedes_application_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let entry = directory.path().join("org.example.Editor.desktop");
+        std::fs::write(
+            &entry,
+            "[Desktop Entry]\nType=Application\nName=Editor\nIcon=declared-editor\nExec=editor\n",
+        )
+        .unwrap();
+        let mut requested = Vec::new();
+        let resolved = desktop_entry_icon_with(
+            &entry,
+            |_| None,
+            |name| {
+                requested.push(name.to_owned());
+                Some(name.to_owned())
+            },
+        );
+
+        assert_eq!(resolved.as_deref(), Some("declared-editor"));
+        assert_eq!(requested, ["declared-editor"]);
+    }
+
+    #[test]
+    fn desktop_entry_absolute_svg_resolves_through_public_adapter() {
+        let directory = tempfile::tempdir().unwrap();
+        let icon = directory.path().join("editor.svg");
+        std::fs::write(
+            &icon,
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><rect width="32" height="32" fill="#25aee4"/></svg>"##,
+        )
+        .unwrap();
+        let entry = directory.path().join("org.example.Editor.desktop");
+        std::fs::write(
+            &entry,
+            format!(
+                "[Desktop Entry]\nType=Application\nName=Editor\nIcon={}\nExec=editor\n",
+                icon.display()
+            ),
+        )
+        .unwrap();
+
+        let resolved = super::path_icon_with_theme_at_size(&entry, None, 48)
+            .expect("the declared absolute icon should resolve");
+        assert_eq!((resolved.width(), resolved.height()), (48, 48));
+        assert!(resolved.pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn desktop_entry_falls_back_to_safe_application_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let entry = directory.path().join("org.example.Editor.desktop");
+        std::fs::write(
+            &entry,
+            "[Desktop Entry]\nType=Application\nName=Editor\nIcon=../untrusted/icon\nExec=editor\n",
+        )
+        .unwrap();
+        let resolved = desktop_entry_icon_with(&entry, |_| None, |name| Some(name.to_owned()));
+
+        assert_eq!(resolved.as_deref(), Some("org.example.Editor"));
+    }
+
+    #[test]
+    fn malformed_and_oversized_desktop_entries_do_not_reach_icon_loaders() {
+        let directory = tempfile::tempdir().unwrap();
+        let malformed = directory.path().join("malformed.desktop");
+        std::fs::write(&malformed, "not a desktop entry").unwrap();
+        assert!(
+            desktop_entry_icon_with::<()>(
+                &malformed,
+                |_| panic!("malformed entries must not load absolute icons"),
+                |_| panic!("malformed entries must not search icon themes"),
+            )
+            .is_none()
+        );
+
+        let oversized = directory.path().join("oversized.desktop");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(super::MAX_DESKTOP_ENTRY_BYTES + 1).unwrap();
+        assert!(
+            desktop_entry_icon_with::<()>(
+                &oversized,
+                |_| panic!("oversized entries must not load absolute icons"),
+                |_| panic!("oversized entries must not search icon themes"),
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn portal_file_uris_preserve_unix_paths_and_percent_escapes() {
