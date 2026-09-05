@@ -26,15 +26,13 @@ pub fn validate_str(input: &str) -> Result<ReplayScenario, FixtureError> {
     let value: Value = serde_json::from_str(input)?;
     scan(&value, "$")?;
     let scenario: ReplayScenario = serde_json::from_value(value)?;
-    let mut expected = 1;
-    for event in &scenario.events {
+    for (expected, event) in (1..).zip(&scenario.events) {
         if event.sequence != expected {
             return Err(FixtureError::Invalid(format!(
                 "event sequence {} should be {expected}",
                 event.sequence
             )));
         }
-        expected += 1;
     }
     Ok(scenario)
 }
