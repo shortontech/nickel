@@ -67,6 +67,26 @@ fn adjacent_tab_index(active: usize, count: usize, reverse: bool) -> Option<usiz
     })
 }
 
+fn cancel_transient_input_on_focus_loss(app: &mut FileApp) -> bool {
+    let changed = app.rename_editor.is_some()
+        || app.control_down
+        || app.shift_down
+        || app.resizing_sidebar
+        || app.resizing_details_column.is_some()
+        || app.selection_drag.is_some()
+        || app.primary_down;
+    // Inline rename never commits implicitly. Losing the parent window cancels
+    // the edit, avoiding a partial or ambiguous filesystem write.
+    app.rename_editor = None;
+    app.control_down = false;
+    app.shift_down = false;
+    app.resizing_sidebar = false;
+    app.resizing_details_column = None;
+    app.selection_drag = None;
+    app.primary_down = false;
+    changed
+}
+
 impl Default for FileHostAdapter {
     fn default() -> Self {
         Self {
@@ -296,14 +316,25 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     changed = true;
                 }
             }
-            InputEvent::FocusLost { .. } | InputEvent::DeviceRemoved { .. } => {
+            InputEvent::FocusLost { .. } => {
                 let app = host.application_mut();
+                changed |= cancel_transient_input_on_focus_loss(app);
+            }
+            InputEvent::DeviceRemoved { .. } => {
+                let app = host.application_mut();
+                let had_input_state = app.control_down
+                    || app.shift_down
+                    || app.resizing_sidebar
+                    || app.resizing_details_column.is_some()
+                    || app.selection_drag.is_some()
+                    || app.primary_down;
                 app.control_down = false;
                 app.shift_down = false;
                 app.resizing_sidebar = false;
                 app.resizing_details_column = None;
                 app.selection_drag = None;
                 app.primary_down = false;
+                changed |= had_input_state;
             }
             InputEvent::FocusGained { .. } => {
                 host.application_mut().refresh_icons();
@@ -381,9 +412,12 @@ impl HostAdapter<FileApp> for FileHostAdapter {
 #[cfg(test)]
 mod tests {
     use super::{
-        NavigationShortcut, adjacent_tab_index, navigation_shortcut, selection_command_modifier,
+        NavigationShortcut, adjacent_tab_index, cancel_transient_input_on_focus_loss,
+        navigation_shortcut, selection_command_modifier,
     };
+    use crate::{FileApp, FileMessage};
     use nickel_input::{KeyCode, Modifier, ModifierState};
+    use nickel_ui::Application;
 
     #[test]
     fn conventional_alt_navigation_shortcuts_precede_item_direction() {
@@ -423,5 +457,23 @@ mod tests {
             let state = ModifierState::from_sides([modifier]);
             assert!(!selection_command_modifier(&state));
         }
+    }
+
+    #[test]
+    fn focus_loss_cancels_rename_without_committing_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        std::fs::write(&path, b"report").unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+        app.selected = Some(0);
+        app.selected_entries.insert(0);
+        app.update(FileMessage::BeginRename);
+        app.update(FileMessage::RenameChanged("renamed.txt".into()));
+
+        assert!(cancel_transient_input_on_focus_loss(&mut app));
+        assert!(app.rename_editor.is_none());
+        assert!(path.exists());
+        assert!(!directory.path().join("renamed.txt").exists());
+        assert!(!cancel_transient_input_on_focus_loss(&mut app));
     }
 }

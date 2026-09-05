@@ -366,8 +366,27 @@ pub fn execute_local_transfer(
             break;
         }
         let Some(name) = source.path.file_name() else {
+            report.failed.push((
+                source.path.clone(),
+                "source does not have a transferable file name".into(),
+            ));
+            progress(index + 1, sources.len());
             continue;
         };
+        // Local selections carry a provider-owned filesystem identity. Check it
+        // immediately before mutation so a removed/replaced path cannot redirect
+        // a stale copy, move, paste, or drag transaction. Native clipboard/drag
+        // offers use their adapter's synthetic authority and are revalidated by
+        // the filesystem operation itself.
+        if source.provider == "local"
+            && crate::file_identity(&source.path).ok() != Some(source.identity)
+        {
+            report
+                .failed
+                .push((source.path.clone(), "source changed or disappeared".into()));
+            progress(index + 1, sources.len());
+            continue;
+        }
         let mut target = destination.join(name);
         if target.exists() {
             match conflicts {
@@ -544,7 +563,7 @@ mod tests {
     fn source(path: &str, provider: &str, removable: bool) -> TransferSource {
         TransferSource {
             provider: provider.into(),
-            identity: FileIdentity(1, 2),
+            identity: crate::file_identity(Path::new(path)).unwrap_or(FileIdentity(1, 2)),
             path: path.into(),
             capabilities: ItemCapabilities {
                 readable: true,
@@ -757,6 +776,35 @@ mod tests {
         assert!(report.affected.is_empty());
         assert!(report.failed.is_empty());
         assert!(!destination.path().join("report (3).txt").exists());
+    }
+
+    #[test]
+    fn local_transfer_rejects_a_replaced_source_identity() {
+        let source_dir = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let path = source_dir.path().join("report.txt");
+        std::fs::write(&path, b"original").unwrap();
+        let source = source(path.to_str().unwrap(), "local", true);
+        std::fs::rename(&path, source_dir.path().join("old-report.txt")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        let effect = plan_paste(
+            &ClipboardOffer::new(TransferIntent::Move, vec![source]).unwrap(),
+            "local",
+            destination.path(),
+            true,
+            ConflictPolicy::Ask,
+        )
+        .unwrap();
+
+        let report = execute_local_transfer(
+            &effect,
+            &std::sync::atomic::AtomicBool::new(false),
+            |_, _| {},
+        );
+        assert!(report.affected.is_empty());
+        assert_eq!(report.failed.len(), 1);
+        assert!(path.exists(), "replacement must never be moved");
+        assert!(!destination.path().join("report.txt").exists());
     }
 
     #[test]

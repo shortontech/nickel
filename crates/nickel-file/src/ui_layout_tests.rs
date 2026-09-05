@@ -154,6 +154,7 @@ fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
     app.primary_down = true;
     app.last_click = Some(FileClick {
         path: expected[1].clone(),
+        identity: app.browser.identity_at(3),
         position: nickel_ui::Point { x: 0.0, y: 0.0 },
         when: std::time::Instant::now(),
     });
@@ -2007,6 +2008,23 @@ fn double_click_requires_stable_path_time_and_pointer_distance() {
         activated.status,
         format!("Opening {}…", directory.path().join("alpha").display())
     );
+}
+
+#[test]
+fn replacement_at_the_same_path_cannot_inherit_a_double_click() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("report.txt");
+    std::fs::write(&path, b"first").unwrap();
+    let mut app = FileApp::new(directory.path().to_path_buf());
+    app.cursor = Point { x: 80.0, y: 80.0 };
+    app.update_message(FileMessage::Entry(0));
+
+    std::fs::rename(&path, directory.path().join("old-report.txt")).unwrap();
+    std::fs::write(&path, b"replacement").unwrap();
+    app.update_message(FileMessage::Entry(0));
+
+    assert!(app.activation_rx.is_none());
+    assert_eq!(app.status, "");
 }
 
 #[test]

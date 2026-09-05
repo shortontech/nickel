@@ -64,6 +64,7 @@ type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
 #[derive(Clone, Debug)]
 pub(crate) struct FileClick {
     path: PathBuf,
+    identity: Option<crate::FileIdentity>,
     position: Point,
     when: Instant,
 }
@@ -2547,9 +2548,22 @@ impl FileApp {
                     .entries()
                     .get(index)
                     .map(|entry| entry.path.clone());
+                // Revalidate at the input boundary: a native watch may not have
+                // reconciled a remove-and-recreate burst before the second press.
+                let entry_identity = entry_path
+                    .as_deref()
+                    .and_then(|path| crate::file_identity(path).ok())
+                    .or_else(|| self.browser.identity_at(index));
                 let activate = entry_path.as_ref().is_some_and(|entry_path| {
                     self.last_click.as_ref().is_some_and(|previous| {
                         previous.path == *entry_path
+                            // A path can be removed and replaced between presses. Stable
+                            // provider identity prevents the replacement from inheriting a
+                            // click transaction. Fixtures/providers without identities retain
+                            // the conservative path contract.
+                            && (entry_identity.is_none()
+                                || previous.identity.is_none()
+                                || previous.identity == entry_identity)
                             && now.duration_since(previous.when) <= DOUBLE_CLICK_INTERVAL
                             && (self.cursor.x - previous.position.x).abs() <= DOUBLE_CLICK_DISTANCE
                             && (self.cursor.y - previous.position.y).abs() <= DOUBLE_CLICK_DISTANCE
@@ -2573,6 +2587,7 @@ impl FileApp {
                 }
                 self.last_click = entry_path.map(|path| FileClick {
                     path,
+                    identity: entry_identity,
                     position: self.cursor,
                     when: now,
                 });
@@ -2771,9 +2786,14 @@ impl FileApp {
             return;
         }
         let total = offer.sources.len();
-        let Ok(effect) =
-            crate::operations::plan_paste(&offer, "local", &destination, true, ConflictPolicy::Ask)
-        else {
+        let writable = crate::directory_is_writable(&destination);
+        let Ok(effect) = crate::operations::plan_paste(
+            &offer,
+            "local",
+            &destination,
+            writable,
+            ConflictPolicy::Ask,
+        ) else {
             self.status = "Paste target is not valid".into();
             return;
         };
