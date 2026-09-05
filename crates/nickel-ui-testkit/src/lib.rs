@@ -1332,6 +1332,7 @@ pub fn audit_reachability<A: Application>(
         .iter()
         .filter(|node| {
             node.enabled
+                && node.role != Some(SemanticRole::ScrollBar)
                 && node.actions.iter().any(|action| {
                     action_supported_by_modality(*action, ReachabilityModality::Controller)
                 })
@@ -1358,27 +1359,37 @@ pub fn audit_reachability<A: Application>(
                 let selector = Selector::id(node.id.clone());
                 let before = semantic_digest(&scenario.semantic_nodes());
                 let result = if *modality == ReachabilityModality::Controller {
-                    controller_routes
-                        .as_ref()
-                        .expect("controller routes exist when modality is enabled")
-                        .routes
-                        .get(node.id.as_str())
-                        .ok_or_else(|| {
-                            controller_routes
-                                .as_ref()
-                                .and_then(|routes| routes.failure.clone())
-                                .unwrap_or_else(|| {
-                                    format!("controller BFS did not reach {}", node.id.as_str())
-                                })
-                        })
-                        .and_then(|prefix| {
-                            replay_controller_route(&factory, prefix, node, *action).map(
-                                |(reached, steps)| {
-                                    scenario = reached;
-                                    steps
-                                },
-                            )
-                        })
+                    if node.role == Some(SemanticRole::ScrollBar)
+                        && matches!(action, ActionKind::Increment | ActionKind::Decrement)
+                    {
+                        route_controller_scroll(&factory, node, *action, policy.maximum_path_length)
+                            .map(|(reached, steps)| {
+                                scenario = reached;
+                                steps
+                            })
+                    } else {
+                        controller_routes
+                            .as_ref()
+                            .expect("controller routes exist when modality is enabled")
+                            .routes
+                            .get(node.id.as_str())
+                            .ok_or_else(|| {
+                                controller_routes
+                                    .as_ref()
+                                    .and_then(|routes| routes.failure.clone())
+                                    .unwrap_or_else(|| {
+                                        format!("controller BFS did not reach {}", node.id.as_str())
+                                    })
+                            })
+                            .and_then(|prefix| {
+                                replay_controller_route(&factory, prefix, node, *action).map(
+                                    |(reached, steps)| {
+                                        scenario = reached;
+                                        steps
+                                    },
+                                )
+                            })
+                    }
                 } else {
                     route_action(
                         &mut scenario,
@@ -3896,6 +3907,68 @@ fn replay_controller_route<A: Application>(
     Ok((scenario, trace))
 }
 
+fn route_controller_scroll<A: Application>(
+    factory: &impl Fn() -> Scenario<A>,
+    target: &SemanticNodeSnapshot,
+    action: ActionKind,
+    maximum_path_length: usize,
+) -> Result<(Scenario<A>, Vec<String>), String> {
+    let initial = match target.value {
+        Some(SemanticValueSnapshot::Number { value, .. }) => value,
+        _ => return Err("controller scrollbar route requires a numeric semantic value".into()),
+    };
+    let moved_in_direction = |value: f64| match action {
+        ActionKind::Increment => value > initial,
+        ActionKind::Decrement => value < initial,
+        _ => false,
+    };
+    let mut scenario = factory();
+    let mut steps = Vec::new();
+    for index in 0..maximum_path_length {
+        scenario.host.handle_event(UiEvent::ControllerNext);
+        let inspection = scenario.host.inspect();
+        steps.push(format!(
+            "controller_Next:{}@{}",
+            inspection
+                .controller_target
+                .as_ref()
+                .map_or("none", UiId::as_str),
+            inspection
+                .controller_scope
+                .as_ref()
+                .map_or("root", UiId::as_str),
+        ));
+        let current = scenario
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id == target.id)
+            .and_then(|node| match node.value {
+                Some(SemanticValueSnapshot::Number { value, .. }) => Some(value),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                format!(
+                    "controller navigation removed scrollbar {}",
+                    target.id.as_str()
+                )
+            })?;
+        if moved_in_direction(current) {
+            steps.push(format!(
+                "controller:{action:?}:{}:{initial}->{current}",
+                target.id.as_str()
+            ));
+            return Ok((scenario, steps));
+        }
+        if index + 1 == maximum_path_length {
+            break;
+        }
+    }
+    Err(format!(
+        "controller navigation did not {action:?} scrollbar {} within {maximum_path_length} steps",
+        target.id.as_str()
+    ))
+}
+
 fn route_action<A: Application>(
     scenario: &mut Scenario<A>,
     selector: &Selector,
@@ -4625,6 +4698,59 @@ mod tests {
         assert_eq!(
             scenario.host().inspect().controller_target,
             Some(UiId::from("root/increment"))
+        );
+    }
+
+    #[test]
+    fn controller_reachability_proves_scroll_through_production_navigation() {
+        #[derive(Default)]
+        struct ScrollFixture {
+            activations: usize,
+        }
+
+        impl Application for ScrollFixture {
+            type Message = Message;
+
+            fn update(&mut self, message: Self::Message) {
+                if message == Message::Increment {
+                    self.activations += 1;
+                }
+            }
+
+            fn view(
+                &self,
+                _context: nickel_ui::ViewContext,
+            ) -> impl nickel_ui::View<Self::Message> {
+                nickel_ui::VerticalScroll::new(Message::Increment, 0.0)
+                    .on_scroll(|_| Message::Increment)
+                    .child(
+                        nickel_ui::Column::new()
+                            .child(Button::new(Message::Increment, "First").id("first"))
+                            .child(Spacer::vertical(400.0))
+                            .child(Button::new(Message::Increment, "Last").id("last")),
+                    )
+            }
+        }
+
+        let policy = ReachabilityPolicy {
+            modalities: [ReachabilityModality::Controller].into_iter().collect(),
+            ..ReachabilityPolicy::default()
+        };
+        let report = audit_reachability(
+            || Scenario::new(ScrollFixture::default(), 200, 100),
+            &policy,
+        );
+        let scroll = report
+            .paths
+            .iter()
+            .find(|path| path.target == "root" && path.action == "Increment")
+            .expect("scroll increment is audited");
+        assert!(scroll.reached, "{:?}", report.issues);
+        assert!(
+            scroll
+                .steps
+                .iter()
+                .any(|step| step.contains("controller:Increment:root"))
         );
     }
 
