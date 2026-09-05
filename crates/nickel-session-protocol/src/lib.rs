@@ -110,6 +110,7 @@ pub enum Command {
         layout: OutputLayout,
     },
     CreateWorkspace,
+    ToggleShowDesktop,
     RemoveWorkspace {
         workspace: WorkspaceId,
     },
@@ -917,6 +918,8 @@ pub enum WindowAction {
     Minimize,
     MaximizeRestore,
     FullscreenRestore,
+    SnapLeading,
+    SnapTrailing,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

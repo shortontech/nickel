@@ -1,21 +1,23 @@
 use nickel_core::theme::ThemePalette;
 use nickel_ui::{
     AnyView, Application, Button, Column, Container, EffectEvidence, Insets, Row, SemanticRole,
-    Shortcut, Text, TextAlign, UiHost, ViewContext,
+    Shortcut, Text, TextAlign, UiHost, VerticalScroll, ViewContext,
 };
 
 use crate::notification::DesktopNotification;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum NotificationMessage {
     Invoke(String),
     Dismiss,
+    Scroll(f32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotificationEffect {
     Invoke { notification_id: u32, key: String },
     Dismiss { notification_id: u32 },
+    CloseHistory,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -25,6 +27,9 @@ pub enum NotificationFailure {
 
 pub struct NotificationApp {
     notification: Option<DesktopNotification>,
+    history: Vec<DesktopNotification>,
+    history_mode: bool,
+    history_offset: f32,
     palette: ThemePalette,
     effects: Vec<NotificationEffect>,
     effect_evidence: Vec<EffectEvidence>,
@@ -36,6 +41,9 @@ impl NotificationApp {
     pub fn new(palette: ThemePalette) -> Self {
         Self {
             notification: None,
+            history: Vec::new(),
+            history_mode: false,
+            history_offset: 0.0,
             palette,
             effects: Vec::new(),
             effect_evidence: Vec::new(),
@@ -48,6 +56,17 @@ impl NotificationApp {
         if self.notification.as_ref() != notification || self.palette != palette {
             self.notification = notification.cloned();
             self.palette = palette;
+            self.dirty = true;
+        }
+        self.history_mode = false;
+    }
+
+    pub fn sync_history(&mut self, history: &[DesktopNotification], palette: ThemePalette) {
+        if self.history != history || self.palette != palette || !self.history_mode {
+            self.history = history.to_vec();
+            self.notification = history.first().cloned();
+            self.palette = palette;
+            self.history_mode = true;
             self.dirty = true;
         }
     }
@@ -81,6 +100,10 @@ impl Application for NotificationApp {
             return;
         };
         match message {
+            NotificationMessage::Scroll(offset) => {
+                self.history_offset = offset.max(0.0);
+                self.dirty = true;
+            }
             NotificationMessage::Invoke(key) => {
                 if notification.actions.iter().any(|action| action.key == key) {
                     self.effects.push(NotificationEffect::Invoke {
@@ -107,7 +130,10 @@ impl Application for NotificationApp {
     }
 
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        if shortcut == Shortcut::Escape && self.notification.is_some() {
+        if shortcut == Shortcut::Escape && self.history_mode {
+            self.effects.push(NotificationEffect::CloseHistory);
+            true
+        } else if shortcut == Shortcut::Escape && self.notification.is_some() {
             self.request_dismiss();
             true
         } else {
@@ -120,6 +146,51 @@ impl Application for NotificationApp {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        if self.history_mode {
+            let entries = self.history.iter().map(|notification| {
+                let heading = if notification.summary.trim().is_empty() {
+                    &notification.app_name
+                } else {
+                    &notification.summary
+                };
+                Container::new()
+                    .padding(Insets::all(10.0))
+                    .background(self.palette.surface)
+                    .radius(8.0)
+                    .child(
+                        Column::new()
+                            .gap(4.0)
+                            .child(Text::new(heading).color(self.palette.text))
+                            .child(Text::new(&notification.body).color(self.palette.muted)),
+                    )
+            });
+            return AnyView::new(
+                Container::new()
+                    .id("notification-history")
+                    .semantic_role(SemanticRole::Dialog)
+                    .accessibility_label("Notification history")
+                    .width(context.viewport.size.width)
+                    .height(context.viewport.size.height)
+                    .padding(Insets::all(12.0))
+                    .background(self.palette.panel)
+                    .border(self.palette.surface_hover, 1.0)
+                    .radius(16.0)
+                    .child(
+                        VerticalScroll::new(
+                            NotificationMessage::Scroll(self.history_offset),
+                            self.history_offset,
+                        )
+                        .on_scroll(NotificationMessage::Scroll)
+                        .height((context.viewport.size.height - 24.0).max(1.0))
+                        .child(
+                            Column::new()
+                                .gap(8.0)
+                                .child(Text::new("Notifications").color(self.palette.text))
+                                .children(entries),
+                        ),
+                    ),
+            );
+        }
         let Some(notification) = &self.notification else {
             return AnyView::new(Container::new());
         };

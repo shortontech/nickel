@@ -486,6 +486,9 @@ pub struct NickelSession {
     displaced_output_windows: HashMap<String, Vec<DisplacedWindow>>,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
+    shortcut_desktop_windows: Vec<WindowId>,
+    shortcut_desktop_focus: Option<WindowId>,
+    shortcut_snap_restore: HashMap<WindowId, smithay::utils::Rectangle<i32, Logical>>,
     maximized_restore: HashMap<ObjectId, Geometry>,
     x11_maximized_restore: HashMap<u32, smithay::utils::Rectangle<i32, Logical>>,
     fullscreen_restore: HashMap<ObjectId, Geometry>,
@@ -1490,6 +1493,9 @@ impl NickelSession {
             displaced_output_windows: HashMap::new(),
             preview_highlight: None,
             minimized_windows: HashMap::new(),
+            shortcut_desktop_windows: Vec::new(),
+            shortcut_desktop_focus: None,
+            shortcut_snap_restore: HashMap::new(),
             maximized_restore: HashMap::new(),
             x11_maximized_restore: HashMap::new(),
             fullscreen_restore: HashMap::new(),
@@ -2038,6 +2044,7 @@ impl NickelSession {
                 self.notify_workspace_state();
                 return ServerMessage::Workspaces(self.protocol_workspaces());
             }
+            SessionCommand::ToggleShowDesktop => self.toggle_show_desktop(),
             SessionCommand::RemoveWorkspace { workspace } => {
                 let transition = match self.workspaces.remove(WorkspaceId(workspace.0)) {
                     Ok(transition) => transition,
@@ -2101,6 +2108,14 @@ impl NickelSession {
                     ProtocolWindowAction::Minimize => self.minimize_window(id),
                     ProtocolWindowAction::MaximizeRestore => self.maximize_window(id),
                     ProtocolWindowAction::FullscreenRestore => self.toggle_fullscreen_window(id),
+                    ProtocolWindowAction::SnapLeading => {
+                        self.activate_window(id);
+                        self.snap_active_window(true);
+                    }
+                    ProtocolWindowAction::SnapTrailing => {
+                        self.activate_window(id);
+                        self.snap_active_window(false);
+                    }
                 }
             }
             SessionCommand::TestInput { input } => {
@@ -3267,6 +3282,144 @@ impl NickelSession {
             .map(|window| window.id)
         {
             self.minimize_window(id);
+        }
+    }
+
+    pub fn toggle_show_desktop(&mut self) {
+        if self.locked {
+            return;
+        }
+        if self.shortcut_desktop_windows.is_empty() {
+            let ids = self
+                .windows
+                .snapshot()
+                .into_iter()
+                .filter(|window| {
+                    !self.minimized_windows.contains_key(&window.id)
+                        && self.workspaces.is_visible(&window.id)
+                })
+                .map(|window| window.id)
+                .collect::<Vec<_>>();
+            self.shortcut_desktop_focus = self
+                .windows
+                .snapshot()
+                .into_iter()
+                .find(|window| window.active)
+                .map(|window| window.id);
+            for id in ids.iter().copied() {
+                self.minimize_window(id);
+            }
+            self.shortcut_desktop_windows = ids;
+        } else {
+            let ids = std::mem::take(&mut self.shortcut_desktop_windows);
+            let focus = self.shortcut_desktop_focus.take();
+            for id in ids.iter().copied().filter(|id| Some(*id) != focus) {
+                if self.window_exists(nickel_session_protocol::WindowId(id.0)) {
+                    self.activate_window(id);
+                }
+            }
+            if let Some(id) = focus.filter(|id| ids.contains(id))
+                && self.window_exists(nickel_session_protocol::WindowId(id.0))
+            {
+                self.activate_window(id);
+            }
+        }
+    }
+
+    pub fn snap_active_window(&mut self, leading: bool) {
+        let Some(id) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .map(|window| window.id)
+        else {
+            return;
+        };
+        if self
+            .protocol_windows()
+            .into_iter()
+            .any(|candidate| candidate.id.0 == id.0 && candidate.fullscreen)
+        {
+            return;
+        }
+        let Some(window) = self.window_for_registry_id(id) else {
+            return;
+        };
+        let Some(output) = self.space.outputs_for_element(&window).into_iter().next() else {
+            return;
+        };
+        let Some(frame) = self.space.element_geometry(&window) else {
+            return;
+        };
+        let output = self.space.output_geometry(&output).unwrap_or(frame);
+        let area = self.work_area_for_output(Geometry {
+            x: output.loc.x,
+            y: output.loc.y,
+            width: output.size.w,
+            height: output.size.h,
+        });
+        self.shortcut_snap_restore.entry(id).or_insert(frame);
+        let width = (area.width / 2).max(1);
+        let leading = if locale_is_rtl() { !leading } else { leading };
+        let x = if leading {
+            area.x
+        } else {
+            area.x + area.width - width
+        };
+        let target =
+            smithay::utils::Rectangle::new((x, area.y).into(), (width, area.height).into());
+        if let Some(surface) = window.x11_surface() {
+            let _ = surface.configure(target);
+        }
+        self.map_compositor_moved_window(window, target.loc, true);
+        if let Some(surface) = self
+            .window_for_registry_id(id)
+            .and_then(|window| window.toplevel().cloned())
+        {
+            surface.with_pending_state(|state| state.size = Some((width, area.height).into()));
+            surface.send_pending_configure();
+        }
+        self.notify_protocol_snapshot();
+    }
+
+    pub fn restore_or_minimize_active_window(&mut self) {
+        let Some(snapshot) = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .find(|window| window.active)
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(restore) = self.shortcut_snap_restore.remove(&snapshot.id) {
+            let Some(window) = self.window_for_registry_id(snapshot.id) else {
+                return;
+            };
+            let location = self
+                .output_geometry_for_window(&window)
+                .map(|output| {
+                    clamp_window_location(
+                        restore.loc,
+                        restore.size,
+                        self.work_area_for_output(output),
+                    )
+                })
+                .unwrap_or(restore.loc);
+            self.map_compositor_moved_window(window.clone(), location, true);
+            if let Some(surface) = window.toplevel() {
+                surface.with_pending_state(|state| state.size = Some(restore.size));
+                surface.send_pending_configure();
+            }
+        } else if self
+            .protocol_windows()
+            .into_iter()
+            .any(|window| window.id.0 == snapshot.id.0 && window.maximized)
+        {
+            self.maximize_window(snapshot.id);
+        } else {
+            self.minimize_window(snapshot.id);
         }
     }
 
@@ -5875,6 +6028,20 @@ impl NickelSession {
                     })
             })
     }
+}
+
+fn locale_is_rtl() -> bool {
+    std::env::var("LC_ALL")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("LANG").ok())
+        .is_some_and(|locale| {
+            ["ar", "fa", "he", "ur"].iter().any(|language| {
+                locale == *language
+                    || locale.starts_with(&format!("{language}_"))
+                    || locale.starts_with(&format!("{language}-"))
+            })
+        })
 }
 
 fn maximized_content_geometry(frame: Geometry, server_decorated: bool) -> Geometry {

@@ -61,6 +61,8 @@ pub enum MenuAction {
     MaximizeRestore(WindowId),
     Minimize(WindowId),
     FullscreenRestore(WindowId),
+    SnapLeading(WindowId),
+    SnapTrailing(WindowId),
     MoveToWorkspace(WindowId, u64),
     MoveToDisplay(WindowId, String),
     NewWindow(ApplicationId),
@@ -261,6 +263,10 @@ pub(crate) fn window_menu_entries(
             .into(),
             MenuAction::MaximizeRestore(id),
         ));
+    }
+    if capabilities.maximize && !window.state.fullscreen {
+        entries.push(("Snap left".into(), MenuAction::SnapLeading(id)));
+        entries.push(("Snap right".into(), MenuAction::SnapTrailing(id)));
     }
     if capabilities.fullscreen {
         entries.push((

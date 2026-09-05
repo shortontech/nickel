@@ -388,17 +388,18 @@ impl NickelSession {
                                 Some(HotkeyAction::RemoveActiveWorkspace) => session.remove_active_workspace(),
                                 Some(HotkeyAction::CloseActiveWindow) => session.close_active_window(),
                                 Some(HotkeyAction::MaximizeActiveWindow) => session.maximize_active_window(),
-                                Some(HotkeyAction::RestoreOrMinimizeActiveWindow) => session.minimize_active_window(),
+                                Some(HotkeyAction::RestoreOrMinimizeActiveWindow) => session.restore_or_minimize_active_window(),
                                 Some(HotkeyAction::MoveWindowToPreviousOutput) => session.move_active_window_to_output_direction(true),
                                 Some(HotkeyAction::MoveWindowToNextOutput) => session.move_active_window_to_output_direction(false),
                                 Some(HotkeyAction::OpenFiles) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::OpenFiles),
                                 Some(HotkeyAction::OpenSettings) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::OpenSettings),
                                 Some(HotkeyAction::ShowControlCenter) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter),
                                 Some(HotkeyAction::ShowNotifications) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowNotifications),
-                                Some(HotkeyAction::ShowDesktop) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowDesktop),
+                                Some(HotkeyAction::ShowDesktop) => session.toggle_show_desktop(),
                                 Some(HotkeyAction::ProjectDisplays) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ProjectDisplays),
                                 Some(HotkeyAction::ShowWindowMenu) => session.notify_global_shortcut(nickel_session_protocol::ShortcutAction::ShowWindowMenu),
-                                Some(HotkeyAction::SnapLeading | HotkeyAction::SnapTrailing) => {}
+                                Some(HotkeyAction::SnapLeading) => session.snap_active_window(true),
+                                Some(HotkeyAction::SnapTrailing) => session.snap_active_window(false),
                                 Some(HotkeyAction::CaptureActiveWindow) => {
                                     session.notify_global_shortcut(
                                         nickel_session_protocol::ShortcutAction::CaptureActiveWindow,

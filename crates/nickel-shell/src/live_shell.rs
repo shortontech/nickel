@@ -1922,6 +1922,7 @@ pub struct LiveShell {
     tray: Vec<TrayItem>,
     tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
+    notification_history_visible: bool,
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
@@ -1968,6 +1969,8 @@ pub struct LiveShell {
     control_host: ControlCenterHost,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
+    projection_chooser: nickel_core::display_projection::ProjectionChooser,
+    projection_rollback_deadline: Option<Instant>,
     launcher_view: LauncherViewState,
     launcher_icons: LauncherIconCache,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
@@ -2218,6 +2221,7 @@ impl LiveShell {
             tray,
             tray_icons,
             notification: None,
+            notification_history_visible: false,
             wallpaper_path,
             wallpaper: None,
             wallpaper_size: (0, 0),
@@ -2264,6 +2268,8 @@ impl LiveShell {
             control_host,
             control_change_token: HostChangeToken::default(),
             control_deadline: Some(Instant::now()),
+            projection_chooser: Default::default(),
+            projection_rollback_deadline: None,
             launcher_view,
             launcher_icons,
             launcher_host,
@@ -2425,7 +2431,7 @@ impl LiveShell {
             changed = true;
         }
         let notification = self.notification_feed.snapshot();
-        if notification != self.notification {
+        if !self.notification_history_visible && notification != self.notification {
             self.notification = notification;
             self.notification_host
                 .application_mut()
@@ -2675,7 +2681,9 @@ impl LiveShell {
             SurfaceRole::Desktop | SurfaceRole::Panel => true,
             SurfaceRole::Launcher => self.launcher_visible,
             SurfaceRole::ControlCenter => self.control_visible,
-            SurfaceRole::Notification => self.notification.is_some(),
+            SurfaceRole::Notification => {
+                self.notification.is_some() || self.notification_history_visible
+            }
             SurfaceRole::VolumeOsd => self.volume_osd_until.is_some(),
             SurfaceRole::WindowPreview => {
                 self.preview_group.is_some() || self.task_switcher_group.is_some()
@@ -2923,11 +2931,18 @@ impl LiveShell {
             self.volume_osd_until = None;
             outcome.visibility_changed = true;
         }
+        if self
+            .projection_rollback_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.rollback_projection();
+            outcome.visibility_changed = true;
+        }
         outcome
     }
 
     pub fn notification_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
-        if self.notification.is_none() {
+        if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
         self.sync_notification_host(width, height);
@@ -2946,7 +2961,7 @@ impl LiveShell {
     }
 
     pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.notification.is_none() {
+        if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
         self.sync_notification_host(420, 180);
@@ -2972,7 +2987,7 @@ impl LiveShell {
     }
 
     pub fn notification_controller(&mut self, action: ControllerAction) -> bool {
-        if self.notification.is_none() {
+        if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
         self.sync_notification_host(420, 180);
@@ -3618,6 +3633,12 @@ impl LiveShell {
             MenuAction::FullscreenRestore(window) => {
                 self.send_window_action(window, WindowAction::Fullscreen)
             }
+            MenuAction::SnapLeading(window) => {
+                self.send_window_action(window, WindowAction::SnapLeading)
+            }
+            MenuAction::SnapTrailing(window) => {
+                self.send_window_action(window, WindowAction::SnapTrailing)
+            }
             MenuAction::MoveToWorkspace(window, workspace) => {
                 let _ = send_session_command(
                     "move-window-to-workspace",
@@ -3940,16 +3961,28 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::ShowNotifications => {
-                // Notification history uses the same privacy-safe shell surface as live notices.
-                self.notification.is_some()
+                let history = self.notification_feed.history();
+                self.notification_host
+                    .application_mut()
+                    .sync_history(&history, self.palette);
+                self.notification = history.first().cloned();
+                self.notification_history_visible = true;
+                #[cfg(target_os = "linux")]
+                let _ = send_session_command(
+                    "focus-notifications",
+                    ShellCommand::SetShellRoleVisible {
+                        role: nickel_session_protocol::ShellRole::Notification,
+                        visible: true,
+                    },
+                );
+                true
             }
             platform::GlobalShortcut::ShowDesktop => {
-                tracing::warn!("show-desktop requires compositor window-set restoration");
-                false
+                send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
             }
             platform::GlobalShortcut::ProjectDisplays => {
-                tracing::warn!("display projection chooser is unavailable on this host");
-                false
+                self.set_control_visible(true);
+                true
             }
             platform::GlobalShortcut::ShowWindowMenu => self.open_active_window_menu(),
             platform::GlobalShortcut::ConsumerControl(control) => {
@@ -4665,9 +4698,16 @@ impl LiveShell {
     }
 
     fn sync_notification_host(&mut self, width: u32, height: u32) {
-        self.notification_host
-            .application_mut()
-            .sync(self.notification.as_ref(), self.palette);
+        if self.notification_history_visible {
+            let history = self.notification_feed.history();
+            self.notification_host
+                .application_mut()
+                .sync_history(&history, self.palette);
+        } else {
+            self.notification_host
+                .application_mut()
+                .sync(self.notification.as_ref(), self.palette);
+        }
         self.notification_host.step(HostBatch {
             surface_size: Some((width, height)),
             events: vec![HostEvent::Poll],
@@ -4692,6 +4732,23 @@ impl LiveShell {
                 }
                 NotificationEffect::Dismiss { notification_id } => {
                     self.dismiss_notification_transport(notification_id);
+                }
+                NotificationEffect::CloseHistory => {
+                    self.notification_history_visible = false;
+                    self.notification = None;
+                    #[cfg(target_os = "linux")]
+                    let _ = send_session_command(
+                        "hide-notification-history",
+                        ShellCommand::SetShellRoleVisible {
+                            role: nickel_session_protocol::ShellRole::Notification,
+                            visible: false,
+                        },
+                    );
+                    #[cfg(target_os = "linux")]
+                    let _ = send_session_command(
+                        "restore-notification-focus",
+                        ShellCommand::RestoreApplicationFocus,
+                    );
                 }
             }
         }
@@ -5357,12 +5414,25 @@ impl LiveShell {
             ControlAction::CreateWorkspace => {
                 let _ = send_session_command("create-workspace", ShellCommand::CreateWorkspace);
             }
+            ControlAction::ToggleShowDesktop => {
+                let _ =
+                    send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop);
+            }
+            ControlAction::ShowNotifications => {
+                self.global_shortcut(platform::GlobalShortcut::ShowNotifications);
+            }
             ControlAction::RemoveWorkspace(workspace) => {
                 let _ = send_session_command(
                     "remove-workspace",
                     ShellCommand::RemoveWorkspace(workspace),
                 );
             }
+            ControlAction::PreviewProjection(mode) => self.preview_projection(mode),
+            ControlAction::ConfirmProjection => {
+                self.projection_chooser.confirm();
+                self.projection_rollback_deadline = None;
+            }
+            ControlAction::CancelProjection => self.rollback_projection(),
             ControlAction::RequestSessionAction(_)
             | ControlAction::CancelSessionAction
             | ControlAction::ConfirmSessionAction => {}
@@ -5371,6 +5441,111 @@ impl LiveShell {
             }
         }
         let _ = self.refresh();
+    }
+
+    fn preview_projection(&mut self, mode: nickel_core::display_projection::ProjectionMode) {
+        #[cfg(target_os = "linux")]
+        {
+            use nickel_core::display_projection::{
+                ProjectionChooser, ProjectionOutput, ProjectionPlacement,
+            };
+            let Ok(outputs) = platform::projection_outputs() else {
+                return;
+            };
+            let topology = outputs
+                .iter()
+                .map(|output| ProjectionOutput {
+                    name: output.name.clone(),
+                    internal: output.name.starts_with("eDP") || output.name.starts_with("LVDS"),
+                    width: output.geometry.width,
+                    height: output.geometry.height,
+                })
+                .collect::<Vec<_>>();
+            let Some(plan) = ProjectionChooser::plan(mode, &topology) else {
+                return;
+            };
+            let previous = outputs
+                .iter()
+                .map(|output| ProjectionPlacement {
+                    name: output.name.clone(),
+                    x: output.geometry.x,
+                    enabled: output.enabled,
+                })
+                .collect();
+            let primary = outputs
+                .iter()
+                .find(|output| {
+                    output.primary
+                        && plan
+                            .placements
+                            .iter()
+                            .any(|entry| entry.name == output.name && entry.enabled)
+                })
+                .or_else(|| {
+                    outputs.iter().find(|output| {
+                        plan.placements
+                            .iter()
+                            .any(|entry| entry.name == output.name && entry.enabled)
+                    })
+                })
+                .map(|output| output.name.clone())
+                .unwrap_or_default();
+            let layout = nickel_session_protocol::OutputLayout {
+                primary,
+                placements: plan
+                    .placements
+                    .iter()
+                    .map(|entry| nickel_session_protocol::OutputPlacement {
+                        name: entry.name.clone(),
+                        x: entry.x,
+                        y: 0,
+                        enabled: entry.enabled,
+                    })
+                    .collect(),
+            };
+            if send_session_command("preview-projection", ShellCommand::ApplyOutputs(layout)) {
+                self.projection_chooser.preview(previous, plan);
+                self.projection_rollback_deadline = Some(Instant::now() + Duration::from_secs(15));
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = mode;
+    }
+
+    fn rollback_projection(&mut self) {
+        self.projection_rollback_deadline = None;
+        #[cfg(target_os = "linux")]
+        if let Some(mut previous) = self.projection_chooser.rollback() {
+            if let Ok(outputs) = platform::projection_outputs() {
+                previous.retain(|entry| outputs.iter().any(|output| output.name == entry.name));
+                if !previous.iter().any(|entry| entry.enabled)
+                    && let Some(first) = previous.first_mut()
+                {
+                    first.enabled = true;
+                }
+            }
+            if previous.is_empty() {
+                return;
+            }
+            let primary = previous
+                .iter()
+                .find(|entry| entry.enabled)
+                .map(|entry| entry.name.clone())
+                .unwrap_or_default();
+            let layout = nickel_session_protocol::OutputLayout {
+                primary,
+                placements: previous
+                    .into_iter()
+                    .map(|entry| nickel_session_protocol::OutputPlacement {
+                        name: entry.name,
+                        x: entry.x,
+                        y: 0,
+                        enabled: entry.enabled,
+                    })
+                    .collect(),
+            };
+            let _ = send_session_command("rollback-projection", ShellCommand::ApplyOutputs(layout));
+        }
     }
 }
 

@@ -132,6 +132,10 @@ impl NotificationStore {
         self.notifications.back().cloned()
     }
 
+    pub fn history(&self) -> Vec<DesktopNotification> {
+        self.notifications.iter().rev().cloned().collect()
+    }
+
     pub fn has_action(&self, id: u32, key: &str) -> bool {
         self.notifications.iter().any(|notification| {
             notification.id == id && notification.actions.iter().any(|action| action.key == key)
@@ -190,6 +194,23 @@ mod tests {
         assert_ne!(id, 0);
         assert_eq!(replacement, id);
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn history_is_newest_first_without_marking_or_removing_entries() {
+        let now = Instant::now();
+        let mut store = NotificationStore::default();
+        let first = notify(&mut store, 0, now);
+        let second = notify(&mut store, 0, now);
+        assert_eq!(
+            store
+                .history()
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![second, first]
+        );
+        assert_eq!(store.len(), 2);
     }
 
     #[test]

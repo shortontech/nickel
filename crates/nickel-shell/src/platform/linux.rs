@@ -203,6 +203,10 @@ fn session_snapshot() -> Result<nickel_session_protocol::Snapshot, String> {
     result
 }
 
+pub fn projection_outputs() -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+    session_snapshot().map(|snapshot| snapshot.outputs)
+}
+
 fn intersection_area(
     left: nickel_session_protocol::Geometry,
     right: nickel_session_protocol::Geometry,
@@ -497,6 +501,13 @@ fn notification_name_owned(
 impl NotificationSource for NotificationFeed {
     fn snapshot(&self) -> Option<DesktopNotification> {
         self.store.lock().ok()?.newest()
+    }
+
+    fn history(&self) -> Vec<DesktopNotification> {
+        self.store
+            .lock()
+            .map(|store| store.history())
+            .unwrap_or_default()
     }
 
     fn dismiss(&self, id: u32) {
@@ -1121,6 +1132,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::CaptureOutput { .. } => "capture-output",
             SessionCommand::ApplyOutputs { .. } => "apply-outputs",
             SessionCommand::CreateWorkspace => "create-workspace",
+            SessionCommand::ToggleShowDesktop => "toggle-show-desktop",
             SessionCommand::RemoveWorkspace { .. } => "remove-workspace",
             SessionCommand::SwitchWorkspace { .. } => "switch-workspace",
             SessionCommand::MoveWindowToWorkspace { .. } => "move-window-to-workspace",
@@ -1324,9 +1336,12 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 WindowAction::Maximize => SessionWindowAction::MaximizeRestore,
                 WindowAction::Minimize => SessionWindowAction::Minimize,
                 WindowAction::Fullscreen => SessionWindowAction::FullscreenRestore,
+                WindowAction::SnapLeading => SessionWindowAction::SnapLeading,
+                WindowAction::SnapTrailing => SessionWindowAction::SnapTrailing,
             },
         },
         ShellCommand::CreateWorkspace => SessionCommand::CreateWorkspace,
+        ShellCommand::ToggleShowDesktop => SessionCommand::ToggleShowDesktop,
         ShellCommand::RemoveWorkspace(workspace) => SessionCommand::RemoveWorkspace {
             workspace: nickel_session_protocol::WorkspaceId(workspace),
         },
@@ -1346,6 +1361,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
                 output,
             }
         }
+        ShellCommand::ApplyOutputs(layout) => SessionCommand::ApplyOutputs { layout },
     }
 }
 

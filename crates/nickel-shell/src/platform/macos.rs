@@ -357,6 +357,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
         WindowAction::Close => close_window(&target),
         WindowAction::Maximize => false,
         WindowAction::Fullscreen => false,
+        WindowAction::SnapLeading | WindowAction::SnapTrailing => false,
     }
 }
 

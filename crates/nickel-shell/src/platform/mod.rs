@@ -211,6 +211,9 @@ pub trait TraySource {
 
 pub trait NotificationSource {
     fn snapshot(&self) -> Option<crate::notification::DesktopNotification>;
+    fn history(&self) -> Vec<crate::notification::DesktopNotification> {
+        self.snapshot().into_iter().collect()
+    }
     fn dismiss(&self, id: u32);
     fn invoke(&self, id: u32, action_key: &str);
 }
@@ -222,6 +225,8 @@ pub enum WindowAction {
     Maximize,
     Minimize,
     Fullscreen,
+    SnapLeading,
+    SnapTrailing,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,6 +383,7 @@ pub enum ShellCommand {
         action: WindowAction,
     },
     CreateWorkspace,
+    ToggleShowDesktop,
     RemoveWorkspace(u64),
     SwitchWorkspace(u64),
     MoveWindowToWorkspace {
@@ -388,6 +394,7 @@ pub enum ShellCommand {
         window: WindowId,
         output: String,
     },
+    ApplyOutputs(nickel_session_protocol::OutputLayout),
 }
 
 #[cfg(test)]
@@ -424,12 +431,12 @@ pub use linux::{
     copy_image_to_clipboard, copy_temp_image_path, execute_run_command, handle_consumer_control,
     handle_focused_shortcut, launch_application, launch_session_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
-    network_status, prepare_audio_environment, register_session_shell, release_pointer,
-    request_secure_storage_retry, respond_runtime_diagnostics, respond_semantic_action,
-    respond_semantic_target, secure_storage_state, select_audio_device, semantic_target_receiver,
-    send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
-    set_wifi_enabled, shell_readiness, show_window_system_menu, toggle_bluetooth_device,
-    update_panel_fullscreen_state, wallpaper,
+    network_status, prepare_audio_environment, projection_outputs, register_session_shell,
+    release_pointer, request_secure_storage_retry, respond_runtime_diagnostics,
+    respond_semantic_action, respond_semantic_target, secure_storage_state, select_audio_device,
+    semantic_target_receiver, send_shell_command, set_audio_volume, set_bluetooth_discovery,
+    set_bluetooth_powered, set_wifi_enabled, shell_readiness, show_window_system_menu,
+    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(target_os = "windows")]

@@ -3,6 +3,7 @@
 use crate::platform::{
     AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
 };
+use nickel_core::display_projection::ProjectionMode;
 use nickel_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
     Length, LinearGradient, Row, SemanticRole, Slider, Spacer, Text, UiHost, VerticalScroll,
@@ -35,7 +36,12 @@ pub enum ControlAction {
     SelectAudioDevice { id: String },
     SwitchWorkspace(u64),
     CreateWorkspace,
+    ToggleShowDesktop,
+    ShowNotifications,
     RemoveWorkspace(u64),
+    PreviewProjection(ProjectionMode),
+    ConfirmProjection,
+    CancelProjection,
     RequestSessionAction(SessionAction),
     CancelSessionAction,
     ConfirmSessionAction,
@@ -48,6 +54,7 @@ pub struct ControlViewState {
     pub bluetooth_expanded: bool,
     pub audio_expanded: bool,
     pub pending_session_action: Option<SessionAction>,
+    pub pending_projection: Option<ProjectionMode>,
 }
 
 pub struct ControlCenterApp {
@@ -128,6 +135,10 @@ impl Application for ControlCenterApp {
                 self.state.pending_session_action = Some(action);
             }
             ControlAction::CancelSessionAction => self.state.pending_session_action = None,
+            ControlAction::PreviewProjection(mode) => self.state.pending_projection = Some(mode),
+            ControlAction::ConfirmProjection | ControlAction::CancelProjection => {
+                self.state.pending_projection = None
+            }
             ControlAction::ConfirmSessionAction => {
                 if let Some(action) = self.state.pending_session_action.take() {
                     self.effects.push(ControlAction::SessionAction(action));
@@ -179,6 +190,22 @@ fn control_center_view(
         bluetooth_view(bluetooth, state.bluetooth_expanded),
         audio_view(audio, state.audio_expanded),
         workspaces_view(workspaces),
+        card(
+            64.0,
+            vec![AnyView::new(
+                Row::new()
+                    .gap(8.0)
+                    .child(
+                        button(action(ControlAction::ToggleShowDesktop), "Show desktop")
+                            .id("show-desktop"),
+                    )
+                    .child(
+                        button(action(ControlAction::ShowNotifications), "Notifications")
+                            .id("show-notifications"),
+                    ),
+            )],
+        ),
+        projection_view(state.pending_projection),
         session_view(state.pending_session_action),
     ];
     let content = Column::new()
@@ -213,6 +240,45 @@ fn control_center_view(
                     .height(viewport_height)
                     .child(content),
             ),
+    )
+}
+
+fn projection_view(pending: Option<ProjectionMode>) -> Card {
+    if pending.is_some() {
+        return card(
+            82.0,
+            vec![
+                AnyView::new(Text::new("Keep these display settings?").color(PRIMARY)),
+                AnyView::new(
+                    Row::new()
+                        .gap(8.0)
+                        .child(button(action(ControlAction::CancelProjection), "Revert"))
+                        .child(button(action(ControlAction::ConfirmProjection), "Keep")),
+                ),
+            ],
+        );
+    }
+    let modes = [
+        ("PC screen", ProjectionMode::InternalOnly),
+        ("Duplicate", ProjectionMode::Duplicate),
+        ("Extend", ProjectionMode::Extend),
+        ("Second screen", ProjectionMode::ExternalOnly),
+    ];
+    card(
+        96.0,
+        vec![
+            AnyView::new(Text::new("Project displays").color(PRIMARY)),
+            AnyView::new(
+                Row::new()
+                    .gap(6.0)
+                    .children(modes.into_iter().map(|(label, mode)| {
+                        AnyView::new(button(
+                            action(ControlAction::PreviewProjection(mode)),
+                            label,
+                        ))
+                    })),
+            ),
+        ],
     )
 }
 
@@ -734,6 +800,7 @@ mod tests {
     use crate::platform::{
         AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
     };
+    use nickel_core::display_projection::ProjectionMode;
     use nickel_ui::{Application, SemanticAction, SemanticRole, SemanticValueInput};
 
     #[test]
@@ -781,6 +848,21 @@ mod tests {
                 &ControlAction::RequestSessionAction(value)
             ));
             assert!(!has_action(&host, &ControlAction::SessionAction(value)));
+        }
+    }
+
+    #[test]
+    fn projection_and_show_desktop_are_controller_reachable_semantic_actions() {
+        let host = build(&[]);
+        assert!(has_action(&host, &ControlAction::ToggleShowDesktop));
+        assert!(has_action(&host, &ControlAction::ShowNotifications));
+        for mode in [
+            ProjectionMode::InternalOnly,
+            ProjectionMode::Duplicate,
+            ProjectionMode::Extend,
+            ProjectionMode::ExternalOnly,
+        ] {
+            assert!(has_action(&host, &ControlAction::PreviewProjection(mode)));
         }
     }
     #[test]
