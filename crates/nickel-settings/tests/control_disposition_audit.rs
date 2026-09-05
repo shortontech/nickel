@@ -132,7 +132,6 @@ fn low_level_click_composites_are_exactly_the_documented_exceptions() {
     let allowed = [
         ("SelectDisplay", "display-card-*", true),
         ("WifiNetwork", "wifi-network-*", true),
-        ("BluetoothDevice", "bluetooth-device-*", true),
     ];
     assert_eq!(
         click_targets.len(),
