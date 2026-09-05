@@ -2521,6 +2521,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn wifi_power_uses_one_truthful_semantic_switch() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
@@ -2572,6 +2573,27 @@ mod tests {
         assert!(!wifi.enabled);
     }
 
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn unsupported_platform_wifi_power_remains_truthfully_disabled() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
+        app.network_available = true;
+        app.wifi_enabled = false;
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetWifiPower(true))
+                .is_empty()
+        );
+        let wifi = tree
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("network-wifi-power"))
+            .expect("unsupported Wi-Fi power switch remains represented");
+        assert_eq!(wifi.state.as_deref(), Some("off disabled"));
+        assert!(!wifi.enabled);
+    }
+
     #[test]
     fn pending_wifi_power_keeps_confirmed_value_and_rejects_repeat_activation() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
@@ -2595,6 +2617,7 @@ mod tests {
         assert!(!wifi.enabled);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn failed_wifi_power_request_restores_the_confirmed_state_and_reports_error() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Network);
