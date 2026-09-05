@@ -301,9 +301,24 @@ impl DesktopApplication {
         let Some(browser) = &mut self.browser else {
             return false;
         };
+        let previous_entries = self
+            .layout
+            .items()
+            .iter()
+            .map(|item| {
+                (
+                    item.entry.path.clone(),
+                    desktop_entry_fingerprint(&item.entry),
+                )
+            })
+            .collect::<HashMap<_, _>>();
         match browser.refresh() {
             Ok(()) => {
                 let snapshot = desktop_snapshot(browser);
+                let current_entries = snapshot
+                    .iter()
+                    .map(|(_, entry)| (entry.path.clone(), desktop_entry_fingerprint(entry)))
+                    .collect::<HashMap<_, _>>();
                 self.layout.reconcile(snapshot);
                 self.directory_generation = self.directory_generation.wrapping_add(1);
                 if self
@@ -313,7 +328,11 @@ impl DesktopApplication {
                 {
                     self.context_menu = None;
                 }
-                self.icon_cache.clear();
+                retain_unchanged_desktop_icons(
+                    &mut self.icon_cache,
+                    &previous_entries,
+                    &current_entries,
+                );
                 self.error = None;
                 true
             }
@@ -824,6 +843,24 @@ impl DesktopApplication {
         }
         self.icon_cache.len() != previous_len
     }
+}
+
+type DesktopEntryFingerprint = (bool, Option<u64>, Option<std::time::SystemTime>);
+
+fn desktop_entry_fingerprint(entry: &nickel_file::FileEntry) -> DesktopEntryFingerprint {
+    (entry.is_directory, entry.size, entry.modified)
+}
+
+fn retain_unchanged_desktop_icons(
+    cache: &mut HashMap<std::path::PathBuf, Arc<image::RgbaImage>>,
+    previous: &HashMap<std::path::PathBuf, DesktopEntryFingerprint>,
+    current: &HashMap<std::path::PathBuf, DesktopEntryFingerprint>,
+) {
+    cache.retain(|path, _| {
+        current
+            .get(path)
+            .is_some_and(|fingerprint| previous.get(path) == Some(fingerprint))
+    });
 }
 
 fn desktop_snapshot(
@@ -6019,10 +6056,36 @@ mod tests {
     use super::{
         HostRuntimeSamples, LiveShell, initial_wallpaper, panel_status_layout, panel_tray_icons,
         platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
-        preview_refresh_due, secure_storage_status_label, semantic_theme_from_palette,
-        session_feed_status_label, shortcut_capability_status, visible_tray_item,
-        window_belongs_to_panel,
+        preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
+        semantic_theme_from_palette, session_feed_status_label, shortcut_capability_status,
+        visible_tray_item, window_belongs_to_panel,
     };
+
+    #[test]
+    fn desktop_refresh_retains_only_icons_with_unchanged_meaningful_metadata() {
+        let stable = std::path::PathBuf::from("/desktop/stable.desktop");
+        let changed = std::path::PathBuf::from("/desktop/changed.desktop");
+        let removed = std::path::PathBuf::from("/desktop/removed.desktop");
+        let pixels = Arc::new(RgbaImage::from_pixel(1, 1, Rgba([1, 2, 3, 255])));
+        let mut cache = HashMap::from([
+            (stable.clone(), Arc::clone(&pixels)),
+            (changed.clone(), Arc::clone(&pixels)),
+            (removed.clone(), pixels),
+        ]);
+        let previous = HashMap::from([
+            (stable.clone(), (false, Some(10), None)),
+            (changed.clone(), (false, Some(10), None)),
+            (removed, (false, Some(10), None)),
+        ]);
+        let current = HashMap::from([
+            (stable.clone(), (false, Some(10), None)),
+            (changed.clone(), (false, Some(11), None)),
+        ]);
+
+        retain_unchanged_desktop_icons(&mut cache, &previous, &current);
+
+        assert_eq!(cache.keys().collect::<Vec<_>>(), [&stable]);
+    }
 
     #[test]
     fn explicit_wallpaper_path_wins_without_loading_the_system_wallpaper() {
@@ -8084,6 +8147,7 @@ mod tests {
                     (
                         nickel_file::FileIdentity(83, index + 1),
                         nickel_file::FileEntry {
+                            display_name_override: None,
                             name: OsString::from(&name),
                             path: PathBuf::from("/desktop").join(name),
                             is_directory: false,
