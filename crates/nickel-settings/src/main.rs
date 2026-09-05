@@ -12,6 +12,7 @@ use model::SettingsApp;
 use nickel_session_protocol::{ClientEnvelope, ServerEnvelope};
 use nickel_session_protocol::{
     Command as SessionCommand, Query as SessionQuery, Request as SessionRequest, ServerMessage,
+    ShellBehaviorSetting, ShellBehaviorSnapshot, ShellBehaviorTransaction, ShellBehaviorValue,
 };
 #[cfg(not(target_os = "windows"))]
 use nickel_session_protocol::{
@@ -536,6 +537,42 @@ fn desktop_count_message(fraction: f32) -> SettingsMessage {
             * f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1))
         .round() as u8,
     )
+}
+
+fn shell_behavior_transaction(
+    prior: &ShellSettings,
+    requested: &ShellSettings,
+    topology_generation: u64,
+) -> Option<ShellBehaviorTransaction> {
+    let changes = [
+        (prior.bar_on_all_displays != requested.bar_on_all_displays).then_some((
+            ShellBehaviorSetting::BarDisplayScope,
+            ShellBehaviorValue::Toggle(prior.bar_on_all_displays),
+            ShellBehaviorValue::Toggle(requested.bar_on_all_displays),
+        )),
+        (prior.all_windows_on_every_bar != requested.all_windows_on_every_bar).then_some((
+            ShellBehaviorSetting::BarWindowScope,
+            ShellBehaviorValue::Toggle(prior.all_windows_on_every_bar),
+            ShellBehaviorValue::Toggle(requested.all_windows_on_every_bar),
+        )),
+        (prior.desktop_count != requested.desktop_count).then_some((
+            ShellBehaviorSetting::DesktopCount,
+            ShellBehaviorValue::Count(prior.desktop_count),
+            ShellBehaviorValue::Count(requested.desktop_count),
+        )),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    let [(setting, prior, requested)] = changes.as_slice() else {
+        return None;
+    };
+    Some(ShellBehaviorTransaction {
+        setting: *setting,
+        prior: *prior,
+        requested: *requested,
+        topology_generation,
+    })
 }
 
 fn appearance_hue_message(fraction: f32) -> SettingsMessage {
@@ -1260,21 +1297,44 @@ impl SettingsApp {
         if !self.persistence_enabled {
             return;
         }
-        let result = try_save_shell_settings(&self.shell_settings).and_then(|()| {
-            match session_request(SessionRequest::Command(SessionCommand::ReloadShellSettings)) {
-                Ok(ServerMessage::Ack) => Ok(()),
-                Ok(_) => Err("the session returned an unexpected response".to_owned()),
-                Err(error) => Err(error.to_string()),
-            }
-        });
+        let transaction = shell_behavior_transaction(
+            &previous,
+            &self.shell_settings,
+            self.shell_topology_generation,
+        );
+        let result = transaction
+            .ok_or_else(|| "shell setting transaction was ambiguous".to_owned())
+            .and_then(|transaction| {
+                match session_request(SessionRequest::Command(
+                    SessionCommand::ApplyShellBehavior { transaction },
+                )) {
+                    Ok(ServerMessage::ShellBehavior(snapshot)) => {
+                        self.apply_shell_behavior_snapshot(&snapshot);
+                        Ok(())
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => Err(message),
+                    Ok(_) => Err("the session returned an unexpected response".to_owned()),
+                    Err(error) => Err(error.to_string()),
+                }
+            });
         if let Err(error) = result {
             self.shell_settings = previous.clone();
-            let _ = try_save_shell_settings(&previous);
             let error = error.chars().take(240).collect::<String>();
             self.status = format!("Could not apply shell setting: {error}");
         } else {
             self.status = "Nickel Bar settings applied".into();
         }
+    }
+
+    fn apply_shell_behavior_snapshot(&mut self, snapshot: &ShellBehaviorSnapshot) {
+        self.shell_settings.bar_on_all_displays = snapshot.bar_on_all_displays;
+        self.shell_settings.all_windows_on_every_bar = snapshot.all_windows_on_every_bar;
+        self.shell_settings.desktop_count = snapshot.desktop_count;
+        self.shell_settings.active_desktop = self
+            .shell_settings
+            .active_desktop
+            .min(snapshot.desktop_count.saturating_sub(1));
+        self.shell_topology_generation = snapshot.topology_generation;
     }
 
     fn flush_pending_desktop_count(&mut self) {
@@ -1558,6 +1618,13 @@ impl SettingsApp {
                 nickel_session_protocol::Event::ShellSettingsChanged => {
                     if self.desktop_count_previous.is_none() {
                         self.shell_settings = load_shell_settings();
+                    }
+                    self.refresh_workspace_state();
+                    self.request_redraw();
+                }
+                nickel_session_protocol::Event::ShellBehaviorChanged(snapshot) => {
+                    if self.desktop_count_previous.is_none() {
+                        self.apply_shell_behavior_snapshot(&snapshot);
                     }
                     self.refresh_workspace_state();
                     self.request_redraw();
@@ -2203,13 +2270,37 @@ mod tests {
         NetworkAdapter, OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH,
         SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
         WallpaperSettings, WifiNetwork, attach_rect_centered, codex_feature_state,
-        constrain_center, snap_rect,
+        constrain_center, shell_behavior_transaction, snap_rect,
     };
 
     #[test]
     fn display_settings_polls_for_external_toolkit_changes() {
         let app = SettingsApp::with_initial_page(SettingsPage::Display);
         assert!(Application::poll_interval(&app).is_some());
+    }
+
+    #[test]
+    fn each_bar_control_creates_one_typed_topology_scoped_transaction() {
+        let prior = nickel_core::shell_settings::ShellSettings::default();
+        let mut requested = prior.clone();
+        requested.bar_on_all_displays = false;
+        let transaction = shell_behavior_transaction(&prior, &requested, 17).unwrap();
+        assert_eq!(
+            transaction.setting,
+            nickel_session_protocol::ShellBehaviorSetting::BarDisplayScope
+        );
+        assert_eq!(
+            transaction.prior,
+            nickel_session_protocol::ShellBehaviorValue::Toggle(true)
+        );
+        assert_eq!(
+            transaction.requested,
+            nickel_session_protocol::ShellBehaviorValue::Toggle(false)
+        );
+        assert_eq!(transaction.topology_generation, 17);
+
+        requested.all_windows_on_every_bar = false;
+        assert!(shell_behavior_transaction(&prior, &requested, 17).is_none());
     }
 
     #[test]

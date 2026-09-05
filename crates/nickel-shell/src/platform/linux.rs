@@ -1107,12 +1107,14 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::IdleInhibition => "query-idle-inhibition",
             SessionQuery::CacheDiagnostics => "query-cache-diagnostics",
             SessionQuery::Workspaces => "query-workspaces",
+            SessionQuery::ShellBehavior => "query-shell-behavior",
             SessionQuery::Preview { .. } => "query-preview",
             SessionQuery::ShellSemanticTarget { .. } => "query-shell-semantic-target",
             SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
+            SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
             SessionCommand::ToggleLauncher => "toggle-launcher",
             SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
             SessionCommand::SetLauncherVisibleFromController { .. } => {
@@ -1833,9 +1835,9 @@ fn subscription_shortcut(
     state: &mut SubscriptionState,
 ) -> Option<GlobalShortcut> {
     match message {
-        ServerMessage::Event(SessionEvent::ShellSettingsChanged) => {
-            Some(GlobalShortcut::ReloadShellSettings)
-        }
+        ServerMessage::Event(
+            SessionEvent::ShellSettingsChanged | SessionEvent::ShellBehaviorChanged(_),
+        ) => Some(GlobalShortcut::ReloadShellSettings),
         ServerMessage::Event(SessionEvent::LauncherVisibility { visible })
         | ServerMessage::LauncherVisibility { visible } => {
             if state.launcher_visible.replace(visible) == Some(visible) {

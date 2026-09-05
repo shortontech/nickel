@@ -29,6 +29,7 @@ use nickel_session_protocol::{
     ClientEnvelope, Command as SessionCommand, ErrorCode, Event as SessionEvent,
     Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview,
     Query, Request, SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
+    ShellBehaviorSetting, ShellBehaviorSnapshot, ShellBehaviorTransaction, ShellBehaviorValue,
     ShellPopoverAnchor, ShellRole, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
     WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
     WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
@@ -192,6 +193,62 @@ fn protocol_error(code: ErrorCode, message: impl Into<String>) -> ServerMessage 
         code,
         message: message.into(),
     }
+}
+
+fn shell_behavior_value(
+    settings: &ShellSettings,
+    setting: ShellBehaviorSetting,
+) -> ShellBehaviorValue {
+    match setting {
+        ShellBehaviorSetting::BarDisplayScope => {
+            ShellBehaviorValue::Toggle(settings.bar_on_all_displays)
+        }
+        ShellBehaviorSetting::BarWindowScope => {
+            ShellBehaviorValue::Toggle(settings.all_windows_on_every_bar)
+        }
+        ShellBehaviorSetting::DesktopCount => ShellBehaviorValue::Count(settings.desktop_count),
+    }
+}
+
+fn apply_shell_behavior_value(
+    settings: &mut ShellSettings,
+    setting: ShellBehaviorSetting,
+    value: ShellBehaviorValue,
+) -> Result<(), &'static str> {
+    match (setting, value) {
+        (ShellBehaviorSetting::BarDisplayScope, ShellBehaviorValue::Toggle(value)) => {
+            settings.bar_on_all_displays = value;
+        }
+        (ShellBehaviorSetting::BarWindowScope, ShellBehaviorValue::Toggle(value)) => {
+            settings.all_windows_on_every_bar = value;
+        }
+        (ShellBehaviorSetting::DesktopCount, ShellBehaviorValue::Count(value))
+            if (1..=nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES).contains(&value) =>
+        {
+            settings.desktop_count = value;
+        }
+        (ShellBehaviorSetting::DesktopCount, ShellBehaviorValue::Count(_)) => {
+            return Err("desktop count is outside the supported range");
+        }
+        _ => return Err("setting and value types do not match"),
+    }
+    Ok(())
+}
+
+fn prepare_shell_behavior_update(
+    current: &ShellSettings,
+    topology_generation: u64,
+    transaction: &ShellBehaviorTransaction,
+) -> Result<ShellSettings, &'static str> {
+    if transaction.topology_generation != topology_generation {
+        return Err("stale output topology generation");
+    }
+    if transaction.prior != shell_behavior_value(current, transaction.setting) {
+        return Err("shell setting changed before this transaction was applied");
+    }
+    let mut requested = current.clone();
+    apply_shell_behavior_value(&mut requested, transaction.setting, transaction.requested)?;
+    Ok(requested)
 }
 
 fn retain_live_idle_inhibitors<K: Eq + std::hash::Hash>(
@@ -465,6 +522,8 @@ pub struct NickelSession {
     pub preview_window: Option<Window>,
     pub server_decorated: HashSet<ObjectId>,
     pub primary_output_name: Option<String>,
+    output_topology_generation: u64,
+    last_protocol_outputs: Vec<OutputSnapshot>,
     output_scale_preferences: nickel_core::dpi::PersistedOutputScales,
     virtual_test_outputs: HashMap<String, (Output, Option<GlobalId>)>,
     pending_output_global_retirements: DeferredGlobalRetirements<GlobalId>,
@@ -1489,6 +1548,8 @@ impl NickelSession {
             preview_window: None,
             server_decorated: HashSet::new(),
             primary_output_name: None,
+            output_topology_generation: 0,
+            last_protocol_outputs: Vec::new(),
             output_scale_preferences: nickel_core::dpi::PersistedOutputScales::load_default()
                 .unwrap_or_default(),
             virtual_test_outputs: HashMap::new(),
@@ -1901,6 +1962,10 @@ impl NickelSession {
                 })
             }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
+            Query::ShellBehavior => {
+                let _ = self.refresh_output_topology_generation();
+                ServerMessage::ShellBehavior(self.protocol_shell_behavior())
+            }
             Query::Preview { window } => {
                 let id = WindowId(window.0);
                 if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
@@ -1938,6 +2003,9 @@ impl NickelSession {
             SessionCommand::ReloadShellSettings => {
                 self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();
+            }
+            SessionCommand::ApplyShellBehavior { transaction } => {
+                return self.apply_shell_behavior_transaction(transaction);
             }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
@@ -3654,6 +3722,96 @@ impl NickelSession {
             .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
+    fn refresh_output_topology_generation(&mut self) -> bool {
+        let outputs = self.protocol_outputs();
+        if outputs != self.last_protocol_outputs {
+            self.last_protocol_outputs = outputs;
+            self.output_topology_generation =
+                self.output_topology_generation.wrapping_add(1).max(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn protocol_shell_behavior(&self) -> ShellBehaviorSnapshot {
+        let settings = ShellSettings::load_default();
+        ShellBehaviorSnapshot {
+            bar_on_all_displays: settings.bar_on_all_displays,
+            all_windows_on_every_bar: settings.all_windows_on_every_bar,
+            desktop_count: settings.desktop_count,
+            topology_generation: self.output_topology_generation,
+        }
+    }
+
+    fn notify_shell_behavior_snapshot(&mut self, snapshot: ShellBehaviorSnapshot) {
+        let event = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::ShellBehaviorChanged(snapshot)),
+        });
+        if let Ok(event) = event
+            && let Ok(socket) = UnixDatagram::unbound()
+        {
+            self.launcher_subscribers
+                .retain(|path| socket.send_to(&event, path).is_ok());
+        }
+    }
+
+    fn apply_shell_behavior_transaction(
+        &mut self,
+        transaction: ShellBehaviorTransaction,
+    ) -> ServerMessage {
+        let _ = self.refresh_output_topology_generation();
+        if transaction.topology_generation != self.output_topology_generation {
+            return protocol_error(
+                ErrorCode::InvalidRequest,
+                format!(
+                    "stale output topology generation {}; current generation is {}",
+                    transaction.topology_generation, self.output_topology_generation
+                ),
+            );
+        }
+        let previous = ShellSettings::load_default();
+        let requested = match prepare_shell_behavior_update(
+            &previous,
+            self.output_topology_generation,
+            &transaction,
+        ) {
+            Ok(requested) => requested,
+            Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+        };
+        if let Err(error) = requested.save_default() {
+            return protocol_error(
+                ErrorCode::Internal,
+                format!("could not persist shell setting: {error}"),
+            );
+        }
+        let requested_count = usize::from(requested.desktop_count);
+        let transitions = match self.workspaces.set_count(requested_count) {
+            Ok(transitions) => transitions,
+            Err(error) => {
+                let rollback = previous.save_default();
+                return protocol_error(
+                    ErrorCode::Internal,
+                    format!(
+                        "could not apply shell setting: {error:?}; persistence rollback: {}",
+                        if rollback.is_ok() {
+                            "complete"
+                        } else {
+                            "failed"
+                        }
+                    ),
+                );
+            }
+        };
+        for transition in transitions {
+            self.apply_workspace_transition(transition);
+        }
+        let effective = self.protocol_shell_behavior();
+        self.notify_shell_behavior_snapshot(effective.clone());
+        ServerMessage::ShellBehavior(effective)
+    }
+
     pub(crate) fn notify_global_shortcut(
         &mut self,
         action: nickel_session_protocol::ShortcutAction,
@@ -3695,6 +3853,9 @@ impl NickelSession {
     }
 
     pub(crate) fn notify_protocol_snapshot(&mut self) {
+        if self.refresh_output_topology_generation() {
+            self.notify_shell_behavior_snapshot(self.protocol_shell_behavior());
+        }
         let event = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot())),
@@ -6226,21 +6387,22 @@ mod protocol_tests {
         OUTPUT_GLOBAL_DISABLED_GRACE, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
         PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, RegisteredShellRole,
         ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
-        bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
-        command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
-        maximized_content_geometry, output_global_capacity_available,
-        output_index_for_shell_surface, preview_mapping_has_exact_size,
+        apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
+        clamp_window_location, command_requires_shell_identity, drag_icon_location,
+        identification_expiry_is_current, maximized_content_geometry,
+        output_global_capacity_available, output_index_for_shell_surface,
+        prepare_shell_behavior_update, preview_mapping_has_exact_size,
         protocol_preview_from_cached, record_preview_capture_attempt,
         restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
-        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels,
+        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         shell_surface_output_from_title, test_control_may_invoke,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
-        Command, OutputTransform, Query, ServerEnvelope, ServerMessage, SessionAction, ShellRole,
-        TestOutput,
+        Command, OutputTransform, Query, ServerEnvelope, ServerMessage, SessionAction,
+        ShellBehaviorSetting, ShellBehaviorTransaction, ShellBehaviorValue, ShellRole, TestOutput,
     };
     use smithay::{
         output::{Output, PhysicalProperties, Subpixel},
@@ -6252,6 +6414,68 @@ mod protocol_tests {
     };
     use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn shell_behavior_values_are_typed_and_desktop_counts_are_validated() {
+        let mut settings = nickel_core::shell_settings::ShellSettings::default();
+        assert_eq!(
+            shell_behavior_value(&settings, ShellBehaviorSetting::BarDisplayScope),
+            ShellBehaviorValue::Toggle(true)
+        );
+        assert!(
+            apply_shell_behavior_value(
+                &mut settings,
+                ShellBehaviorSetting::BarWindowScope,
+                ShellBehaviorValue::Toggle(false),
+            )
+            .is_ok()
+        );
+        assert!(!settings.all_windows_on_every_bar);
+        assert!(
+            apply_shell_behavior_value(
+                &mut settings,
+                ShellBehaviorSetting::DesktopCount,
+                ShellBehaviorValue::Count(0),
+            )
+            .is_err()
+        );
+        assert!(
+            apply_shell_behavior_value(
+                &mut settings,
+                ShellBehaviorSetting::BarDisplayScope,
+                ShellBehaviorValue::Count(2),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shell_behavior_transactions_reject_stale_topology_and_concurrent_writers() {
+        let current = nickel_core::shell_settings::ShellSettings::default();
+        let mut transaction = ShellBehaviorTransaction {
+            setting: ShellBehaviorSetting::BarDisplayScope,
+            prior: ShellBehaviorValue::Toggle(true),
+            requested: ShellBehaviorValue::Toggle(false),
+            topology_generation: 4,
+        };
+        assert_eq!(
+            prepare_shell_behavior_update(&current, 5, &transaction),
+            Err("stale output topology generation")
+        );
+        transaction.topology_generation = 5;
+        transaction.prior = ShellBehaviorValue::Toggle(false);
+        assert_eq!(
+            prepare_shell_behavior_update(&current, 5, &transaction),
+            Err("shell setting changed before this transaction was applied")
+        );
+        transaction.prior = ShellBehaviorValue::Toggle(true);
+        let requested = prepare_shell_behavior_update(&current, 5, &transaction).unwrap();
+        assert!(!requested.bar_on_all_displays);
+        assert!(
+            current.bar_on_all_displays,
+            "planning must not mutate authority"
+        );
+    }
 
     #[test]
     fn pointer_identity_churn_returns_all_collections_to_baseline() {

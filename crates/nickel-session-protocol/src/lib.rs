@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 17;
+pub const PROTOCOL_VERSION: u16 = 18;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -54,6 +54,7 @@ pub enum Query {
     /// capability-gated nested test endpoint.
     ShellRuntimeDiagnostics,
     Workspaces,
+    ShellBehavior,
     Preview {
         window: WindowId,
     },
@@ -70,6 +71,9 @@ pub enum Query {
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
     ReloadShellSettings,
+    ApplyShellBehavior {
+        transaction: ShellBehaviorTransaction,
+    },
     ToggleLauncher,
     SetLauncherVisible {
         visible: bool,
@@ -407,6 +411,7 @@ pub enum ServerMessage {
     CacheDiagnostics(CacheDiagnostics),
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
+    ShellBehavior(ShellBehaviorSnapshot),
     Preview(PreviewFrame),
     ShellSemanticTarget(ResolvedShellTarget),
     Event(Event),
@@ -650,6 +655,7 @@ pub enum ErrorCode {
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
     ShellSettingsChanged,
+    ShellBehaviorChanged(ShellBehaviorSnapshot),
     Snapshot(Snapshot),
     LauncherVisibility { visible: bool },
     Windows(Vec<WindowSnapshot>),
@@ -663,6 +669,37 @@ pub enum Event {
     LockState { locked: bool },
     GlobalShortcut { action: ShortcutAction },
     ConsumerControl { control: ConsumerControl },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellBehaviorSetting {
+    BarDisplayScope,
+    BarWindowScope,
+    DesktopCount,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ShellBehaviorValue {
+    Toggle(bool),
+    Count(u8),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellBehaviorTransaction {
+    pub setting: ShellBehaviorSetting,
+    pub prior: ShellBehaviorValue,
+    pub requested: ShellBehaviorValue,
+    pub topology_generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellBehaviorSnapshot {
+    pub bar_on_all_displays: bool,
+    pub all_windows_on_every_bar: bool,
+    pub desktop_count: u8,
+    pub topology_generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1745,5 +1782,39 @@ mod tests {
         let encoded = encode(&envelope).expect("bounded metadata population fits one frame");
         assert!(encoded.len() <= MAX_FRAME_BYTES);
         assert_eq!(decode::<ServerEnvelope>(&encoded).unwrap(), envelope);
+    }
+
+    #[test]
+    fn shell_behavior_transaction_and_effective_ack_round_trip() {
+        let request = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 42,
+            request: Request::Command(Command::ApplyShellBehavior {
+                transaction: ShellBehaviorTransaction {
+                    setting: ShellBehaviorSetting::DesktopCount,
+                    prior: ShellBehaviorValue::Count(4),
+                    requested: ShellBehaviorValue::Count(6),
+                    topology_generation: 9,
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+
+        let response = ServerEnvelope {
+            request_id: 42,
+            message: ServerMessage::ShellBehavior(ShellBehaviorSnapshot {
+                bar_on_all_displays: true,
+                all_windows_on_every_bar: false,
+                desktop_count: 6,
+                topology_generation: 9,
+            }),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
+            response
+        );
     }
 }

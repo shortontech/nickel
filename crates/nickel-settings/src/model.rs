@@ -39,6 +39,7 @@ pub(super) struct SettingsApp {
     pub(super) codex_disable_confirmation: bool,
     pub(super) next_optional_feature_refresh: Instant,
     pub(super) shell_settings: ShellSettings,
+    pub(super) shell_topology_generation: u64,
     pub(super) wallpaper_settings: WallpaperSettings,
     pub(super) wallpaper_preview: Option<Arc<image::RgbaImage>>,
     pub(super) wallpaper_dimensions: Option<(u32, u32)>,
@@ -134,6 +135,16 @@ impl Default for SettingsApp {
                 scale_120: 120,
             },
         ];
+        let mut shell_settings = load_shell_settings();
+        let mut shell_topology_generation = 0;
+        if let Ok(nickel_session_protocol::ServerMessage::ShellBehavior(snapshot)) = session_request(
+            nickel_session_protocol::Request::Query(nickel_session_protocol::Query::ShellBehavior),
+        ) {
+            shell_settings.bar_on_all_displays = snapshot.bar_on_all_displays;
+            shell_settings.all_windows_on_every_bar = snapshot.all_windows_on_every_bar;
+            shell_settings.desktop_count = snapshot.desktop_count;
+            shell_topology_generation = snapshot.topology_generation;
+        }
         Self {
             controller_family: nickel_ui::ControllerFamily::Generic,
             localizer,
@@ -168,7 +179,8 @@ impl Default for SettingsApp {
             codex_executable_path,
             codex_disable_confirmation: false,
             next_optional_feature_refresh: Instant::now(),
-            shell_settings: load_shell_settings(),
+            shell_settings,
+            shell_topology_generation,
             wallpaper_settings,
             wallpaper_preview,
             wallpaper_dimensions,
