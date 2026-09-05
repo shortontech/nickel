@@ -2265,12 +2265,12 @@ mod tests {
 
     use super::view::codex_switch_state;
     use super::{
-        BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction, FeatureEffectiveState,
-        FeatureHealth, FeatureInstallation, FeaturePolicy, FeatureSupport, FileIconPreference,
-        NetworkAdapter, OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH,
-        SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, WifiNetwork, attach_rect_centered, codex_feature_state,
-        constrain_center, shell_behavior_transaction, snap_rect,
+        ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction,
+        FeatureEffectiveState, FeatureHealth, FeatureInstallation, FeaturePolicy, FeatureSupport,
+        FileIconPreference, NetworkAdapter, OptionalFeatureRuntime, OptionalFeatureSettings, Rect,
+        SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage,
+        ThemePreference, UiHost, WallpaperSettings, WifiNetwork, attach_rect_centered,
+        codex_feature_state, constrain_center, shell_behavior_transaction, snap_rect,
     };
 
     #[test]
@@ -2316,6 +2316,37 @@ mod tests {
         // The platform request is unavailable in tests, but the requested
         // model is restored before adapter execution.
         assert_eq!(app.displays[0].scale_120, original[0].scale_120);
+    }
+
+    #[test]
+    fn application_scale_policy_is_one_accessible_radio_group() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        app.application_scale_policy = ApplicationScalePolicy::Unchanged;
+        let tree = app.build_ui(900.0, 900.0);
+        let nodes = tree.accessibility_nodes();
+        assert_eq!(
+            nodes
+                .iter()
+                .filter(|node| node.semantic_role == Some(SemanticRole::RadioGroup))
+                .count(),
+            1
+        );
+        let policy = nodes
+            .iter()
+            .filter(|node| node.semantic_role == Some(SemanticRole::Radio))
+            .collect::<Vec<_>>();
+        assert_eq!(policy.len(), 3);
+        assert_eq!(
+            policy
+                .iter()
+                .filter(|node| node.state.as_deref() == Some("selected"))
+                .count(),
+            1
+        );
+        assert!(policy.iter().any(|node| {
+            node.label.as_deref() == Some("Leave unchanged")
+                && node.state.as_deref() == Some("selected")
+        }));
     }
 
     #[test]
@@ -2824,16 +2855,8 @@ mod tests {
             .lines()
             .filter(|line| line.contains("on_press={"))
             .collect::<Vec<_>>();
-        assert_eq!(click_targets.len(), 7, "{click_targets:#?}");
-        for required in [
-            "SelectDisplay",
-            "WifiNetwork",
-            "BluetoothDevice",
-            "BarPrimaryDisplay",
-            "BarAllDisplays",
-            "BarDisplayWindows",
-            "BarAllWindows",
-        ] {
+        assert_eq!(click_targets.len(), 3, "{click_targets:#?}");
+        for required in ["SelectDisplay", "WifiNetwork", "BluetoothDevice"] {
             assert!(
                 click_targets.iter().any(|line| line.contains(required)),
                 "missing documented custom composite for {required}: {click_targets:#?}"

@@ -1,5 +1,5 @@
 use super::*;
-use nickel_ui::{ComponentBuilderExt, Row, TextField};
+use nickel_ui::{ComponentBuilderExt, RadioGroup, RadioOption, Row, TextField};
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
@@ -327,18 +327,42 @@ impl SettingsApp {
             ApplicationScalePolicy::Custom(scale) => scale.units(),
             _ => 120,
         };
+        let application_scale_policy_choices = RadioGroup::new([
+            RadioOption::new(
+                theme,
+                SettingsMessage::ApplicationScaleFollow,
+                "Follow Nickel",
+                self.application_scale_policy == ApplicationScalePolicy::FollowNickel,
+            )
+            .description("Clear Nickel-owned toolkit overrides and follow compositor scaling."),
+            RadioOption::new(
+                theme,
+                SettingsMessage::ApplicationScaleUnchanged,
+                "Leave unchanged",
+                self.application_scale_policy == ApplicationScalePolicy::Unchanged,
+            )
+            .description("Do not write toolkit-wide compatibility settings."),
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetApplicationScale(
+                    app_scale_units.saturating_sub(60).min(420) / 30,
+                ),
+                "Custom",
+                matches!(
+                    self.application_scale_policy,
+                    ApplicationScalePolicy::Custom(_)
+                ),
+            )
+            .description("Use the custom application scale selected below."),
+        ])
+        .id("application-scale-policy");
         let app_scale = SettingsCard::titled(
             theme,
             "Application compatibility scale",
             "Toolkit compatibility is separate from per-display Wayland scale. Running applications may need a restart.",
         )
         .id("application-scale")
-        .child(
-            Row::new()
-                .gap(8.0)
-                .child(Button::semantic(theme, SettingsMessage::ApplicationScaleFollow, "Follow Nickel", ButtonPresentation::Secondary))
-                .child(Button::semantic(theme, SettingsMessage::ApplicationScaleUnchanged, "Leave unchanged", ButtonPresentation::Secondary)),
-        )
+        .child(application_scale_policy_choices)
         .child(
             SliderField::new(
                 theme,
@@ -786,48 +810,60 @@ impl SettingsApp {
                 </Container>
             }
         });
+        let bar_display_scope = RadioGroup::new([
+            RadioOption::new(
+                theme,
+                SettingsMessage::BarPrimaryDisplay,
+                self.localizer.text("settings-bar-primary-display"),
+                !self.shell_settings.bar_on_all_displays,
+            ),
+            RadioOption::new(
+                theme,
+                SettingsMessage::BarAllDisplays,
+                self.localizer
+                    .number("settings-bar-all-displays", "count", display_count as i64),
+                self.shell_settings.bar_on_all_displays,
+            ),
+        ])
+        .id("bar-display-scope");
+        let bar_window_scope = RadioGroup::new([
+            RadioOption::new(
+                theme,
+                SettingsMessage::BarDisplayWindows,
+                self.localizer.text("settings-bar-this-display"),
+                !self.shell_settings.all_windows_on_every_bar,
+            ),
+            RadioOption::new(
+                theme,
+                SettingsMessage::BarAllWindows,
+                self.localizer.text("settings-bar-all-windows"),
+                self.shell_settings.all_windows_on_every_bar,
+            ),
+        ])
+        .id("bar-window-scope");
+        let desktop_count = SliderField::new(
+            theme,
+            self.localizer.text("settings-bar-desktops"),
+            "The number of persistent workspaces available to the session.",
+            self.localizer.number(
+                "settings-bar-desktop-count",
+                "count",
+                i64::from(self.shell_settings.desktop_count),
+            ),
+            f32::from(self.shell_settings.desktop_count.saturating_sub(1))
+                / f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1),
+            desktop_count_message,
+        )
+        .id("bar-desktop-count");
         ui! {
             <Column grow={1.0} padding={Insets {
                 top: 24.0, right: 40.0, bottom: 20.0, left: 20.0,
             }} gap={14.0}>
                 <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-show-on")}</Text>
-                <Row height={38.0} gap={28.0}>
-                    <RadioButton on_press={SettingsMessage::BarPrimaryDisplay}
-                        label={self.localizer.text("settings-bar-primary-display")}
-                        selected={!self.shell_settings.bar_on_all_displays}
-                        colors_pair={(if !self.shell_settings.bar_on_all_displays { palette.accent } else { palette.muted }, palette.text)}
-                        width={210.0} />
-                    <RadioButton on_press={SettingsMessage::BarAllDisplays}
-                        label={self.localizer.number("settings-bar-all-displays", "count", display_count as i64)}
-                        selected={self.shell_settings.bar_on_all_displays}
-                        colors_pair={(if self.shell_settings.bar_on_all_displays { palette.accent } else { palette.muted }, palette.text)}
-                        width={210.0} />
-                </Row>
+                {bar_display_scope}
                 <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-window-scope")}</Text>
-                <Row height={38.0} gap={28.0}>
-                    <RadioButton on_press={SettingsMessage::BarDisplayWindows}
-                        label={self.localizer.text("settings-bar-this-display")}
-                        selected={!self.shell_settings.all_windows_on_every_bar}
-                        colors_pair={(if !self.shell_settings.all_windows_on_every_bar { palette.accent } else { palette.muted }, palette.text)}
-                        width={210.0} />
-                    <RadioButton on_press={SettingsMessage::BarAllWindows}
-                        label={self.localizer.text("settings-bar-all-windows")}
-                        selected={self.shell_settings.all_windows_on_every_bar}
-                        colors_pair={(if self.shell_settings.all_windows_on_every_bar { palette.accent } else { palette.muted }, palette.text)}
-                        width={210.0} />
-                </Row>
-                <Text color={palette.text} height={20.0}>{self.localizer.text("settings-bar-desktops")}</Text>
-                <Text scale={1.0} color={palette.muted} height={18.0}>
-                    {self.localizer.number("settings-bar-desktop-count", "count", i64::from(self.shell_settings.desktop_count))}
-                </Text>
-                <Slider id={"bar-desktop-count"}
-                    value={f32::from(self.shell_settings.desktop_count.saturating_sub(1)) /
-                        f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1)}
-                    on_change={desktop_count_message} width={520.0}
-                    adjustment_step={1.0 /
-                        f32::from(nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES - 1)}
-                    focus_background_tint={theme.borders.focus}
-                    controller_focus_background_tint={theme.borders.controller_focus} />
+                {bar_window_scope}
+                {desktop_count}
                 <Row height={46.0} gap={8.0} children={desktop_choices} />
             </Column>
         }

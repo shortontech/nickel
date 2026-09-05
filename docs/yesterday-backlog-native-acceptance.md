@@ -6,6 +6,18 @@ excluded. A specification stays active until every applicable item below has rec
 Cross-compilation, unit tests, and a nested compositor do not substitute for a criterion that names
 an installed native session, physical hardware, or visual inspection.
 
+## Explicitly excluded Run dependency
+
+Specifications 0183–0187 and their Run/terminal deliverables are outside this wave. That exclusion
+also applies narrowly to Spec 0136's `Super+R` behavior and Spec 0178's Run-field adoption and native
+acceptance. Those clauses are **unimplemented**, not complete: `GlobalShortcut::ShowRun` currently
+logs that Nickel Run is unavailable and performs no action. Specs 0136 and 0178 therefore remain
+active for those clauses after this wave unless the specifications are split; no automated or native
+result below is evidence for Run.
+
+Nickel currently targets Linux and Windows. Scoped specifications that predated removal of the macOS
+target have been amended accordingly; macOS is not a missing acceptance platform for this queue.
+
 ## Automated gates before native acceptance
 
 The post-integration completeness audit on 2026-09-04 rechecked every scoped implementation against
@@ -119,7 +131,9 @@ Clippy across all targets with warnings denied.
 - **0173:** audit Linux and Windows at low/high DPI under dark, light, high-contrast, and custom
   themes; pure black/white remains confined to the independently configurable terminal viewport.
 - **0174:** exercise the real Wi-Fi switch and representative migrated Settings controls on Linux
-  and Windows without presenting unsupported operations as available.
+  and Windows without presenting unsupported operations as available. The checked-in
+  `docs/settings-control-dispositions.tsv` is the machine-checked control inventory; native testing
+  remains required for the accepted production components and documented custom composites.
 - **0191:** change and restore Linux MIME/URI and Nickel terminal/file-manager handlers; exercise and
   verify supported Windows consent workflows and effective handlers.
 
