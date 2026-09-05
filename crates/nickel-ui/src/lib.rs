@@ -103,6 +103,18 @@ pub(crate) use ui::PaintCommand;
 /// components or [`CustomPaint`]; platform presenters consume this module.
 pub mod backend {
     pub use crate::ui::PaintCommand;
+
+    /// Test/diagnostic inspection kept beside the renderer command authority so
+    /// application crates never need to pattern-match the display list.
+    #[doc(hidden)]
+    pub fn contains_image_pixels(
+        commands: &[PaintCommand],
+        pixels: &std::sync::Arc<image::RgbaImage>,
+    ) -> bool {
+        commands.iter().any(|command| {
+            matches!(command, PaintCommand::Image { image, .. } if image.as_raw() == pixels.as_raw())
+        })
+    }
 }
 
 pub type Fragment<Message = String> = Column<Message>;

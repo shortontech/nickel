@@ -82,6 +82,16 @@ icons across metadata-only directory invalidations and evicting only removed or 
 entries. Installed confirmation of launcher execution, click containment, and stable artwork remains
 queued.
 
+Commit `b5c3f53` replaces the oversized flat desktop background menu with shared recursive `View`
+and `Sort By` submenus. Pointer hover/click, keyboard left/right scope traversal, controller
+activation, accessibility relationships, blur/cancel dismissal, RTL flipping, and output-bounded
+placement share the UI overlay authority. Production-input regressions prove that Hide then Show
+updates the persisted desktop-layout visibility state and that selecting an icon preserves its
+nontransparent rendered artwork. The combined UI and Shell suites passed 582 tests with nine
+ignored live/release checks, strict all-target/all-feature Clippy passed, and the declarative display-
+list/hit-authority gates remained at their zero consumer exception baseline. Installed pointer,
+keyboard, controller, placement, and persistence confirmation remains queued.
+
 Chrome Wayland upload and VS Code dirty-tab close then exposed invisible modal children: window
 grouping admitted a second identity and Alt+` listed it without a preview, while the taskbar preview
 path saw only the presentable parent. Commit `c28a262` fixes initial commits for registered-but-yet-

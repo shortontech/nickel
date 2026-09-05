@@ -8101,9 +8101,10 @@ mod tests {
             .icon_cache
             .insert(PathBuf::from("/desktop/first.txt"), Arc::clone(&artwork));
         let before_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
-        assert!(before_commands.iter().any(|command| {
-            matches!(command, nickel_ui::backend::PaintCommand::Image { image, .. } if image.as_raw() == artwork.as_raw())
-        }));
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &before_commands,
+            &artwork
+        ));
         let before_token = shell.desktop_change_token;
 
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
@@ -8134,9 +8135,10 @@ mod tests {
         )));
         let selected_commands = shell.scene(SurfaceRole::Desktop, 400, 600);
         assert!(shell.desktop_host.application().layout.icons_visible());
-        assert!(selected_commands.iter().any(|command| {
-            matches!(command, nickel_ui::backend::PaintCommand::Image { image, .. } if image.as_raw() == artwork.as_raw())
-        }));
+        assert!(nickel_ui::backend::contains_image_pixels(
+            &selected_commands,
+            &artwork
+        ));
 
         let pointer_token = shell.desktop_change_token;
         assert!(
