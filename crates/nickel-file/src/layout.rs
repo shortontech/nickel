@@ -79,7 +79,8 @@ pub(crate) fn build_view(
             (
                 index,
                 entry.clone(),
-                app.selected_entries.contains(&index),
+                app.selected_entries.contains(&index)
+                    || app.native_drop_destination.as_ref() == Some(&entry.path),
                 app.icons.get(&entry.path).cloned(),
             )
         })
@@ -386,6 +387,7 @@ pub(crate) fn sidebar_folder_elements(
                 palette.muted
             },
         )
+        .open_id(crate::app::drop_target_id("sidebar", &path))
         .accessibility_labels((format!("Toggle {label}"), format!("Open {label}")))
         .focus_background_tints((palette.accent, palette.complement))
         .indent(depth)

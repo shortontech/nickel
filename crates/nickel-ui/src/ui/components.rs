@@ -1781,6 +1781,22 @@ impl<Message> SidebarFolder<Message> {
         self
     }
 
+    /// Assigns a stable semantic identity to the folder-opening action. This
+    /// lets native drag adapters resolve a drop destination without coupling
+    /// provider paths to painted row geometry.
+    pub fn open_id(mut self, id: impl Into<UiId>) -> Self {
+        if let Some(open) = self
+            .0
+            .0
+            .children
+            .first_mut()
+            .and_then(|row| row.children.get_mut(1))
+        {
+            open.id = Some(id.into());
+        }
+        self
+    }
+
     pub fn indent(mut self, depth: usize) -> Self {
         self.0.0.style.padding.left = depth as f32 * 16.0;
         self

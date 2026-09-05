@@ -4,7 +4,8 @@ use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, HostAdapter, HostServices, Point, ReadingDirection, UiHost,
+    AdapterOutcome, Application, HostAdapter, HostServices, Point, ReadingDirection,
+    SemanticNodeSnapshot, UiHost,
 };
 use winit::{
     dpi::LogicalSize,
@@ -85,6 +86,83 @@ fn cancel_transient_input_on_focus_loss(app: &mut FileApp) -> bool {
     app.selection_drag = None;
     app.primary_down = false;
     changed
+}
+
+fn point_in_node(point: Point, node: &SemanticNodeSnapshot) -> bool {
+    point.x >= node.bounds.origin.x
+        && point.y >= node.bounds.origin.y
+        && point.x < node.bounds.origin.x + node.bounds.size.width
+        && point.y < node.bounds.origin.y + node.bounds.size.height
+}
+
+/// Resolves native drops through production semantic geometry. The returned
+/// provider path is snapshotted while pointer motion is available because the
+/// native `DroppedFile` event itself carries source paths but no destination.
+fn drop_destination_at(
+    nodes: &[SemanticNodeSnapshot],
+    point: Point,
+    app: &FileApp,
+) -> Option<std::path::PathBuf> {
+    let hit_ids = nodes
+        .iter()
+        .filter(|node| point_in_node(point, node))
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    for id in &hit_ids {
+        if let Some(index) = id
+            .rsplit("/file-entry-")
+            .next()
+            .filter(|_| id.contains("/file-entry-"))
+            .and_then(|index| index.parse::<usize>().ok())
+            && let Some(entry) = app.browser.entries().get(index)
+            && entry.is_directory
+        {
+            return Some(entry.path.clone());
+        }
+    }
+    for index in 0..app.tabs.len() {
+        if hit_ids
+            .iter()
+            .any(|id| id.ends_with(&format!("/file-drop-tab-{index}")))
+        {
+            return if index == app.active_tab {
+                Some(app.browser.current().to_path_buf())
+            } else {
+                app.inactive_tab(index)
+                    .map(|tab| tab.browser.current().to_path_buf())
+            };
+        }
+    }
+    let mut destinations = app
+        .location_groups
+        .iter()
+        .flat_map(|group| group.entries.iter().map(|(_, path)| path.clone()))
+        .chain(
+            app.sidebar_children
+                .values()
+                .flat_map(|children| children.iter().map(|(_, path)| path.clone())),
+        )
+        .collect::<Vec<_>>();
+    let mut ancestor = Some(app.browser.current());
+    while let Some(path) = ancestor {
+        destinations.push(path.to_path_buf());
+        ancestor = path.parent();
+    }
+    for destination in destinations {
+        for prefix in ["sidebar", "breadcrumb"] {
+            let candidate = crate::app::drop_target_id(prefix, &destination);
+            if hit_ids
+                .iter()
+                .any(|id| id.ends_with(&format!("/{candidate}")))
+            {
+                return Some(destination);
+            }
+        }
+    }
+    hit_ids
+        .iter()
+        .any(|id| id.ends_with("/file-content"))
+        .then(|| app.browser.current().to_path_buf())
 }
 
 impl Default for FileHostAdapter {
@@ -196,7 +274,9 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                     ),
                     KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
-                        if app.rename_editor.is_some() {
+                        if app.pending_transfer_conflict.is_some() {
+                            app.update(FileMessage::TransferCancelConflicts);
+                        } else if app.rename_editor.is_some() {
                             app.update(FileMessage::CancelRename);
                         } else if app.transfer_rx.is_some() {
                             app.update(FileMessage::CancelTransfer);
@@ -260,8 +340,11 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         host.application().browser.entries().len(),
                     )
                 });
+                let drop_destination =
+                    drop_destination_at(&host.semantic_nodes(), cursor, host.application());
                 let app = host.application_mut();
                 app.cursor = cursor;
+                app.native_drop_destination = drop_destination;
                 app.begin_file_drag_if_threshold(cursor);
                 if let Some(entries) = selected_entries {
                     app.selected_entries = entries;
@@ -413,7 +496,7 @@ impl HostAdapter<FileApp> for FileHostAdapter {
 mod tests {
     use super::{
         NavigationShortcut, adjacent_tab_index, cancel_transient_input_on_focus_loss,
-        navigation_shortcut, selection_command_modifier,
+        drop_destination_at, navigation_shortcut, selection_command_modifier,
     };
     use crate::{FileApp, FileMessage};
     use nickel_input::{KeyCode, Modifier, ModifierState};
@@ -475,5 +558,28 @@ mod tests {
         assert!(path.exists());
         assert!(!directory.path().join("renamed.txt").exists());
         assert!(!cancel_transient_input_on_focus_loss(&mut app));
+    }
+
+    #[test]
+    fn native_drop_target_uses_semantic_folder_geometry() {
+        let directory = tempfile::tempdir().unwrap();
+        let folder = directory.path().join("destination");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(directory.path().join("file.txt"), b"file").unwrap();
+        let host = nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let node = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("destination"))
+            .unwrap();
+        let point = nickel_ui::Point {
+            x: node.bounds.origin.x + node.bounds.size.width / 2.0,
+            y: node.bounds.origin.y + node.bounds.size.height / 2.0,
+        };
+
+        assert_eq!(
+            drop_destination_at(&host.semantic_nodes(), point, host.application()),
+            Some(folder)
+        );
     }
 }

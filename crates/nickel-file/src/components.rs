@@ -160,7 +160,7 @@ pub(crate) fn navigation_toolbar(
                     } else {
                         ui! { <></> }
                     }}
-                    <Container on_press={FileMessage::Breadcrumb(path.clone())}
+                    <Container id={crate::app::drop_target_id("breadcrumb", path)} on_press={FileMessage::Breadcrumb(path.clone())}
                         focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement} padding={Insets {
                         top: 4.0, right: 2.0, bottom: 3.0, left: 2.0,
                     }} accessibility_label={format!("Open {label}")}>
@@ -665,7 +665,7 @@ pub(crate) fn tab(
                 <Row height={25.0} gap={6.0} padding={Insets {
                     top: 4.0, right: 4.0, bottom: 3.0, left: 9.0,
                 }}>
-                    <Container width={125.0} height={25.0} on_press={FileMessage::SwitchTab(index)}
+                    <Container id={format!("file-drop-tab-{index}")} width={125.0} height={25.0} on_press={FileMessage::SwitchTab(index)}
                         focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}
                         accessibility_label={format!("Tab {label}")}><Row gap={6.0}>
                         {if let Some((id, image)) = icon {

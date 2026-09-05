@@ -55,11 +55,24 @@ fn entry_context_menu_id(path: &std::path::Path) -> String {
     path.hash(&mut hasher);
     format!("file-entry-context-{:016x}", hasher.finish())
 }
+
+pub(crate) fn drop_target_id(prefix: &str, path: &std::path::Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    format!("file-drop-{prefix}-{:016x}", hasher.finish())
+}
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
 type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
 type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
 type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingTransferConflict {
+    offer: ClipboardOffer,
+    destination: PathBuf,
+    conflicts: Vec<PathBuf>,
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct FileClick {
@@ -104,6 +117,9 @@ pub enum FileMessage {
     CommitRename,
     CancelRename,
     CancelTransfer,
+    TransferKeepBoth,
+    TransferSkipConflicts,
+    TransferCancelConflicts,
     CopySelection,
     CutSelection,
     Paste,
@@ -185,10 +201,13 @@ pub struct FileApp {
     pub(crate) drag_hover: Option<PathBuf>,
     native_drop_batch: Vec<PathBuf>,
     native_drop_deadline: Option<Instant>,
+    pub(crate) native_drop_destination: Option<PathBuf>,
+    native_drop_batch_destination: Option<PathBuf>,
     pub(crate) outbound_drag: Option<DragOffer>,
     pub(crate) primary_down: bool,
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
     transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    pub(crate) pending_transfer_conflict: Option<PendingTransferConflict>,
     pub(crate) selection_anchor: Option<usize>,
     pub(crate) active_tab_id: u64,
     pub(crate) next_tab_id: u64,
@@ -945,10 +964,13 @@ impl FileApp {
             drag_hover: None,
             native_drop_batch: Vec::new(),
             native_drop_deadline: None,
+            native_drop_destination: None,
+            native_drop_batch_destination: None,
             outbound_drag: None,
             primary_down: false,
             transfer_rx: None,
             transfer_cancel: None,
+            pending_transfer_conflict: None,
             selection_anchor: None,
             active_tab_id: 0,
             next_tab_id: 1,
@@ -2190,6 +2212,16 @@ impl FileApp {
                     self.status = "Cancelling transfer…".into();
                 }
             }
+            FileMessage::TransferKeepBoth => {
+                self.resolve_transfer_conflicts(ConflictPolicy::KeepBoth)
+            }
+            FileMessage::TransferSkipConflicts => {
+                self.resolve_transfer_conflicts(ConflictPolicy::Skip)
+            }
+            FileMessage::TransferCancelConflicts => {
+                self.pending_transfer_conflict = None;
+                self.status = "Transfer cancelled".into();
+            }
             FileMessage::CommitRename => self.commit_rename(),
             FileMessage::CopySelection => self.capture_file_clipboard(TransferIntent::Copy),
             FileMessage::CutSelection => self.capture_file_clipboard(TransferIntent::Move),
@@ -2785,15 +2817,56 @@ impl FileApp {
             self.status = "Wait for the current file operation to finish".into();
             return;
         }
+        if self.pending_transfer_conflict.is_some() {
+            self.status = "Resolve or cancel the current file conflicts first".into();
+            return;
+        }
+        let writable = crate::directory_is_writable(&destination);
+        if !writable {
+            self.status = "Paste target is not writable".into();
+            return;
+        }
+        let conflicts = offer
+            .sources
+            .iter()
+            .filter_map(|source| source.path.file_name().map(|name| destination.join(name)))
+            .filter(|target| target.exists())
+            .collect::<Vec<_>>();
+        if !conflicts.is_empty() {
+            self.status = format!(
+                "{} item{} already exist{} in the destination",
+                conflicts.len(),
+                if conflicts.len() == 1 { "" } else { "s" },
+                if conflicts.len() == 1 { "s" } else { "" },
+            );
+            self.pending_transfer_conflict = Some(PendingTransferConflict {
+                offer,
+                destination,
+                conflicts,
+            });
+            return;
+        }
+        self.start_transfer_with_policy(offer, destination, ConflictPolicy::Ask);
+    }
+
+    fn resolve_transfer_conflicts(&mut self, policy: ConflictPolicy) {
+        let Some(pending) = self.pending_transfer_conflict.take() else {
+            return;
+        };
+        self.start_transfer_with_policy(pending.offer, pending.destination, policy);
+    }
+
+    fn start_transfer_with_policy(
+        &mut self,
+        offer: ClipboardOffer,
+        destination: PathBuf,
+        conflict_policy: ConflictPolicy,
+    ) {
         let total = offer.sources.len();
         let writable = crate::directory_is_writable(&destination);
-        let Ok(effect) = crate::operations::plan_paste(
-            &offer,
-            "local",
-            &destination,
-            writable,
-            ConflictPolicy::Ask,
-        ) else {
+        let Ok(effect) =
+            crate::operations::plan_paste(&offer, "local", &destination, writable, conflict_policy)
+        else {
             self.status = "Paste target is not valid".into();
             return;
         };
@@ -2927,7 +3000,13 @@ impl FileApp {
             })
             .collect();
         match ClipboardOffer::new(TransferIntent::Copy, sources) {
-            Ok(offer) => self.start_transfer(offer, self.browser.current().to_path_buf()),
+            Ok(offer) => {
+                let destination = self
+                    .native_drop_batch_destination
+                    .take()
+                    .unwrap_or_else(|| self.browser.current().to_path_buf());
+                self.start_transfer(offer, destination);
+            }
             Err(error) => self.status = format!("Could not accept drop: {error:?}"),
         }
         true
@@ -2960,13 +3039,20 @@ impl Application for FileApp {
     fn file_drag_event(&mut self, event: nickel_ui::FileDragEvent) -> bool {
         match event {
             nickel_ui::FileDragEvent::Hovered(path) => self.drag_hover = Some(path),
-            nickel_ui::FileDragEvent::HoverCancelled => self.drag_hover = None,
+            nickel_ui::FileDragEvent::HoverCancelled => {
+                self.drag_hover = None;
+                self.native_drop_destination = None;
+            }
             nickel_ui::FileDragEvent::Dropped(path) => {
                 self.drag_hover = None;
                 if path.file_name().is_none() {
                     return false;
                 }
+                if self.native_drop_batch.is_empty() {
+                    self.native_drop_batch_destination = self.native_drop_destination.clone();
+                }
                 self.native_drop_batch.push(path);
+                self.native_drop_destination = None;
                 // Winit reports one DroppedFile event per path. Coalesce the
                 // burst so a native multi-file drag becomes one bounded operation.
                 self.native_drop_deadline = Some(Instant::now() + Duration::from_millis(25));
@@ -3147,6 +3233,36 @@ impl Application for FileApp {
                         <Button on_press={FileMessage::CancelRename}>{"Cancel"}</Button>
                     </Row>
                 </Column>
+            }));
+        }
+        if let Some(pending) = &self.pending_transfer_conflict {
+            let surface = TransientSurface::dialog(
+                "file-transfer-conflicts",
+                OverlayAnchor::Node(UiId::from("file-content")),
+                Size::new(440.0, 180.0),
+                OverlayStyle {
+                    background: palette.surface,
+                    foreground: palette.text,
+                    border: palette.muted,
+                    selected: palette.accent_soft,
+                    radius: 8,
+                },
+            );
+            let count = pending.conflicts.len();
+            overlays.push(FrameOverlay::surface(surface, ui! {
+                <Container semantic_role={nickel_ui::SemanticRole::Dialog}
+                    accessibility_label={format!("Resolve {count} file transfer conflicts")}
+                    background={palette.surface} padding={Insets::all(18.0)}>
+                    <Column gap={12.0}>
+                        <Text color={palette.text} scale={1.25}>{format!("{count} item{} already exist{}", if count == 1 { "" } else { "s" }, if count == 1 { "s" } else { "" })}</Text>
+                        <Text color={palette.muted}> {"Choose how Nickel File should handle every conflicting name in this transfer."} </Text>
+                        <Row gap={8.0}>
+                            <Button on_press={FileMessage::TransferKeepBoth}> {"Keep both"} </Button>
+                            <Button on_press={FileMessage::TransferSkipConflicts}> {"Skip conflicts"} </Button>
+                            <Button on_press={FileMessage::TransferCancelConflicts}> {"Cancel transfer"} </Button>
+                        </Row>
+                    </Column>
+                </Container>
             }));
         }
         overlays.push(FrameOverlay::Menu(configure(
@@ -3383,6 +3499,8 @@ mod live_reconciliation_tests {
 
     use nickel_file::DirectoryBrowser;
 
+    use crate::operations::{ClipboardOffer, ItemCapabilities, TransferIntent, TransferSource};
+
     use super::{FileApp, FileMessage};
 
     fn settle_live_change(app: &mut FileApp) {
@@ -3612,6 +3730,54 @@ mod live_reconciliation_tests {
         }
         assert!(destination.path().join("a.txt").exists());
         assert!(destination.path().join("b.txt").exists());
+    }
+
+    #[test]
+    fn conflicting_transfer_waits_for_an_explicit_bounded_policy() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let source_path = source.path().join("report.txt");
+        fs::write(&source_path, b"new").unwrap();
+        fs::write(destination.path().join("report.txt"), b"old").unwrap();
+        let offer = ClipboardOffer::new(
+            TransferIntent::Copy,
+            vec![TransferSource {
+                provider: "local".into(),
+                identity: crate::file_identity(&source_path).unwrap(),
+                path: source_path,
+                capabilities: ItemCapabilities {
+                    readable: true,
+                    removable: true,
+                },
+            }],
+        )
+        .unwrap();
+        let mut app = FileApp::new(destination.path().to_path_buf());
+
+        app.start_transfer(offer, destination.path().to_path_buf());
+        assert!(app.transfer_rx.is_none());
+        assert_eq!(
+            app.pending_transfer_conflict
+                .as_ref()
+                .unwrap()
+                .conflicts
+                .len(),
+            1
+        );
+        app.update_message(FileMessage::TransferKeepBoth);
+        while app.transfer_rx.is_some() {
+            app.poll_transfer();
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert_eq!(
+            fs::read(destination.path().join("report.txt")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            fs::read(destination.path().join("report (2).txt")).unwrap(),
+            b"new"
+        );
     }
 }
 
