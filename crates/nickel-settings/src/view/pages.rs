@@ -1,19 +1,54 @@
 use super::*;
 use nickel_ui::{ComponentBuilderExt, Row, TextField};
 
+pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
+    let available = state.capability.support == FeatureSupport::Supported
+        && state.capability.installation == FeatureInstallation::Installed;
+    if !available || !state.editable() {
+        return if state.requested_enabled {
+            SwitchState::DisabledOn
+        } else {
+            SwitchState::DisabledOff
+        };
+    }
+    match state.effective {
+        FeatureEffectiveState::Disabled => SwitchState::Off,
+        FeatureEffectiveState::Enabled => SwitchState::On,
+        FeatureEffectiveState::Enabling => {
+            if state.requested_enabled {
+                SwitchState::DisabledOn
+            } else {
+                SwitchState::DisabledOff
+            }
+        }
+        // A rejected or impossible-to-order acknowledgement is neither On nor
+        // Off. In particular, never paint the switch On merely because the
+        // requested preference was persisted before runtime application failed.
+        FeatureEffectiveState::Rejected | FeatureEffectiveState::Stale => SwitchState::Mixed,
+        FeatureEffectiveState::Unavailable => {
+            if state.requested_enabled {
+                SwitchState::DisabledOn
+            } else {
+                SwitchState::DisabledOff
+            }
+        }
+    }
+}
+
 impl SettingsApp {
     pub(super) fn optional_features_components(
         &self,
     ) -> impl nickel_ui::Component<SettingsMessage> {
         let theme = self.ui_theme();
         let state = &self.codex_feature;
-        let available = state.capability.support == FeatureSupport::Supported
-            && state.capability.installation == FeatureInstallation::Installed;
-        let switch_state = match (state.requested_enabled, available, state.editable()) {
-            (true, true, true) => SwitchState::On,
-            (false, true, true) => SwitchState::Off,
-            (true, _, _) => SwitchState::DisabledOn,
-            (false, _, _) => SwitchState::DisabledOff,
+        let switch_state = codex_switch_state(state);
+        let switch_action = match switch_state {
+            SwitchState::On => Some(SettingsMessage::SetCodexEnabled(false)),
+            SwitchState::Off => Some(SettingsMessage::SetCodexEnabled(true)),
+            SwitchState::Mixed => Some(SettingsMessage::SetCodexEnabled(false)),
+            SwitchState::MixedUnavailable | SwitchState::DisabledOff | SwitchState::DisabledOn => {
+                None
+            }
         };
         let status = match state.effective {
             FeatureEffectiveState::Disabled => "Disabled",
@@ -108,14 +143,9 @@ impl SettingsApp {
         )
         .child(
             SettingsRow::new(theme, "Enable Codex", status).trailing(
-                Switch::with_state(
-                    switch_state,
-                    (available && state.editable())
-                        .then_some(SettingsMessage::SetCodexEnabled as fn(bool) -> SettingsMessage),
-                    theme,
-                )
-                .id("optional-feature-codex-enabled")
-                .accessibility_label("Enable Codex integration"),
+                Switch::with_state_action(switch_state, switch_action, theme)
+                    .id("optional-feature-codex-enabled")
+                    .accessibility_label("Enable Codex integration"),
             ),
         )
         .child(confirmation)

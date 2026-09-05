@@ -649,6 +649,8 @@ impl<Message> Component<Message> for Surface<Message> {
 pub enum SwitchState {
     Off,
     On,
+    /// Requested and effective values differ, but the user may resolve them.
+    Mixed,
     MixedUnavailable,
     DisabledOff,
     DisabledOn,
@@ -656,11 +658,11 @@ pub enum SwitchState {
 
 impl SwitchState {
     fn value(self) -> bool {
-        matches!(self, Self::On | Self::DisabledOn)
+        matches!(self, Self::On | Self::Mixed | Self::DisabledOn)
     }
 
     fn interactive(self) -> bool {
-        matches!(self, Self::Off | Self::On)
+        matches!(self, Self::Off | Self::On | Self::Mixed)
     }
 }
 
@@ -685,16 +687,29 @@ impl<Message> Switch<Message> {
         on_change: Option<fn(bool) -> Message>,
         theme: SemanticTheme,
     ) -> Self {
+        let on_activate = on_change.map(|on_change| on_change(!state.value()));
+        Self::with_state_action(state, on_activate, theme)
+    }
+
+    /// Builds a switch with an explicit reconciliation action. `Mixed` uses
+    /// this to request Off without falsely presenting a rejected request as On.
+    pub fn with_state_action(
+        state: SwitchState,
+        on_activate: Option<Message>,
+        theme: SemanticTheme,
+    ) -> Self {
         let value = state.value();
         let thumb = Container::new()
             .width(18.0)
             .height(18.0)
             .radius(9.0)
-            .background(if state == SwitchState::MixedUnavailable {
-                theme.text.disabled
-            } else {
-                theme.text.primary
-            });
+            .background(
+                if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
+                    theme.text.disabled
+                } else {
+                    theme.text.primary
+                },
+            );
         let mut control = Container::new()
             .width(42.0)
             .height(24.0)
@@ -702,19 +717,22 @@ impl<Message> Switch<Message> {
             .accessibility_label("Switch")
             .radius(12.0)
             .padding(Insets::all(3.0))
-            .background(if state == SwitchState::MixedUnavailable {
-                theme.surfaces.selected
-            } else if value {
-                theme.accent.ordinary
-            } else {
-                theme.surfaces.raised
-            })
+            .background(
+                if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
+                    theme.surfaces.selected
+                } else if value {
+                    theme.accent.ordinary
+                } else {
+                    theme.surfaces.raised
+                },
+            )
             .interaction_backgrounds(theme.surfaces.hover, theme.surfaces.pressed)
             .focus_background_tint(theme.borders.focus)
             .controller_focus_background_tint(theme.borders.controller_focus)
             .accessibility_state(match state {
                 SwitchState::Off => "off",
                 SwitchState::On => "on",
+                SwitchState::Mixed => "mixed",
                 SwitchState::MixedUnavailable => "mixed unavailable",
                 SwitchState::DisabledOff => "off disabled",
                 SwitchState::DisabledOn => "on disabled",
@@ -722,19 +740,21 @@ impl<Message> Switch<Message> {
             .child(
                 Row::new()
                     .fill_width()
-                    .justify_content(if state == SwitchState::MixedUnavailable {
-                        Justify::Center
-                    } else if value {
-                        Justify::End
-                    } else {
-                        Justify::Start
-                    })
+                    .justify_content(
+                        if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
+                            Justify::Center
+                        } else if value {
+                            Justify::End
+                        } else {
+                            Justify::Start
+                        },
+                    )
                     .child(thumb),
             );
         if state.interactive()
-            && let Some(on_change) = on_change
+            && let Some(on_activate) = on_activate
         {
-            control = control.message(on_change(!value));
+            control = control.message(on_activate);
         }
         Self(control)
     }

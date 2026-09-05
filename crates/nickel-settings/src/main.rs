@@ -2194,8 +2194,9 @@ mod tests {
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
-    use nickel_ui::{Application, SemanticRole};
+    use nickel_ui::{Application, SemanticRole, SwitchState};
 
+    use super::view::codex_switch_state;
     use super::{
         BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction, FeatureEffectiveState,
         FeatureHealth, FeatureInstallation, FeaturePolicy, FeatureSupport, FileIconPreference,
@@ -3629,6 +3630,44 @@ mod tests {
                 FeatureEffectiveState::Enabling
             }
         );
+    }
+
+    #[test]
+    fn rejected_or_stale_codex_application_never_paints_the_switch_on() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.codex_feature.requested_enabled = true;
+        app.codex_feature.capability.installation = FeatureInstallation::Installed;
+        app.codex_feature.capability.support = FeatureSupport::Supported;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
+
+        app.codex_feature.effective = FeatureEffectiveState::Rejected;
+        assert_eq!(codex_switch_state(&app.codex_feature), SwitchState::Mixed);
+        let frame = app.build_ui(1100.0, 720.0);
+        assert_eq!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(false))
+                .len(),
+            1,
+            "the mixed switch remains an explicit way to resolve the failed request"
+        );
+        assert!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::SetCodexEnabled(true))
+                .is_empty()
+        );
+
+        app.codex_feature.effective = FeatureEffectiveState::Stale;
+        assert_eq!(codex_switch_state(&app.codex_feature), SwitchState::Mixed);
+
+        app.codex_feature.effective = FeatureEffectiveState::Enabling;
+        assert_eq!(
+            codex_switch_state(&app.codex_feature),
+            SwitchState::DisabledOn,
+            "an unacknowledged request is visibly pending rather than interactive"
+        );
+
+        app.codex_feature.effective = FeatureEffectiveState::Enabled;
+        assert_eq!(codex_switch_state(&app.codex_feature), SwitchState::On);
     }
 
     #[test]
