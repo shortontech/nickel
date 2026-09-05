@@ -418,6 +418,7 @@ pub struct WinitShell {
     started: Instant,
     options: ShellOptions,
     primary_output_name: Option<String>,
+    active_output_name: Option<String>,
 }
 
 impl WinitShell {
@@ -461,6 +462,7 @@ impl WinitShell {
             started,
             options,
             primary_output_name: None,
+            active_output_name: None,
         })
     }
 
@@ -706,6 +708,62 @@ impl WinitShell {
             self.sync_display_geometry()?;
         }
         Ok(true)
+    }
+
+    /// Records a genuine interaction point in desktop-physical coordinates.
+    /// Monitor enumeration and repaint never call this, so they cannot steal
+    /// the output used by the next global launcher invocation.
+    pub fn set_active_output_at(&mut self, point: (i32, i32)) -> bool {
+        let Some(name) = output_name_at(&self.displays, point) else {
+            return false;
+        };
+        if self.active_output_name.as_deref() == Some(name) {
+            return false;
+        }
+        self.active_output_name = Some(name.to_owned());
+        true
+    }
+
+    pub fn set_active_output_from_surface(&mut self, id: SurfaceId) -> bool {
+        let Some(name) = self.surface(id).map(|surface| surface.output_name.clone()) else {
+            return false;
+        };
+        if name.is_empty() || self.active_output_name.as_ref() == Some(&name) {
+            return false;
+        }
+        self.active_output_name = Some(name);
+        true
+    }
+
+    fn active_output_index(&self) -> Option<usize> {
+        preferred_output_index(
+            &self.displays,
+            self.active_output_name.as_deref(),
+            self.primary_output_name.as_deref(),
+        )
+    }
+
+    fn relocate_to_active_output(&mut self, index: usize) {
+        let Some(display_index) = self.active_output_index() else {
+            return;
+        };
+        let Some((geometry, output_name)) = self.displays.get(display_index).cloned() else {
+            return;
+        };
+        let role = self.surfaces[index].role;
+        if role != SurfaceRole::Launcher {
+            return;
+        }
+        let (_, x, y, width, height, _) = surface_geometry(role, geometry, self.options.panel_edge);
+        let surface = &mut self.surfaces[index];
+        surface.display_index = display_index;
+        surface.output_name = output_name;
+        surface
+            .window
+            .set_outer_position(LogicalPosition::new(x, y));
+        let _ = surface
+            .window
+            .request_inner_size(LogicalSize::new(width, height));
     }
 
     fn retire_settled_output_surfaces(&mut self, output_names: &[String], now: Instant) {
@@ -1005,7 +1063,13 @@ impl WinitShell {
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
-        let shown = self.surface_mut(id).is_some_and(|surface| {
+        let Some(index) = self.surface_indices.get(&id.0).copied() else {
+            return false;
+        };
+        if self.surfaces[index].role == SurfaceRole::Launcher {
+            self.relocate_to_active_output(index);
+        }
+        let shown = self.surfaces.get_mut(index).is_some_and(|surface| {
             if surface.visible {
                 return false;
             }
@@ -1441,6 +1505,39 @@ impl WinitShell {
     }
 }
 
+fn output_name_at(displays: &[(DisplayGeometry, String)], point: (i32, i32)) -> Option<&str> {
+    displays
+        .iter()
+        .find(|(geometry, _)| {
+            let right = i64::from(geometry.x) + i64::from(geometry.width);
+            let bottom = i64::from(geometry.y) + i64::from(geometry.height);
+            i64::from(point.0) >= i64::from(geometry.x)
+                && i64::from(point.0) < right
+                && i64::from(point.1) >= i64::from(geometry.y)
+                && i64::from(point.1) < bottom
+        })
+        .map(|(_, name)| name.as_str())
+}
+
+fn preferred_output_index(
+    displays: &[(DisplayGeometry, String)],
+    active: Option<&str>,
+    primary: Option<&str>,
+) -> Option<usize> {
+    active
+        .and_then(|name| displays.iter().position(|(_, candidate)| candidate == name))
+        .or_else(|| {
+            primary.and_then(|name| displays.iter().position(|(_, candidate)| candidate == name))
+        })
+        .or_else(|| {
+            displays
+                .iter()
+                .enumerate()
+                .min_by(|(_, (_, left)), (_, (_, right))| left.cmp(right))
+                .map(|(index, _)| index)
+        })
+}
+
 fn panel_outputs(
     output_names: &[String],
     all_displays: bool,
@@ -1698,13 +1795,53 @@ mod tests {
         DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_CREATION_RETRY_MAX,
         OUTPUT_CREATION_RETRY_MIN, OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry,
         OutputRetirementTracker, PANEL_TITLE, PanelEdge, SurfaceRole, desired_output_surfaces,
-        durable_presenter_peak, output_role_is_retired, panel_outputs, parse_proc_status_rss,
-        require_displays, shell_surface_title, surface_geometry, surface_is_borderless,
+        durable_presenter_peak, output_name_at, output_role_is_retired, panel_outputs,
+        parse_proc_status_rss, preferred_output_index, require_displays, shell_surface_title,
+        surface_geometry, surface_is_borderless,
     };
 
     use nickel_ui::AggregatePresenterCacheDiagnostics;
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn active_output_selection_uses_interaction_then_primary_then_stable_identity() {
+        let displays = vec![
+            (
+                DisplayGeometry {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    scale: 1.0,
+                },
+                "z-primary".to_owned(),
+            ),
+            (
+                DisplayGeometry {
+                    x: -2560,
+                    y: -200,
+                    width: 2560,
+                    height: 1440,
+                    scale: 1.5,
+                },
+                "a-wide".to_owned(),
+            ),
+        ];
+        assert_eq!(output_name_at(&displays, (-200, 400)), Some("a-wide"));
+        assert_eq!(output_name_at(&displays, (0, 0)), Some("z-primary"));
+        assert_eq!(output_name_at(&displays, (1920, 100)), None);
+        assert_eq!(
+            preferred_output_index(&displays, Some("a-wide"), Some("z-primary")),
+            Some(1)
+        );
+        assert_eq!(
+            preferred_output_index(&displays, Some("missing"), Some("z-primary")),
+            Some(0),
+            "a stale interaction output falls through to the configured primary"
+        );
+        assert_eq!(preferred_output_index(&displays, None, None), Some(1));
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

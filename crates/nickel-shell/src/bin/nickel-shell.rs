@@ -1608,6 +1608,7 @@ fn handle_shell_input(
                     render_role(shell, state, SurfaceRole::WindowContextMenu)?;
                 }
             } else if edge == KeyEdge::Pressed && role == SurfaceRole::Panel {
+                shell.set_active_output_from_surface(surface);
                 if let Some(output) = shell
                     .surface(surface)
                     .map(|entry| entry.output_name().to_owned())
@@ -1715,6 +1716,7 @@ fn handle_shell_input(
         InputEvent::Touch(nickel_input::TouchEvent::Ended { position, .. })
             if role == SurfaceRole::Panel =>
         {
+            shell.set_active_output_from_surface(surface);
             let width = shell
                 .surface(surface)
                 .map(|entry| entry.window().size().0)
@@ -2308,6 +2310,15 @@ fn main() -> Result<(), String> {
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
                 tracing::debug!(?shortcut, "handling global shortcut");
                 shell.begin_input_observation(Instant::now());
+                #[cfg(not(target_os = "linux"))]
+                if matches!(
+                    shortcut,
+                    platform::GlobalShortcut::ToggleLauncher
+                        | platform::GlobalShortcut::ShowLauncher
+                ) && let Some(point) = platform::active_display_point()
+                {
+                    shell.set_active_output_at(point);
+                }
                 if shortcut == platform::GlobalShortcut::ReloadShellSettings {
                     let settings = nickel_core::shell_settings::ShellSettings::load_default();
                     if shell.set_bar_on_all_displays(settings.bar_on_all_displays)? {
@@ -2389,6 +2400,7 @@ fn main() -> Result<(), String> {
                 surface,
                 focused: true,
             }) => {
+                shell.set_active_output_from_surface(surface);
                 if shell
                     .surface(surface)
                     .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)

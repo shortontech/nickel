@@ -5,6 +5,10 @@ use crate::{
     platform::{FeedState, GlobalShortcut, NotificationSource, ShellCommand, TraySource},
 };
 
+pub fn active_display_point() -> Option<(i32, i32)> {
+    None
+}
+
 pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
 }

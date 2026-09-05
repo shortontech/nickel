@@ -214,6 +214,30 @@ pub fn capture_desktop() -> Result<DesktopCapture, String> {
     })
 }
 
+/// Returns a point on the display currently used by the foreground application.
+/// The cursor is the fallback when Windows has no meaningful foreground window.
+pub fn active_display_point() -> Option<(i32, i32)> {
+    unsafe {
+        let foreground = GetForegroundWindow();
+        if !foreground.is_invalid() {
+            let mut bounds = RECT::default();
+            if GetWindowRect(foreground, &mut bounds).is_ok()
+                && bounds.right > bounds.left
+                && bounds.bottom > bounds.top
+            {
+                return Some((
+                    bounds.left + (bounds.right - bounds.left) / 2,
+                    bounds.top + (bounds.bottom - bounds.top) / 2,
+                ));
+            }
+        }
+        let mut cursor = POINT::default();
+        GetCursorPos(&mut cursor)
+            .ok()
+            .map(|()| (cursor.x, cursor.y))
+    }
+}
+
 pub fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
     const CF_BITMAP: u32 = 2;
     let info = BITMAPINFO {
