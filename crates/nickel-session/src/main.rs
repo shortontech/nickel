@@ -58,16 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    if let Ok(env_filter) = tracing_subscriber::EnvFilter::try_from_default_env() {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .init();
-    }
+    nickel_logging::init("nickel-session")?;
 
     let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
     let mut event_loop: EventLoop<'static, NickelSession> = EventLoop::try_new()?;

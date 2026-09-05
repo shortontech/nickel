@@ -15,6 +15,7 @@ bitflags.workspace = true
 image.workspace = true
 nickel-core = { path = "../nickel-core" }
 nickel-input = { path = "../nickel-input" }
+nickel-logging = { path = "../nickel-logging" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
 nickel-ui = { path = "../nickel-ui" }
 nix.workspace = true
@@ -23,7 +24,6 @@ serde_json.workspace = true
 smithay.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 winit = { workspace = true, optional = true }
 xcursor.workspace = true
 zbus.workspace = true
