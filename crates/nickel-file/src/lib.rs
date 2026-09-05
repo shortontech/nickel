@@ -35,6 +35,7 @@ pub fn desktop_directory() -> PathBuf {
 
 pub fn open_path(path: &Path) -> Result<(), String> {
     match open_target_kind(path) {
+        #[cfg(target_os = "linux")]
         OpenTargetKind::Launcher => {
             platform::open_launcher(path).map_err(|error| error.to_string())
         }
@@ -46,6 +47,7 @@ pub fn open_path(path: &Path) -> Result<(), String> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenTargetKind {
+    #[cfg(target_os = "linux")]
     Launcher,
     Document,
 }
