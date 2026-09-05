@@ -128,6 +128,10 @@ impl DesktopLayout {
         self.arrangement
     }
 
+    pub fn folder_grouping(&self) -> FolderGrouping {
+        self.grouping
+    }
+
     pub fn grid(&self) -> (f32, f32) {
         self.cell
     }

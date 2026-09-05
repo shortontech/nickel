@@ -164,6 +164,10 @@ pub struct DesktopApplication {
     active_scale: f32,
     icon_cache: HashMap<std::path::PathBuf, Arc<image::RgbaImage>>,
     pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
+    /// Pointer position at which the last snapped desktop move was committed.
+    /// Keeping this separate from every motion event lets ordinary small motion
+    /// accumulate until it crosses a grid-cell boundary.
+    drag_commit_position: Option<DesktopPoint>,
     selection_start: Option<DesktopPoint>,
     pointer_position: DesktopPoint,
     pointer_seen: bool,
@@ -200,6 +204,7 @@ pub enum DesktopCommand {
     IconsVisible(bool),
     IconSize(f32, f32),
     Sort(DesktopSortKey, DesktopSortDirection),
+    FolderGrouping(FolderGrouping),
     Manual,
     AlignGrid,
     AutoArrange,
@@ -264,6 +269,7 @@ impl DesktopApplication {
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,
+            drag_commit_position: None,
             selection_start: None,
             pointer_position: DesktopPoint::default(),
             pointer_seen: false,
@@ -426,6 +432,7 @@ impl DesktopApplication {
         if let Some(id) = hit {
             self.layout.select(id, modifiers);
             self.pointer_down = Some((id, local));
+            self.drag_commit_position = Some(local);
             self.selection_start = None;
             self.pointer_dragged = false;
         } else {
@@ -433,6 +440,7 @@ impl DesktopApplication {
                 self.layout.clear_selection();
             }
             self.pointer_down = None;
+            self.drag_commit_position = None;
             self.selection_start = Some(local);
         }
         true
@@ -441,7 +449,7 @@ impl DesktopApplication {
     fn pointer_motion(&mut self, local: DesktopPoint) -> bool {
         self.pointer_position = local;
         self.pointer_seen = true;
-        let Some((id, previous)) = self.pointer_down else {
+        let Some((id, pressed)) = self.pointer_down else {
             let Some(start) = self.selection_start else {
                 return false;
             };
@@ -458,15 +466,28 @@ impl DesktopApplication {
             );
             return true;
         };
+        let committed = self.drag_commit_position.unwrap_or(pressed);
         let delta = DesktopPoint {
-            x: local.x - previous.x,
-            y: local.y - previous.y,
+            x: local.x - committed.x,
+            y: local.y - committed.y,
         };
         if delta.x.abs() < 2.0 && delta.y.abs() < 2.0 {
             return false;
         }
-        self.layout.move_group(id, delta, &self.active_output);
-        self.pointer_down = Some((id, local));
+        let (cell_width, cell_height) = self.layout.grid();
+        if delta.x.abs() < cell_width / 2.0 && delta.y.abs() < cell_height / 2.0 {
+            return false;
+        }
+        let snapped_delta = DesktopPoint {
+            x: (delta.x / cell_width).round() * cell_width,
+            y: (delta.y / cell_height).round() * cell_height,
+        };
+        self.layout
+            .move_group(id, snapped_delta, &self.active_output);
+        self.drag_commit_position = Some(DesktopPoint {
+            x: committed.x + snapped_delta.x,
+            y: committed.y + snapped_delta.y,
+        });
         self.pointer_dragged = true;
         true
     }
@@ -478,6 +499,7 @@ impl DesktopApplication {
         let Some((id, pressed)) = self.pointer_down.take() else {
             return false;
         };
+        self.drag_commit_position = None;
         let moved = self.pointer_dragged
             || (local.x - pressed.x).abs() >= 2.0
             || (local.y - pressed.y).abs() >= 2.0;
@@ -512,131 +534,6 @@ impl DesktopApplication {
                 self.error = Some(format!("Could not open {}: {error}", path.display()));
             }
         }
-    }
-
-    fn context_click(&mut self, local: DesktopPoint) -> bool {
-        let Some(context) = self.context_menu.clone() else {
-            return false;
-        };
-        let Some(origin) = context.anchor else {
-            return false;
-        };
-        let entry = context.entry;
-        if local.x < origin.x || local.x > origin.x + 190.0 || local.y < origin.y {
-            self.context_menu = None;
-            return true;
-        }
-        let row = ((local.y - origin.y) / 30.0) as usize;
-        if let Some(id) = entry {
-            match row {
-                0 => self.activate(id),
-                1 | 2 => {
-                    let paths = self
-                        .layout
-                        .items()
-                        .iter()
-                        .filter(|item| self.layout.selected().contains(&item.id))
-                        .map(|item| item.entry.path.clone())
-                        .collect::<Vec<_>>();
-                    if let Err(error) = nickel_file::publish_file_clipboard(&paths, row == 1) {
-                        self.error = Some(format!("Could not update file clipboard: {error}"));
-                    }
-                }
-                3 => {
-                    if let Some(path) = self
-                        .layout
-                        .items()
-                        .iter()
-                        .find(|item| item.id == id)
-                        .map(|item| item.entry.path.clone())
-                        && let Err(error) = launch_nickel_file_rename(&path)
-                    {
-                        self.error = Some(format!("Could not rename: {error}"));
-                    }
-                }
-                4 => {
-                    if let Some(path) = self
-                        .layout
-                        .items()
-                        .iter()
-                        .find(|item| item.id == id)
-                        .map(|item| item.entry.path.clone())
-                        && let Err(error) = launch_nickel_file_properties(&path)
-                    {
-                        self.error = Some(format!("Could not show properties: {error}"));
-                    }
-                }
-                _ => {}
-            }
-        } else {
-            match row {
-                0 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Name,
-                        direction: DesktopSortDirection::Ascending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                1 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Name,
-                        direction: DesktopSortDirection::Descending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                2 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Kind,
-                        direction: DesktopSortDirection::Ascending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                3 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Kind,
-                        direction: DesktopSortDirection::Descending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                4 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Size,
-                        direction: DesktopSortDirection::Ascending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                5 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Size,
-                        direction: DesktopSortDirection::Descending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                6 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Modified,
-                        direction: DesktopSortDirection::Ascending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                7 => self.layout.set_arrangement(
-                    DesktopArrangement::Sorted {
-                        key: DesktopSortKey::Modified,
-                        direction: DesktopSortDirection::Descending,
-                    },
-                    FolderGrouping::FoldersFirst,
-                ),
-                8 => self
-                    .layout
-                    .set_arrangement(DesktopArrangement::Manual, FolderGrouping::FoldersFirst),
-                9 => self.layout.align_to_grid(),
-                10 => self.layout.clean_up(),
-                _ => {}
-            }
-            self.save_layout();
-        }
-        self.context_menu = None;
-        true
     }
 
     fn open_background_context(&mut self, anchor: Option<DesktopPoint>) {
@@ -689,13 +586,20 @@ impl DesktopApplication {
         match command {
             DesktopCommand::IconsVisible(value) => self.layout.set_icons_visible(value),
             DesktopCommand::IconSize(width, height) => self.layout.set_grid(width, height),
-            DesktopCommand::Sort(key, direction) => self.layout.set_arrangement(
-                DesktopArrangement::Sorted { key, direction },
-                FolderGrouping::FoldersFirst,
-            ),
-            DesktopCommand::Manual => self
-                .layout
-                .set_arrangement(DesktopArrangement::Manual, FolderGrouping::FoldersFirst),
+            DesktopCommand::Sort(key, direction) => {
+                let grouping = self.layout.folder_grouping();
+                self.layout
+                    .set_arrangement(DesktopArrangement::Sorted { key, direction }, grouping);
+            }
+            DesktopCommand::FolderGrouping(grouping) => {
+                let arrangement = self.layout.arrangement();
+                self.layout.set_arrangement(arrangement, grouping);
+            }
+            DesktopCommand::Manual => {
+                let grouping = self.layout.folder_grouping();
+                self.layout
+                    .set_arrangement(DesktopArrangement::Manual, grouping);
+            }
             DesktopCommand::AlignGrid => self.layout.align_to_grid(),
             DesktopCommand::AutoArrange => self.layout.clean_up(),
             DesktopCommand::Refresh => {
@@ -790,6 +694,18 @@ impl DesktopApplication {
                 self.open_background_context(None);
                 self.apply_desktop_command(DesktopCommand::Paste);
             }
+            KeyCode::KeyC | KeyCode::KeyX if self.modifiers.toggle => {
+                if let Some(id) = self.layout.selected().iter().copied().next() {
+                    <Self as nickel_ui::Application>::update(
+                        self,
+                        if code == KeyCode::KeyX {
+                            DesktopMessage::Cut(id)
+                        } else {
+                            DesktopMessage::Copy(id)
+                        },
+                    );
+                }
+            }
             KeyCode::KeyD if self.modifiers.toggle && self.modifiers.range => {
                 self.open_background_context(None);
                 self.apply_desktop_command(DesktopCommand::IconsVisible(
@@ -797,6 +713,11 @@ impl DesktopApplication {
                 ));
             }
             KeyCode::KeyA if self.modifiers.toggle => self.layout.select_all(),
+            KeyCode::F2 => {
+                if let Some(id) = self.layout.selected().iter().copied().next() {
+                    <Self as nickel_ui::Application>::update(self, DesktopMessage::Rename(id));
+                }
+            }
             KeyCode::ArrowLeft if move_selected => self.move_selected_by(-96.0, 0.0),
             KeyCode::ArrowRight if move_selected => self.move_selected_by(96.0, 0.0),
             KeyCode::ArrowUp if move_selected => self.move_selected_by(0.0, -112.0),
@@ -1024,6 +945,7 @@ impl nickel_ui::Application for DesktopApplication {
             let visible = self.layout.icons_visible();
             let grid = self.layout.grid();
             let arrangement = self.layout.arrangement();
+            let grouping = self.layout.folder_grouping();
             let checked = |selected: bool, label: &str| {
                 if selected {
                     format!("✓ {label}")
@@ -1247,6 +1169,21 @@ impl nickel_ui::Application for DesktopApplication {
                     "auto-arrange",
                     "Auto Arrange",
                     DesktopMessage::Command(DesktopCommand::AutoArrange),
+                ))
+                .item(
+                    OverlayMenuItem::action(
+                        "folders-first",
+                        checked(grouping == FolderGrouping::FoldersFirst, "Folders first"),
+                        DesktopMessage::Command(DesktopCommand::FolderGrouping(
+                            FolderGrouping::FoldersFirst,
+                        )),
+                    )
+                    .separator_before(true),
+                )
+                .item(OverlayMenuItem::action(
+                    "folders-mixed",
+                    checked(grouping == FolderGrouping::Mixed, "Mix folders and files"),
+                    DesktopMessage::Command(DesktopCommand::FolderGrouping(FolderGrouping::Mixed)),
                 ))
                 .item(
                     OverlayMenuItem::action(
@@ -1725,6 +1662,7 @@ impl DesktopApplication {
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,
+            drag_commit_position: None,
             selection_start: None,
             pointer_position: DesktopPoint::default(),
             pointer_seen: false,
@@ -2674,17 +2612,11 @@ impl LiveShell {
                     y: position.y as f32,
                 };
                 if edge == nickel_input::KeyEdge::Pressed {
-                    if application.context_menu.is_some()
-                        && button == nickel_input::PointerButton::Primary
-                    {
-                        application.context_click(point)
-                    } else {
-                        application.pointer_press(
-                            point,
-                            button == nickel_input::PointerButton::Secondary,
-                            application.modifiers,
-                        )
-                    }
+                    application.pointer_press(
+                        point,
+                        button == nickel_input::PointerButton::Secondary,
+                        application.modifiers,
+                    )
                 } else if button == nickel_input::PointerButton::Primary {
                     application.pointer_release(point, Instant::now())
                 } else {
@@ -3168,19 +3100,49 @@ impl LiveShell {
             PanelAction::TaskContext(index) => {
                 let panel_windows = self.panel_windows();
                 let groups = self.launcher.taskbar_applications(&panel_windows);
-                let Some(window) = groups.get(index).and_then(|group| {
-                    group
-                        .windows
-                        .iter()
-                        .find(|window| window.active)
-                        .or_else(|| group.windows.first())
-                }) else {
+                let Some(group) = groups.get(index) else {
                     return;
                 };
-                let window_snapshot = window.clone();
-                let window = window.id;
+                let window_snapshot = group
+                    .windows
+                    .iter()
+                    .find(|window| window.active)
+                    .or_else(|| group.windows.first())
+                    .cloned()
+                    .or_else(|| {
+                        let application_id = group.application_id.clone()?;
+                        Some(OpenWindow {
+                            // Application-only menus never dispatch a window action;
+                            // capabilities are deliberately empty. The stable target
+                            // is the canonical application identity below.
+                            id: crate::model::WindowId(u64::MAX),
+                            application_id: Some(application_id),
+                            active: false,
+                            title: group.application_name.clone(),
+                            state: crate::model::WindowState {
+                                capabilities: crate::model::WindowCapabilities {
+                                    activate: false,
+                                    close: false,
+                                    minimize: false,
+                                    maximize: false,
+                                    fullscreen: false,
+                                    move_workspace: false,
+                                    move_display: false,
+                                },
+                                ..crate::model::WindowState::default()
+                            },
+                        })
+                    });
+                let Some(window_snapshot) = window_snapshot else {
+                    return;
+                };
+                let window = group
+                    .windows
+                    .iter()
+                    .any(|candidate| candidate.id == window_snapshot.id)
+                    .then_some(window_snapshot.id);
                 self.close_window_preview();
-                self.window_menu = Some(window);
+                self.window_menu = window;
                 self.window_menu_snapshot = Some(window_snapshot);
                 self.window_menu_host = None;
                 let x = self
@@ -3908,7 +3870,8 @@ impl LiveShell {
             return menu_height(&self.workspaces) as i32;
         };
         let outputs = self.window_feed.outputs();
-        let application_id = window.application_id.as_ref().filter(|id| {
+        let application_id = window.application_id.as_ref();
+        let application_launch_available = application_id.is_some_and(|id| {
             self.launcher
                 .application(id)
                 .is_some_and(|application| application.launch_command().is_some())
@@ -3919,6 +3882,7 @@ impl LiveShell {
             &self.workspaces,
             &outputs,
             application_id,
+            application_launch_available,
             pinned,
         )) as i32
     }
@@ -4849,15 +4813,17 @@ impl LiveShell {
     }
 
     fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
-        let Some(window) = self.window_menu else {
+        if self.window_menu.is_none() && self.window_menu_snapshot.is_none() {
             self.window_menu_host = None;
             return Vec::new();
-        };
+        }
         let Some(snapshot) = self.window_menu_snapshot.clone().or_else(|| {
-            self.windows
-                .iter()
-                .find(|candidate| candidate.id == window)
-                .cloned()
+            self.window_menu.and_then(|window| {
+                self.windows
+                    .iter()
+                    .find(|candidate| candidate.id == window)
+                    .cloned()
+            })
         }) else {
             self.close_window_preview();
             return Vec::new();
@@ -4865,15 +4831,12 @@ impl LiveShell {
         self.window_menu_snapshot
             .get_or_insert_with(|| snapshot.clone());
         let outputs = self.window_feed.outputs();
-        let application_id = snapshot
-            .application_id
-            .as_ref()
-            .filter(|id| {
-                self.launcher
-                    .application(id)
-                    .is_some_and(|application| application.launch_command().is_some())
-            })
-            .cloned();
+        let application_id = snapshot.application_id.clone();
+        let application_launch_available = application_id.as_ref().is_some_and(|id| {
+            self.launcher
+                .application(id)
+                .is_some_and(|application| application.launch_command().is_some())
+        });
         let pinned = application_id
             .as_ref()
             .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
@@ -4882,6 +4845,7 @@ impl LiveShell {
             &self.workspaces,
             &outputs,
             application_id.as_ref(),
+            application_launch_available,
             pinned,
         ))
         .ceil()
@@ -4893,6 +4857,7 @@ impl LiveShell {
                     self.workspaces.clone(),
                     outputs.clone(),
                     application_id.clone(),
+                    application_launch_available,
                     pinned,
                     self.palette,
                 ),
@@ -6876,6 +6841,58 @@ mod tests {
     }
 
     #[test]
+    fn closed_taskbar_pin_opens_application_actions_and_unpins_once() {
+        let directory = tempfile::tempdir().expect("temporary preferences directory");
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
+            "org.example.pinned".into(),
+            "Pinned Example".into(),
+            None,
+            None,
+            Some(vec!["example".into()]),
+        )]);
+        shell
+            .launcher
+            .set_pins(vec![("org.example.pinned".into(), 0)]);
+        shell.launcher_preferences_path = Some(directory.path().join("launcher-preferences"));
+        shell.windows.clear();
+        shell.sync_panel_host();
+
+        shell.apply_panel_action(super::PanelAction::TaskContext(0));
+
+        assert!(
+            shell.window_menu.is_none(),
+            "closed pins have no WindowId target"
+        );
+        assert_eq!(
+            shell
+                .window_menu_snapshot
+                .as_ref()
+                .and_then(|target| target.application_id.as_ref())
+                .map(crate::model::ApplicationId::as_str),
+            Some("org.example.pinned")
+        );
+        let _ = shell.window_menu_scene();
+        let host = shell
+            .window_menu_host
+            .as_ref()
+            .expect("application-only task menu host");
+        assert!(host.accessibility_nodes().iter().any(|node| {
+            node.label.as_deref() == Some("New Window")
+                && node.semantic_role == Some(SemanticRole::Button)
+        }));
+        assert!(host.accessibility_nodes().iter().any(|node| {
+            node.label.as_deref() == Some("Unpin from Nickel Bar")
+                && node.semantic_role == Some(SemanticRole::Button)
+        }));
+
+        shell.apply_window_menu_action(crate::window_preview::MenuAction::TogglePin(
+            crate::model::ApplicationId::new("org.example.pinned"),
+        ));
+        assert!(!shell.launcher.is_pinned("org.example.pinned"));
+    }
+
+    #[test]
     fn due_panel_clock_deadline_rebuilds_only_when_the_minute_changes() {
         let mut shell = LiveShell::new().unwrap();
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
@@ -7598,6 +7615,66 @@ mod tests {
     }
 
     #[test]
+    fn desktop_drag_accumulates_small_motion_until_crossing_the_snap_threshold() {
+        use std::{ffi::OsString, path::PathBuf};
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.layout.reconcile(vec![(
+            nickel_file::FileIdentity(12, 3),
+            nickel_file::FileEntry {
+                name: OsString::from("drag-me.txt"),
+                path: PathBuf::from("/desktop/drag-me.txt"),
+                is_directory: false,
+                size: Some(3),
+                modified: None,
+            },
+        )]);
+        let item = desktop.layout.items()[0].clone();
+        let start = nickel_file::desktop::Point {
+            x: item.position.x + 4.0,
+            y: item.position.y + 4.0,
+        };
+        assert!(desktop.pointer_press(start, false, Default::default()));
+
+        for offset in [10.0, 20.0, 30.0, 40.0, 49.0] {
+            let _ = desktop.pointer_motion(nickel_file::desktop::Point {
+                x: start.x + offset,
+                y: start.y,
+            });
+        }
+
+        assert_eq!(
+            desktop.layout.items()[0].position.x,
+            item.position.x + desktop.layout.grid().0,
+            "sub-threshold motion events must not be discarded individually"
+        );
+        let _ = desktop.pointer_motion(nickel_file::desktop::Point {
+            x: start.x + 97.0,
+            y: start.y,
+        });
+        assert_eq!(
+            desktop.layout.items()[0].position.x,
+            item.position.x + desktop.layout.grid().0,
+            "crossing one cell must not double-count the next half-cell"
+        );
+        let _ = desktop.pointer_motion(nickel_file::desktop::Point {
+            x: start.x + 145.0,
+            y: start.y,
+        });
+        assert_eq!(
+            desktop.layout.items()[0].position.x,
+            item.position.x + desktop.layout.grid().0 * 2.0,
+        );
+        assert!(desktop.pointer_release(
+            nickel_file::desktop::Point {
+                x: start.x + 145.0,
+                y: start.y,
+            },
+            Instant::now(),
+        ));
+    }
+
+    #[test]
     fn desktop_background_menu_captures_pointer_and_uses_shared_accessible_overlay() {
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
@@ -7733,6 +7810,15 @@ mod tests {
         assert_eq!(
             desktop.layout.arrangement(),
             nickel_file::desktop::Arrangement::Manual
+        );
+
+        desktop.open_background_context(None);
+        desktop.apply_desktop_command(super::DesktopCommand::FolderGrouping(
+            nickel_file::desktop::FolderGrouping::Mixed,
+        ));
+        assert_eq!(
+            desktop.layout.folder_grouping(),
+            nickel_file::desktop::FolderGrouping::Mixed
         );
     }
 
