@@ -12,6 +12,7 @@ use std::{
         mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
     thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use alacritty_terminal::{
@@ -27,11 +28,13 @@ use alacritty_terminal::{
 };
 
 const EVENT_CAPACITY: usize = 128;
+const INPUT_QUEUE_CAPACITY: usize = 64;
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 const MAX_TITLE_BYTES: usize = 4 * 1024;
 const MAX_SCROLLBACK: usize = 100_000;
 const MAX_COLUMNS: u16 = 500;
 const MAX_LINES: u16 = 200;
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalDimensions {
@@ -232,6 +235,8 @@ pub enum TerminalError {
     InvalidWorkingDirectory(PathBuf),
     #[error("terminal input exceeds the bounded write size")]
     WriteTooLarge,
+    #[error("terminal input queue is full")]
+    InputQueueFull,
     #[error("terminal session is closed")]
     Closed,
     #[error("could not create terminal PTY: {0}")]
@@ -245,7 +250,7 @@ struct Proxy {
     events: SyncSender<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
-    pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
+    input_sender: Arc<Mutex<Option<SyncSender<Vec<u8>>>>>,
 }
 
 impl EventListener for Proxy {
@@ -267,9 +272,9 @@ impl EventListener for Proxy {
             }
             Event::Exit => TerminalEvent::Closed,
             Event::PtyWrite(text) => {
-                if let Some(sender) = self.pty_sender.lock().unwrap().as_ref() {
+                if let Some(sender) = self.input_sender.lock().unwrap().as_ref() {
                     let bytes = truncate_utf8(text, MAX_WRITE_BYTES).into_bytes();
-                    let _ = sender.send(Msg::Input(Cow::Owned(bytes)));
+                    let _ = sender.try_send(bytes);
                 }
                 return;
             }
@@ -401,6 +406,52 @@ impl TerminalEngine {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ForceHandle {
+    #[cfg(unix)]
+    pid: u32,
+    #[cfg(target_os = "windows")]
+    process: usize,
+}
+
+impl ForceHandle {
+    fn from_pty(pty: &tty::Pty) -> Self {
+        #[cfg(unix)]
+        {
+            Self {
+                pid: pty.child().id(),
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Self {
+                process: pty.child_watcher().raw_handle() as usize,
+            }
+        }
+    }
+
+    fn terminate(self) {
+        #[cfg(unix)]
+        unsafe {
+            unsafe extern "C" {
+                fn kill(pid: i32, signal: i32) -> i32;
+            }
+            // SAFETY: The PID remains owned and unreaped by the live PTY worker while its join
+            // handle is unfinished. Signal 9 is the portable Unix SIGKILL value.
+            let _ = kill(self.pid as i32, 9);
+        }
+        #[cfg(target_os = "windows")]
+        unsafe {
+            unsafe extern "system" {
+                fn TerminateProcess(process: *mut std::ffi::c_void, exit_code: u32) -> i32;
+            }
+            // SAFETY: Alacritty's child watcher owns this handle for the lifetime of the unfinished
+            // PTY worker. A concurrent close merely makes this best-effort call fail harmlessly.
+            let _ = TerminateProcess(self.process as *mut std::ffi::c_void, 1);
+        }
+    }
+}
+
 /// Owns one child process, PTY event loop, and terminal model.
 pub struct TerminalSession {
     terminal: Arc<FairMutex<Term<Proxy>>>,
@@ -411,7 +462,10 @@ pub struct TerminalSession {
     dimensions: TerminalDimensions,
     resize_generation: u64,
     exit: TerminalExit,
-    worker: Option<JoinHandle<()>>,
+    input_sender: Option<SyncSender<Vec<u8>>>,
+    workers: Vec<JoinHandle<()>>,
+    shutdown_deadline: Option<Instant>,
+    force_handle: ForceHandle,
 }
 
 impl TerminalSession {
@@ -422,7 +476,7 @@ impl TerminalSession {
             events,
             generation,
             wake_pending,
-            pty_sender,
+            input_sender,
         } = proxy();
         let config = Config {
             scrolling_history: options.scrollback_lines,
@@ -445,11 +499,27 @@ impl TerminalSession {
         };
         let pty = tty::new(&tty_options, options.dimensions.window_size(), 0)
             .map_err(TerminalError::Spawn)?;
+        let force_handle = ForceHandle::from_pty(&pty);
+        let (bounded_input, input_receiver) = sync_channel(INPUT_QUEUE_CAPACITY);
+        *input_sender.lock().unwrap() = Some(bounded_input.clone());
         let event_loop = EventLoop::new(Arc::clone(&terminal), proxy, pty, true, false)
             .map_err(TerminalError::Spawn)?;
         let sender = event_loop.channel();
-        *pty_sender.lock().unwrap() = Some(sender.clone());
-        let worker = std::thread::Builder::new()
+        let input_event_sender = sender.clone();
+        let input_worker = std::thread::Builder::new()
+            .name("nickel-terminal-input".into())
+            .spawn(move || {
+                while let Ok(bytes) = input_receiver.recv() {
+                    if input_event_sender
+                        .send(Msg::Input(Cow::Owned(bytes)))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .map_err(TerminalError::Spawn)?;
+        let event_worker = std::thread::Builder::new()
             .name("nickel-terminal-pty".into())
             .spawn(move || {
                 let _ = event_loop.spawn().join();
@@ -464,7 +534,10 @@ impl TerminalSession {
             dimensions: options.dimensions,
             resize_generation: 0,
             exit: TerminalExit::Running,
-            worker: Some(worker),
+            input_sender: Some(bounded_input),
+            workers: vec![event_worker, input_worker],
+            shutdown_deadline: None,
+            force_handle,
         })
     }
 
@@ -472,9 +545,7 @@ impl TerminalSession {
         if bytes.len() > MAX_WRITE_BYTES {
             return Err(TerminalError::WriteTooLarge);
         }
-        self.sender
-            .send(Msg::Input(Cow::Owned(bytes)))
-            .map_err(|error| TerminalError::Send(error.to_string()))
+        enqueue_input(self.input_sender.as_ref(), bytes)
     }
 
     pub fn resize(
@@ -562,12 +633,14 @@ impl TerminalSession {
     }
 
     pub fn try_event(&mut self) -> Option<TerminalEvent> {
+        self.advance_shutdown();
         let event = self.events.try_recv().ok()?;
         if event == TerminalEvent::Changed {
             self.wake_pending.store(false, Ordering::Release);
         }
         match event {
             TerminalEvent::ChildExited(code) => {
+                self.shutdown_deadline = None;
                 self.exit = TerminalExit::Exited(code);
                 Some(TerminalEvent::ChildExited(code))
             }
@@ -590,18 +663,46 @@ impl TerminalSession {
             return Ok(());
         }
         self.exit = TerminalExit::CloseRequested;
+        self.input_sender.take();
+        self.shutdown_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
         self.sender
             .send(Msg::Shutdown)
             .map_err(|error| TerminalError::Send(error.to_string()))
+    }
+
+    fn advance_shutdown(&mut self) {
+        let Some(deadline) = self.shutdown_deadline else {
+            return;
+        };
+        if self.workers.iter().all(JoinHandle::is_finished) {
+            self.shutdown_deadline = None;
+        } else if Instant::now() >= deadline {
+            self.force_handle.terminate();
+            self.exit = TerminalExit::Forced;
+            self.shutdown_deadline = None;
+        }
+    }
+}
+
+fn enqueue_input(
+    sender: Option<&SyncSender<Vec<u8>>>,
+    bytes: Vec<u8>,
+) -> Result<(), TerminalError> {
+    match sender.ok_or(TerminalError::Closed)?.try_send(bytes) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Full(_)) => Err(TerminalError::InputQueueFull),
+        Err(TrySendError::Disconnected(_)) => Err(TerminalError::Closed),
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
+        self.input_sender.take();
         let _ = self.sender.send(Msg::Shutdown);
-        // Joining a stuck platform PTY would block the UI/drop path. Dropping detaches the bounded
-        // worker; explicit shutdown observation can join it in a future process supervisor.
-        let _ = self.worker.take();
+        // Joining a stuck platform PTY would block the UI/drop path. An observed close uses the
+        // bounded grace/force path; an unobserved application drop still lets the PTY destructor
+        // close its child while these worker handles detach.
+        self.workers.clear();
     }
 }
 
@@ -610,25 +711,25 @@ struct ProxyParts {
     events: Receiver<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
-    pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
+    input_sender: Arc<Mutex<Option<SyncSender<Vec<u8>>>>>,
 }
 
 fn proxy() -> ProxyParts {
     let (events, receiver) = sync_channel(EVENT_CAPACITY);
     let generation = Arc::new(AtomicU64::new(1));
     let wake_pending = Arc::new(AtomicBool::new(false));
-    let pty_sender = Arc::new(Mutex::new(None));
+    let input_sender = Arc::new(Mutex::new(None));
     ProxyParts {
         proxy: Proxy {
             events,
             generation: Arc::clone(&generation),
             wake_pending: Arc::clone(&wake_pending),
-            pty_sender: Arc::clone(&pty_sender),
+            input_sender: Arc::clone(&input_sender),
         },
         events: receiver,
         generation,
         wake_pending,
-        pty_sender,
+        input_sender,
     }
 }
 
@@ -856,6 +957,96 @@ mod tests {
         assert_eq!(options.program.unwrap().arguments[1], "space value");
         assert!(TerminalEngine::new(dimensions(80, 24), MAX_SCROLLBACK + 1).is_err());
         assert!(TerminalDimensions::new(MAX_COLUMNS + 1, 24, 8, 16).is_err());
+    }
+
+    #[test]
+    fn pending_terminal_input_is_bounded_and_never_blocks_the_caller() {
+        let (sender, receiver) = sync_channel(1);
+        enqueue_input(Some(&sender), vec![1]).unwrap();
+        assert!(matches!(
+            enqueue_input(Some(&sender), vec![2]),
+            Err(TerminalError::InputQueueFull)
+        ));
+        drop(receiver);
+        assert!(matches!(
+            enqueue_input(Some(&sender), vec![3]),
+            Err(TerminalError::Closed)
+        ));
+        assert_eq!(INPUT_QUEUE_CAPACITY * MAX_WRITE_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child-process fixture launched by forced_shutdown_has_a_bounded_grace_period"]
+    fn forced_shutdown_child_fixture() {
+        if std::env::var_os("NICKEL_TERMINAL_FORCE_FIXTURE").is_none() {
+            return;
+        }
+        unsafe extern "C" {
+            fn signal(signal: i32, handler: usize) -> usize;
+        }
+        // SAFETY: POSIX signal 1 is SIGHUP and handler value 1 is SIG_IGN. This isolated child
+        // fixture deliberately ignores the PTY's graceful hangup to exercise forced cleanup.
+        unsafe {
+            signal(1, 1);
+        }
+        println!("nickel-force-fixture-ready");
+        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn forced_shutdown_has_a_bounded_grace_period() {
+        let mut environment = HashMap::new();
+        environment.insert("NICKEL_TERMINAL_FORCE_FIXTURE".into(), "1".into());
+        let mut session = TerminalSession::spawn(TerminalOptions {
+            program: Some(TerminalProgram {
+                executable: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                arguments: vec![
+                    "--ignored".into(),
+                    "--exact".into(),
+                    "tests::forced_shutdown_child_fixture".into(),
+                    "--nocapture".into(),
+                ],
+            }),
+            working_directory: None,
+            environment,
+            dimensions: dimensions(80, 10),
+            scrollback_lines: 100,
+        })
+        .unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            while session.try_event().is_some() {}
+            let visible = session
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            if visible.contains("nickel-force-fixture-ready") {
+                break;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "child fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        session.request_close().unwrap();
+        let forced_deadline = Instant::now() + SHUTDOWN_GRACE + Duration::from_secs(1);
+        while session.exit_state() != &TerminalExit::Forced {
+            let _ = session.try_event();
+            assert!(
+                Instant::now() < forced_deadline,
+                "ignored graceful shutdown was not force-terminated"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
