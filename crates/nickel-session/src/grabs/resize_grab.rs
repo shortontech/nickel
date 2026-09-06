@@ -2,10 +2,8 @@ use crate::{NickelSession, focus::PointerFocusTarget};
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
-        AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
-        GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent,
-        GestureSwipeEndEvent, GestureSwipeUpdateEvent, GrabStartData as PointerGrabStartData,
-        MotionEvent, PointerGrab, PointerInnerHandle, RelativeMotionEvent,
+        ButtonEvent, GrabStartData as PointerGrabStartData, MotionEvent, PointerGrab,
+        PointerInnerHandle,
     },
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
@@ -94,6 +92,8 @@ impl ResizeSurfaceGrab {
 }
 
 impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
+    forward_pointer_grab_events!();
+
     fn motion(
         &mut self,
         data: &mut NickelSession,
@@ -182,16 +182,6 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         }
     }
 
-    fn relative_motion(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        focus: Option<(PointerFocusTarget, Point<f64, Logical>)>,
-        event: &RelativeMotionEvent,
-    ) {
-        handle.relative_motion(data, focus, event);
-    }
-
     fn button(
         &mut self,
         data: &mut NickelSession,
@@ -220,101 +210,6 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             }
         }
     }
-
-    fn axis(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        details: AxisFrame,
-    ) {
-        handle.axis(data, details)
-    }
-
-    fn frame(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-    ) {
-        handle.frame(data);
-    }
-
-    fn gesture_swipe_begin(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GestureSwipeBeginEvent,
-    ) {
-        handle.gesture_swipe_begin(data, event)
-    }
-
-    fn gesture_swipe_update(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GestureSwipeUpdateEvent,
-    ) {
-        handle.gesture_swipe_update(data, event)
-    }
-
-    fn gesture_swipe_end(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GestureSwipeEndEvent,
-    ) {
-        handle.gesture_swipe_end(data, event)
-    }
-
-    fn gesture_pinch_begin(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GesturePinchBeginEvent,
-    ) {
-        handle.gesture_pinch_begin(data, event)
-    }
-
-    fn gesture_pinch_update(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GesturePinchUpdateEvent,
-    ) {
-        handle.gesture_pinch_update(data, event)
-    }
-
-    fn gesture_pinch_end(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GesturePinchEndEvent,
-    ) {
-        handle.gesture_pinch_end(data, event)
-    }
-
-    fn gesture_hold_begin(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GestureHoldBeginEvent,
-    ) {
-        handle.gesture_hold_begin(data, event)
-    }
-
-    fn gesture_hold_end(
-        &mut self,
-        data: &mut NickelSession,
-        handle: &mut PointerInnerHandle<'_, NickelSession>,
-        event: &GestureHoldEndEvent,
-    ) {
-        handle.gesture_hold_end(data, event)
-    }
-
-    fn start_data(&self) -> &PointerGrabStartData<NickelSession> {
-        &self.start_data
-    }
-
-    fn unset(&mut self, _data: &mut NickelSession) {}
 }
 
 /// State of the resize operation.
