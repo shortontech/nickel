@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     ffi::OsString,
     hash::Hash,
     os::fd::AsFd,
@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use nickel_core::{
@@ -83,13 +83,10 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
 }
 
 use crate::{
+    output_retirement::{DeferredRetirements, RetirementAction, capacity_available},
     shell_layout::{self, Geometry},
     window_registry::{WindowId, WindowRegistry},
 };
-
-const OUTPUT_GLOBAL_BIND_SETTLE_GRACE: Duration = Duration::from_secs(3);
-const OUTPUT_GLOBAL_DISABLED_GRACE: Duration = Duration::from_secs(3);
-const MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS: usize = nickel_session_protocol::MAX_OUTPUTS;
 
 fn stable_output_identity(output: &Output) -> String {
     let physical = output.physical_properties();
@@ -101,92 +98,6 @@ fn stable_output_identity(output: &Output) -> String {
         format!("{hardware}|{}", output.name())
     } else {
         hardware
-    }
-}
-
-fn output_global_capacity_available(pending: usize, live: usize) -> bool {
-    pending.saturating_add(live) < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
-}
-
-struct DeferredGlobalRetirements<T> {
-    pending: VecDeque<DeferredGlobalRetirement<T>>,
-}
-
-struct DeferredGlobalRetirement<T> {
-    identity: String,
-    deadline: Instant,
-    disabled: bool,
-    value: T,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum GlobalRetirementAction<T> {
-    Disable { identity: String, value: T },
-    Remove { identity: String, value: T },
-}
-
-impl<T> Default for DeferredGlobalRetirements<T> {
-    fn default() -> Self {
-        Self {
-            pending: VecDeque::new(),
-        }
-    }
-}
-
-impl<T> DeferredGlobalRetirements<T> {
-    fn has_capacity(&self) -> bool {
-        self.pending.len() < MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
-    }
-
-    fn defer(&mut self, now: Instant, identity: String, value: T) -> Result<(), T> {
-        if !self.has_capacity() {
-            return Err(value);
-        }
-        self.pending.push_back(DeferredGlobalRetirement {
-            identity,
-            deadline: now + OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
-            disabled: false,
-            value,
-        });
-        Ok(())
-    }
-
-    fn advance(&mut self, now: Instant) -> Vec<GlobalRetirementAction<T>>
-    where
-        T: Clone,
-    {
-        let mut actions = Vec::new();
-        let mut retained = VecDeque::with_capacity(self.pending.len());
-        while let Some(mut pending) = self.pending.pop_front() {
-            if pending.deadline > now {
-                retained.push_back(pending);
-            } else if pending.disabled {
-                actions.push(GlobalRetirementAction::Remove {
-                    identity: pending.identity,
-                    value: pending.value,
-                });
-            } else {
-                pending.disabled = true;
-                pending.deadline = now + OUTPUT_GLOBAL_DISABLED_GRACE;
-                actions.push(GlobalRetirementAction::Disable {
-                    identity: pending.identity.clone(),
-                    value: pending.value.clone(),
-                });
-                retained.push_back(pending);
-            }
-        }
-        self.pending = retained;
-        actions
-    }
-
-    fn len(&self) -> usize {
-        self.pending.len()
-    }
-
-    fn has_enabled_identity(&self, identity: &str) -> bool {
-        self.pending
-            .iter()
-            .any(|pending| !pending.disabled && pending.identity == identity)
     }
 }
 
@@ -532,7 +443,7 @@ pub struct NickelSession {
     last_protocol_outputs: Vec<OutputSnapshot>,
     output_scale_preferences: nickel_core::dpi::PersistedOutputScales,
     virtual_test_outputs: HashMap<String, (Output, Option<GlobalId>)>,
-    pending_output_global_retirements: DeferredGlobalRetirements<GlobalId>,
+    pending_output_global_retirements: DeferredRetirements<GlobalId>,
     pub preview_frames: HashMap<WindowId, PreviewFrame>,
     preview_spares: HashMap<WindowId, Vec<u8>>,
     preview_switcher_interest: Vec<WindowId>,
@@ -1279,7 +1190,7 @@ impl NickelSession {
 
     pub(crate) fn output_global_admission_available(&mut self) -> bool {
         self.reap_output_global_retirements(Instant::now());
-        output_global_capacity_available(
+        capacity_available(
             self.pending_output_global_retirements.len(),
             self.space.outputs().count(),
         )
@@ -1311,12 +1222,12 @@ impl NickelSession {
         let mut identities_to_publish = HashSet::new();
         for action in self.pending_output_global_retirements.advance(now) {
             match action {
-                GlobalRetirementAction::Disable { identity, value } => {
+                RetirementAction::Disable { identity, value } => {
                     self.display_handle.disable_global::<NickelSession>(value);
                     identities_to_publish.insert(identity);
                     disabled = true;
                 }
-                GlobalRetirementAction::Remove { value, .. } => {
+                RetirementAction::Remove { value, .. } => {
                     self.display_handle.remove_global::<NickelSession>(value);
                 }
             }
@@ -1571,7 +1482,7 @@ impl NickelSession {
             output_scale_preferences: nickel_core::dpi::PersistedOutputScales::load_default()
                 .unwrap_or_default(),
             virtual_test_outputs: HashMap::new(),
-            pending_output_global_retirements: DeferredGlobalRetirements::default(),
+            pending_output_global_retirements: DeferredRetirements::default(),
             preview_frames: HashMap::new(),
             preview_spares: HashMap::new(),
             preview_switcher_interest: Vec::new(),
@@ -6644,22 +6555,25 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        DeferredGlobalRetirements, DisplacedWindow, GlobalRetirementAction,
-        MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS, OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
-        OUTPUT_GLOBAL_DISABLED_GRACE, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
+        DisplacedWindow, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
         PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, RegisteredShellRole,
         ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
         apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
         clamp_window_location, command_requires_shell_identity, drag_icon_location,
         identification_expiry_is_current, maximized_content_geometry,
-        output_global_capacity_available, output_index_for_shell_surface,
-        prepare_shell_behavior_update, preview_mapping_has_exact_size,
-        protocol_preview_from_cached, record_preview_capture_attempt,
-        restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
-        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        output_index_for_shell_surface, prepare_shell_behavior_update,
+        preview_mapping_has_exact_size, protocol_preview_from_cached,
+        record_preview_capture_attempt, restored_drag_content_geometry,
+        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
+        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         shell_surface_output_from_title, test_control_may_invoke,
+    };
+    use crate::output_retirement::{
+        BIND_SETTLE_GRACE as OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
+        DISABLED_GRACE as OUTPUT_GLOBAL_DISABLED_GRACE,
+        MAX_PENDING as MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
     };
     use crate::shell_layout::Geometry;
     use nickel_session_protocol::{
@@ -7027,98 +6941,6 @@ mod protocol_tests {
         let display = Display::new().unwrap();
         let session = super::NickelSession::new(&mut event_loop, display, true);
         (event_loop, session)
-    }
-
-    #[test]
-    fn deferred_global_queue_is_bounded_and_advances_through_both_grace_periods() {
-        let started = Instant::now();
-        let mut retirements = DeferredGlobalRetirements::default();
-        for value in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
-            assert_eq!(
-                retirements.defer(started, format!("output-{value}"), value),
-                Ok(())
-            );
-        }
-        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
-        assert!(!output_global_capacity_available(
-            MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS - 1,
-            1,
-        ));
-        assert_eq!(
-            retirements.defer(
-                started,
-                "overflow".into(),
-                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
-            ),
-            Err(MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
-        );
-        assert!(
-            retirements
-                .advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE - Duration::from_millis(1))
-                .is_empty()
-        );
-        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
-        assert_eq!(
-            retirements.advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE),
-            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
-                .map(|value| GlobalRetirementAction::Disable {
-                    identity: format!("output-{value}"),
-                    value,
-                })
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
-        assert!(
-            retirements
-                .advance(
-                    started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE
-                        - Duration::from_millis(1),
-                )
-                .is_empty()
-        );
-        assert_eq!(
-            retirements
-                .advance(started + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,),
-            (0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS)
-                .map(|value| GlobalRetirementAction::Remove {
-                    identity: format!("output-{value}"),
-                    value,
-                })
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(retirements.len(), 0);
-    }
-
-    #[test]
-    fn rapid_unique_global_churn_returns_to_baseline_each_grace_window() {
-        let started = Instant::now();
-        let mut retirements = DeferredGlobalRetirements::default();
-        for generation in 0..64 {
-            let cycle = started
-                + (OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE) * generation;
-            for output in 0..MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS {
-                retirements
-                    .defer(cycle, format!("output-{output}"), (generation, output))
-                    .expect("one admitted window of churn fits the bound");
-            }
-            assert!(!retirements.has_capacity());
-            assert_eq!(
-                retirements
-                    .advance(cycle + OUTPUT_GLOBAL_BIND_SETTLE_GRACE)
-                    .len(),
-                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
-            );
-            assert_eq!(retirements.len(), MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS);
-            assert_eq!(
-                retirements
-                    .advance(
-                        cycle + OUTPUT_GLOBAL_BIND_SETTLE_GRACE + OUTPUT_GLOBAL_DISABLED_GRACE,
-                    )
-                    .len(),
-                MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS
-            );
-            assert_eq!(retirements.len(), 0);
-        }
     }
 
     #[test]
