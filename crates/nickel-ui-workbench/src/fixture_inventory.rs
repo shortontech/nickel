@@ -251,6 +251,7 @@ impl InventoryApp {
                             bold: true,
                             italic: false,
                             monospace: false,
+                            font_family: None,
                             strikethrough: false,
                             underline: false,
                             color: Some(palette.text.primary),

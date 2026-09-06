@@ -16,6 +16,7 @@ pub mod run;
 pub mod scenario;
 pub mod shell_settings;
 pub mod task_switcher;
+pub mod terminal_settings;
 pub mod theme;
 pub mod wallpaper_settings;
 pub mod window_input;

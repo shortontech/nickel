@@ -123,6 +123,8 @@ pub struct StyledTextSpan {
     pub bold: bool,
     pub italic: bool,
     pub monospace: bool,
+    /// Optional explicit font family. The renderer resolves it through the shared font system.
+    pub font_family: Option<Arc<str>>,
     pub strikethrough: bool,
     pub underline: bool,
     pub color: Option<Color>,
@@ -1656,12 +1658,17 @@ fn measure_text(
     })
 }
 
-fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'static> {
-    let mut attrs = Attrs::new().family(if span.is_some_and(|span| span.monospace) {
-        Family::Monospace
-    } else {
-        Family::SansSerif
-    });
+fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'_> {
+    let family = span
+        .and_then(|span| span.font_family.as_deref().map(Family::Name))
+        .unwrap_or_else(|| {
+            if span.is_some_and(|span| span.monospace) {
+                Family::Monospace
+            } else {
+                Family::SansSerif
+            }
+        });
+    let mut attrs = Attrs::new().family(family);
     if span.is_some_and(|span| span.bold) {
         attrs = attrs.weight(Weight::BOLD);
     }
@@ -1671,7 +1678,7 @@ fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'static> {
     attrs
 }
 
-fn styled_segments<'a>(text: &'a str, spans: &[StyledTextSpan]) -> Vec<(&'a str, Attrs<'static>)> {
+fn styled_segments<'a>(text: &'a str, spans: &'a [StyledTextSpan]) -> Vec<(&'a str, Attrs<'a>)> {
     let mut segments = Vec::new();
     let mut cursor = 0;
     for span in spans {

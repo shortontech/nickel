@@ -898,13 +898,18 @@ fn cosmic_align(align: TextAlign) -> Align {
     }
 }
 
-fn rich_attrs(color: Color, span: Option<&StyledTextSpan>, metadata: usize) -> Attrs<'static> {
+fn rich_attrs(color: Color, span: Option<&StyledTextSpan>, metadata: usize) -> Attrs<'_> {
+    let family = span
+        .and_then(|span| span.font_family.as_deref().map(Family::Name))
+        .unwrap_or_else(|| {
+            if span.is_some_and(|span| span.monospace) {
+                Family::Monospace
+            } else {
+                Family::SansSerif
+            }
+        });
     let mut attrs = Attrs::new()
-        .family(if span.is_some_and(|span| span.monospace) {
-            Family::Monospace
-        } else {
-            Family::SansSerif
-        })
+        .family(family)
         .color(text_color(
             span.and_then(|span| span.color).unwrap_or(color),
         ))
@@ -920,9 +925,9 @@ fn rich_attrs(color: Color, span: Option<&StyledTextSpan>, metadata: usize) -> A
 
 fn rich_segments<'a>(
     text: &'a str,
-    spans: &[StyledTextSpan],
+    spans: &'a [StyledTextSpan],
     color: Color,
-) -> Vec<(&'a str, Attrs<'static>)> {
+) -> Vec<(&'a str, Attrs<'a>)> {
     let mut segments = Vec::new();
     let mut cursor = 0;
     for (index, span) in spans.iter().enumerate() {

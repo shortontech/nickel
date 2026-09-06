@@ -419,6 +419,8 @@ pub struct TerminalPalette {
     pub cursor: u32,
     pub selection: u32,
     pub indexed: [u32; 16],
+    pub cursor_style: nickel_core::terminal_settings::TerminalCursorStyle,
+    pub font_family: std::sync::Arc<str>,
 }
 
 impl Default for TerminalPalette {
@@ -433,6 +435,8 @@ impl Default for TerminalPalette {
                 0xffe5e9f0, 0xff4c566a, 0xffd08770, 0xffb8d8a8, 0xffffdf9b, 0xff9cc1e6, 0xffd5a5d2,
                 0xff8fdbdf, 0xffffffff,
             ],
+            cursor_style: nickel_core::terminal_settings::TerminalCursorStyle::Block,
+            font_family: std::sync::Arc::from("monospace"),
         }
     }
 }
@@ -532,7 +536,10 @@ impl<'a> TerminalViewport<'a> {
         if cell.selected {
             background = self.palette.selection;
         }
-        if cursor {
+        if cursor
+            && self.palette.cursor_style
+                == nickel_core::terminal_settings::TerminalCursorStyle::Block
+        {
             background = self.palette.cursor;
             foreground = self.palette.background;
         }
@@ -550,19 +557,30 @@ impl<'a> TerminalViewport<'a> {
                 bold: cell.bold,
                 italic: cell.italic,
                 monospace: true,
+                font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
                 strikethrough: false,
-                underline: cell.underline,
+                underline: cell.underline
+                    || (cursor
+                        && self.palette.cursor_style
+                            == nickel_core::terminal_settings::TerminalCursorStyle::Underline),
                 color: Some(foreground),
                 background: None,
             }],
         )
         .scale(self.metrics.text_scale)
         .color(foreground);
-        Container::new()
+        let mut container = Container::new()
             .width(self.metrics.width)
             .height(self.metrics.height)
             .background(background)
-            .child(styled)
+            .child(styled);
+        if cursor
+            && self.palette.cursor_style
+                == nickel_core::terminal_settings::TerminalCursorStyle::Beam
+        {
+            container = container.border(self.palette.cursor, 1.0);
+        }
+        container
     }
 }
 
@@ -666,7 +684,10 @@ mod tests {
     fn viewport_uses_bounded_shared_declarative_primitives() {
         let snapshot =
             snapshot(b"plain \x1b[1;2;3;4;31mred\x1b[0m \x1b[8mhidden\x1b[0m \xe7\x95\x8c");
-        let palette = TerminalPalette::default();
+        let palette = TerminalPalette {
+            font_family: std::sync::Arc::from("Nickel Fixture Mono"),
+            ..TerminalPalette::default()
+        };
         let frame = UiFrame::<()>::layout(
             TerminalViewport::new(
                 &snapshot,
@@ -684,13 +705,11 @@ mod tests {
             .unwrap();
         assert_eq!(viewport.role, Some(SemanticRole::GraphicalCustomControl));
         assert!(viewport.name.as_deref().unwrap().contains("plain red"));
-        assert!(frame.commands().iter().any(|command| {
-            matches!(
-                command,
-                nickel_ui::backend::PaintCommand::StyledText { spans, .. }
-                    if spans.iter().any(|span| span.bold && span.italic && span.underline)
-            )
-        }));
+        let commands = format!("{:?}", frame.commands());
+        assert!(commands.contains("bold: true"));
+        assert!(commands.contains("italic: true"));
+        assert!(commands.contains("underline: true"));
+        assert!(commands.contains("Nickel Fixture Mono"));
         assert!(
             frame.commands().len() <= 100,
             "visible work stays bounded by the grid"

@@ -12,6 +12,7 @@ path = "src/bin/nickel-terminal.rs"
 
 [dependencies]
 nickel-input = { path = "../nickel-input" }
+nickel-core = { path = "../nickel-core" }
 nickel-terminal = { path = "../nickel-terminal" }
 nickel-ui = { path = "../nickel-ui" }
 nickel-logging = { path = "../nickel-logging" }

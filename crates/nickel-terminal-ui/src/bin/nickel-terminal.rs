@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use nickel_core::terminal_settings::TerminalSettings;
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
     TerminalSession, TerminalSnapshot,
@@ -59,22 +60,42 @@ enum Message {
 }
 
 impl TerminalApp {
-    fn new(program: Option<TerminalProgram>, cwd: Option<PathBuf>) -> Result<Self, Box<dyn Error>> {
+    fn new(
+        program: Option<TerminalProgram>,
+        cwd: Option<PathBuf>,
+        settings: &TerminalSettings,
+    ) -> Result<Self, Box<dyn Error>> {
         let dimensions =
             TerminalDimensions::new(INITIAL_COLUMNS, INITIAL_LINES, CELL_WIDTH, CELL_HEIGHT)?;
+        let program = program.or_else(|| {
+            settings
+                .default_shell
+                .as_ref()
+                .map(|executable| TerminalProgram {
+                    executable: executable.clone(),
+                    arguments: Vec::new(),
+                })
+        });
         let session = TerminalSession::spawn(TerminalOptions {
             program,
-            working_directory: cwd,
+            working_directory: cwd.or_else(|| settings.initial_working_directory.clone()),
             environment: HashMap::new(),
             dimensions,
-            scrollback_lines: 10_000,
+            scrollback_lines: settings.scrollback_lines,
         })?;
         let snapshot = session.snapshot();
+        let palette = TerminalPalette {
+            foreground: settings.foreground,
+            background: settings.background,
+            cursor_style: settings.cursor_style,
+            font_family: std::sync::Arc::from(settings.font_family.as_str()),
+            ..TerminalPalette::default()
+        };
         Ok(Self {
             session,
             snapshot,
-            palette: TerminalPalette::default(),
-            metrics: CellMetrics::integral(14.0, 1.0),
+            palette,
+            metrics: CellMetrics::integral(settings.font_size(), 1.0),
             title: "Nickel Terminal".into(),
             status: None,
             paste_confirmation: None,
@@ -448,7 +469,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     });
     // PTY allocation and parsing start before this delay. Until a platform attribution
     // subscription is available the conservative decision is to show the terminal at expiry.
-    let app = TerminalApp::new(program, cwd)?;
+    let settings = TerminalSettings::load_default();
+    let app = TerminalApp::new(program, cwd, &settings)?;
     if !deferred_window.is_zero() {
         std::thread::sleep(deferred_window);
     }
@@ -467,6 +489,7 @@ mod tests {
                 arguments: vec!["-c".into(), "exit 0".into()],
             }),
             None,
+            &TerminalSettings::default(),
         )
         .expect("fixture PTY");
         let mut host = UiHost::new(app, 900, 600);

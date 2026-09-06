@@ -1045,6 +1045,7 @@ fn push_styled_text(
             bold: style.bold,
             italic: style.italic,
             monospace: style.monospace,
+            font_family: None,
             strikethrough: style.strikethrough,
             underline: false,
             color: style.color,
