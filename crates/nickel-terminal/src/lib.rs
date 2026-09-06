@@ -124,9 +124,11 @@ pub struct TerminalCell {
     pub foreground: TerminalColor,
     pub background: TerminalColor,
     pub bold: bool,
+    pub dim: bool,
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
+    pub concealed: bool,
     pub wide: bool,
     pub wide_spacer: bool,
     pub selected: bool,
@@ -573,9 +575,11 @@ fn snapshot(
                 bold: cell
                     .flags
                     .intersects(Flags::BOLD | Flags::BOLD_ITALIC | Flags::DIM_BOLD),
+                dim: cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD),
                 italic: cell.flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
                 underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
                 inverse: cell.flags.contains(Flags::INVERSE),
+                concealed: cell.flags.contains(Flags::HIDDEN),
                 wide: cell.flags.contains(Flags::WIDE_CHAR),
                 wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
                 selected,

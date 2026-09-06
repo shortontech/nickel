@@ -2,7 +2,9 @@
 
 use nickel_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, TextEvent};
 use nickel_terminal::{TerminalCell, TerminalColor, TerminalScroll, TerminalSnapshot};
-use nickel_ui::{Component, Container, Grid, Layer, Point, SemanticRole, Text, Track, View};
+use nickel_ui::{
+    Component, Container, Grid, SemanticRole, StyledText, StyledTextSpan, Track, View,
+};
 
 pub const MAX_PASTE_BYTES: usize = 1024 * 1024;
 
@@ -281,6 +283,12 @@ impl<'a> TerminalViewport<'a> {
         if cell.inverse {
             std::mem::swap(&mut foreground, &mut background);
         }
+        if cell.dim {
+            foreground = blend(foreground, background, 0.55);
+        }
+        if cell.concealed {
+            foreground = background;
+        }
         if cell.selected {
             background = self.palette.selection;
         }
@@ -294,32 +302,27 @@ impl<'a> TerminalViewport<'a> {
             cell.character.to_string()
         };
         value.extend(cell.combining.iter());
-        let mut layer = Layer::new()
-            .width(self.metrics.width)
-            .height(self.metrics.height)
-            .child(
-                Text::new(value)
-                    .scale(self.metrics.text_scale)
-                    .bold(cell.bold)
-                    .color(foreground),
-            );
-        if cell.underline {
-            layer = layer.child(
-                Container::new()
-                    .position(Point {
-                        x: 0.0,
-                        y: self.metrics.height - 2.0,
-                    })
-                    .width(self.metrics.width)
-                    .height(1.0)
-                    .background(foreground),
-            );
-        }
+        let end = value.len();
+        let styled = StyledText::new(
+            value,
+            vec![StyledTextSpan {
+                range: 0..end,
+                bold: cell.bold,
+                italic: cell.italic,
+                monospace: true,
+                strikethrough: false,
+                underline: cell.underline,
+                color: Some(foreground),
+                background: None,
+            }],
+        )
+        .scale(self.metrics.text_scale)
+        .color(foreground);
         Container::new()
             .width(self.metrics.width)
             .height(self.metrics.height)
             .background(background)
-            .child(layer)
+            .child(styled)
     }
 }
 
@@ -394,6 +397,15 @@ fn named_index(name: &str) -> Option<usize> {
     })
 }
 
+fn blend(foreground: u32, background: u32, amount: f32) -> u32 {
+    let channel = |shift: u32| {
+        let foreground = ((foreground >> shift) & 0xff_u32) as f32;
+        let background = ((background >> shift) & 0xff_u32) as f32;
+        (background + (foreground - background) * amount).round() as u32
+    };
+    0xff00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -410,7 +422,8 @@ mod tests {
 
     #[test]
     fn viewport_uses_bounded_shared_declarative_primitives() {
-        let snapshot = snapshot(b"plain \x1b[1;4;31mred\x1b[0m \xe7\x95\x8c");
+        let snapshot =
+            snapshot(b"plain \x1b[1;2;3;4;31mred\x1b[0m \x1b[8mhidden\x1b[0m \xe7\x95\x8c");
         let palette = TerminalPalette::default();
         let frame = UiFrame::<()>::layout(
             TerminalViewport::new(
@@ -429,6 +442,13 @@ mod tests {
             .unwrap();
         assert_eq!(viewport.role, Some(SemanticRole::GraphicalCustomControl));
         assert!(viewport.name.as_deref().unwrap().contains("plain red"));
+        assert!(frame.commands().iter().any(|command| {
+            matches!(
+                command,
+                nickel_ui::backend::PaintCommand::StyledText { spans, .. }
+                    if spans.iter().any(|span| span.bold && span.italic && span.underline)
+            )
+        }));
         assert!(
             frame.commands().len() <= 100,
             "visible work stays bounded by the grid"
