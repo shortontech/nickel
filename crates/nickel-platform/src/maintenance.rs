@@ -9,6 +9,9 @@ use std::{
     time::SystemTime,
 };
 
+#[cfg(target_os = "linux")]
+use std::path::Path;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaintenanceProvider {
     LinuxPackageKit { distribution: String },
@@ -237,32 +240,20 @@ pub fn maintenance_service() -> Arc<MaintenanceService> {
 }
 
 pub fn maintenance_backend() -> Box<dyn MaintenanceBackend> {
+    #[cfg(target_os = "linux")]
+    return Box::new(LinuxMaintenance::detect());
+    #[cfg(not(target_os = "linux"))]
     Box::new(UnsupportedMaintenance::detect())
 }
 
+#[cfg(not(target_os = "linux"))]
 struct UnsupportedMaintenance {
     provider: MaintenanceProvider,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl UnsupportedMaintenance {
     fn detect() -> Self {
-        #[cfg(target_os = "linux")]
-        {
-            let distribution = linux_distribution_id();
-            let packagekit = executable_on_path("pkcon");
-            return Self {
-                provider: if packagekit {
-                    MaintenanceProvider::LinuxPackageKit { distribution }
-                } else {
-                    MaintenanceProvider::LinuxUnsupported { distribution }
-                },
-            };
-        }
-        #[cfg(target_os = "windows")]
-        return Self {
-            provider: MaintenanceProvider::WindowsUpdateAndSecurity,
-        };
-        #[allow(unreachable_code)]
         Self {
             provider: MaintenanceProvider::Unsupported {
                 platform: std::env::consts::OS.into(),
@@ -271,6 +262,7 @@ impl UnsupportedMaintenance {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
 impl MaintenanceBackend for UnsupportedMaintenance {
     fn inspect(&self) -> Result<MaintenanceSnapshot, MaintenanceError> {
         Ok(MaintenanceSnapshot {
@@ -280,21 +272,7 @@ impl MaintenanceBackend for UnsupportedMaintenance {
                 firewall: unavailable_observation(),
                 malware_protection: unavailable_observation(),
             },
-            permissions: [
-                PermissionKind::Camera,
-                PermissionKind::Microphone,
-                PermissionKind::Location,
-                PermissionKind::Notifications,
-                PermissionKind::ScreenCapture,
-            ]
-            .into_iter()
-            .map(|kind| PermissionStatus {
-                kind,
-                global_enabled: unavailable_observation(),
-                per_application_consent: false,
-                mutation: PermissionMutation::Unsupported,
-            })
-            .collect(),
+            permissions: required_unsupported_permissions(),
             secure_storage: unavailable_observation(),
         })
     }
@@ -304,6 +282,272 @@ impl MaintenanceBackend for UnsupportedMaintenance {
             detail: "No supported authoritative mutation provider is connected".into(),
         })
     }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxMaintenance {
+    distribution: String,
+    packagekit: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxMaintenance {
+    fn detect() -> Self {
+        Self {
+            distribution: linux_distribution_id(),
+            packagekit: executable_on_path("pkcon"),
+        }
+    }
+
+    fn updates(&self) -> Observation<UpdateStatus> {
+        if !self.packagekit {
+            return Observation::unsupported(format!(
+                "{} has no PackageKit command provider",
+                self.distribution
+            ));
+        }
+        let observed_at = SystemTime::now();
+        match std::process::Command::new("pkcon")
+            .args(["get-updates", "--plain", "--noninteractive"])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let available = packagekit_update_count(&String::from_utf8_lossy(&output.stdout));
+                Observation {
+                    state: ObservationState::Current,
+                    value: Some(UpdateStatus {
+                        available,
+                        phase: UpdatePhase::Idle,
+                        restart_required: linux_restart_required(),
+                        last_successful_check: Some(observed_at),
+                    }),
+                    observed_at: Some(observed_at),
+                    detail: Some(format!(
+                        "PackageKit reported {available} available update(s)"
+                    )),
+                }
+            }
+            Ok(output) => Observation {
+                state: ObservationState::Failed,
+                value: None,
+                observed_at: Some(observed_at),
+                detail: Some(format!("PackageKit query failed with {}", output.status)),
+            },
+            Err(error) => Observation {
+                state: if error.kind() == std::io::ErrorKind::PermissionDenied {
+                    ObservationState::PermissionDenied
+                } else {
+                    ObservationState::Failed
+                },
+                value: None,
+                observed_at: Some(observed_at),
+                detail: Some(format!("PackageKit could not start: {error}")),
+            },
+        }
+    }
+
+    fn firewall(&self) -> Observation<ProtectionHealth> {
+        let observed_at = SystemTime::now();
+        if executable_on_path("firewall-cmd") {
+            return command_health("firewall-cmd", &["--state"], observed_at, |output| {
+                if output.trim() == "running" {
+                    ProtectionHealth::Healthy
+                } else {
+                    ProtectionHealth::AttentionRequired
+                }
+            });
+        }
+        if executable_on_path("ufw") {
+            return command_health("ufw", &["status"], observed_at, |output| {
+                if output
+                    .lines()
+                    .any(|line| line.trim().eq_ignore_ascii_case("Status: active"))
+                {
+                    ProtectionHealth::Healthy
+                } else {
+                    ProtectionHealth::AttentionRequired
+                }
+            });
+        }
+        Observation::unsupported("No supported firewall status provider is installed")
+    }
+
+    fn secure_storage(&self) -> Observation<SecureStorageReadiness> {
+        let observed_at = SystemTime::now();
+        let result = (|| {
+            let connection = zbus::blocking::Connection::session().ok()?;
+            let proxy = zbus::blocking::fdo::DBusProxy::new(&connection).ok()?;
+            let name = zbus::names::BusName::try_from("org.freedesktop.secrets").ok()?;
+            proxy.name_has_owner(name).ok()
+        })();
+        match result {
+            Some(true) => Observation {
+                state: ObservationState::Current,
+                value: Some(SecureStorageReadiness::Ready),
+                observed_at: Some(observed_at),
+                detail: Some("Secret Service is available for this session".into()),
+            },
+            Some(false) => Observation {
+                state: ObservationState::Current,
+                value: Some(SecureStorageReadiness::Unavailable),
+                observed_at: Some(observed_at),
+                detail: Some("Secret Service has no session owner".into()),
+            },
+            None => Observation {
+                state: ObservationState::Failed,
+                value: None,
+                observed_at: Some(observed_at),
+                detail: Some("Secret Service readiness could not be queried".into()),
+            },
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl MaintenanceBackend for LinuxMaintenance {
+    fn inspect(&self) -> Result<MaintenanceSnapshot, MaintenanceError> {
+        Ok(MaintenanceSnapshot {
+            provider: if self.packagekit {
+                MaintenanceProvider::LinuxPackageKit {
+                    distribution: self.distribution.clone(),
+                }
+            } else {
+                MaintenanceProvider::LinuxUnsupported {
+                    distribution: self.distribution.clone(),
+                }
+            },
+            updates: self.updates(),
+            protection: ProtectionStatus {
+                firewall: self.firewall(),
+                malware_protection: Observation::unsupported(
+                    "No supported Linux malware-protection authority is connected",
+                ),
+            },
+            permissions: required_unsupported_permissions(),
+            secure_storage: self.secure_storage(),
+        })
+    }
+
+    fn request(&self, action: MaintenanceAction) -> Result<MaintenanceOutcome, MaintenanceError> {
+        match action {
+            MaintenanceAction::CheckForUpdates if self.packagekit => {
+                run_packagekit(&["refresh", "force", "--noninteractive"])
+            }
+            MaintenanceAction::InstallUpdates if self.packagekit => {
+                run_packagekit(&["update", "--noninteractive"])
+            }
+            MaintenanceAction::CheckForUpdates | MaintenanceAction::InstallUpdates => {
+                Ok(MaintenanceOutcome::Unsupported {
+                    detail: format!("{} has no PackageKit provider", self.distribution),
+                })
+            }
+            MaintenanceAction::ScheduleRestart => Ok(MaintenanceOutcome::Unsupported {
+                detail: "Linux restart scheduling has no connected provider".into(),
+            }),
+            MaintenanceAction::SetPermission(_, _)
+            | MaintenanceAction::OpenNativePermissionSettings(_) => {
+                Ok(MaintenanceOutcome::Unsupported {
+                    detail:
+                        "This Linux desktop exposes no supported global permission mutation API"
+                            .into(),
+                })
+            }
+            MaintenanceAction::RecoverSecureStorage => Ok(MaintenanceOutcome::Unsupported {
+                detail: "Secret Service recovery remains owned by the configured provider".into(),
+            }),
+        }
+    }
+}
+
+fn required_unsupported_permissions() -> Vec<PermissionStatus> {
+    [
+        PermissionKind::Camera,
+        PermissionKind::Microphone,
+        PermissionKind::Location,
+        PermissionKind::Notifications,
+        PermissionKind::ScreenCapture,
+    ]
+    .into_iter()
+    .map(|kind| PermissionStatus {
+        kind,
+        global_enabled: unavailable_observation(),
+        per_application_consent: false,
+        mutation: PermissionMutation::Unsupported,
+    })
+    .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn packagekit_update_count(output: &str) -> u32 {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| {
+            !line.is_empty()
+                && !line.starts_with("Getting")
+                && !line.starts_with("Finished")
+                && !line.starts_with("Available")
+                && !line.starts_with("There are no")
+                && (line.contains(';') || line.contains('\t'))
+        })
+        .count()
+        .min(u32::MAX as usize) as u32
+}
+
+#[cfg(target_os = "linux")]
+fn linux_restart_required() -> bool {
+    Path::new("/run/reboot-required").is_file() || Path::new("/var/run/reboot-required").is_file()
+}
+
+#[cfg(target_os = "linux")]
+fn command_health(
+    program: &str,
+    arguments: &[&str],
+    observed_at: SystemTime,
+    classify: impl FnOnce(&str) -> ProtectionHealth,
+) -> Observation<ProtectionHealth> {
+    match std::process::Command::new(program).args(arguments).output() {
+        Ok(output) if output.status.success() => Observation {
+            state: ObservationState::Current,
+            value: Some(classify(&String::from_utf8_lossy(&output.stdout))),
+            observed_at: Some(observed_at),
+            detail: Some(format!("{program} reported firewall state")),
+        },
+        Ok(output) => Observation {
+            state: ObservationState::PermissionDenied,
+            value: None,
+            observed_at: Some(observed_at),
+            detail: Some(format!("{program} status failed with {}", output.status)),
+        },
+        Err(error) => Observation {
+            state: ObservationState::Failed,
+            value: None,
+            observed_at: Some(observed_at),
+            detail: Some(format!("{program} status could not start: {error}")),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn run_packagekit(arguments: &[&str]) -> Result<MaintenanceOutcome, MaintenanceError> {
+    let status = std::process::Command::new("pkcon")
+        .args(arguments)
+        .status()
+        .map_err(|error| MaintenanceError {
+            class: if error.kind() == std::io::ErrorKind::PermissionDenied {
+                MaintenanceFailureClass::Authorization
+            } else {
+                MaintenanceFailureClass::ProviderUnavailable
+            },
+            detail: format!("PackageKit could not start: {error}"),
+        })?;
+    Ok(if status.success() {
+        MaintenanceOutcome::Accepted
+    } else {
+        MaintenanceOutcome::Rejected {
+            detail: format!("PackageKit rejected the request with {status}"),
+        }
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -467,13 +711,24 @@ mod tests {
             assert!(!permission.per_application_consent);
             assert_eq!(permission.mutation, PermissionMutation::Unsupported);
         }
-        assert_ne!(
-            snapshot.protection.firewall.state,
-            ObservationState::Current
-        );
-        assert_ne!(
-            snapshot.protection.malware_protection.state,
-            ObservationState::Current
+        for observation in [
+            &snapshot.protection.firewall,
+            &snapshot.protection.malware_protection,
+        ] {
+            if observation.state != ObservationState::Current {
+                assert_ne!(observation.value, Some(ProtectionHealth::Healthy));
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn packagekit_plain_output_counts_only_package_records() {
+        let output = "Getting updates\nAvailable updates\nnormal;pkg-one;1.2;x86_64;repo\nsecurity\tpkg-two\t3.4\nFinished\n";
+        assert_eq!(packagekit_update_count(output), 2);
+        assert_eq!(
+            packagekit_update_count("Getting updates\nThere are no updates available\nFinished\n"),
+            0
         );
     }
 }
