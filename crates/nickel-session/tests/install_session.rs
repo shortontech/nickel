@@ -79,6 +79,23 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     assert!(portals.contains("org.freedesktop.impl.portal.Secret=kwallet"));
     assert!(portals.contains("org.freedesktop.impl.portal.ScreenCast=wlr"));
     assert!(portals.contains("org.freedesktop.impl.portal.Screenshot=wlr"));
+    let documentation = root.join("usr/share/doc/nickel");
+    for artifact in [
+        "LICENSE-MIT",
+        "LICENSE-APACHE",
+        "Cargo.lock",
+        "NOTICE.md",
+        "LICENSE.OpenSeeFace",
+    ] {
+        assert!(
+            documentation.join(artifact).is_file(),
+            "installer omitted {artifact}"
+        );
+    }
+    let notice =
+        fs::read_to_string(documentation.join("NOTICE.md")).expect("installed distribution notice");
+    assert!(notice.contains("third-party Rust crates"));
+    assert!(notice.contains("LICENSE.OpenSeeFace"));
 }
 
 #[test]

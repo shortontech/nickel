@@ -50,5 +50,15 @@ install -Dm644 "$repository/packaging/nickel-portals.conf" \
     "$install_root/usr/share/xdg-desktop-portal/nickel-portals.conf"
 install -Dm644 "$repository/assets/icons/nickel-settings.png" \
     "$install_root/usr/share/icons/hicolor/512x512/apps/nickel-settings.png"
+install -Dm644 "$repository/LICENSE-MIT" \
+    "$install_root/usr/share/doc/nickel/LICENSE-MIT"
+install -Dm644 "$repository/LICENSE-APACHE" \
+    "$install_root/usr/share/doc/nickel/LICENSE-APACHE"
+install -Dm644 "$repository/Cargo.lock" \
+    "$install_root/usr/share/doc/nickel/Cargo.lock"
+install -Dm644 "$repository/packaging/NOTICE.md" \
+    "$install_root/usr/share/doc/nickel/NOTICE.md"
+install -Dm644 "$repository/crates/nickel-gaze/models/LICENSE.OpenSeeFace" \
+    "$install_root/usr/share/doc/nickel/LICENSE.OpenSeeFace"
 
 echo "Installed the Nickel SDDM session."
