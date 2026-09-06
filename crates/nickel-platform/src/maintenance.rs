@@ -61,6 +61,7 @@ impl<T> Observation<T> {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn unavailable_observation<T>() -> Observation<T> {
     Observation::unsupported("No supported authoritative provider is connected")
 }
@@ -242,16 +243,18 @@ pub fn maintenance_service() -> Arc<MaintenanceService> {
 pub fn maintenance_backend() -> Box<dyn MaintenanceBackend> {
     #[cfg(target_os = "linux")]
     return Box::new(LinuxMaintenance::detect());
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    return Box::new(WindowsMaintenance);
+    #[cfg(not(any(target_os = "linux", target_os = "windows")))]
     Box::new(UnsupportedMaintenance::detect())
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct UnsupportedMaintenance {
     provider: MaintenanceProvider,
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl UnsupportedMaintenance {
     fn detect() -> Self {
         Self {
@@ -262,7 +265,7 @@ impl UnsupportedMaintenance {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl MaintenanceBackend for UnsupportedMaintenance {
     fn inspect(&self) -> Result<MaintenanceSnapshot, MaintenanceError> {
         Ok(MaintenanceSnapshot {
@@ -281,6 +284,123 @@ impl MaintenanceBackend for UnsupportedMaintenance {
         Ok(MaintenanceOutcome::Unsupported {
             detail: "No supported authoritative mutation provider is connected".into(),
         })
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsMaintenance;
+
+#[cfg(target_os = "windows")]
+impl WindowsMaintenance {
+    fn updates(&self) -> Observation<UpdateStatus> {
+        let observed_at = SystemTime::now();
+        let script = "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');[Console]::Out.WriteLine($q.Updates.Count)";
+        match windows_powershell(script) {
+            Ok(output) => match output.trim().parse::<u32>() {
+                Ok(available) => {
+                    let Ok(restart_required) = windows_restart_required() else {
+                        return failed_observation(
+                            observed_at,
+                            "Windows restart requirement could not be queried",
+                        );
+                    };
+                    Observation {
+                        state: ObservationState::Current,
+                        value: Some(UpdateStatus {
+                            available,
+                            phase: UpdatePhase::Idle,
+                            restart_required,
+                            last_successful_check: Some(observed_at),
+                        }),
+                        observed_at: Some(observed_at),
+                        detail: Some(format!(
+                            "Windows Update Agent reported {available} available update(s)"
+                        )),
+                    }
+                }
+                Err(_) => failed_observation(observed_at, "Windows Update returned invalid data"),
+            },
+            Err(error) => command_failure_observation(observed_at, "Windows Update", error),
+        }
+    }
+
+    fn protection(&self) -> ProtectionStatus {
+        let observed_at = SystemTime::now();
+        let firewall = windows_powershell("$ErrorActionPreference='Stop';Get-NetFirewallProfile | ForEach-Object {[Console]::Out.WriteLine($_.Enabled)}")
+            .map(|output| {
+                let values = output.lines().filter_map(parse_powershell_bool).collect::<Vec<_>>();
+                if !values.is_empty() && values.iter().all(|enabled| *enabled) {
+                    ProtectionHealth::Healthy
+                } else {
+                    ProtectionHealth::AttentionRequired
+                }
+            });
+        let malware = windows_powershell("$ErrorActionPreference='Stop';$s=Get-MpComputerStatus;[Console]::Out.WriteLine($s.AntivirusEnabled);[Console]::Out.WriteLine($s.RealTimeProtectionEnabled)")
+            .map(|output| {
+                let values = output.lines().filter_map(parse_powershell_bool).collect::<Vec<_>>();
+                if values.len() == 2 && values.iter().all(|enabled| *enabled) {
+                    ProtectionHealth::Healthy
+                } else {
+                    ProtectionHealth::AttentionRequired
+                }
+            });
+        ProtectionStatus {
+            firewall: protection_observation(observed_at, "Windows Firewall", firewall),
+            malware_protection: protection_observation(observed_at, "Microsoft Defender", malware),
+        }
+    }
+
+    fn permissions(&self) -> Vec<PermissionStatus> {
+        [
+            PermissionKind::Camera,
+            PermissionKind::Microphone,
+            PermissionKind::Location,
+            PermissionKind::Notifications,
+            PermissionKind::ScreenCapture,
+        ]
+        .into_iter()
+        .map(|kind| PermissionStatus {
+            kind,
+            global_enabled: windows_permission_state(kind),
+            per_application_consent: true,
+            mutation: PermissionMutation::NativeConsent,
+        })
+        .collect()
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl MaintenanceBackend for WindowsMaintenance {
+    fn inspect(&self) -> Result<MaintenanceSnapshot, MaintenanceError> {
+        Ok(MaintenanceSnapshot {
+            provider: MaintenanceProvider::WindowsUpdateAndSecurity,
+            updates: self.updates(),
+            protection: self.protection(),
+            permissions: self.permissions(),
+            secure_storage: windows_secure_storage_readiness(),
+        })
+    }
+
+    fn request(&self, action: MaintenanceAction) -> Result<MaintenanceOutcome, MaintenanceError> {
+        match action {
+            MaintenanceAction::CheckForUpdates => run_windows_update_action(
+                "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$null=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0')",
+            ),
+            MaintenanceAction::InstallUpdates => run_windows_install_updates(),
+            MaintenanceAction::ScheduleRestart => windows_native_consent(
+                "ms-settings:windowsupdate-restartoptions",
+                "Windows owns restart scheduling",
+            ),
+            MaintenanceAction::SetPermission(kind, _)
+            | MaintenanceAction::OpenNativePermissionSettings(kind) => windows_native_consent(
+                windows_permission_uri(kind),
+                "Windows owns per-application consent",
+            ),
+            MaintenanceAction::RecoverSecureStorage => windows_native_consent(
+                "ms-settings:signinoptions",
+                "Windows owns account and credential recovery",
+            ),
+        }
     }
 }
 
@@ -459,6 +579,209 @@ impl MaintenanceBackend for LinuxMaintenance {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn windows_powershell(script: &str) -> Result<String, MaintenanceError> {
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            script,
+        ])
+        .output()
+        .map_err(|error| MaintenanceError {
+            class: if error.kind() == std::io::ErrorKind::PermissionDenied {
+                MaintenanceFailureClass::Authorization
+            } else {
+                MaintenanceFailureClass::ProviderUnavailable
+            },
+            detail: format!("Windows authority could not start: {error}"),
+        })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(MaintenanceError {
+            class: match output.status.code() {
+                Some(5) => MaintenanceFailureClass::Authorization,
+                _ => MaintenanceFailureClass::Unknown,
+            },
+            detail: format!("Windows authority failed with {}", output.status),
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_powershell_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn failed_observation<T>(observed_at: SystemTime, detail: &str) -> Observation<T> {
+    Observation {
+        state: ObservationState::Failed,
+        value: None,
+        observed_at: Some(observed_at),
+        detail: Some(detail.into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn command_failure_observation<T>(
+    observed_at: SystemTime,
+    authority: &str,
+    error: MaintenanceError,
+) -> Observation<T> {
+    Observation {
+        state: if error.class == MaintenanceFailureClass::Authorization {
+            ObservationState::PermissionDenied
+        } else {
+            ObservationState::Failed
+        },
+        value: None,
+        observed_at: Some(observed_at),
+        detail: Some(format!("{authority}: {}", error.detail)),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn protection_observation(
+    observed_at: SystemTime,
+    authority: &str,
+    result: Result<ProtectionHealth, MaintenanceError>,
+) -> Observation<ProtectionHealth> {
+    match result {
+        Ok(health) => Observation {
+            state: ObservationState::Current,
+            value: Some(health),
+            observed_at: Some(observed_at),
+            detail: Some(format!("{authority} reported current state")),
+        },
+        Err(error) => command_failure_observation(observed_at, authority, error),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_restart_required() -> Result<bool, MaintenanceError> {
+    windows_powershell("[Console]::Out.WriteLine((Test-Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired'))")
+        .and_then(|output| parse_powershell_bool(&output).ok_or(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: "Windows returned an invalid restart state".into(),
+        }))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_permission_state(kind: PermissionKind) -> Observation<bool> {
+    let observed_at = SystemTime::now();
+    let capability = match kind {
+        PermissionKind::Camera => "webcam",
+        PermissionKind::Microphone => "microphone",
+        PermissionKind::Location => "location",
+        PermissionKind::Notifications => "notifications",
+        PermissionKind::ScreenCapture => "graphicsCaptureProgrammatic",
+    };
+    let script = format!(
+        "$ErrorActionPreference='Stop';$p='HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\CapabilityAccessManager\\ConsentStore\\{capability}';if(Test-Path $p){{[Console]::Out.WriteLine((Get-ItemPropertyValue -Path $p -Name Value))}}else{{[Console]::Out.WriteLine('Unavailable')}}"
+    );
+    match windows_powershell(&script) {
+        Ok(value) if value.trim().eq_ignore_ascii_case("Allow") => Observation {
+            state: ObservationState::Current,
+            value: Some(true),
+            observed_at: Some(observed_at),
+            detail: Some(format!("Windows {capability} consent is enabled")),
+        },
+        Ok(value) if value.trim().eq_ignore_ascii_case("Deny") => Observation {
+            state: ObservationState::Current,
+            value: Some(false),
+            observed_at: Some(observed_at),
+            detail: Some(format!("Windows {capability} consent is disabled")),
+        },
+        Ok(_) => Observation::unsupported(format!(
+            "Windows does not expose a global {capability} consent value"
+        )),
+        Err(error) => command_failure_observation(observed_at, "Windows privacy consent", error),
+    }
+}
+
+#[cfg(target_os = "windows")]
+const fn windows_permission_uri(kind: PermissionKind) -> &'static str {
+    match kind {
+        PermissionKind::Camera => "ms-settings:privacy-webcam",
+        PermissionKind::Microphone => "ms-settings:privacy-microphone",
+        PermissionKind::Location => "ms-settings:privacy-location",
+        PermissionKind::Notifications => "ms-settings:notifications",
+        PermissionKind::ScreenCapture => "ms-settings:privacy-screencapture",
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_native_consent(uri: &str, detail: &str) -> Result<MaintenanceOutcome, MaintenanceError> {
+    crate::open_external_url(uri).map_err(|error| MaintenanceError {
+        class: MaintenanceFailureClass::ProviderUnavailable,
+        detail: error,
+    })?;
+    Ok(MaintenanceOutcome::NativeConsentRequired {
+        detail: detail.into(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_update_action(script: &str) -> Result<MaintenanceOutcome, MaintenanceError> {
+    windows_powershell(script).map(|_| MaintenanceOutcome::Accepted)
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_install_updates() -> Result<MaintenanceOutcome, MaintenanceError> {
+    let output = windows_powershell(
+        "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');$u=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $q.Updates){if(-not $i.EulaAccepted){[Console]::Out.WriteLine('CONSENT_REQUIRED');return};$null=$u.Add($i)};if($u.Count -gt 0){$d=$s.CreateUpdateDownloader();$d.Updates=$u;$null=$d.Download();$ready=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $u){if($i.IsDownloaded){$null=$ready.Add($i)}};if($ready.Count -gt 0){$installer=$s.CreateUpdateInstaller();$installer.Updates=$ready;$null=$installer.Install()}}",
+    )?;
+    if output.lines().any(|line| line.trim() == "CONSENT_REQUIRED") {
+        windows_native_consent(
+            "ms-settings:windowsupdate",
+            "Windows Update requires license consent",
+        )
+    } else {
+        Ok(MaintenanceOutcome::Accepted)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_secure_storage_readiness() -> Observation<SecureStorageReadiness> {
+    use windows::Win32::{
+        Foundation::{HLOCAL, LocalFree},
+        Security::Cryptography::{CRYPT_INTEGER_BLOB, CryptProtectData},
+    };
+    let observed_at = SystemTime::now();
+    let mut marker = *b"Nickel-DPAPI-probe";
+    let input = CRYPT_INTEGER_BLOB {
+        cbData: marker.len() as u32,
+        pbData: marker.as_mut_ptr(),
+    };
+    let mut output = CRYPT_INTEGER_BLOB::default();
+    let result =
+        unsafe { CryptProtectData(&raw const input, None, None, None, None, 0, &raw mut output) };
+    if !output.pbData.is_null() {
+        let _ = unsafe { LocalFree(Some(HLOCAL(output.pbData.cast()))) };
+    }
+    match result {
+        Ok(()) => Observation {
+            state: ObservationState::Current,
+            value: Some(SecureStorageReadiness::Ready),
+            observed_at: Some(observed_at),
+            detail: Some("Windows DPAPI protected a non-secret readiness marker".into()),
+        },
+        Err(error) => failed_observation(
+            observed_at,
+            &format!("Windows DPAPI readiness probe failed: {error}"),
+        ),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
 fn required_unsupported_permissions() -> Vec<PermissionStatus> {
     [
         PermissionKind::Camera,
