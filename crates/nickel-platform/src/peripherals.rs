@@ -187,7 +187,12 @@ pub fn peripheral_backend() -> Box<dyn PeripheralBackend> {
     Box::new(LinuxPeripherals)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub fn peripheral_backend() -> Box<dyn PeripheralBackend> {
+    Box::new(WindowsPeripherals)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub fn peripheral_backend() -> Box<dyn PeripheralBackend> {
     Box::new(UnsupportedPeripherals)
 }
@@ -497,9 +502,488 @@ fn parse_df_filesystem(line: &str) -> Option<FilesystemUsage> {
     })
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+struct WindowsPeripherals;
+
+#[cfg(target_os = "windows")]
+impl PeripheralBackend for WindowsPeripherals {
+    fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
+        Ok(PeripheralSnapshot {
+            provider: PeripheralProvider::WindowsPrintAndStorage,
+            printers: discover_windows_printers(),
+            volumes: discover_windows_storage(true),
+            filesystems: discover_windows_storage(false).map(|volumes| {
+                volumes
+                    .into_iter()
+                    .filter_map(|volume| {
+                        Some(FilesystemUsage {
+                            id: volume.id,
+                            name: volume.name,
+                            mount_path: volume.mount_path?,
+                            capacity_bytes: volume.capacity_bytes?,
+                            available_bytes: volume.available_bytes?,
+                        })
+                    })
+                    .collect()
+            }),
+            omitted_printers: 0,
+            omitted_jobs: 0,
+            omitted_volumes: 0,
+            omitted_filesystems: 0,
+        })
+    }
+
+    fn request(&self, action: PeripheralAction) -> Result<PeripheralOutcome, PeripheralError> {
+        use windows::Win32::Graphics::Printing::{
+            DeletePrinter, JOB_CONTROL_CANCEL, SetDefaultPrinterW, SetJobW,
+        };
+        match action {
+            PeripheralAction::SetDefaultPrinter(id) => {
+                let wide = wide_null(&id);
+                if unsafe { SetDefaultPrinterW(windows::core::PCWSTR(wide.as_ptr())) }.as_bool() {
+                    Ok(PeripheralOutcome::Accepted)
+                } else {
+                    Err(last_windows_error("set the default printer"))
+                }
+            }
+            PeripheralAction::RemovePrinter(id) => {
+                let printer = open_windows_printer(&id)?;
+                unsafe { DeletePrinter(printer.0) }
+                    .map(|()| PeripheralOutcome::Accepted)
+                    .map_err(|error| classify_windows_error("remove the printer", error))
+            }
+            PeripheralAction::CancelPrintJob { printer_id, job_id } => {
+                let job_id = job_id.parse::<u32>().map_err(|_| PeripheralError {
+                    class: PeripheralFailureClass::InvalidTarget,
+                    detail: "Windows print job identity is not numeric".into(),
+                })?;
+                let printer = open_windows_printer(&printer_id)?;
+                if unsafe { SetJobW(printer.0, job_id, 0, None, JOB_CONTROL_CANCEL) }.as_bool() {
+                    Ok(PeripheralOutcome::Accepted)
+                } else {
+                    Err(last_windows_error("cancel the print job"))
+                }
+            }
+            PeripheralAction::AddPrinter { address } => {
+                let script = if address.starts_with("\\\\") {
+                    "Add-Printer -ConnectionName $env:NICKEL_PRINTER_ADDRESS -ErrorAction Stop"
+                } else {
+                    "$a=$env:NICKEL_PRINTER_ADDRESS; $n='Nickel-'+[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($a))).Substring(0,12); Add-Printer -Name $n -DeviceURL $a -ErrorAction Stop"
+                };
+                run_windows_powershell(script, "NICKEL_PRINTER_ADDRESS", &address)
+            }
+            PeripheralAction::PrintTestPage(id) => run_windows_powershell(
+                "$p=Get-CimInstance Win32_Printer | Where-Object Name -eq $env:NICKEL_PRINTER_NAME | Select-Object -First 1; if($null -eq $p){throw 'Printer not found'}; $r=Invoke-CimMethod -InputObject $p -MethodName PrintTestPage; if($r.ReturnValue -ne 0){throw ('PrintTestPage failed: '+$r.ReturnValue)}",
+                "NICKEL_PRINTER_NAME",
+                &id,
+            ),
+            PeripheralAction::OpenCleanupLocation(path) => crate::open_directory(&path)
+                .map(|()| PeripheralOutcome::Accepted)
+                .map_err(|detail| PeripheralError {
+                    class: PeripheralFailureClass::ProviderUnavailable,
+                    detail,
+                }),
+            PeripheralAction::UnmountVolume(id) => {
+                let path = windows_volume_mount_path(&id)?;
+                run_windows_program("mountvol.exe", &[path.to_string_lossy().as_ref(), "/p"])
+            }
+            PeripheralAction::EjectVolume(id) => {
+                let path = windows_volume_mount_path(&id)?;
+                run_windows_powershell(
+                    "$p=(New-Object -ComObject Shell.Application).Namespace(17).ParseName($env:NICKEL_VOLUME_PATH); if($null -eq $p){throw 'Volume not found'}; $p.InvokeVerb('Eject')",
+                    "NICKEL_VOLUME_PATH",
+                    path.to_string_lossy().as_ref(),
+                )
+            }
+            PeripheralAction::MountVolume(_) => Ok(PeripheralOutcome::Unsupported {
+                detail:
+                    "Windows cannot remount this volume without a retained system volume identity"
+                        .into(),
+            }),
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value)
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn wide_pointer(value: windows::core::PWSTR) -> String {
+    if value.is_null() {
+        String::new()
+    } else {
+        unsafe { value.to_string() }.unwrap_or_default()
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsPrinterHandle(windows::Win32::Graphics::Printing::PRINTER_HANDLE);
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsPrinterHandle {
+    fn drop(&mut self) {
+        let _ = unsafe { windows::Win32::Graphics::Printing::ClosePrinter(self.0) };
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn open_windows_printer(name: &str) -> Result<WindowsPrinterHandle, PeripheralError> {
+    use windows::Win32::Graphics::Printing::{OpenPrinterW, PRINTER_HANDLE};
+    let wide = wide_null(name);
+    let mut handle = PRINTER_HANDLE::default();
+    unsafe { OpenPrinterW(windows::core::PCWSTR(wide.as_ptr()), &mut handle, None) }
+        .map(|()| WindowsPrinterHandle(handle))
+        .map_err(|error| classify_windows_error("open the printer", error))
+}
+
+#[cfg(target_os = "windows")]
+fn discover_windows_printers() -> Result<Vec<Printer>, String> {
+    use windows::Win32::Graphics::Printing::{
+        EnumPrintersW, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W,
+    };
+    let mut needed = 0;
+    let mut returned = 0;
+    let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
+    let _ = unsafe {
+        EnumPrintersW(
+            flags,
+            windows::core::PCWSTR::null(),
+            4,
+            None,
+            &mut needed,
+            &mut returned,
+        )
+    };
+    if needed == 0 {
+        return Ok(Vec::new());
+    }
+    let mut storage = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    let buffer = unsafe {
+        std::slice::from_raw_parts_mut(
+            storage.as_mut_ptr().cast::<u8>(),
+            storage.len() * std::mem::size_of::<usize>(),
+        )
+    };
+    unsafe {
+        EnumPrintersW(
+            flags,
+            windows::core::PCWSTR::null(),
+            4,
+            Some(buffer),
+            &mut needed,
+            &mut returned,
+        )
+    }
+    .map_err(|error| format!("could not enumerate Windows printers: {error}"))?;
+    let records = unsafe {
+        std::slice::from_raw_parts(
+            storage.as_ptr().cast::<PRINTER_INFO_4W>(),
+            returned as usize,
+        )
+    };
+    let default = windows_default_printer();
+    Ok(records
+        .iter()
+        .filter_map(|record| {
+            let id = wide_pointer(record.pPrinterName);
+            if id.is_empty() {
+                return None;
+            }
+            let (state, jobs) = inspect_windows_printer(&id);
+            Some(Printer {
+                name: id.clone(),
+                is_default: default.as_deref() == Some(id.as_str()),
+                id,
+                state,
+                jobs,
+            })
+        })
+        .collect())
+}
+
+#[cfg(target_os = "windows")]
+fn windows_default_printer() -> Option<String> {
+    use windows::Win32::Graphics::Printing::GetDefaultPrinterW;
+    let mut length = 0;
+    let _ = unsafe { GetDefaultPrinterW(None, &mut length) };
+    if length == 0 {
+        return None;
+    }
+    let mut buffer = vec![0u16; length as usize];
+    unsafe { GetDefaultPrinterW(Some(windows::core::PWSTR(buffer.as_mut_ptr())), &mut length) }
+        .as_bool()
+        .then(|| String::from_utf16_lossy(&buffer[..length.saturating_sub(1) as usize]))
+}
+
+#[cfg(target_os = "windows")]
+fn inspect_windows_printer(name: &str) -> (PrinterState, Vec<PrintJob>) {
+    use windows::Win32::Graphics::Printing::{
+        EnumJobsW, GetPrinterW, JOB_INFO_1W, JOB_STATUS_ERROR, JOB_STATUS_PAUSED,
+        JOB_STATUS_PRINTING, PRINTER_INFO_6, PRINTER_STATUS_BUSY, PRINTER_STATUS_ERROR,
+        PRINTER_STATUS_OFFLINE, PRINTER_STATUS_PRINTING, PRINTER_STATUS_PROCESSING,
+    };
+    let Ok(handle) = open_windows_printer(name) else {
+        return (PrinterState::Offline, Vec::new());
+    };
+    let mut needed = 0;
+    let _ = unsafe { GetPrinterW(handle.0, 6, None, &mut needed) };
+    let mut state = PrinterState::Ready;
+    if needed >= std::mem::size_of::<PRINTER_INFO_6>() as u32 {
+        let mut storage = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+        let buffer = unsafe {
+            std::slice::from_raw_parts_mut(
+                storage.as_mut_ptr().cast::<u8>(),
+                storage.len() * std::mem::size_of::<usize>(),
+            )
+        };
+        if unsafe { GetPrinterW(handle.0, 6, Some(buffer), &mut needed) }.is_ok() {
+            let status = unsafe { storage.as_ptr().cast::<PRINTER_INFO_6>().read() }.dwStatus;
+            state = if status & (PRINTER_STATUS_ERROR | PRINTER_STATUS_OFFLINE) != 0 {
+                PrinterState::Error
+            } else if status
+                & (PRINTER_STATUS_BUSY | PRINTER_STATUS_PRINTING | PRINTER_STATUS_PROCESSING)
+                != 0
+            {
+                PrinterState::Busy
+            } else {
+                PrinterState::Ready
+            };
+        }
+    }
+    let mut jobs_needed = 0;
+    let mut returned = 0;
+    let _ = unsafe {
+        EnumJobsW(
+            handle.0,
+            0,
+            MAX_JOBS as u32,
+            1,
+            None,
+            &mut jobs_needed,
+            &mut returned,
+        )
+    };
+    if jobs_needed == 0 {
+        return (state, Vec::new());
+    }
+    let mut storage = vec![0usize; (jobs_needed as usize).div_ceil(std::mem::size_of::<usize>())];
+    let buffer = unsafe {
+        std::slice::from_raw_parts_mut(
+            storage.as_mut_ptr().cast::<u8>(),
+            storage.len() * std::mem::size_of::<usize>(),
+        )
+    };
+    if unsafe {
+        EnumJobsW(
+            handle.0,
+            0,
+            MAX_JOBS as u32,
+            1,
+            Some(buffer),
+            &mut jobs_needed,
+            &mut returned,
+        )
+    }
+    .is_err()
+    {
+        return (state, Vec::new());
+    }
+    let records = unsafe {
+        std::slice::from_raw_parts(storage.as_ptr().cast::<JOB_INFO_1W>(), returned as usize)
+    };
+    let jobs = records
+        .iter()
+        .map(|record| PrintJob {
+            id: record.JobId.to_string(),
+            name: wide_pointer(record.pDocument),
+            state: if record.Status & JOB_STATUS_ERROR != 0 {
+                PrintJobState::Failed
+            } else if record.Status & JOB_STATUS_PAUSED != 0 {
+                PrintJobState::Held
+            } else if record.Status & JOB_STATUS_PRINTING != 0 {
+                PrintJobState::Printing
+            } else {
+                PrintJobState::Pending
+            },
+        })
+        .collect();
+    (state, jobs)
+}
+
+#[cfg(target_os = "windows")]
+fn discover_windows_storage(removable_only: bool) -> Result<Vec<RemovableVolume>, String> {
+    use windows::Win32::Storage::FileSystem::{
+        GetDiskFreeSpaceExW, GetDriveTypeW, GetLogicalDriveStringsW, GetVolumeInformationW,
+    };
+    let length = unsafe { GetLogicalDriveStringsW(None) };
+    if length == 0 {
+        return Err("Windows did not return logical drive identities".into());
+    }
+    let mut buffer = vec![0u16; length as usize + 1];
+    let written = unsafe { GetLogicalDriveStringsW(Some(&mut buffer)) } as usize;
+    let mut volumes = Vec::new();
+    for root in buffer[..written]
+        .split(|value| *value == 0)
+        .filter(|root| !root.is_empty())
+    {
+        let mut wide = root.to_vec();
+        wide.push(0);
+        let root_pointer = windows::core::PCWSTR(wide.as_ptr());
+        let drive_type = unsafe { GetDriveTypeW(root_pointer) };
+        if removable_only != (drive_type == 2) {
+            continue;
+        }
+        let mut available = 0;
+        let mut capacity = 0;
+        if unsafe {
+            GetDiskFreeSpaceExW(
+                root_pointer,
+                Some(&mut available),
+                Some(&mut capacity),
+                None,
+            )
+        }
+        .is_err()
+        {
+            continue;
+        }
+        let mut label = vec![0u16; 261];
+        let mut serial = 0;
+        let _ = unsafe {
+            GetVolumeInformationW(
+                root_pointer,
+                Some(&mut label),
+                Some(&mut serial),
+                None,
+                None,
+                None,
+            )
+        };
+        let root = String::from_utf16_lossy(root);
+        let label_length = label
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(label.len());
+        let name = if label_length == 0 {
+            root.clone()
+        } else {
+            String::from_utf16_lossy(&label[..label_length])
+        };
+        volumes.push(RemovableVolume {
+            id: format!("{serial:08x}:{root}"),
+            name,
+            capacity_bytes: Some(capacity),
+            available_bytes: Some(available),
+            mount_path: Some(PathBuf::from(root)),
+            state: VolumeState::Mounted,
+            ejectable: drive_type == 2,
+            detail: None,
+        });
+    }
+    Ok(volumes)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_volume_mount_path(id: &str) -> Result<PathBuf, PeripheralError> {
+    discover_windows_storage(true)
+        .ok()
+        .and_then(|volumes| {
+            volumes
+                .into_iter()
+                .find(|volume| volume.id == id)
+                .and_then(|volume| volume.mount_path)
+        })
+        .ok_or_else(|| PeripheralError {
+            class: PeripheralFailureClass::InvalidTarget,
+            detail: "The removable volume is no longer present".into(),
+        })
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_program(
+    program: &str,
+    arguments: &[&str],
+) -> Result<PeripheralOutcome, PeripheralError> {
+    let output = std::process::Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| PeripheralError {
+            class: PeripheralFailureClass::ProviderUnavailable,
+            detail: format!("{program} is unavailable: {error}"),
+        })?;
+    classify_windows_process_output(output)
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_powershell(
+    script: &str,
+    variable: &str,
+    value: &str,
+) -> Result<PeripheralOutcome, PeripheralError> {
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env(variable, value)
+        .output()
+        .map_err(|error| PeripheralError {
+            class: PeripheralFailureClass::ProviderUnavailable,
+            detail: format!("Windows PowerShell is unavailable: {error}"),
+        })?;
+    classify_windows_process_output(output)
+}
+
+#[cfg(target_os = "windows")]
+fn classify_windows_process_output(
+    output: std::process::Output,
+) -> Result<PeripheralOutcome, PeripheralError> {
+    if output.status.success() {
+        Ok(PeripheralOutcome::Accepted)
+    } else {
+        let detail = clean_text(String::from_utf8_lossy(&output.stderr).trim());
+        let lowercase = detail.to_lowercase();
+        Ok(
+            if lowercase.contains("access") || lowercase.contains("permission") {
+                PeripheralOutcome::AuthorizationRequired { detail }
+            } else if lowercase.contains("busy") || lowercase.contains("in use") {
+                PeripheralOutcome::Busy { detail }
+            } else {
+                PeripheralOutcome::Rejected { detail }
+            },
+        )
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn last_windows_error(operation: &str) -> PeripheralError {
+    classify_windows_error(operation, windows::core::Error::from_thread())
+}
+
+#[cfg(target_os = "windows")]
+fn classify_windows_error(operation: &str, error: windows::core::Error) -> PeripheralError {
+    use windows::Win32::Foundation::{E_ACCESSDENIED, ERROR_BUSY, ERROR_NOT_READY};
+    let class = if error.code() == E_ACCESSDENIED {
+        PeripheralFailureClass::Authorization
+    } else if error.code() == ERROR_BUSY.to_hresult()
+        || error.code() == ERROR_NOT_READY.to_hresult()
+    {
+        PeripheralFailureClass::Busy
+    } else {
+        PeripheralFailureClass::Unknown
+    };
+    PeripheralError {
+        class,
+        detail: format!("Could not {operation}: {error}"),
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 struct UnsupportedPeripherals;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 impl PeripheralBackend for UnsupportedPeripherals {
     fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
         #[cfg(target_os = "linux")]
