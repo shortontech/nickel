@@ -80,7 +80,10 @@ fn await_deferred_decision(
             .saturating_duration_since(now)
             .min(Duration::from_millis(2));
         match receiver.recv_timeout(wait) {
-            Ok(()) => return true,
+            Ok(()) => {
+                app.poll();
+                return matches!(app.session.exit_state(), TerminalExit::Running);
+            }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
         }
