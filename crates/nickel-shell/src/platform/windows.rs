@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet},
     env,
     ffi::c_void,
     os::windows::ffi::OsStringExt,
@@ -9,7 +10,7 @@ use std::{
         mpsc::{self, Receiver, Sender},
     },
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use windows::{
@@ -33,6 +34,10 @@ use windows::{
             SRCCOPY, SelectObject,
         },
         Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
         System::LibraryLoader::GetModuleHandleW,
         System::Threading::{
             AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
@@ -1655,7 +1660,118 @@ pub fn execute_run_command(command: &str) -> Result<(), LaunchError> {
         return Ok(());
     }
     let parts = parse_windows_command(command)?;
-    super::launch_deferred_terminal(&parts)
+    launch_observed_deferred_terminal(&parts)
+}
+
+fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), LaunchError> {
+    use std::io::Write;
+
+    let mut terminal = super::spawn_deferred_terminal(arguments)?;
+    let root_pid = terminal.id();
+    let mut decision_input = terminal.stdin.take();
+    thread::Builder::new()
+        .name("nickel-run-window-observer".into())
+        .spawn(move || {
+            let started = Instant::now();
+            if let Some(input) = decision_input.as_mut() {
+                let _ = input.write_all(b"start\n");
+                let _ = input.flush();
+            }
+            while started.elapsed() <= Duration::from_millis(100) {
+                let descendants = windows_process_descendants(root_pid);
+                if !descendants.is_empty() && has_eligible_window_from(&descendants) {
+                    if let Some(input) = decision_input.as_mut() {
+                        let _ = input.write_all(b"suppress\n");
+                        let _ = input.flush();
+                    }
+                    return;
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        })
+        .map_err(|error| LaunchError::Platform(error.to_string()))?;
+    Ok(())
+}
+
+fn windows_process_descendants(root_pid: u32) -> HashSet<u32> {
+    const MAX_PROCESSES: usize = 8_192;
+    let mut parents = HashMap::new();
+    // SAFETY: The snapshot handle is closed below and PROCESSENTRY32W carries its declared size.
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return HashSet::new();
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut result = unsafe { Process32FirstW(snapshot, &raw mut entry) };
+    while result.is_ok() && parents.len() < MAX_PROCESSES {
+        parents.insert(entry.th32ProcessID, entry.th32ParentProcessID);
+        result = unsafe { Process32NextW(snapshot, &raw mut entry) };
+    }
+    // SAFETY: snapshot is the live owned handle returned above.
+    let _ = unsafe { CloseHandle(snapshot) };
+    parents
+        .keys()
+        .copied()
+        .filter(|pid| windows_pid_descends_from(*pid, root_pid, &parents))
+        .collect()
+}
+
+fn windows_pid_descends_from(mut pid: u32, root_pid: u32, parents: &HashMap<u32, u32>) -> bool {
+    for _ in 0..64 {
+        if pid == root_pid {
+            return true;
+        }
+        let Some(parent) = parents.get(&pid).copied() else {
+            return false;
+        };
+        if parent == 0 || parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
+}
+
+struct PendingWindowSearch<'a> {
+    descendants: &'a HashSet<u32>,
+    found: bool,
+}
+
+fn has_eligible_window_from(descendants: &HashSet<u32>) -> bool {
+    let mut search = PendingWindowSearch {
+        descendants,
+        found: false,
+    };
+    // SAFETY: The callback is synchronous and state points to a live stack value for the call.
+    let _ = unsafe {
+        EnumWindows(
+            Some(find_pending_launch_window),
+            LPARAM((&raw mut search).cast::<c_void>() as isize),
+        )
+    };
+    search.found
+}
+
+unsafe extern "system" fn find_pending_launch_window(hwnd: HWND, state: LPARAM) -> BOOL {
+    if unsafe { !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() } {
+        return BOOL(1);
+    }
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    let search = unsafe { &mut *(state.0 as *mut PendingWindowSearch<'_>) };
+    if !search.descendants.contains(&process_id) {
+        return BOOL(1);
+    }
+    let Some(class) = window_class(hwnd) else {
+        return BOOL(1);
+    };
+    if window_title(hwnd).is_some() && is_bar_eligible_window(hwnd, &class) {
+        search.found = true;
+        return BOOL(0);
+    }
+    BOOL(1)
 }
 
 fn parse_windows_command(command: &str) -> Result<Vec<String>, LaunchError> {
@@ -3572,7 +3688,7 @@ mod tests {
         TrayNotifyIconData, application_icon, clamp_preview_x, contain_rect, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, rectangle_covers, restore_legacy_icon_alpha,
-        should_restore_on_activation,
+        should_restore_on_activation, windows_pid_descends_from,
     };
 
     #[test]
@@ -3738,6 +3854,16 @@ mod tests {
                 "Nickel Shell"
             ]
         );
+    }
+
+    #[test]
+    fn pending_window_lineage_is_bounded_and_rejects_unrelated_processes() {
+        let parents = std::collections::HashMap::from([(30, 20), (20, 10), (40, 1)]);
+        assert!(windows_pid_descends_from(10, 10, &parents));
+        assert!(windows_pid_descends_from(30, 10, &parents));
+        assert!(!windows_pid_descends_from(40, 10, &parents));
+        let cycle = std::collections::HashMap::from([(50, 60), (60, 50)]);
+        assert!(!windows_pid_descends_from(50, 10, &cycle));
     }
 
     #[test]
