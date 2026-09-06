@@ -631,6 +631,7 @@ impl<Message: Clone> UiFrame<Message> {
         mut content: Element<Message>,
     ) -> Result<(), SemanticActionError> {
         let overlay = surface.id.clone();
+        let focus = surface.focus;
         self.present_transient_surface(state, surface)?;
         if self.active_overlay.as_ref().map(|(id, _)| id) != Some(&overlay) {
             return Ok(());
@@ -654,6 +655,29 @@ impl<Message: Clone> UiFrame<Message> {
         emit_element(&content, index, None, self);
         for node in &self.resolved.nodes[index..] {
             state.touch(node.id.clone());
+        }
+        if focus == crate::OverlayFocusPolicy::FirstItem {
+            let belongs_to_overlay = |candidate: Option<&UiId>| {
+                candidate.is_some_and(|candidate| {
+                    candidate
+                        .as_str()
+                        .strip_prefix(overlay.as_ui_id().as_str())
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+                })
+            };
+            if !belongs_to_overlay(state.focused())
+                && let Some(target) = self.resolved.nodes[index..]
+                    .iter()
+                    .find(|node| node.interaction.interactive)
+                    .map(|node| node.id.clone())
+            {
+                state.set_focus(Some(target.clone()));
+                if state.navigation().controller_selected().is_some()
+                    || state.input_modality() != InputModality::Pointer
+                {
+                    state.navigation_mut().set_controller_selected(Some(target));
+                }
+            }
         }
         Ok(())
     }

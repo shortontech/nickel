@@ -3120,8 +3120,14 @@ mod tests {
             node.role.as_deref() == Some("popover")
                 && node.label.as_deref() == Some("Application details")
         }));
-        host.handle_event(UiEvent::FocusNext);
-        assert_ne!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+        assert!(
+            host.inspect()
+                .keyboard_focus
+                .as_ref()
+                .is_some_and(|id| id.as_str().starts_with("details-popover/content")),
+            "FirstItem popovers focus their first interactive content immediately: {:?}",
+            host.inspect().keyboard_focus
+        );
         host.handle_event(UiEvent::ControllerBack);
         assert!(host.inspect().open_overlay.is_none());
         assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));

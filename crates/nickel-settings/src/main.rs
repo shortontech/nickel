@@ -3076,7 +3076,7 @@ mod tests {
             .update(SettingsMessage::DefaultAppHandlerSearchChanged(
                 "handler-249".into(),
             ));
-        host.handle_event(nickel_ui::UiEvent::ControllerBack);
+        host.handle_input(&navigation_key(99, KeyCode::Escape, NamedKey::Escape), None);
         let chooser = host
             .semantic_nodes()
             .into_iter()
@@ -3140,6 +3140,74 @@ mod tests {
                 .is_empty(),
             "consent-only platforms must expose the same candidate chooser"
         );
+    }
+
+    #[test]
+    fn unsupported_default_app_rows_open_truthful_searchable_overlays() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
+            target: nickel_platform::AssociationTarget::scheme("https"),
+            effective: None,
+            handlers: vec![nickel_platform::ApplicationHandler {
+                id: "browser.desktop".into(),
+                name: "Fixture Browser".into(),
+                icon: None,
+                source: "fixture".into(),
+            }],
+            capability: nickel_platform::AssociationCapability::Unsupported,
+            scope: nickel_platform::AssociationScope::Policy,
+            detail: "Unavailable".into(),
+        });
+        let mut host = UiHost::new(app, 850, 900);
+        let anchor = host
+            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+            .into_iter()
+            .next()
+            .expect("unsupported rows remain inspectable");
+        host.perform_semantic_action(
+            anchor.id.clone(),
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(host.inspect().open_overlay.is_some());
+        assert!(
+            host.inspect()
+                .keyboard_focus
+                .as_ref()
+                .is_some_and(|id| id.as_str().ends_with("default-app-handler-search-0")),
+            "the chooser search field receives initial focus: {:?}",
+            host.inspect().keyboard_focus
+        );
+        let names = host
+            .semantic_nodes()
+            .into_iter()
+            .filter_map(|node| node.name)
+            .collect::<Vec<_>>();
+        let accessibility_labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(
+            accessibility_labels
+                .iter()
+                .any(|label| label.contains("unsupported")),
+            "the overlay must explain the unsupported state: {accessibility_labels:?}"
+        );
+        assert!(names.iter().any(|name| name == "Fixture Browser"));
+        assert!(
+            host.semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
+                row: 0,
+                handler_id: "browser.desktop".into(),
+            })
+            .is_empty(),
+            "unsupported candidates must not emit a misleading change action"
+        );
+        host.handle_input(
+            &navigation_key(100, KeyCode::Escape, NamedKey::Escape),
+            None,
+        );
+        assert!(host.inspect().open_overlay.is_none());
+        assert_eq!(host.inspect().keyboard_focus, Some(anchor.id));
     }
 
     #[test]

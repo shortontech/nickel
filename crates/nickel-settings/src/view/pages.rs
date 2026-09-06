@@ -748,14 +748,6 @@ impl SettingsApp {
                 .clone()
                 .or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone()))
                 .unwrap_or_else(|| "Loading applications…".into());
-            let can_choose = row.snapshot.as_ref().is_some_and(|snapshot| {
-                !snapshot.handlers.is_empty()
-                    && matches!(
-                        snapshot.capability,
-                        nickel_platform::AssociationCapability::DirectUserChange
-                            | nickel_platform::AssociationCapability::NativeConsent
-                    )
-            });
             ui! {
                 <Container background={palette.surface} padding={Insets { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }}>
                     {SettingsRow::new(theme, row.label.clone(), detail).trailing(
@@ -763,7 +755,7 @@ impl SettingsApp {
                             theme,
                             SettingsMessage::ToggleDefaultAppSelect(index),
                             current,
-                            if can_choose { ButtonPresentation::Quiet } else { ButtonPresentation::Disabled },
+                            ButtonPresentation::Quiet,
                         )
                         .id(format!("default-app-{index}"))
                         .width(220.0)
@@ -918,6 +910,8 @@ impl SettingsApp {
             .iter()
             .enumerate()
             .map(|(row_index, row)| {
+                let target_key = row.target.platform_key().to_lowercase();
+                let target_family = row.target.family().label().to_lowercase();
                 let effective_id = row
                     .snapshot
                     .as_ref()
@@ -936,6 +930,8 @@ impl SettingsApp {
                                 || handler.name.to_lowercase().contains(&query)
                                 || handler.id.to_lowercase().contains(&query)
                                 || handler.source.to_lowercase().contains(&query)
+                                || target_key.contains(&query)
+                                || target_family.contains(&query)
                         });
                         handlers.sort_by(|left, right| {
                             (Some(&left.id) != effective_id.as_ref())
@@ -951,6 +947,34 @@ impl SettingsApp {
                         CollectionState::Error(row.status.clone().unwrap_or_default())
                     }
                     None => CollectionState::Loading,
+                };
+                let can_change = row.snapshot.as_ref().is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.capability,
+                        nickel_platform::AssociationCapability::DirectUserChange
+                            | nickel_platform::AssociationCapability::NativeConsent
+                    )
+                });
+                let discovery_status = match row.snapshot.as_ref() {
+                    None if row.status.is_some() => row.status.clone(),
+                    None => Some("Discovering compatible applications…".into()),
+                    Some(snapshot) => row.status.clone().or_else(|| {
+                        Some(match snapshot.capability {
+                            nickel_platform::AssociationCapability::DirectUserChange => {
+                                "Choose an application below.".into()
+                            }
+                            nickel_platform::AssociationCapability::NativeConsent => {
+                                "Choosing an application opens the operating system consent flow."
+                                    .into()
+                            }
+                            nickel_platform::AssociationCapability::ReadOnly => {
+                                "The operating system reports this association as read-only.".into()
+                            }
+                            nickel_platform::AssociationCapability::Unsupported => {
+                                "Changing this association is unsupported on this platform.".into()
+                            }
+                        })
+                    }),
                 };
                 let current = effective_id.clone();
                 let collection = Collection::try_new(
@@ -975,13 +999,14 @@ impl SettingsApp {
                                     handler_id: handler.id,
                                 },
                                 if is_current { "Current" } else { "Choose" },
-                                if is_current {
+                                if is_current || !can_change {
                                     ButtonPresentation::Disabled
                                 } else {
                                     ButtonPresentation::Quiet
                                 },
                             )
-                            .width(88.0),
+                            .width(88.0)
+                            .enabled(can_change && !is_current),
                         )
                     },
                 )
@@ -1014,10 +1039,14 @@ impl SettingsApp {
                 .navigation_scope(NavigationScope::group())
                 .theme(theme)
                 .child(collection);
-                let content = Column::new()
+                let mut content = Column::new()
                     .gap(8.0)
                     .padding(Insets::all(10.0))
-                    .background(palette.surface)
+                    .background(palette.surface);
+                if let Some(status) = discovery_status {
+                    content = content.child(Text::new(status).color(palette.muted));
+                }
+                let content = content
                     .child(SettingsSearchField::new(
                         theme,
                         format!("default-app-handler-search-{row_index}"),
