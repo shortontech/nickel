@@ -1,6 +1,7 @@
 //! Shared native platform adapters used by Nickel applications.
 
 mod default_apps;
+mod maintenance;
 mod media;
 mod platform_contract;
 mod toolkit_scale;
@@ -13,6 +14,13 @@ pub use default_apps::{
     open_once_supported, open_once_with, open_with_default,
 };
 
+pub use maintenance::{
+    MaintenanceAction, MaintenanceBackend, MaintenanceError, MaintenanceFailureClass,
+    MaintenanceOutcome, MaintenanceProvider, MaintenanceService, MaintenanceSnapshot, Observation,
+    ObservationState, PermissionKind, PermissionMutation, PermissionStatus, ProtectionHealth,
+    ProtectionStatus, SecureStorageReadiness, UpdatePhase, UpdateStatus, maintenance_backend,
+    maintenance_service,
+};
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
 pub use platform_contract::{
     AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,
