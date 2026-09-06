@@ -316,7 +316,9 @@ fn scan_worker(
 ) {
     let mut generation = 1_u64;
     loop {
-        scan_path_generation(path.as_deref(), budgets, generation, &snapshot);
+        scan_path_generation_until(path.as_deref(), budgets, generation, &snapshot, || {
+            refresh.upgrade().is_none()
+        });
         generation = generation.saturating_add(1);
         match receiver.recv_timeout(Duration::from_secs(30)) {
             Ok(RefreshReason::Filesystem) => {}
@@ -372,11 +374,22 @@ fn publish(
     });
 }
 
+#[cfg(test)]
 fn scan_path_generation(
     path: Option<&std::ffi::OsStr>,
     budgets: ScanBudgets,
     generation: u64,
     snapshot: &RwLock<Arc<IndexSnapshot>>,
+) {
+    scan_path_generation_until(path, budgets, generation, snapshot, || false);
+}
+
+fn scan_path_generation_until(
+    path: Option<&std::ffi::OsStr>,
+    budgets: ScanBudgets,
+    generation: u64,
+    snapshot: &RwLock<Arc<IndexSnapshot>>,
+    mut cancelled: impl FnMut() -> bool,
 ) {
     let started = Instant::now();
     let mut commands = HashMap::new();
@@ -392,7 +405,10 @@ fn scan_path_generation(
     let mut complete = true;
 
     'directories: for (directory_index, directory) in directories.enumerate() {
-        if directory_index >= budgets.max_directories || started.elapsed() >= budgets.max_elapsed {
+        if cancelled()
+            || directory_index >= budgets.max_directories
+            || started.elapsed() >= budgets.max_elapsed
+        {
             complete = false;
             break;
         }
@@ -411,7 +427,7 @@ fn scan_path_generation(
             continue;
         };
         for entry in entries {
-            if progress.entries_inspected >= budgets.max_directory_entries {
+            if cancelled() || progress.entries_inspected >= budgets.max_directory_entries {
                 complete = false;
                 break 'directories;
             }
@@ -1159,6 +1175,37 @@ mod tests {
         assert_eq!(snapshot.progress.generation, 10);
         assert_eq!(snapshot.progress.directories_scanned, 1);
         assert!(snapshot.commands.is_empty());
+    }
+
+    #[test]
+    fn cancellation_stops_an_in_progress_generation() {
+        let directory = tempfile::tempdir().unwrap();
+        for index in 0..32 {
+            executable(
+                &directory.path().join(format!("command-{index}")),
+                b"#!/bin/sh\n",
+            );
+        }
+        let path = std::env::join_paths([directory.path()]).unwrap();
+        let snapshot = RwLock::new(Arc::new(IndexSnapshot::default()));
+        let mut checks = 0;
+        scan_path_generation_until(
+            Some(&path),
+            ScanBudgets {
+                max_elapsed: Duration::from_secs(5),
+                ..ScanBudgets::default()
+            },
+            12,
+            &snapshot,
+            || {
+                checks += 1;
+                checks > 4
+            },
+        );
+        let snapshot = snapshot.read().unwrap();
+        assert!(!snapshot.progress.complete);
+        assert_eq!(snapshot.progress.generation, 12);
+        assert!(snapshot.progress.entries_inspected < 32);
     }
 
     #[test]
