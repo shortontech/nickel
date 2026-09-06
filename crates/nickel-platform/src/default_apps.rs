@@ -10,6 +10,9 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssociationTarget {
     Extension(String),
@@ -642,6 +645,11 @@ impl LinuxAssociations {
         locales: &[String],
     ) -> Vec<ApplicationHandler> {
         let key = target.platform_key();
+        let compatible_keys = linux_compatible_keys(&key);
+        let registered = compatible_keys
+            .iter()
+            .flat_map(|key| linux_registered_handler_ids(key))
+            .collect::<HashSet<_>>();
         let mut handlers = Vec::new();
         for entry in entries {
             let id = format!("{}.desktop", entry.id());
@@ -653,7 +661,8 @@ impl LinuxAssociations {
             }
             let supports = entry
                 .mime_type()
-                .is_some_and(|types| types.into_iter().any(|kind| kind == key));
+                .is_some_and(|types| types.into_iter().any(|kind| compatible_keys.contains(kind)))
+                || registered.contains(&id);
             // NoDisplay suppresses launcher/menu presentation; it does not unregister the
             // application as a compatible association handler. Hidden, however, is the
             // freedesktop deletion/override marker and must win over lower-precedence entries.
@@ -698,6 +707,121 @@ impl LinuxAssociations {
             scope: AssociationScope::User,
             detail: "User-level freedesktop association".into(),
         })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_compatible_keys(key: &str) -> HashSet<String> {
+    const MAX_COMPATIBLE_TYPES: usize = 64;
+    let mut parents: HashMap<String, Vec<String>> = HashMap::new();
+    for root in desktop_data_roots() {
+        let Ok(contents) = std::fs::read_to_string(root.join("mime/subclasses")) else {
+            continue;
+        };
+        for line in contents.lines().take(65_536) {
+            let mut fields = line.split_ascii_whitespace();
+            let (Some(child), Some(parent)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let values = parents.entry(child.to_owned()).or_default();
+            if values.len() < 16 && !values.iter().any(|value| value == parent) {
+                values.push(parent.to_owned());
+            }
+        }
+    }
+    let mut compatible = HashSet::from([key.to_owned()]);
+    let mut pending = vec![key.to_owned()];
+    while let Some(child) = pending.pop() {
+        let Some(values) = parents.get(&child) else {
+            continue;
+        };
+        for parent in values {
+            if compatible.len() >= MAX_COMPATIBLE_TYPES {
+                return compatible;
+            }
+            if compatible.insert(parent.clone()) {
+                pending.push(parent.clone());
+            }
+        }
+    }
+    compatible
+}
+
+#[cfg(target_os = "linux")]
+fn linux_registered_handler_ids(key: &str) -> HashSet<String> {
+    let mut registered = HashSet::new();
+    let mut removed = HashSet::new();
+    for root in desktop_data_roots() {
+        let applications = root.join("applications");
+        extend_handlers_from_association_file(
+            &applications.join("mimeinfo.cache"),
+            key,
+            &mut registered,
+            &mut removed,
+        );
+        extend_handlers_from_association_file(
+            &applications.join("mimeapps.list"),
+            key,
+            &mut registered,
+            &mut removed,
+        );
+    }
+    for root in desktop_config_roots() {
+        extend_handlers_from_association_file(
+            &root.join("mimeapps.list"),
+            key,
+            &mut registered,
+            &mut removed,
+        );
+    }
+    registered.retain(|id| !removed.contains(id));
+    registered
+}
+
+#[cfg(target_os = "linux")]
+fn extend_handlers_from_association_file(
+    path: &Path,
+    key: &str,
+    registered: &mut HashSet<String>,
+    removed: &mut HashSet<String>,
+) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    enum Section {
+        Ignore,
+        Register,
+        Remove,
+    }
+    let mut section = Section::Ignore;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = match line {
+                "[MIME Cache]" | "[Default Applications]" | "[Added Associations]" => {
+                    Section::Register
+                }
+                "[Removed Associations]" => Section::Remove,
+                _ => Section::Ignore,
+            };
+            continue;
+        }
+        let Some((association, handlers)) = line.split_once('=') else {
+            continue;
+        };
+        if association != key {
+            continue;
+        }
+        for handler in handlers.split(';').filter(|handler| !handler.is_empty()) {
+            match section {
+                Section::Register => {
+                    registered.insert(handler.to_owned());
+                }
+                Section::Remove => {
+                    removed.insert(handler.to_owned());
+                }
+                Section::Ignore => {}
+            }
+        }
     }
 }
 
@@ -1458,6 +1582,62 @@ mod tests {
             1,
             "NoDisplay handlers remain valid association candidates"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "native acceptance compares the installed GLib and freedesktop association authorities"]
+    fn native_linux_handlers_match_the_platform_reported_compatible_set() {
+        let available = LinuxAssociations::available_targets();
+        for key in [
+            "x-scheme-handler/https",
+            "text/plain",
+            "image/png",
+            "image/svg+xml",
+            "application/pdf",
+            "video/mp4",
+        ] {
+            let target = key
+                .strip_prefix("x-scheme-handler/")
+                .map(AssociationTarget::scheme)
+                .unwrap_or_else(|| AssociationTarget::mime(key));
+            assert!(available.contains(&target), "catalog omitted {key}");
+            let snapshot = LinuxAssociations.inspect(&target).unwrap();
+            let output = std::process::Command::new("gio")
+                .env("LC_ALL", "C")
+                .args(["mime", key])
+                .output()
+                .expect("GLib association authority is installed");
+            assert!(output.status.success(), "gio mime rejected {key}");
+            let text = String::from_utf8_lossy(&output.stdout);
+            let mut registered = HashSet::new();
+            let mut in_registered = false;
+            for line in text.lines() {
+                if line == "Registered applications:" {
+                    in_registered = true;
+                    continue;
+                }
+                if in_registered && !line.starts_with('\t') {
+                    break;
+                }
+                if in_registered {
+                    registered.insert(line.trim().to_owned());
+                }
+            }
+            let nickel = snapshot
+                .handlers
+                .iter()
+                .map(|handler| handler.id.clone())
+                .collect::<HashSet<_>>();
+            assert_eq!(nickel, registered, "compatible handlers differ for {key}");
+            if let Some(effective) = snapshot.effective {
+                assert!(
+                    nickel.contains(&effective.id),
+                    "effective handler is absent for {key}"
+                );
+            }
+            eprintln!("{key}: {} compatible handler(s)", nickel.len());
+        }
     }
 
     impl AssociationBackend for Fixture {
