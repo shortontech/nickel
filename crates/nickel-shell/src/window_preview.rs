@@ -242,6 +242,17 @@ impl ApplicationMenuTarget {
             all_closeable,
         }
     }
+
+    pub fn contains_current_window(&self, window: &OpenWindow) -> bool {
+        self.windows.contains(&window.id) && self.application_id == window.application_id
+    }
+
+    pub fn survives(&self, windows: &[OpenWindow], canonical_item_available: bool) -> bool {
+        canonical_item_available
+            || windows
+                .iter()
+                .any(|window| self.contains_current_window(window))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1482,5 +1493,35 @@ mod tests {
         let target = ApplicationMenuTarget::capture(&group);
         assert!(!target.all_closeable);
         assert!(application_menu_entries(&target, false).is_empty());
+    }
+
+    #[test]
+    fn application_target_rejects_reused_ids_from_another_application() {
+        let application = ApplicationId::new("org.nickel.One");
+        let target = ApplicationMenuTarget::capture(&WindowGroup {
+            application_id: Some(application.clone()),
+            application_name: "One".into(),
+            windows: vec![OpenWindow {
+                id: WindowId(7),
+                application_id: Some(application),
+                active: true,
+                title: "Original".into(),
+                state: crate::model::WindowState::default(),
+            }],
+        });
+        let reused = OpenWindow {
+            id: WindowId(7),
+            application_id: Some(ApplicationId::new("org.nickel.Two")),
+            active: true,
+            title: "Reused".into(),
+            state: crate::model::WindowState::default(),
+        };
+
+        assert!(!target.contains_current_window(&reused));
+        assert!(!target.survives(&[reused], false));
+        assert!(
+            target.survives(&[], true),
+            "a closed canonical pin still exists"
+        );
     }
 }

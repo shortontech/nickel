@@ -879,6 +879,16 @@ impl LiveShell {
                 self.close_window_preview();
                 changed = true;
             }
+            if self.application_menu_target.as_ref().is_some_and(|target| {
+                let canonical_item_available = target
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|application| self.launcher.is_pinned(application.as_str()));
+                !target.survives(&self.windows, canonical_item_available)
+            }) {
+                self.close_window_preview();
+                changed = true;
+            }
             if let Some(snapshot) = self.window_menu_snapshot.as_mut()
                 && let Some(window) = self.windows.iter().find(|window| window.id == snapshot.id)
                 && window != snapshot
@@ -2460,9 +2470,14 @@ impl LiveShell {
             ApplicationMenuAction::TogglePin(application) => self
                 .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
             ApplicationMenuAction::CloseAll(windows) => {
+                let Some(target) = self.application_menu_target.as_ref() else {
+                    return;
+                };
                 for window in windows {
                     if self.windows.iter().any(|candidate| {
-                        candidate.id == window && candidate.state.capabilities.close
+                        candidate.id == window
+                            && candidate.state.capabilities.close
+                            && target.contains_current_window(candidate)
                     }) {
                         self.send_window_action(window, WindowAction::Close);
                     }
