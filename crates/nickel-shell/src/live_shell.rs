@@ -46,7 +46,7 @@ use crate::{
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
         application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
         preview_dimensions, semantic_theme_from_palette, validated_application_close_targets,
-        window_menu_max_rows,
+        window_menu_action_is_current, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -985,10 +985,22 @@ impl LiveShell {
                 }
             }
             changed |= self.window_icons.len() != previous_icon_count;
-            if self
-                .window_menu
-                .is_some_and(|target| !self.windows.iter().any(|window| window.id == target))
-            {
+            let stale_window_menu = self.window_menu_snapshot.as_ref().map_or_else(
+                || {
+                    self.window_menu.is_some_and(|target| {
+                        !self.windows.iter().any(|window| window.id == target)
+                    })
+                },
+                |captured| {
+                    self.windows
+                        .iter()
+                        .find(|window| window.id == captured.id)
+                        .is_none_or(|current| {
+                            !crate::window_preview::same_window_identity(captured, current)
+                        })
+                },
+            );
+            if stale_window_menu {
                 self.close_window_preview();
                 changed = true;
             }
@@ -2601,6 +2613,23 @@ impl LiveShell {
     }
 
     fn apply_window_menu_action(&mut self, action: MenuAction) {
+        if !matches!(
+            action,
+            MenuAction::Dismiss
+                | MenuAction::ShowWorkspaces
+                | MenuAction::ShowDisplays
+                | MenuAction::Back
+        ) {
+            let Some(captured) = self.window_menu_snapshot.as_ref() else {
+                return;
+            };
+            let Some(current) = self.windows.iter().find(|window| window.id == captured.id) else {
+                return;
+            };
+            if !window_menu_action_is_current(captured, current, &action) {
+                return;
+            }
+        }
         match action {
             MenuAction::Dismiss => self.dismiss_window_menu(),
             MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => {}

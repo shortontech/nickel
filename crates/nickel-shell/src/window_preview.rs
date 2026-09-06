@@ -69,6 +69,38 @@ pub enum MenuAction {
     MoveToDisplay(WindowId, String),
 }
 
+pub(crate) fn same_window_identity(captured: &OpenWindow, current: &OpenWindow) -> bool {
+    captured.id == current.id && captured.application_id == current.application_id
+}
+
+pub(crate) fn window_menu_action_is_current(
+    captured: &OpenWindow,
+    current: &OpenWindow,
+    action: &MenuAction,
+) -> bool {
+    if !same_window_identity(captured, current) {
+        return false;
+    }
+    let id = current.id;
+    let capabilities = current.state.capabilities;
+    match action {
+        MenuAction::Dismiss
+        | MenuAction::ShowWorkspaces
+        | MenuAction::ShowDisplays
+        | MenuAction::Back => true,
+        MenuAction::Activate(target) => *target == id && capabilities.activate,
+        MenuAction::Close(target) => *target == id && capabilities.close,
+        MenuAction::MaximizeRestore(target) => *target == id && capabilities.maximize,
+        MenuAction::Minimize(target) => *target == id && capabilities.minimize,
+        MenuAction::FullscreenRestore(target) => *target == id && capabilities.fullscreen,
+        MenuAction::SnapLeading(target) | MenuAction::SnapTrailing(target) => {
+            *target == id && capabilities.maximize && !current.state.fullscreen
+        }
+        MenuAction::MoveToWorkspace(target, _) => *target == id && capabilities.move_workspace,
+        MenuAction::MoveToDisplay(target, _) => *target == id && capabilities.move_display,
+    }
+}
+
 pub struct WindowMenuApp {
     window: OpenWindow,
     workspaces: Vec<WorkspaceSummary>,
@@ -1543,6 +1575,43 @@ mod tests {
             target.survives(&[], true),
             "a closed canonical pin still exists"
         );
+    }
+
+    #[test]
+    fn window_menu_actions_reject_reuse_and_revoked_capabilities() {
+        let captured = OpenWindow {
+            id: WindowId(9),
+            application_id: Some(ApplicationId::new("org.nickel.Editor")),
+            active: true,
+            title: "Captured".into(),
+            state: crate::model::WindowState::default(),
+        };
+        let mut current = captured.clone();
+        assert!(window_menu_action_is_current(
+            &captured,
+            &current,
+            &MenuAction::Close(WindowId(9))
+        ));
+
+        current.state.capabilities.close = false;
+        assert!(!window_menu_action_is_current(
+            &captured,
+            &current,
+            &MenuAction::Close(WindowId(9))
+        ));
+        current.state.capabilities.close = true;
+        current.application_id = Some(ApplicationId::new("org.nickel.Other"));
+        assert!(!same_window_identity(&captured, &current));
+        assert!(!window_menu_action_is_current(
+            &captured,
+            &current,
+            &MenuAction::Activate(WindowId(9))
+        ));
+        assert!(!window_menu_action_is_current(
+            &captured,
+            &captured,
+            &MenuAction::Close(WindowId(10))
+        ));
     }
 
     #[test]
