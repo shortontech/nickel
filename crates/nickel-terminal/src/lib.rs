@@ -28,6 +28,8 @@ const EVENT_CAPACITY: usize = 128;
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 const MAX_TITLE_BYTES: usize = 4 * 1024;
 const MAX_SCROLLBACK: usize = 100_000;
+const MAX_COLUMNS: u16 = 500;
+const MAX_LINES: u16 = 200;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalDimensions {
@@ -46,6 +48,9 @@ impl TerminalDimensions {
     ) -> Result<Self, TerminalError> {
         if columns == 0 || lines == 0 || cell_width == 0 || cell_height == 0 {
             return Err(TerminalError::InvalidDimensions);
+        }
+        if columns > MAX_COLUMNS || lines > MAX_LINES {
+            return Err(TerminalError::DimensionsTooLarge);
         }
         Ok(Self {
             columns,
@@ -124,6 +129,7 @@ pub struct TerminalCell {
     pub inverse: bool,
     pub wide: bool,
     pub wide_spacer: bool,
+    pub selected: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,6 +205,8 @@ pub enum TerminalExit {
 pub enum TerminalError {
     #[error("terminal dimensions must be nonzero")]
     InvalidDimensions,
+    #[error("terminal dimensions exceed the bounded grid maximum")]
+    DimensionsTooLarge,
     #[error("terminal scrollback exceeds the bounded maximum")]
     ScrollbackTooLarge,
     #[error("terminal executable is empty")]
@@ -553,6 +561,9 @@ fn snapshot(
     let cells = content
         .display_iter
         .map(|indexed| {
+            let selected = content
+                .selection
+                .is_some_and(|selection| selection.contains(indexed.point));
             let cell = indexed.cell;
             TerminalCell {
                 character: cell.c,
@@ -567,6 +578,7 @@ fn snapshot(
                 inverse: cell.flags.contains(Flags::INVERSE),
                 wide: cell.flags.contains(Flags::WIDE_CHAR),
                 wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
+                selected,
             }
         })
         .collect();
@@ -697,6 +709,7 @@ mod tests {
                 .selected_text()
                 .is_some_and(|text| text.contains("one"))
         );
+        assert!(engine.snapshot().cells.iter().any(|cell| cell.selected));
         engine.clear_selection();
         assert!(engine.selected_text().is_none());
     }
@@ -717,6 +730,7 @@ mod tests {
         options.validate().unwrap();
         assert_eq!(options.program.unwrap().arguments[1], "space value");
         assert!(TerminalEngine::new(dimensions(80, 24), MAX_SCROLLBACK + 1).is_err());
+        assert!(TerminalDimensions::new(MAX_COLUMNS + 1, 24, 8, 16).is_err());
     }
 
     #[cfg(unix)]
