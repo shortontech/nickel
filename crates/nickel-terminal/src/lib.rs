@@ -3,7 +3,6 @@
 pub mod deferred;
 
 use std::{
-    borrow::Cow,
     collections::HashMap,
     path::PathBuf,
     sync::{
@@ -17,7 +16,6 @@ use std::{
 
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
-    event_loop::{EventLoop, EventLoopSender, Msg},
     grid::Scroll,
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
@@ -26,6 +24,9 @@ use alacritty_terminal::{
     tty::{self, Shell},
     vte::ansi,
 };
+
+mod bounded_event_loop;
+use bounded_event_loop::{BoundedEventLoop, BoundedEventLoopSender, InputSendError};
 
 const EVENT_CAPACITY: usize = 128;
 const INPUT_QUEUE_CAPACITY: usize = 64;
@@ -250,7 +251,7 @@ struct Proxy {
     events: SyncSender<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
-    input_sender: Arc<Mutex<Option<SyncSender<Vec<u8>>>>>,
+    input_sender: Arc<Mutex<Option<BoundedEventLoopSender>>>,
 }
 
 impl EventListener for Proxy {
@@ -274,7 +275,7 @@ impl EventListener for Proxy {
             Event::PtyWrite(text) => {
                 if let Some(sender) = self.input_sender.lock().unwrap().as_ref() {
                     let bytes = truncate_utf8(text, MAX_WRITE_BYTES).into_bytes();
-                    let _ = sender.try_send(bytes);
+                    let _ = sender.try_input(bytes);
                 }
                 return;
             }
@@ -458,14 +459,14 @@ impl ForceHandle {
 /// Owns one child process, PTY event loop, and terminal model.
 pub struct TerminalSession {
     terminal: Arc<FairMutex<Term<Proxy>>>,
-    sender: EventLoopSender,
+    sender: BoundedEventLoopSender,
     events: Receiver<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
     dimensions: TerminalDimensions,
     resize_generation: u64,
     exit: TerminalExit,
-    input_sender: Option<SyncSender<Vec<u8>>>,
+    input_sender: Option<BoundedEventLoopSender>,
     workers: Vec<JoinHandle<()>>,
     shutdown_deadline: Option<Instant>,
     force_handle: ForceHandle,
@@ -503,42 +504,27 @@ impl TerminalSession {
         let pty = tty::new(&tty_options, options.dimensions.window_size(), 0)
             .map_err(TerminalError::Spawn)?;
         let force_handle = ForceHandle::from_pty(&pty);
-        let (bounded_input, input_receiver) = sync_channel(INPUT_QUEUE_CAPACITY);
-        *input_sender.lock().unwrap() = Some(bounded_input.clone());
-        let event_loop = EventLoop::new(Arc::clone(&terminal), proxy, pty, true, false)
-            .map_err(TerminalError::Spawn)?;
-        let sender = event_loop.channel();
-        let input_event_sender = sender.clone();
-        let input_worker = std::thread::Builder::new()
-            .name("nickel-terminal-input".into())
-            .spawn(move || {
-                while let Ok(bytes) = input_receiver.recv() {
-                    if input_event_sender
-                        .send(Msg::Input(Cow::Owned(bytes)))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            })
-            .map_err(TerminalError::Spawn)?;
-        let event_worker = std::thread::Builder::new()
-            .name("nickel-terminal-pty".into())
-            .spawn(move || {
-                let _ = event_loop.spawn().join();
-            })
-            .map_err(TerminalError::Spawn)?;
+        let (event_loop, sender) = BoundedEventLoop::new(
+            Arc::clone(&terminal),
+            proxy,
+            pty,
+            true,
+            INPUT_QUEUE_CAPACITY * MAX_WRITE_BYTES,
+        )
+        .map_err(TerminalError::Spawn)?;
+        *input_sender.lock().unwrap() = Some(sender.clone());
+        let event_worker = event_loop.spawn().map_err(TerminalError::Spawn)?;
         Ok(Self {
             terminal,
-            sender,
+            sender: sender.clone(),
             events,
             generation,
             wake_pending,
             dimensions: options.dimensions,
             resize_generation: 0,
             exit: TerminalExit::Running,
-            input_sender: Some(bounded_input),
-            workers: vec![event_worker, input_worker],
+            input_sender: Some(sender.clone()),
+            workers: vec![event_worker],
             shutdown_deadline: None,
             force_handle,
         })
@@ -549,6 +535,11 @@ impl TerminalSession {
             return Err(TerminalError::WriteTooLarge);
         }
         enqueue_input(self.input_sender.as_ref(), bytes)
+    }
+
+    #[cfg(all(test, unix))]
+    fn pending_input_bytes(&self) -> usize {
+        self.sender.pending_bytes()
     }
 
     /// Native process identity of the PTY child for compositor/window attribution.
@@ -569,7 +560,7 @@ impl TerminalSession {
             return Ok(false);
         }
         self.sender
-            .send(Msg::Resize(dimensions.window_size()))
+            .resize(dimensions.window_size())
             .map_err(|error| TerminalError::Send(error.to_string()))?;
         self.terminal.lock().resize(dimensions.term_size());
         self.dimensions = dimensions;
@@ -678,7 +669,7 @@ impl TerminalSession {
         self.input_sender.take();
         self.shutdown_deadline = Some(Instant::now() + SHUTDOWN_GRACE);
         self.sender
-            .send(Msg::Shutdown)
+            .shutdown()
             .map_err(|error| TerminalError::Send(error.to_string()))
     }
 
@@ -697,20 +688,21 @@ impl TerminalSession {
 }
 
 fn enqueue_input(
-    sender: Option<&SyncSender<Vec<u8>>>,
+    sender: Option<&BoundedEventLoopSender>,
     bytes: Vec<u8>,
 ) -> Result<(), TerminalError> {
-    match sender.ok_or(TerminalError::Closed)?.try_send(bytes) {
+    match sender.ok_or(TerminalError::Closed)?.try_input(bytes) {
         Ok(()) => Ok(()),
-        Err(TrySendError::Full(_)) => Err(TerminalError::InputQueueFull),
-        Err(TrySendError::Disconnected(_)) => Err(TerminalError::Closed),
+        Err(InputSendError::Full) => Err(TerminalError::InputQueueFull),
+        Err(InputSendError::Closed) => Err(TerminalError::Closed),
+        Err(InputSendError::Io(error)) => Err(TerminalError::Send(error.to_string())),
     }
 }
 
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.input_sender.take();
-        let _ = self.sender.send(Msg::Shutdown);
+        let _ = self.sender.shutdown();
         // Joining a stuck platform PTY would block the UI/drop path. An observed close uses the
         // bounded grace/force path; an unobserved application drop still lets the PTY destructor
         // close its child while these worker handles detach.
@@ -723,7 +715,7 @@ struct ProxyParts {
     events: Receiver<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
-    input_sender: Arc<Mutex<Option<SyncSender<Vec<u8>>>>>,
+    input_sender: Arc<Mutex<Option<BoundedEventLoopSender>>>,
 }
 
 fn proxy() -> ProxyParts {
@@ -974,15 +966,19 @@ mod tests {
 
     #[test]
     fn pending_terminal_input_is_bounded_and_never_blocks_the_caller() {
-        let (sender, receiver) = sync_channel(1);
+        let (sender, receiver) = BoundedEventLoopSender::test_channel(1).unwrap();
         enqueue_input(Some(&sender), vec![1]).unwrap();
+        assert_eq!(sender.pending_bytes(), 1);
         assert!(matches!(
             enqueue_input(Some(&sender), vec![2]),
             Err(TerminalError::InputQueueFull)
         ));
         drop(receiver);
+        let (closed_sender, closed_receiver) =
+            BoundedEventLoopSender::test_channel(MAX_WRITE_BYTES).unwrap();
+        drop(closed_receiver);
         assert!(matches!(
-            enqueue_input(Some(&sender), vec![3]),
+            enqueue_input(Some(&closed_sender), vec![3]),
             Err(TerminalError::Closed)
         ));
         assert_eq!(INPUT_QUEUE_CAPACITY * MAX_WRITE_BYTES, 4 * 1024 * 1024);
@@ -1112,5 +1108,41 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         panic!("PTY did not preserve output and exit within the bounded deadline");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn live_pty_releases_input_budget_only_after_platform_write() {
+        let mut session = TerminalSession::spawn(TerminalOptions {
+            program: Some(TerminalProgram {
+                executable: "/bin/sh".into(),
+                arguments: vec![
+                    "-c".into(),
+                    "IFS= read -r line; printf 'received:%s' \"$line\"".into(),
+                ],
+            }),
+            working_directory: None,
+            environment: HashMap::new(),
+            dimensions: dimensions(80, 10),
+            scrollback_lines: 100,
+        })
+        .unwrap();
+        session.write("bounded-✓\n".as_bytes().to_vec()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            while session.try_event().is_some() {}
+            let visible = session
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            if visible.contains("received:bounded-✓") {
+                assert_eq!(session.pending_input_bytes(), 0);
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("PTY input was not written and accounted within the bounded deadline");
     }
 }
