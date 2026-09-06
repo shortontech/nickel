@@ -3,6 +3,7 @@
 mod default_apps;
 mod maintenance;
 mod media;
+mod peripherals;
 mod platform_contract;
 mod toolkit_scale;
 
@@ -22,6 +23,12 @@ pub use maintenance::{
     maintenance_service,
 };
 pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
+pub use peripherals::{
+    FilesystemUsage, PeripheralAction, PeripheralBackend, PeripheralError, PeripheralFailureClass,
+    PeripheralOutcome, PeripheralProvider, PeripheralService, PeripheralSnapshot, PrintJob,
+    PrintJobState, Printer, PrinterState, RemovableVolume, VolumeState, peripheral_backend,
+    peripheral_service,
+};
 pub use platform_contract::{
     AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,
 };
