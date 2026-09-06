@@ -518,7 +518,10 @@ impl LinuxAssociations {
     fn available_targets() -> Vec<AssociationTarget> {
         let mut keys = HashSet::new();
         for root in desktop_data_roots() {
-            let Ok(entries) = std::fs::read_dir(root.join("applications")) else {
+            let applications = root.join("applications");
+            extend_association_keys_from_cache(&applications.join("mimeinfo.cache"), &mut keys);
+            extend_association_keys_from_mimeapps(&applications.join("mimeapps.list"), &mut keys);
+            let Ok(entries) = std::fs::read_dir(&applications) else {
                 continue;
             };
             for entry in entries.flatten() {
@@ -529,12 +532,6 @@ impl LinuxAssociations {
                 let Ok(contents) = std::fs::read_to_string(path) else {
                     continue;
                 };
-                let hidden = contents
-                    .lines()
-                    .any(|line| line == "Hidden=true" || line == "NoDisplay=true");
-                if hidden {
-                    continue;
-                }
                 keys.extend(
                     contents
                         .lines()
@@ -544,6 +541,9 @@ impl LinuxAssociations {
                         .map(str::to_owned),
                 );
             }
+        }
+        for root in desktop_config_roots() {
+            extend_association_keys_from_mimeapps(&root.join("mimeapps.list"), &mut keys);
         }
         let mut targets = keys
             .into_iter()
@@ -634,6 +634,45 @@ impl LinuxAssociations {
 }
 
 #[cfg(target_os = "linux")]
+fn extend_association_keys_from_cache(path: &Path, keys: &mut HashSet<String>) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut in_cache = false;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_cache = line == "[MIME Cache]";
+        } else if in_cache
+            && let Some((key, _)) = line.split_once('=')
+            && !key.is_empty()
+        {
+            keys.insert(key.to_owned());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn extend_association_keys_from_mimeapps(path: &Path, keys: &mut HashSet<String>) {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let mut in_associations = false;
+    for line in contents.lines().map(str::trim) {
+        if line.starts_with('[') {
+            in_associations = matches!(
+                line,
+                "[Default Applications]" | "[Added Associations]" | "[Removed Associations]"
+            );
+        } else if in_associations
+            && let Some((key, _)) = line.split_once('=')
+            && !key.is_empty()
+        {
+            keys.insert(key.to_owned());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl AssociationBackend for LinuxAssociations {
     fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
         Ok(Self::available_targets())
@@ -715,6 +754,28 @@ fn desktop_data_roots() -> Vec<std::path::PathBuf> {
     roots.extend(
         std::env::var_os("XDG_DATA_DIRS")
             .unwrap_or_else(|| "/usr/local/share:/usr/share".into())
+            .to_string_lossy()
+            .split(':')
+            .filter(|root| !root.is_empty())
+            .map(std::path::PathBuf::from),
+    );
+    roots
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_config_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if roots.is_empty()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        roots.push(std::path::PathBuf::from(home).join(".config"));
+    }
+    roots.extend(
+        std::env::var_os("XDG_CONFIG_DIRS")
+            .unwrap_or_else(|| "/etc/xdg".into())
             .to_string_lossy()
             .split(':')
             .filter(|root| !root.is_empty())
@@ -1199,6 +1260,38 @@ mod tests {
         assert_eq!(odt.family(), AssociationFamily::Documents);
         assert_eq!(mp4.family(), AssociationFamily::Video);
         assert_eq!(webm.family(), AssociationFamily::Video);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_catalog_combines_mime_cache_and_user_association_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("mimeinfo.cache");
+        let mimeapps = directory.path().join("mimeapps.list");
+        std::fs::write(
+            &cache,
+            "[MIME Cache]\nimage/svg+xml=viewer.desktop;\nvideo/webm=player.desktop;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &mimeapps,
+            "[Default Applications]\napplication/pdf=reader.desktop;\n\
+             [Added Associations]\napplication/vnd.oasis.opendocument.text=writer.desktop;\n",
+        )
+        .unwrap();
+
+        let mut keys = HashSet::new();
+        extend_association_keys_from_cache(&cache, &mut keys);
+        extend_association_keys_from_mimeapps(&mimeapps, &mut keys);
+
+        for expected in [
+            "image/svg+xml",
+            "video/webm",
+            "application/pdf",
+            "application/vnd.oasis.opendocument.text",
+        ] {
+            assert!(keys.contains(expected), "missing association {expected}");
+        }
     }
 
     impl AssociationBackend for Fixture {
