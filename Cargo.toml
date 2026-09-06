@@ -24,6 +24,7 @@ members = [
     "crates/nickel-session",
     "crates/nickel-session-protocol",
     "crates/nickel-settings",
+    "crates/nickel-terminal",
 ]
 default-members = ["crates/nickel-shell"]
 resolver = "3"
@@ -46,6 +47,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.94"
 
 [workspace.dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
 libloading = "0.8.9"
 zeroize = "1.9.0"
 base64 = "0.22.1"
