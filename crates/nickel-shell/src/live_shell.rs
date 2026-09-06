@@ -41,8 +41,9 @@ use crate::{
     },
     screenshot::ScreenshotTool,
     window_preview::{
-        MENU_WIDTH, MenuAction, PreviewAction, TaskbarPreviewAnchor, WindowMenuApp,
-        WindowPreviewFrame, build_preview_frame, menu_height, menu_height_for_rows,
+        ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
+        PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
+        application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
         preview_dimensions, semantic_theme_from_palette, window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
@@ -401,6 +402,8 @@ pub struct LiveShell {
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_anchor_x: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
+    application_menu_target: Option<ApplicationMenuTarget>,
+    application_menu_host: Option<nickel_ui::UiHost<ApplicationMenuApp>>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
     control_host: ControlCenterHost,
@@ -764,6 +767,8 @@ impl LiveShell {
             window_menu_snapshot: None,
             window_menu_anchor_x: None,
             window_menu_host: None,
+            application_menu_target: None,
+            application_menu_host: None,
             notification_host,
             panel_origin_x: 0,
             control_host,
@@ -900,7 +905,7 @@ impl LiveShell {
                     .find(|workspace| workspace.active)
                     .map(|workspace| workspace.id),
             );
-            if self.window_menu.is_none() {
+            if self.window_menu.is_none() && self.application_menu_target.is_none() {
                 self.close_window_preview();
             }
             changed = true;
@@ -1399,7 +1404,9 @@ impl LiveShell {
             SurfaceRole::WindowPreview => {
                 self.preview_group.is_some() || self.task_switcher_group.is_some()
             }
-            SurfaceRole::WindowContextMenu => self.window_menu.is_some(),
+            SurfaceRole::WindowContextMenu => {
+                self.window_menu.is_some() || self.application_menu_target.is_some()
+            }
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
             SurfaceRole::Screenshot => self.screenshot.visible(),
@@ -1462,7 +1469,12 @@ impl LiveShell {
             SurfaceRole::WindowContextMenu => self
                 .window_menu_host
                 .as_ref()
-                .map(|host| host_token(host.inspect())),
+                .map(|host| host_token(host.inspect()))
+                .or_else(|| {
+                    self.application_menu_host
+                        .as_ref()
+                        .map(|host| host_token(host.inspect()))
+                }),
             SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
             SurfaceRole::OnScreenKeyboard => Some(host_token(self.keyboard_host.inspect())),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
@@ -1831,48 +1843,17 @@ impl LiveShell {
                 let Some(group) = groups.get(index) else {
                     return;
                 };
-                let window_snapshot = group
-                    .windows
-                    .iter()
-                    .find(|window| window.active)
-                    .or_else(|| group.windows.first())
-                    .cloned()
-                    .or_else(|| {
-                        let application_id = group.application_id.clone()?;
-                        Some(OpenWindow {
-                            // Application-only menus never dispatch a window action;
-                            // capabilities are deliberately empty. The stable target
-                            // is the canonical application identity below.
-                            id: crate::model::WindowId(u64::MAX),
-                            application_id: Some(application_id),
-                            active: false,
-                            title: group.application_name.clone(),
-                            state: crate::model::WindowState {
-                                capabilities: crate::model::WindowCapabilities {
-                                    activate: false,
-                                    close: false,
-                                    minimize: false,
-                                    maximize: false,
-                                    fullscreen: false,
-                                    move_workspace: false,
-                                    move_display: false,
-                                },
-                                ..crate::model::WindowState::default()
-                            },
-                        })
-                    });
-                let Some(window_snapshot) = window_snapshot else {
+                let target = ApplicationMenuTarget::capture(&group.window_group());
+                let pinned = target
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+                if application_menu_entries(&target, pinned).is_empty() {
                     return;
-                };
-                let window = group
-                    .windows
-                    .iter()
-                    .any(|candidate| candidate.id == window_snapshot.id)
-                    .then_some(window_snapshot.id);
+                }
                 self.close_window_preview();
-                self.window_menu = window;
-                self.window_menu_snapshot = Some(window_snapshot);
-                self.window_menu_host = None;
+                self.application_menu_target = Some(target);
+                self.application_menu_host = None;
                 let x = self
                     .panel_host
                     .semantic_targets_for_message(&PanelAction::Task(index))
@@ -2231,7 +2212,7 @@ impl LiveShell {
     }
 
     pub fn preview_controller(&mut self, action: ControllerAction) -> bool {
-        if self.window_menu.is_some() {
+        if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_controller(action);
         }
         let Some(frame) = self.preview_frame.as_mut() else {
@@ -2332,6 +2313,8 @@ impl LiveShell {
                 self.send_window_action(window, WindowAction::Close);
             }
             PreviewAction::OpenMenu(window) => {
+                self.application_menu_target = None;
+                self.application_menu_host = None;
                 self.window_menu = Some(window);
                 self.window_menu_snapshot = self
                     .windows
@@ -2360,7 +2343,7 @@ impl LiveShell {
     }
 
     pub fn preview_key(&mut self, key: Option<KeyCode>) -> bool {
-        if self.window_menu.is_some() {
+        if self.window_menu.is_some() || self.application_menu_target.is_some() {
             return self.window_menu_host_key(key);
         }
         let Some(frame) = self.preview_frame.as_mut() else {
@@ -2468,19 +2451,21 @@ impl LiveShell {
                     ShellCommand::MoveWindowToDisplay { window, output },
                 );
             }
-            MenuAction::NewWindow(application) => self.apply_launcher_action(
-                LauncherAction::LaunchApplication(application.as_str().to_owned()),
-            ),
-            MenuAction::TogglePin(application) => self
+        }
+    }
+
+    fn apply_application_menu_action(&mut self, action: ApplicationMenuAction) {
+        match action {
+            ApplicationMenuAction::Dismiss => self.dismiss_window_menu(),
+            ApplicationMenuAction::TogglePin(application) => self
                 .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
-            MenuAction::MovePinLeft(application) => {
-                if self.launcher.move_pin(application.as_str(), -1) {
-                    self.persist_launcher_preferences();
-                }
-            }
-            MenuAction::MovePinRight(application) => {
-                if self.launcher.move_pin(application.as_str(), 1) {
-                    self.persist_launcher_preferences();
+            ApplicationMenuAction::CloseAll(windows) => {
+                for window in windows {
+                    if self.windows.iter().any(|candidate| {
+                        candidate.id == window && candidate.state.capabilities.close
+                    }) {
+                        self.send_window_action(window, WindowAction::Close);
+                    }
                 }
             }
         }
@@ -2492,6 +2477,28 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        if self.application_menu_target.is_some() {
+            if self.application_menu_host.is_none() {
+                let _ = self.application_menu_scene();
+            }
+            let Some(host) = self.application_menu_host.as_mut() else {
+                return false;
+            };
+            let outcome = host.step(HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Normalized {
+                    input,
+                    clipboard_text: None,
+                }],
+                ..HostBatch::default()
+            });
+            let actions = host.application_mut().take_effects();
+            for action in actions {
+                self.apply_application_menu_action(action);
+                self.close_window_preview();
+            }
+            return outcome.changed;
+        }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
         }
@@ -2521,6 +2528,40 @@ impl LiveShell {
     }
 
     pub fn window_menu_host_key(&mut self, key: Option<KeyCode>) -> bool {
+        if self.application_menu_target.is_some() {
+            if self.application_menu_host.is_none() {
+                let _ = self.application_menu_scene();
+            }
+            let event = match key {
+                Some(KeyCode::Escape) => HostEvent::Shortcut(Shortcut::Escape),
+                Some(KeyCode::ArrowUp | KeyCode::ArrowLeft) => {
+                    HostEvent::Controller(ControllerAction::Up)
+                }
+                Some(KeyCode::ArrowDown | KeyCode::ArrowRight | KeyCode::Tab) => {
+                    HostEvent::Controller(ControllerAction::Down)
+                }
+                Some(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => {
+                    HostEvent::Controller(ControllerAction::Confirm)
+                }
+                _ => return false,
+            };
+            let Some(host) = self.application_menu_host.as_mut() else {
+                return false;
+            };
+            let outcome = host.step(HostBatch {
+                events: vec![event],
+                ..HostBatch::default()
+            });
+            let actions = host.application_mut().take_effects();
+            for action in actions {
+                self.apply_application_menu_action(action);
+                self.close_window_preview();
+            }
+            if key == Some(KeyCode::Escape) {
+                self.dismiss_window_menu();
+            }
+            return outcome.changed;
+        }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
         }
@@ -2562,6 +2603,27 @@ impl LiveShell {
     }
 
     pub fn window_menu_host_controller(&mut self, action: ControllerAction) -> bool {
+        if self.application_menu_target.is_some() {
+            if self.application_menu_host.is_none() {
+                let _ = self.application_menu_scene();
+            }
+            let Some(host) = self.application_menu_host.as_mut() else {
+                return false;
+            };
+            let outcome = host.step(HostBatch {
+                events: vec![HostEvent::Controller(action)],
+                ..HostBatch::default()
+            });
+            let effects = host.application_mut().take_effects();
+            for effect in effects {
+                self.apply_application_menu_action(effect);
+                self.close_window_preview();
+            }
+            if action == ControllerAction::Cancel {
+                self.dismiss_window_menu();
+            }
+            return outcome.changed;
+        }
         if self.window_menu_host.is_none() {
             let _ = self.window_menu_scene();
         }
@@ -2626,7 +2688,7 @@ impl LiveShell {
                 }
             }
         }
-        if self.window_menu.is_some() {
+        if self.window_menu.is_some() || self.application_menu_target.is_some() {
             let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
             let _ = send_session_command(
                 "show-context-menu",
@@ -2658,6 +2720,13 @@ impl LiveShell {
     }
 
     fn window_context_menu_height(&self) -> i32 {
+        if let Some(target) = &self.application_menu_target {
+            let pinned = target
+                .application_id
+                .as_ref()
+                .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+            return menu_height_for_rows(application_menu_entries(target, pinned).len()) as i32;
+        }
         let Some(window) = self.window_menu_snapshot.as_ref().or_else(|| {
             self.window_menu
                 .and_then(|id| self.windows.iter().find(|candidate| candidate.id == id))
@@ -2665,21 +2734,7 @@ impl LiveShell {
             return menu_height(&self.workspaces) as i32;
         };
         let outputs = self.window_feed.outputs();
-        let application_id = window.application_id.as_ref();
-        let application_launch_available = application_id.is_some_and(|id| {
-            self.launcher
-                .application(id)
-                .is_some_and(|application| application.launch_command().is_some())
-        });
-        let pinned = application_id.is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-        menu_height_for_rows(window_menu_max_rows(
-            window,
-            &self.workspaces,
-            &outputs,
-            application_id,
-            application_launch_available,
-            pinned,
-        )) as i32
+        menu_height_for_rows(window_menu_max_rows(window, &self.workspaces, &outputs)) as i32
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
@@ -2711,6 +2766,8 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_host = None;
+        self.application_menu_target = None;
+        self.application_menu_host = None;
     }
 
     fn close_window_preview(&mut self) {
@@ -2727,12 +2784,14 @@ impl LiveShell {
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
         self.window_menu_host = None;
+        self.application_menu_target = None;
+        self.application_menu_host = None;
         let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
         let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
     }
 
     fn dismiss_window_menu(&mut self) {
-        let focused_menu = self.window_menu.is_some();
+        let focused_menu = self.window_menu.is_some() || self.application_menu_target.is_some();
         self.close_window_preview();
         if focused_menu {
             #[cfg(target_os = "linux")]
@@ -3648,6 +3707,9 @@ impl LiveShell {
     }
 
     fn window_menu_scene(&mut self) -> Vec<PaintCommand> {
+        if self.application_menu_target.is_some() {
+            return self.application_menu_scene();
+        }
         if self.window_menu.is_none() && self.window_menu_snapshot.is_none() {
             self.window_menu_host = None;
             return Vec::new();
@@ -3666,34 +3728,16 @@ impl LiveShell {
         self.window_menu_snapshot
             .get_or_insert_with(|| snapshot.clone());
         let outputs = self.window_feed.outputs();
-        let application_id = snapshot.application_id.clone();
-        let application_launch_available = application_id.as_ref().is_some_and(|id| {
-            self.launcher
-                .application(id)
-                .is_some_and(|application| application.launch_command().is_some())
-        });
-        let pinned = application_id
-            .as_ref()
-            .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
-        let height = menu_height_for_rows(window_menu_max_rows(
-            &snapshot,
-            &self.workspaces,
-            &outputs,
-            application_id.as_ref(),
-            application_launch_available,
-            pinned,
-        ))
-        .ceil()
-        .max(1.0) as u32;
+        let height =
+            menu_height_for_rows(window_menu_max_rows(&snapshot, &self.workspaces, &outputs))
+                .ceil()
+                .max(1.0) as u32;
         let host = self.window_menu_host.get_or_insert_with(|| {
             nickel_ui::UiHost::new(
                 WindowMenuApp::new(
                     snapshot.clone(),
                     self.workspaces.clone(),
                     outputs.clone(),
-                    application_id.clone(),
-                    application_launch_available,
-                    pinned,
                     self.palette,
                 ),
                 MENU_WIDTH.ceil() as u32,
@@ -3702,6 +3746,34 @@ impl LiveShell {
         });
         host.application_mut()
             .sync(&snapshot, &self.workspaces, &outputs, self.palette);
+        host.step(HostBatch {
+            surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        host.commands().to_vec()
+    }
+
+    fn application_menu_scene(&mut self) -> Vec<PaintCommand> {
+        let Some(target) = self.application_menu_target.clone() else {
+            self.application_menu_host = None;
+            return Vec::new();
+        };
+        let pinned = target
+            .application_id
+            .as_ref()
+            .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+        let height = menu_height_for_rows(application_menu_entries(&target, pinned).len())
+            .ceil()
+            .max(1.0) as u32;
+        let host = self.application_menu_host.get_or_insert_with(|| {
+            nickel_ui::UiHost::new(
+                ApplicationMenuApp::new(target, pinned, self.palette),
+                MENU_WIDTH.ceil() as u32,
+                height,
+            )
+        });
+        host.application_mut().sync(pinned, self.palette);
         host.step(HostBatch {
             surface_size: Some((MENU_WIDTH.ceil() as u32, height)),
             events: vec![HostEvent::Poll],

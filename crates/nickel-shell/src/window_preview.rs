@@ -67,19 +67,12 @@ pub enum MenuAction {
     SnapTrailing(WindowId),
     MoveToWorkspace(WindowId, u64),
     MoveToDisplay(WindowId, String),
-    NewWindow(ApplicationId),
-    TogglePin(ApplicationId),
-    MovePinLeft(ApplicationId),
-    MovePinRight(ApplicationId),
 }
 
 pub struct WindowMenuApp {
     window: OpenWindow,
     workspaces: Vec<WorkspaceSummary>,
     outputs: Vec<String>,
-    application_id: Option<ApplicationId>,
-    application_launch_available: bool,
-    pinned: bool,
     palette: ThemePalette,
     effects: Vec<MenuAction>,
     dirty: bool,
@@ -99,18 +92,12 @@ impl WindowMenuApp {
         window: OpenWindow,
         workspaces: Vec<WorkspaceSummary>,
         outputs: Vec<String>,
-        application_id: Option<ApplicationId>,
-        application_launch_available: bool,
-        pinned: bool,
         palette: ThemePalette,
     ) -> Self {
         Self {
             window,
             workspaces,
             outputs,
-            application_id,
-            application_launch_available,
-            pinned,
             palette,
             effects: Vec::new(),
             dirty: false,
@@ -177,14 +164,9 @@ impl Application for WindowMenuApp {
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         let entries = match self.page {
-            WindowMenuPage::Root => window_menu_entries(
-                &self.window,
-                &self.workspaces,
-                &self.outputs,
-                self.application_id.as_ref(),
-                self.application_launch_available,
-                self.pinned,
-            ),
+            WindowMenuPage::Root => {
+                window_menu_entries(&self.window, &self.workspaces, &self.outputs)
+            }
             WindowMenuPage::Workspaces => workspace_menu_entries(&self.window, &self.workspaces),
             WindowMenuPage::Displays => display_menu_entries(&self.window, &self.outputs),
         };
@@ -209,13 +191,12 @@ impl Application for WindowMenuApp {
                 &self.window,
                 &self.workspaces,
                 &self.outputs,
-                self.application_id.as_ref(),
-                self.application_launch_available,
-                self.pinned,
             )))
             .padding(Insets::all(MENU_PADDING))
             .background(self.palette.panel)
             .radius(10.0)
+            .semantic_role(SemanticRole::Menu)
+            .accessibility_label(format!("Window menu for {}", self.window.title))
             .child(content)
     }
 
@@ -232,13 +213,156 @@ impl Application for WindowMenuApp {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplicationMenuTarget {
+    pub application_id: Option<ApplicationId>,
+    pub application_name: String,
+    pub windows: Vec<WindowId>,
+    pub all_closeable: bool,
+}
+
+impl ApplicationMenuTarget {
+    pub fn capture(group: &WindowGroup) -> Self {
+        let mut seen = std::collections::HashSet::new();
+        let windows = group
+            .windows
+            .iter()
+            .filter_map(|window| seen.insert(window.id).then_some(window.id))
+            .collect::<Vec<_>>();
+        let all_closeable = !windows.is_empty()
+            && group
+                .windows
+                .iter()
+                .filter(|window| seen.contains(&window.id))
+                .all(|window| window.state.capabilities.close);
+        Self {
+            application_id: group.application_id.clone(),
+            application_name: group.application_name.clone(),
+            windows,
+            all_closeable,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ApplicationMenuAction {
+    Dismiss,
+    TogglePin(ApplicationId),
+    CloseAll(Vec<WindowId>),
+}
+
+pub struct ApplicationMenuApp {
+    target: ApplicationMenuTarget,
+    pinned: bool,
+    palette: ThemePalette,
+    effects: Vec<ApplicationMenuAction>,
+    dirty: bool,
+}
+
+impl ApplicationMenuApp {
+    pub fn new(target: ApplicationMenuTarget, pinned: bool, palette: ThemePalette) -> Self {
+        Self {
+            target,
+            pinned,
+            palette,
+            effects: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    pub fn sync(&mut self, pinned: bool, palette: ThemePalette) {
+        self.pinned = pinned;
+        self.palette = palette;
+        self.dirty = true;
+    }
+
+    pub fn take_effects(&mut self) -> Vec<ApplicationMenuAction> {
+        std::mem::take(&mut self.effects)
+    }
+}
+
+pub(crate) fn application_menu_entries(
+    target: &ApplicationMenuTarget,
+    pinned: bool,
+) -> Vec<(String, ApplicationMenuAction)> {
+    let mut entries = Vec::new();
+    if let Some(application_id) = &target.application_id {
+        entries.push((
+            (if pinned {
+                "Unpin from Nickel Bar"
+            } else {
+                "Pin to Nickel Bar"
+            })
+            .into(),
+            ApplicationMenuAction::TogglePin(application_id.clone()),
+        ));
+    }
+    if target.all_closeable {
+        entries.push((
+            "Close all windows".into(),
+            ApplicationMenuAction::CloseAll(target.windows.clone()),
+        ));
+    }
+    entries
+}
+
+impl Application for ApplicationMenuApp {
+    type Message = ApplicationMenuAction;
+
+    fn update(&mut self, message: Self::Message) {
+        self.effects.push(message);
+    }
+
+    fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let entries = application_menu_entries(&self.target, self.pinned);
+        let content = entries.into_iter().enumerate().fold(
+            nickel_ui::Column::new().gap(MENU_ROW_GAP),
+            |column, (index, (label, action))| {
+                column.child(
+                    Button::new(action, label)
+                        .id(format!("application-menu-action-{index}"))
+                        .height(MENU_ROW_HEIGHT)
+                        .background(self.palette.panel)
+                        .focus_background_tint(self.palette.accent)
+                        .controller_focus_background_tint(self.palette.accent)
+                        .color(self.palette.text),
+                )
+            },
+        );
+        Container::new()
+            .id("application-menu-anchor")
+            .width(MENU_WIDTH)
+            .height(menu_height_for_rows(
+                application_menu_entries(&self.target, self.pinned).len(),
+            ))
+            .padding(Insets::all(MENU_PADDING))
+            .background(self.palette.panel)
+            .radius(10.0)
+            .semantic_role(SemanticRole::Menu)
+            .accessibility_label(format!(
+                "Application menu for {}",
+                self.target.application_name
+            ))
+            .child(content)
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+        if shortcut != nickel_ui::Shortcut::Escape {
+            return false;
+        }
+        self.effects.push(ApplicationMenuAction::Dismiss);
+        true
+    }
+}
+
 pub(crate) fn window_menu_entries(
     window: &OpenWindow,
     workspaces: &[WorkspaceSummary],
     outputs: &[String],
-    application_id: Option<&ApplicationId>,
-    application_launch_available: bool,
-    pinned: bool,
 ) -> Vec<(String, MenuAction)> {
     let id = window.id;
     let capabilities = window.state.capabilities;
@@ -301,33 +425,6 @@ pub(crate) fn window_menu_entries(
     if capabilities.move_display && outputs.len() > 1 {
         entries.push(("Move to Display ›".into(), MenuAction::ShowDisplays));
     }
-    if let Some(application_id) = application_id {
-        if application_launch_available {
-            entries.push((
-                "New Window".into(),
-                MenuAction::NewWindow(application_id.clone()),
-            ));
-        }
-        entries.push((
-            (if pinned {
-                "Unpin from Nickel Bar"
-            } else {
-                "Pin to Nickel Bar"
-            })
-            .into(),
-            MenuAction::TogglePin(application_id.clone()),
-        ));
-        if pinned {
-            entries.push((
-                "Move Left".into(),
-                MenuAction::MovePinLeft(application_id.clone()),
-            ));
-            entries.push((
-                "Move Right".into(),
-                MenuAction::MovePinRight(application_id.clone()),
-            ));
-        }
-    }
     if capabilities.close {
         entries.push(("Close Window".to_owned(), MenuAction::Close(id)));
     }
@@ -367,21 +464,11 @@ pub(crate) fn window_menu_max_rows(
     window: &OpenWindow,
     workspaces: &[WorkspaceSummary],
     outputs: &[String],
-    application_id: Option<&ApplicationId>,
-    application_launch_available: bool,
-    pinned: bool,
 ) -> usize {
-    window_menu_entries(
-        window,
-        workspaces,
-        outputs,
-        application_id,
-        application_launch_available,
-        pinned,
-    )
-    .len()
-    .max(workspaces.len().saturating_add(1))
-    .max(outputs.len().saturating_add(1))
+    window_menu_entries(window, workspaces, outputs)
+        .len()
+        .max(workspaces.len().saturating_add(1))
+        .max(outputs.len().saturating_add(1))
 }
 
 pub struct WindowPreviewFrame {
@@ -1130,28 +1217,16 @@ mod tests {
                 window.clone(),
                 workspaces.to_vec(),
                 outputs.clone(),
-                window.application_id.clone(),
-                true,
-                false,
                 ThemePalette::from_appearance(Appearance::default()),
             ),
             MENU_WIDTH as u32,
-            menu_height_for_rows(window_menu_max_rows(
-                &window,
-                &workspaces,
-                &outputs,
-                window.application_id.as_ref(),
-                true,
-                false,
-            )) as u32,
+            menu_height_for_rows(window_menu_max_rows(&window, &workspaces, &outputs)) as u32,
         );
         for action in [
             MenuAction::Activate(WindowId(9)),
             MenuAction::Minimize(WindowId(9)),
             MenuAction::MaximizeRestore(WindowId(9)),
             MenuAction::FullscreenRestore(WindowId(9)),
-            MenuAction::NewWindow(ApplicationId::new("editor")),
-            MenuAction::TogglePin(ApplicationId::new("editor")),
             MenuAction::Close(WindowId(9)),
         ] {
             let target = host
@@ -1167,14 +1242,7 @@ mod tests {
             host.application_mut().take_effects(),
             vec![MenuAction::Dismiss]
         );
-        let root = window_menu_entries(
-            &window,
-            &workspaces,
-            &outputs,
-            window.application_id.as_ref(),
-            true,
-            false,
-        );
+        let root = window_menu_entries(&window, &workspaces, &outputs);
         assert!(
             root.iter()
                 .any(|(_, action)| *action == MenuAction::ShowWorkspaces)
@@ -1211,9 +1279,6 @@ mod tests {
             captured.clone(),
             vec![],
             vec!["left".into()],
-            captured.application_id.clone(),
-            true,
-            false,
             ThemePalette::from_appearance(Appearance::default()),
         );
         captured.active = true;
@@ -1239,17 +1304,10 @@ mod tests {
         assert_eq!(menu.window.id, WindowId(9));
         assert_eq!(menu.window.title, "New title");
         assert!(
-            window_menu_entries(
-                &menu.window,
-                &menu.workspaces,
-                &menu.outputs,
-                menu.application_id.as_ref(),
-                menu.application_launch_available,
-                menu.pinned,
-            )
-            .iter()
-            .any(|(label, action)| label == "Restore from Maximized"
-                && *action == MenuAction::MaximizeRestore(WindowId(9)))
+            window_menu_entries(&menu.window, &menu.workspaces, &menu.outputs,)
+                .iter()
+                .any(|(label, action)| label == "Restore from Maximized"
+                    && *action == MenuAction::MaximizeRestore(WindowId(9)))
         );
         assert!(
             workspace_menu_entries(&menu.window, &menu.workspaces)
@@ -1301,9 +1359,6 @@ mod tests {
                 active: true,
             }],
             &["left".into(), "right".into()],
-            None,
-            false,
-            false,
         );
         let labels = entries
             .iter()
@@ -1321,52 +1376,111 @@ mod tests {
         );
         assert!(!entries.iter().any(|(_, action)| matches!(
             action,
-            MenuAction::MoveToWorkspace(..)
-                | MenuAction::MoveToDisplay(..)
-                | MenuAction::NewWindow(..)
-                | MenuAction::TogglePin(..)
-                | MenuAction::MovePinLeft(..)
-                | MenuAction::MovePinRight(..)
+            MenuAction::MoveToWorkspace(..) | MenuAction::MoveToDisplay(..)
         )));
     }
 
     #[test]
-    fn unavailable_pinned_application_can_be_removed_without_offering_launch() {
+    fn unavailable_pinned_application_uses_an_explicit_application_target() {
         let application = ApplicationId::new("org.example.missing");
-        let entries = window_menu_entries(
-            &OpenWindow {
-                id: WindowId(u64::MAX),
-                application_id: Some(application.clone()),
-                active: false,
-                title: "Missing".into(),
-                state: crate::model::WindowState {
-                    capabilities: crate::model::WindowCapabilities {
-                        activate: false,
-                        close: false,
-                        minimize: false,
-                        maximize: false,
-                        fullscreen: false,
-                        move_workspace: false,
-                        move_display: false,
-                    },
-                    ..Default::default()
-                },
-            },
-            &[],
-            &[],
-            Some(&application),
-            false,
-            true,
-        );
+        let target = ApplicationMenuTarget {
+            application_id: Some(application.clone()),
+            application_name: "Missing".into(),
+            windows: Vec::new(),
+            all_closeable: false,
+        };
+        let entries = application_menu_entries(&target, true);
 
         assert!(entries.iter().any(|(label, action)| {
             label == "Unpin from Nickel Bar"
-                && *action == MenuAction::TogglePin(application.clone())
+                && *action == ApplicationMenuAction::TogglePin(application.clone())
         }));
         assert!(
             entries
                 .iter()
-                .all(|(_, action)| !matches!(action, MenuAction::NewWindow(_)))
+                .all(|(_, action)| !matches!(action, ApplicationMenuAction::CloseAll(_)))
         );
+    }
+
+    #[test]
+    fn application_menu_captures_unique_membership_and_never_exposes_window_actions() {
+        let application = ApplicationId::new("org.example.Editor");
+        let make_window = |id, close| OpenWindow {
+            id: WindowId(id),
+            application_id: Some(application.clone()),
+            active: false,
+            title: format!("Window {id}"),
+            state: crate::model::WindowState {
+                capabilities: crate::model::WindowCapabilities {
+                    close,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        let group = WindowGroup {
+            application_id: Some(application.clone()),
+            application_name: "Editor".into(),
+            windows: vec![
+                make_window(2, true),
+                make_window(1, true),
+                make_window(2, true),
+            ],
+        };
+        let target = ApplicationMenuTarget::capture(&group);
+        assert_eq!(target.windows, vec![WindowId(2), WindowId(1)]);
+        let entries = application_menu_entries(&target, false);
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    "Pin to Nickel Bar".into(),
+                    ApplicationMenuAction::TogglePin(application)
+                ),
+                (
+                    "Close all windows".into(),
+                    ApplicationMenuAction::CloseAll(vec![WindowId(2), WindowId(1)])
+                ),
+            ]
+        );
+        assert!(entries.iter().all(|(label, _)| {
+            !label.contains("Maximize")
+                && !label.contains("Minimize")
+                && !label.contains("Workspace")
+                && label != "Close Window"
+        }));
+    }
+
+    #[test]
+    fn application_menu_omits_bulk_close_for_mixed_capabilities() {
+        let group = WindowGroup {
+            application_id: None,
+            application_name: "Unresolved".into(),
+            windows: vec![
+                OpenWindow {
+                    id: WindowId(1),
+                    application_id: None,
+                    active: false,
+                    title: "Closeable".into(),
+                    state: crate::model::WindowState::default(),
+                },
+                OpenWindow {
+                    id: WindowId(2),
+                    application_id: None,
+                    active: false,
+                    title: "Protected".into(),
+                    state: crate::model::WindowState {
+                        capabilities: crate::model::WindowCapabilities {
+                            close: false,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                },
+            ],
+        };
+        let target = ApplicationMenuTarget::capture(&group);
+        assert!(!target.all_closeable);
+        assert!(application_menu_entries(&target, false).is_empty());
     }
 }

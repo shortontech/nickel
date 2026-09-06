@@ -168,7 +168,7 @@
         );
         assert_eq!(
             shell
-                .window_menu_snapshot
+                .application_menu_target
                 .as_ref()
                 .and_then(|target| target.application_id.as_ref())
                 .map(crate::model::ApplicationId::as_str),
@@ -176,19 +176,18 @@
         );
         let _ = shell.window_menu_scene();
         let host = shell
-            .window_menu_host
+            .application_menu_host
             .as_ref()
             .expect("application-only task menu host");
-        assert!(host.accessibility_nodes().iter().any(|node| {
+        assert!(!host.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("New Window")
-                && node.semantic_role == Some(SemanticRole::Button)
         }));
         assert!(host.accessibility_nodes().iter().any(|node| {
             node.label.as_deref() == Some("Unpin from Nickel Bar")
                 && node.semantic_role == Some(SemanticRole::Button)
         }));
 
-        shell.apply_window_menu_action(crate::window_preview::MenuAction::TogglePin(
+        shell.apply_application_menu_action(crate::window_preview::ApplicationMenuAction::TogglePin(
             crate::model::ApplicationId::new("org.example.pinned"),
         ));
         assert!(!shell.launcher.is_pinned("org.example.pinned"));
@@ -805,4 +804,3 @@
                 .contains("Private")
         );
     }
-

@@ -583,7 +583,7 @@
     }
 
     #[test]
-    fn taskbar_secondary_click_opens_menu_for_active_group_member_at_item_anchor() {
+    fn taskbar_secondary_click_opens_application_menu_for_captured_group_at_item_anchor() {
         let mut shell = LiveShell::new().unwrap();
         shell
             .launcher
@@ -615,19 +615,25 @@
         let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
 
         assert!(shell.panel_click(center, 1_280, true));
-        assert_eq!(shell.window_menu, Some(WindowId(42)));
+        assert!(shell.window_menu.is_none());
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
         assert!(shell.preview_group.is_none());
         assert_eq!(
-            shell.window_menu_snapshot.as_ref().map(|window| window.id),
-            Some(WindowId(42))
+            shell
+                .application_menu_target
+                .as_ref()
+                .map(|target| target.windows.clone()),
+            Some(vec![WindowId(41), WindowId(42)])
         );
         shell.windows[0].active = true;
         shell.windows[1].active = false;
         assert_eq!(
-            shell.window_menu_snapshot.as_ref().map(|window| window.id),
-            Some(WindowId(42)),
-            "an open menu must not retarget when group activity changes"
+            shell
+                .application_menu_target
+                .as_ref()
+                .map(|target| target.windows.clone()),
+            Some(vec![WindowId(41), WindowId(42)]),
+            "an open menu must not recapture membership when group activity changes"
         );
         shell.windows[0].active = false;
         shell.windows[1].active = true;
@@ -642,7 +648,7 @@
         );
         assert!(outcome.failures.is_empty(), "{:#?}", outcome.failures);
         assert!(shell.apply_panel_effects());
-        assert_eq!(shell.window_menu, Some(WindowId(42)));
+        assert!(shell.application_menu_target.is_some());
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
 
         for event in [
@@ -658,7 +664,7 @@
                 ..HostBatch::default()
             });
             assert!(shell.apply_panel_effects());
-            assert_eq!(shell.window_menu, Some(WindowId(42)));
+            assert!(shell.application_menu_target.is_some());
             assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
         }
     }
@@ -960,4 +966,3 @@
                 .is_empty()
         );
     }
-
