@@ -103,7 +103,7 @@ pub enum LaunchError {
     Platform(String),
 }
 
-fn launch_deferred_terminal(arguments: &[String]) -> Result<(), LaunchError> {
+fn spawn_deferred_terminal(arguments: &[String]) -> Result<std::process::Child, LaunchError> {
     let (program, rest) = arguments.split_first().ok_or(LaunchError::EmptyCommand)?;
     let current =
         std::env::current_exe().map_err(|error| LaunchError::Platform(error.to_string()))?;
@@ -133,10 +133,16 @@ fn launch_deferred_terminal(arguments: &[String]) -> Result<(), LaunchError> {
         .env_remove("NICKEL_SESSION_CONTROL")
         .env_remove("NICKEL_SESSION_TOKEN")
         .env_remove("NICKEL_SHELL_TEST_CONTROL");
+    #[cfg(target_os = "linux")]
+    command.stdin(std::process::Stdio::piped());
     command
         .spawn()
-        .map(|_| ())
         .map_err(|error| LaunchError::Platform(error.to_string()))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn launch_deferred_terminal(arguments: &[String]) -> Result<(), LaunchError> {
+    spawn_deferred_terminal(arguments).map(|_| ())
 }
 
 /// A failure while making a request over the shell/session control channel.

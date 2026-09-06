@@ -40,6 +40,46 @@ fn close_after_exit(enabled: bool, code: Option<i32>) -> bool {
     enabled && code == Some(0)
 }
 
+fn deferred_window_suppressed(delay: Duration) -> bool {
+    use std::io::{BufRead, Read};
+
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let _ = std::thread::Builder::new()
+        .name("nickel-terminal-window-decision".into())
+        .spawn(move || {
+            let mut decision = String::new();
+            if std::io::stdin()
+                .lock()
+                .take(64)
+                .read_line(&mut decision)
+                .is_ok()
+                && is_suppress_decision(&decision)
+            {
+                let _ = sender.try_send(());
+            }
+        });
+    receiver.recv_timeout(delay).is_ok()
+}
+
+fn is_suppress_decision(decision: &str) -> bool {
+    decision.trim() == "suppress"
+}
+
+fn await_deferred_start() -> Instant {
+    use std::io::{BufRead, Read};
+
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().take(64).read_line(&mut line);
+    Instant::now()
+}
+
+fn supervise_hidden_session(session: &mut TerminalSession) {
+    while matches!(session.exit_state(), TerminalExit::Running) {
+        while session.try_event().is_some() {}
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 struct TerminalApp {
     session: TerminalSession,
     snapshot: TerminalSnapshot,
@@ -494,12 +534,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         executable: command.remove(0),
         arguments: command,
     });
-    // PTY allocation and parsing start before this delay. Until a platform attribution
-    // subscription is available the conservative decision is to show the terminal at expiry.
+    // The trusted launcher opens the classification interval before this process spawns the PTY.
+    // PTY allocation and parsing then start before any visibility delay; absent an attributed
+    // suppression signal, the conservative decision is to construct the terminal UI at expiry.
+    let deferred_started = (!deferred_window.is_zero()).then(await_deferred_start);
     let settings = TerminalSettings::load_default();
-    let app = TerminalApp::new(program, cwd, &settings)?;
-    if !deferred_window.is_zero() {
-        std::thread::sleep(deferred_window);
+    let mut app = TerminalApp::new(program, cwd, &settings)?;
+    let remaining = deferred_started
+        .map(|started| deferred_window.saturating_sub(started.elapsed()))
+        .unwrap_or_default();
+    if !remaining.is_zero() && deferred_window_suppressed(remaining) {
+        supervise_hidden_session(&mut app.session);
+        return Ok(());
     }
     nickel_ui::run_with_adapter(
         app,
@@ -567,5 +613,12 @@ mod tests {
         assert!(!close_after_exit(false, Some(0)));
         assert!(!close_after_exit(true, Some(1)));
         assert!(!close_after_exit(true, None));
+    }
+
+    #[test]
+    fn deferred_control_pipe_accepts_only_the_exact_suppression_word() {
+        assert!(is_suppress_decision("suppress\n"));
+        assert!(!is_suppress_decision("start\n"));
+        assert!(!is_suppress_decision("suppress now\n"));
     }
 }

@@ -1118,6 +1118,8 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
+            SessionCommand::ObservePendingLaunch { .. } => "observe-pending-launch",
+            SessionCommand::CancelPendingLaunch { .. } => "cancel-pending-launch",
             SessionCommand::RegisterShellSurface { .. } => "register-shell-surface",
             SessionCommand::RequestOnScreenKeyboard => "request-on-screen-keyboard",
             SessionCommand::ConfigureOnScreenKeyboard { .. } => "configure-on-screen-keyboard",
@@ -1891,6 +1893,14 @@ fn subscription_shortcut(
     state: &mut SubscriptionState,
 ) -> Option<GlobalShortcut> {
     match message {
+        ServerMessage::Event(SessionEvent::PendingLaunchWindow {
+            generation,
+            observed_after_ms,
+            descendant,
+        }) => {
+            deliver_pending_launch_observation(generation, observed_after_ms, descendant);
+            None
+        }
         ServerMessage::Event(
             SessionEvent::ShellSettingsChanged | SessionEvent::ShellBehaviorChanged(_),
         ) => Some(GlobalShortcut::ReloadShellSettings),
@@ -1973,7 +1983,87 @@ pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     if let Some(program) = arguments.first() {
         let _ = crate::executable_index::global_executable_index().classify(program);
     }
-    super::launch_deferred_terminal(&arguments)
+    launch_observed_deferred_terminal(&arguments)
+}
+
+static PENDING_LAUNCH_GENERATION: AtomicU64 = AtomicU64::new(1);
+type PendingLaunchSignal = (u16, bool);
+type PendingLaunchRelays = HashMap<u64, mpsc::SyncSender<PendingLaunchSignal>>;
+static PENDING_LAUNCH_RELAYS: OnceLock<Mutex<PendingLaunchRelays>> = OnceLock::new();
+
+fn deliver_pending_launch_observation(generation: u64, observed_after_ms: u16, descendant: bool) {
+    if let Ok(relays) = PENDING_LAUNCH_RELAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        && let Some(sender) = relays.get(&generation)
+    {
+        let _ = sender.try_send((observed_after_ms, descendant));
+    }
+}
+
+fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::LaunchError> {
+    use std::io::Write;
+
+    let mut terminal = super::spawn_deferred_terminal(arguments)?;
+    let root_pid = terminal.id();
+    let mut decision_input = terminal.stdin.take();
+    let generation = PENDING_LAUNCH_GENERATION.fetch_add(1, Ordering::Relaxed);
+    thread::Builder::new()
+        .name("nickel-run-window-observer".into())
+        .spawn(move || {
+            let (sender, receiver) = mpsc::sync_channel(1);
+            if let Ok(mut relays) = PENDING_LAUNCH_RELAYS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+            {
+                if relays.len() >= nickel_session_protocol::MAX_PENDING_LAUNCHES {
+                    if let Some(input) = decision_input.as_mut() {
+                        let _ = input.write_all(b"start\n");
+                        let _ = input.flush();
+                    }
+                    return;
+                }
+                relays.insert(generation, sender);
+            } else {
+                if let Some(input) = decision_input.as_mut() {
+                    let _ = input.write_all(b"start\n");
+                    let _ = input.flush();
+                }
+                return;
+            }
+            let registered = one_shot_session_request(SessionRequest::Command(
+                SessionCommand::ObservePendingLaunch {
+                    generation,
+                    root_pid,
+                    deadline_ms: 100,
+                },
+            ))
+            .is_ok();
+            if let Some(input) = decision_input.as_mut() {
+                let _ = input.write_all(b"start\n");
+                let _ = input.flush();
+            }
+            if registered
+                && receiver.recv_timeout(Duration::from_millis(100)).is_ok()
+                && let Some(input) = decision_input.as_mut()
+            {
+                let _ = input.write_all(b"suppress\n");
+                let _ = input.flush();
+            }
+            if let Ok(mut relays) = PENDING_LAUNCH_RELAYS
+                .get_or_init(|| Mutex::new(HashMap::new()))
+                .lock()
+            {
+                relays.remove(&generation);
+            }
+            if registered {
+                let _ = one_shot_session_request(SessionRequest::Command(
+                    SessionCommand::CancelPendingLaunch { generation },
+                ));
+            }
+        })
+        .map_err(|error| super::LaunchError::Platform(error.to_string()))?;
+    Ok(())
 }
 
 pub fn launch_application(application: &Application) -> Result<Option<u32>, super::LaunchError> {
@@ -2047,12 +2137,13 @@ mod tests {
     };
 
     use super::{
-        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, SubscriptionState, bounded_notification_text,
-        capture_active_window, capture_active_window_to_file, command_response,
-        crop_output_geometry, logical_rect, notification_actions, notification_name_owned,
-        owning_output, parse_window, pixmap_to_rgba, resolve_application_id, response_for_request,
-        response_message, secure_storage_response, secure_storage_retry_response,
-        session_receive_error, shell_command_payload, subscription_shortcut, tray_retry_delay,
+        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, SubscriptionState,
+        bounded_notification_text, capture_active_window, capture_active_window_to_file,
+        command_response, crop_output_geometry, deliver_pending_launch_observation, logical_rect,
+        notification_actions, notification_name_owned, owning_output, parse_window, pixmap_to_rgba,
+        resolve_application_id, response_for_request, response_message, secure_storage_response,
+        secure_storage_retry_response, session_receive_error, shell_command_payload,
+        subscription_shortcut, tray_retry_delay,
     };
 
     #[test]
@@ -2460,6 +2551,40 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn attributed_window_event_reaches_only_its_pending_generation() {
+        let generation = u64::MAX - 7;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        PENDING_LAUNCH_RELAYS
+            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .unwrap()
+            .insert(generation, sender);
+        deliver_pending_launch_observation(generation + 1, 3, false);
+        assert!(receiver.try_recv().is_err());
+        let mut state = SubscriptionState::default();
+        assert_eq!(
+            subscription_shortcut(
+                nickel_session_protocol::ServerMessage::Event(
+                    nickel_session_protocol::Event::PendingLaunchWindow {
+                        generation,
+                        observed_after_ms: 9,
+                        descendant: true,
+                    },
+                ),
+                &mut state,
+            ),
+            None
+        );
+        assert_eq!(receiver.try_recv(), Ok((9, true)));
+        PENDING_LAUNCH_RELAYS
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .remove(&generation);
     }
 
     #[test]
