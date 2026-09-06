@@ -84,6 +84,7 @@ impl SeatHandler for NickelSession {
             .and_then(|surface| dh.get_client(surface.id()).ok());
         set_primary_focus(dh, seat, client);
         self.launcher_keyboard_focus_changed(focused_surface.as_deref());
+        self.on_screen_keyboard_focus_changed();
     }
 }
 

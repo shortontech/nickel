@@ -291,6 +291,7 @@ pub enum SurfaceRole {
     CodexProjectMenu,
     Lock,
     Screenshot,
+    OnScreenKeyboard,
     CodexChat,
 }
 
@@ -304,6 +305,7 @@ fn surface_is_ephemeral(role: SurfaceRole) -> bool {
             | SurfaceRole::WindowContextMenu
             | SurfaceRole::CodexProjectMenu
             | SurfaceRole::Screenshot
+            | SurfaceRole::OnScreenKeyboard
     )
 }
 
@@ -592,6 +594,7 @@ impl WinitShell {
         self.create_surface(SurfaceRole::WindowContextMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::CodexProjectMenu, 0, primary, primary_name)?;
         self.create_surface(SurfaceRole::Screenshot, 0, primary, primary_name)?;
+        self.create_surface(SurfaceRole::OnScreenKeyboard, 0, primary, primary_name)?;
         tracing::info!(
             elapsed_ms = self.started.elapsed().as_secs_f64() * 1_000.0,
             surface_count = self.surfaces.len(),
@@ -814,7 +817,7 @@ impl WinitShell {
             return;
         };
         let role = self.surfaces[index].role;
-        if role != SurfaceRole::Launcher {
+        if !matches!(role, SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard) {
             return;
         }
         let (_, x, y, width, height, _) = surface_geometry(role, geometry, self.options.panel_edge);
@@ -1129,7 +1132,10 @@ impl WinitShell {
         let Some(index) = self.surface_indices.get(&id.0).copied() else {
             return false;
         };
-        if self.surfaces[index].role == SurfaceRole::Launcher {
+        if matches!(
+            self.surfaces[index].role,
+            SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard
+        ) {
             self.relocate_to_active_output(index);
         }
         let shown = self.surfaces.get_mut(index).is_some_and(|surface| {
@@ -1466,6 +1472,7 @@ impl WinitShell {
             SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu.application_id(),
             SurfaceRole::Lock => SessionShellRole::Lock.application_id(),
             SurfaceRole::Screenshot => SessionShellRole::Screenshot.application_id(),
+            SurfaceRole::OnScreenKeyboard => SessionShellRole::OnScreenKeyboard.application_id(),
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
         };
         let attributes = Window::default_attributes()
@@ -1782,6 +1789,25 @@ fn surface_geometry(
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
+        SurfaceRole::OnScreenKeyboard => {
+            let height = 420.min(geometry.height.saturating_sub(PANEL_HEIGHT));
+            (
+                "On-screen keyboard — Nickel",
+                geometry.x,
+                geometry.y
+                    + geometry.height.saturating_sub(
+                        height
+                            + if panel_edge == PanelEdge::Bottom {
+                                PANEL_HEIGHT
+                            } else {
+                                0
+                            },
+                    ) as i32,
+                geometry.width,
+                height,
+                true,
+            )
+        }
     }
 }
 

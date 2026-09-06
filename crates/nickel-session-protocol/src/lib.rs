@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 18;
+pub const PROTOCOL_VERSION: u16 = 19;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -41,6 +41,7 @@ pub enum Request {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "query", rename_all = "snake_case")]
 pub enum Query {
+    OnScreenKeyboard,
     Snapshot,
     Windows,
     Outputs,
@@ -70,6 +71,18 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    RequestOnScreenKeyboard,
+    ConfigureOnScreenKeyboard {
+        dock_top: bool,
+        enabled: bool,
+        visible: bool,
+        generation: u64,
+        environment_override: bool,
+    },
+    OnScreenKeyboardInput {
+        epoch: u64,
+        input: OnScreenKeyboardInput,
+    },
     ReloadShellSettings,
     ApplyShellBehavior {
         transaction: ShellBehaviorTransaction,
@@ -177,6 +190,23 @@ pub enum SessionAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "input", rename_all = "snake_case")]
 pub enum TestInput {
+    TouchDown {
+        slot: u32,
+        x: i32,
+        y: i32,
+    },
+    TouchMotion {
+        slot: u32,
+        x: i32,
+        y: i32,
+    },
+    TouchUp {
+        slot: u32,
+    },
+    TouchCancel {
+        slot: u32,
+    },
+    TouchFrame,
     ControllerConnect,
     ControllerDisconnect,
     ControllerButton {
@@ -266,6 +296,10 @@ pub enum RecoveryTargetAction {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "target", rename_all = "snake_case")]
 pub enum ShellSemanticTarget {
+    OnScreenKeyboard {
+        key: String,
+    },
+    OnScreenKeyboardToggle,
     PanelApplication {
         application_id: String,
         output: Option<String>,
@@ -388,6 +422,7 @@ pub enum TestPointerButton {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "response", content = "data", rename_all = "snake_case")]
 pub enum ServerMessage {
+    OnScreenKeyboard(OnScreenKeyboardSnapshot),
     Ack,
     Error {
         code: ErrorCode,
@@ -762,6 +797,34 @@ pub struct Snapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct WindowId(pub u64);
 
+/// No surrounding text or typed content is included in recipient diagnostics.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OnScreenKeyboardSnapshot {
+    pub dock_top: bool,
+    pub auto_show_requested: bool,
+    pub touchscreen_present: bool,
+    pub generation: u64,
+    pub environment_override: bool,
+    pub epoch: u64,
+    pub recipient: Option<WindowId>,
+    pub text_input_active: bool,
+    pub enabled: bool,
+    pub visible: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum OnScreenKeyboardInput {
+    Text {
+        text: String,
+    },
+    /// XKB keysyms, not hardware scan codes. Modifiers apply to this tap only.
+    Key {
+        keysym: u32,
+        modifiers: Vec<u32>,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WindowSnapshot {
     pub id: WindowId,
@@ -906,6 +969,7 @@ pub enum ShellRole {
     ProjectMenu,
     Lock,
     Screenshot,
+    OnScreenKeyboard,
     Recovery,
 }
 
@@ -923,6 +987,7 @@ impl ShellRole {
             Self::ProjectMenu => "io.nickel.shell.project-menu",
             Self::Lock => "io.nickel.shell.lock",
             Self::Screenshot => "io.nickel.shell.screenshot",
+            Self::OnScreenKeyboard => "io.nickel.shell.on-screen-keyboard",
             Self::Recovery => "io.nickel.shell.recovery",
         }
     }
@@ -940,6 +1005,7 @@ impl ShellRole {
             Self::ProjectMenu,
             Self::Lock,
             Self::Screenshot,
+            Self::OnScreenKeyboard,
             Self::Recovery,
         ]
         .into_iter()

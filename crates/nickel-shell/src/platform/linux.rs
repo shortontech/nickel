@@ -1101,6 +1101,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
         SessionRequest::RegisterShell { .. } => "register-shell",
         SessionRequest::Subscribe => "subscribe",
         SessionRequest::Query(query) => match query {
+            SessionQuery::OnScreenKeyboard => "query-on-screen-keyboard",
             SessionQuery::Snapshot => "query-snapshot",
             SessionQuery::Windows => "query-windows",
             SessionQuery::Outputs => "query-outputs",
@@ -1117,6 +1118,9 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
+            SessionCommand::RequestOnScreenKeyboard => "request-on-screen-keyboard",
+            SessionCommand::ConfigureOnScreenKeyboard { .. } => "configure-on-screen-keyboard",
+            SessionCommand::OnScreenKeyboardInput { .. } => "on-screen-keyboard-input",
             SessionCommand::ReloadShellSettings => "reload-shell-settings",
             SessionCommand::ApplyShellBehavior { .. } => "apply-shell-behavior",
             SessionCommand::ToggleLauncher => "toggle-launcher",
@@ -1217,6 +1221,43 @@ pub fn request_secure_storage_retry() -> Result<(), SessionRequestError> {
 pub fn send_shell_command(command: ShellCommand) -> Result<(), SessionRequestError> {
     command_response(one_shot_session_request(SessionRequest::Command(
         shell_command_payload(command),
+    ))?)
+}
+
+pub fn on_screen_keyboard_snapshot()
+-> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+    match one_shot_session_request(SessionRequest::Query(SessionQuery::OnScreenKeyboard))? {
+        ServerMessage::OnScreenKeyboard(snapshot) => Ok(snapshot),
+        _ => Err(SessionRequestError::UnexpectedResponse {
+            expected: "on-screen keyboard snapshot",
+        }),
+    }
+}
+
+pub fn configure_on_screen_keyboard(
+    enabled: bool,
+    visible: bool,
+    generation: u64,
+    environment_override: bool,
+    dock_top: bool,
+) -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::ConfigureOnScreenKeyboard {
+            dock_top,
+            enabled,
+            visible,
+            generation,
+            environment_override,
+        },
+    ))?)
+}
+
+pub fn deliver_on_screen_keyboard_input(
+    epoch: u64,
+    input: nickel_session_protocol::OnScreenKeyboardInput,
+) -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::OnScreenKeyboardInput { epoch, input },
     ))?)
 }
 

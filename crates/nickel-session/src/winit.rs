@@ -37,6 +37,13 @@ use crate::{NickelSession, state::PreviewFrame};
 
 const PREVIEW_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
 
+fn parse_nested_size(value: &str) -> Option<(u32, u32)> {
+    let (width, height) = value.split_once('x')?;
+    let width = width.parse().ok()?;
+    let height = height.parse().ok()?;
+    ((320..=8192).contains(&width) && (320..=8192).contains(&height)).then_some((width, height))
+}
+
 fn preview_retry_delay(last_capture: Instant, now: Instant) -> Duration {
     PREVIEW_CAPTURE_INTERVAL.saturating_sub(now.saturating_duration_since(last_capture))
 }
@@ -70,7 +77,20 @@ pub fn init_winit(
     let state = data;
 
     let renderer_owner = nickel_core::resource_owner::try_acquire_smithay_renderer_owner()?;
-    let (mut backend, winit) = winit::init()?;
+    let (mut backend, winit) = if let Ok(size) = std::env::var("NICKEL_NESTED_SIZE") {
+        let (width, height) = parse_nested_size(&size)
+            .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?;
+        winit::init_from_attributes(
+            smithay::reexports::winit::window::WindowAttributes::default()
+                .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
+                    width, height,
+                ))
+                .with_title("Nickel nested session")
+                .with_visible(true),
+        )?
+    } else {
+        winit::init()?
+    };
     state.set_winit_redraw_window(backend.window());
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
@@ -619,15 +639,24 @@ fn window_frame_elements(
             continue;
         };
         let render_location = location - window.geometry().loc - output_geometry.loc;
-        let has_client = !window
-            .render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-                renderer,
-                render_location.to_physical_precise_round(1),
-                Scale::from(1.0),
-                1.0,
-            )
-            .is_empty();
-        if !has_client {
+        let client_elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
+            renderer,
+            render_location.to_physical_precise_round(1),
+            Scale::from(1.0),
+            1.0,
+        );
+        if client_elements.is_empty() {
+            continue;
+        }
+        // Nested decoration overlays must remain below the nonactivating keyboard,
+        // just as the native backend's interleaved client/frame pass does.
+        if state.is_on_screen_keyboard_window(window) {
+            groups.push(
+                client_elements
+                    .into_iter()
+                    .map(WinitFrameElement::from)
+                    .collect(),
+            );
             continue;
         }
         let mut frame = Vec::new();
@@ -868,6 +897,14 @@ mod tests {
     use super::{
         PREVIEW_CAPTURE_INTERVAL, advance_output_capture, flatten_frame_groups, preview_retry_delay,
     };
+
+    #[test]
+    fn explicit_nested_sizes_are_bounded_and_keep_720p_exact() {
+        assert_eq!(super::parse_nested_size("1280x720"), Some((1280, 720)));
+        for invalid in ["1280", "0x720", "1280x0", "8193x720", "1280x999999999999"] {
+            assert!(super::parse_nested_size(invalid).is_none());
+        }
+    }
 
     #[test]
     fn window_frames_preserve_front_to_back_stacking_order() {

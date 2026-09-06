@@ -2310,6 +2310,12 @@ impl<Message> Button<Message> {
         self
     }
 
+    /// Center the measured label in a taller button without font-specific padding offsets.
+    pub fn center_label_vertically(mut self) -> Self {
+        self.0 = self.0.justify_content(Justify::Center);
+        self
+    }
+
     /// Keeps a button label on one line and truncates it to the available width.
     pub fn ellipsis(mut self, ellipsis: bool) -> Self {
         if let Some(label) = self.0.0.children.first_mut()

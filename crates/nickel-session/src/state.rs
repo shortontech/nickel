@@ -348,6 +348,8 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::SessionAction { .. }
             | SessionCommand::FocusShellRole { .. }
             | SessionCommand::RestoreApplicationFocus
+            | SessionCommand::ConfigureOnScreenKeyboard { .. }
+            | SessionCommand::OnScreenKeyboardInput { .. }
     )
 }
 
@@ -482,6 +484,7 @@ pub struct NickelSession {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
+    pub(crate) on_screen_keyboard: crate::on_screen_keyboard::OnScreenKeyboardState,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
     surface_effective_outputs: HashMap<ObjectId, String>,
@@ -1515,6 +1518,7 @@ impl NickelSession {
             xwayland_registration: None,
             popups,
             seat,
+            on_screen_keyboard: Default::default(),
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
             surface_effective_outputs: HashMap::new(),
@@ -1852,6 +1856,9 @@ impl NickelSession {
 
     fn handle_protocol_query(&mut self, query: Query) -> ServerMessage {
         match query {
+            Query::OnScreenKeyboard => {
+                ServerMessage::OnScreenKeyboard(self.on_screen_keyboard_snapshot())
+            }
             Query::Snapshot => ServerMessage::Snapshot(self.protocol_snapshot()),
             Query::Windows => ServerMessage::Windows(
                 self.protocol_windows()
@@ -2009,6 +2016,27 @@ impl NickelSession {
         request_id: u64,
     ) -> ServerMessage {
         match command {
+            SessionCommand::RequestOnScreenKeyboard => self.request_on_screen_keyboard(),
+            SessionCommand::ConfigureOnScreenKeyboard {
+                dock_top,
+                enabled,
+                visible,
+                generation,
+                environment_override,
+            } => {
+                self.configure_on_screen_keyboard(
+                    enabled,
+                    visible,
+                    generation,
+                    environment_override,
+                    dock_top,
+                );
+            }
+            SessionCommand::OnScreenKeyboardInput { epoch, input } => {
+                if let Err(message) = self.deliver_on_screen_keyboard_input(epoch, input) {
+                    return protocol_error(ErrorCode::InvalidRequest, message);
+                }
+            }
             SessionCommand::ReloadShellSettings => {
                 self.apply_configured_workspace_count();
                 self.notify_shell_settings_changed();
@@ -2737,6 +2765,7 @@ impl NickelSession {
             ShellRole::VolumeOsd,
             ShellRole::ProjectMenu,
             ShellRole::Screenshot,
+            ShellRole::OnScreenKeyboard,
         ]
         .into_iter()
         .all(|role| registered_role_count(role) == 1 && role_count(role) <= 1);
@@ -4468,6 +4497,14 @@ impl NickelSession {
         if role == ShellRole::Screenshot {
             self.place_screenshot_surface(&window);
         }
+        if role == ShellRole::OnScreenKeyboard {
+            window.override_z_index(60);
+            if self.on_screen_keyboard_snapshot().visible {
+                self.place_on_screen_keyboard_surface(&window);
+            } else {
+                self.hidden_shell_roles.insert(role);
+            }
+        }
         if self.hidden_shell_roles.contains(&role) {
             if let Some(location) = self.space.element_location(&window) {
                 self.hidden_shell_role_locations.insert(role, location);
@@ -4504,6 +4541,10 @@ impl NickelSession {
     }
 
     pub(crate) fn relayout_committed_shell_window(&mut self, window: &Window) {
+        if self.is_on_screen_keyboard_window(window) && self.on_screen_keyboard_snapshot().visible {
+            self.place_on_screen_keyboard_surface(window);
+            return;
+        }
         let is_screenshot = {
             let registry = self.windows.snapshot();
             window
@@ -4832,7 +4873,7 @@ impl NickelSession {
         eprintln!("nickel-session: transient overlays hidden");
     }
 
-    fn set_shell_role_visible(&mut self, role: ShellRole, visible: bool) {
+    pub(crate) fn set_shell_role_visible(&mut self, role: ShellRole, visible: bool) {
         if matches!(
             role,
             ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock | ShellRole::Launcher
@@ -4860,6 +4901,10 @@ impl NickelSession {
             return;
         };
         if visible {
+            if role == ShellRole::OnScreenKeyboard {
+                self.place_on_screen_keyboard_surface(&window);
+                return;
+            }
             if self.space.elements().any(|mapped| mapped == &window) {
                 return;
             }
@@ -4874,6 +4919,32 @@ impl NickelSession {
             }
             self.space.unmap_elem(&window);
         }
+    }
+
+    fn place_on_screen_keyboard_surface(&mut self, window: &Window) {
+        let Some(output) = self
+            .preferred_interaction_output_name()
+            .as_deref()
+            .and_then(|name| self.output_geometry_named(name))
+            .or_else(|| self.output_geometry_for_shell())
+        else {
+            return;
+        };
+        let area = self.work_area_for_output(output);
+        let height = 420.min(area.height);
+        let target = Geometry {
+            x: area.x,
+            y: if self.on_screen_keyboard.dock_top {
+                area.y
+            } else {
+                area.y + area.height - height
+            },
+            width: area.width,
+            height,
+        };
+        Self::configure_window(window, target);
+        let location = Self::shell_surface_location(window, target);
+        self.map_buffered_window(window.clone(), location, false);
     }
 
     fn show_anchored_shell_role(&mut self, role: ShellRole, anchor: ShellPopoverAnchor) {

@@ -229,6 +229,46 @@ impl AbsolutePositionEvent<TestInputBackend> for TestPointerMotionEvent {
 impl PointerMotionAbsoluteEvent<TestInputBackend> for TestPointerMotionEvent {}
 
 #[derive(Clone, Copy, Debug)]
+struct TestTouchEvent {
+    time: InputTime,
+    slot: u32,
+    x: i32,
+    y: i32,
+}
+impl Event<TestInputBackend> for TestTouchEvent {
+    fn time(&self) -> InputTime {
+        self.time
+    }
+    fn device(&self) -> TestInputDevice {
+        TestInputDevice
+    }
+}
+impl AbsolutePositionEvent<TestInputBackend> for TestTouchEvent {
+    fn x(&self) -> f64 {
+        f64::from(self.x)
+    }
+    fn y(&self) -> f64 {
+        f64::from(self.y)
+    }
+    fn x_transformed(&self, _: i32) -> f64 {
+        self.x()
+    }
+    fn y_transformed(&self, _: i32) -> f64 {
+        self.y()
+    }
+}
+impl smithay::backend::input::TouchEvent<TestInputBackend> for TestTouchEvent {
+    fn slot(&self) -> smithay::backend::input::TouchSlot {
+        Some(self.slot).into()
+    }
+}
+impl smithay::backend::input::TouchDownEvent<TestInputBackend> for TestTouchEvent {}
+impl smithay::backend::input::TouchMotionEvent<TestInputBackend> for TestTouchEvent {}
+impl smithay::backend::input::TouchUpEvent<TestInputBackend> for TestTouchEvent {}
+impl smithay::backend::input::TouchCancelEvent<TestInputBackend> for TestTouchEvent {}
+impl smithay::backend::input::TouchFrameEvent<TestInputBackend> for TestTouchEvent {}
+
+#[derive(Clone, Copy, Debug)]
 struct TestPointerRelativeMotionEvent {
     time: InputTime,
     dx: i32,
@@ -373,11 +413,11 @@ impl InputBackend for TestInputBackend {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    type TouchDownEvent = UnusedEvent;
-    type TouchUpEvent = UnusedEvent;
-    type TouchMotionEvent = UnusedEvent;
-    type TouchCancelEvent = UnusedEvent;
-    type TouchFrameEvent = UnusedEvent;
+    type TouchDownEvent = TestTouchEvent;
+    type TouchUpEvent = TestTouchEvent;
+    type TouchMotionEvent = TestTouchEvent;
+    type TouchCancelEvent = TestTouchEvent;
+    type TouchFrameEvent = TestTouchEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
@@ -436,6 +476,41 @@ impl NickelSession {
         }
         let time = InputTime::now();
         let event = match input {
+            TestInput::TouchDown { slot, x, y } | TestInput::TouchMotion { slot, x, y } => {
+                if slot > 31 || !self.point_is_on_an_output(x, y) {
+                    return Err("invalid test touch slot or position".into());
+                }
+                let event = TestTouchEvent { time, slot, x, y };
+                if matches!(input, TestInput::TouchDown { .. }) {
+                    InputEvent::TouchDown { event }
+                } else {
+                    InputEvent::TouchMotion { event }
+                }
+            }
+            TestInput::TouchUp { slot } | TestInput::TouchCancel { slot } => {
+                if slot > 31 {
+                    return Err("invalid test touch slot".into());
+                }
+                let event = TestTouchEvent {
+                    time,
+                    slot,
+                    x: 0,
+                    y: 0,
+                };
+                if matches!(input, TestInput::TouchUp { .. }) {
+                    InputEvent::TouchUp { event }
+                } else {
+                    InputEvent::TouchCancel { event }
+                }
+            }
+            TestInput::TouchFrame => InputEvent::TouchFrame {
+                event: TestTouchEvent {
+                    time,
+                    slot: 0,
+                    x: 0,
+                    y: 0,
+                },
+            },
             TestInput::Key { key, state } => InputEvent::Keyboard {
                 event: TestKeyEvent {
                     time,

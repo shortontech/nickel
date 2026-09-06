@@ -489,6 +489,9 @@ enum SettingsMessage {
         handler_id: String,
     },
     SetCodexEnabled(bool),
+    SetOnScreenKeyboard(nickel_core::on_screen_keyboard::KeyboardPreference),
+    KeyboardPreviewChanged(String),
+    TryOnScreenKeyboard,
     ConfirmDisableCodex,
     CancelDisableCodex,
     ToggleCodexSourceSelect,
@@ -883,6 +886,9 @@ impl SettingsApp {
     fn handle_settings_message(&mut self, message: SettingsMessage) {
         match message {
             SettingsMessage::Navigate(page) => {
+                if page != SettingsPage::OptionalFeatures {
+                    self.keyboard_preview.clear();
+                }
                 self.page = page;
                 self.active_destination = Some(page);
                 match page {
@@ -898,6 +904,9 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::NavigateTarget(page, target) => {
+                if page != SettingsPage::OptionalFeatures {
+                    self.keyboard_preview.clear();
+                }
                 self.page = page;
                 self.active_destination = Some(page);
                 self.sidebar_query.clear();
@@ -961,6 +970,45 @@ impl SettingsApp {
             }
             SettingsMessage::SetCodexEnabled(enabled) => {
                 self.request_codex_enabled(enabled, false);
+            }
+            SettingsMessage::SetOnScreenKeyboard(preference) => {
+                if self
+                    .keyboard_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.environment_override)
+                {
+                    return;
+                }
+                self.keyboard_error = None;
+                if self.persistence_enabled {
+                    match try_update_optional_feature_settings(|settings| {
+                        settings.on_screen_keyboard = preference;
+                        settings.on_screen_keyboard_generation =
+                            settings.on_screen_keyboard_generation.saturating_add(1);
+                    }) {
+                        Ok(settings) => self.optional_features = settings,
+                        Err(error) => self.keyboard_error = Some(error),
+                    }
+                } else {
+                    self.optional_features.on_screen_keyboard = preference;
+                    self.optional_features.on_screen_keyboard_generation = self
+                        .optional_features
+                        .on_screen_keyboard_generation
+                        .saturating_add(1);
+                }
+            }
+            SettingsMessage::KeyboardPreviewChanged(text) => self.keyboard_preview = text,
+            SettingsMessage::TryOnScreenKeyboard => {
+                self.pending_effects.push(SettingsEffect::FocusControl(
+                    "on-screen-keyboard-preview".into(),
+                ));
+                if self.persistence_enabled
+                    && let Err(error) = session_request(SessionRequest::Command(
+                        SessionCommand::RequestOnScreenKeyboard,
+                    ))
+                {
+                    self.keyboard_error = Some(format!("Could not open the keyboard: {error}"));
+                }
             }
             SettingsMessage::ConfirmDisableCodex => self.request_codex_enabled(false, true),
             SettingsMessage::CancelDisableCodex => self.codex_disable_confirmation = false,
@@ -1461,9 +1509,20 @@ impl SettingsApp {
     }
 
     fn refresh_optional_feature_state(&mut self) {
+        if self.persistence_enabled {
+            self.keyboard_runtime =
+                match session_request(SessionRequest::Query(SessionQuery::OnScreenKeyboard)) {
+                    Ok(ServerMessage::OnScreenKeyboard(snapshot)) => Some(snapshot),
+                    _ => None,
+                };
+        }
         let disk = OptionalFeatureSettings::load_default();
         let runtime = OptionalFeatureRuntime::load_default();
         let external_change = self.persistence_enabled && disk != self.optional_features;
+        let codex_changed = external_change
+            && (disk.codex_enabled != self.optional_features.codex_enabled
+                || disk.codex_generation != self.optional_features.codex_generation
+                || disk.codex_source != self.optional_features.codex_source);
         if external_change {
             self.optional_features = disk;
         }
@@ -1474,7 +1533,7 @@ impl SettingsApp {
             || policy_source != self.codex_feature.capability.policy_source;
         self.codex_feature.capability.policy = policy;
         self.codex_feature.capability.policy_source = policy_source;
-        if external_change {
+        if codex_changed {
             self.start_codex_probe();
         }
         if external_change || runtime_change || policy_change {
@@ -3795,6 +3854,65 @@ mod tests {
 
         assert!(!host.application().shell_settings.bar_on_all_displays);
         assert!(!host.application().shell_settings.all_windows_on_every_bar);
+    }
+
+    #[test]
+    fn keyboard_override_preserves_saved_mode_and_preview_is_disposable() {
+        use nickel_core::on_screen_keyboard::KeyboardPreference;
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.keyboard_runtime = Some(nickel_session_protocol::OnScreenKeyboardSnapshot {
+            environment_override: true,
+            enabled: true,
+            ..Default::default()
+        });
+        let before = app.optional_features.clone();
+        app.handle_settings_message(SettingsMessage::SetOnScreenKeyboard(
+            KeyboardPreference::Disabled,
+        ));
+        assert_eq!(app.optional_features, before);
+        app.handle_settings_message(SettingsMessage::KeyboardPreviewChanged("temporary".into()));
+        app.handle_settings_message(SettingsMessage::Navigate(SettingsPage::Appearance));
+        assert!(app.keyboard_preview.is_empty());
+    }
+
+    #[test]
+    fn keyboard_modes_remain_reachable_in_a_720p_settings_window() {
+        use nickel_core::on_screen_keyboard::KeyboardPreference;
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        let codex_enabled = app.optional_features.codex_enabled;
+        let mut host = UiHost::new(app, 960, 498);
+        let mut sequence = 1;
+        for preference in [
+            KeyboardPreference::Enabled,
+            KeyboardPreference::Disabled,
+            KeyboardPreference::Automatic,
+        ] {
+            let target = host
+                .unique_semantic_target_for_message(&SettingsMessage::SetOnScreenKeyboard(
+                    preference,
+                ))
+                .expect("visible keyboard mode");
+            assert!(
+                target.bounds.origin.y >= 0.0
+                    && target.bounds.origin.y + target.bounds.size.height <= 498.0
+            );
+            assert!(target.bounds.size.height >= 40.0);
+            let x = f64::from(target.bounds.origin.x + target.bounds.size.width / 2.0);
+            let y = f64::from(target.bounds.origin.y + target.bounds.size.height / 2.0);
+            host.handle_input(&primary_event(sequence, KeyEdge::Pressed, x, y), None);
+            host.handle_input(&primary_event(sequence + 1, KeyEdge::Released, x, y), None);
+            sequence += 2;
+            assert_eq!(
+                host.application().optional_features.on_screen_keyboard,
+                preference
+            );
+            assert_eq!(
+                host.application().optional_features.codex_enabled,
+                codex_enabled
+            );
+        }
     }
 
     #[test]

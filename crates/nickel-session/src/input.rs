@@ -197,6 +197,18 @@ impl NickelSession {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
+        use smithay::backend::input::{Device, DeviceCapability};
+        match &event {
+            InputEvent::DeviceAdded { device }
+                if device.has_capability(DeviceCapability::Touch) && device.syspath().is_some() =>
+            {
+                self.on_screen_keyboard.touchscreens.insert(device.id());
+            }
+            InputEvent::DeviceRemoved { device } => {
+                self.on_screen_keyboard.touchscreens.remove(&device.id());
+            }
+            _ => {}
+        }
         self.note_input_activity();
         if self.shell_recovery_visible() {
             match &event {
@@ -589,6 +601,11 @@ impl NickelSession {
                         .is_none_or(|window| self.shell_windows().any(|shell| shell == window));
                     let target = if target.as_ref() == self.launcher_window.as_ref() {
                         LauncherPointerTarget::Launcher
+                    } else if target
+                        .as_ref()
+                        .is_some_and(|window| self.is_on_screen_keyboard_window(window))
+                    {
+                        LauncherPointerTarget::OnScreenKeyboard
                     } else {
                         LauncherPointerTarget::Other
                     };
@@ -838,7 +855,8 @@ impl NickelSession {
                             .x11_surface()
                             .is_some_and(|surface| surface.is_override_redirect());
                         if !unmanaged_x11_popup {
-                            self.space.raise_element(&window, true);
+                            let activate = !self.is_on_screen_keyboard_window(&window);
+                            self.space.raise_element(&window, activate);
                             if let Some(surface) = window.x11_surface() {
                                 self.raise_x11_surface(surface);
                             }
@@ -857,7 +875,9 @@ impl NickelSession {
                                     WindowPointerEffect::ActivateWindow(_) => {}
                                 }
                             }
-                            if !self.is_panel_window(&window) {
+                            if !self.is_panel_window(&window)
+                                && !self.is_on_screen_keyboard_window(&window)
+                            {
                                 self.space.elements().for_each(|candidate| {
                                     candidate.set_activated(candidate == &window);
                                 });
@@ -1017,6 +1037,21 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                if let Some(window) = self
+                    .space
+                    .element_under(location)
+                    .map(|(window, _)| window.clone())
+                    && !self.is_on_screen_keyboard_window(&window)
+                    && !self.is_panel_window(&window)
+                {
+                    if let Some(id) = window
+                        .wl_surface()
+                        .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+                    {
+                        self.activate_window(id);
+                    }
+                    self.request_on_screen_keyboard();
+                }
                 self.record_interaction_output(location);
                 self.active_touch_slots.insert(event.slot());
                 let touch = self.seat.get_touch().unwrap();

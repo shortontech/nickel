@@ -121,8 +121,12 @@ fn panel_status_layout(width: u32, tray_count: usize, codex_available: bool) -> 
     }
 }
 
+#[path = "live_shell/keyboard.rs"]
+mod keyboard;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PanelHover {
+    OnScreenKeyboard,
     Launcher,
     Task(usize),
     Codex,
@@ -132,6 +136,7 @@ enum PanelHover {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum PanelAction {
+    OnScreenKeyboard,
     Launcher,
     Task(usize),
     TaskContext(usize),
@@ -1647,6 +1652,8 @@ impl nickel_ui::Application for VolumeOsdApplication {
 }
 
 pub struct PanelApplication {
+    keyboard_enabled: bool,
+    keyboard_visible: bool,
     launcher: Launcher,
     windows: Vec<OpenWindow>,
     tray: Vec<TrayItem>,
@@ -1853,6 +1860,8 @@ impl PanelApplication {
         ));
         let (clock, date) = panel_clock_text();
         Self {
+            keyboard_enabled: false,
+            keyboard_visible: false,
             launcher,
             windows: Vec::new(),
             tray: Vec::new(),
@@ -2149,6 +2158,15 @@ pub struct LiveShell {
     secure_storage_query_error: Option<(platform::SessionRequestError, Instant)>,
     requested_codex_project: Option<String>,
     screenshot: ScreenshotTool,
+    keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
+    keyboard_visible: bool,
+    keyboard_enabled: bool,
+    keyboard_dock_top: bool,
+    #[cfg(target_os = "linux")]
+    keyboard_override: nickel_core::on_screen_keyboard::KeyboardOverride,
+    keyboard_deadline: Instant,
+    keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
+    keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
 }
 
 #[derive(Default)]
@@ -2394,6 +2412,8 @@ impl LiveShell {
         let (clock, date) = panel_clock_text();
         let panel_host = nickel_ui::UiHost::new(
             PanelApplication {
+                keyboard_enabled: false,
+                keyboard_visible: false,
                 launcher: launcher.clone(),
                 windows: windows.clone(),
                 tray: tray.clone(),
@@ -2499,6 +2519,26 @@ impl LiveShell {
             secure_storage_query_error,
             requested_codex_project: None,
             screenshot: ScreenshotTool::default(),
+            keyboard_host: nickel_ui::UiHost::new(
+                nickel_ui::on_screen_keyboard::KeyboardApp::new(palette),
+                1280,
+                420,
+            ),
+            keyboard_visible: false,
+            keyboard_enabled: false,
+            keyboard_dock_top: false,
+            keyboard_deadline: Instant::now(),
+            keyboard_gesture_leases: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            keyboard_override: {
+                let value = std::env::var(nickel_core::on_screen_keyboard::ENVIRONMENT_VARIABLE)
+                    .unwrap_or_else(|_| "auto".into());
+                nickel_core::on_screen_keyboard::KeyboardOverride::parse(&value).unwrap_or_else(|| {
+                    eprintln!("Invalid NICKEL_ON_SCREEN_KEYBOARD value; using saved keyboard preference");
+                    Default::default()
+                })
+            },
+            keyboard_recipient: None,
         })
     }
 
@@ -2788,6 +2828,17 @@ impl LiveShell {
             SurfaceRole::WindowContextMenu => self.window_menu_scene(),
             SurfaceRole::Lock => self.lock_scene(width, height),
             SurfaceRole::Screenshot => self.screenshot.scene(width, height, self.palette),
+            SurfaceRole::OnScreenKeyboard => {
+                self.keyboard_host
+                    .application_mut()
+                    .set_palette(self.palette);
+                self.keyboard_host.step(nickel_ui::HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![nickel_ui::HostEvent::Poll],
+                    ..Default::default()
+                });
+                self.keyboard_host.commands().to_vec()
+            }
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
         }
     }
@@ -3041,6 +3092,7 @@ impl LiveShell {
             SurfaceRole::CodexProjectMenu => self.codex_project_menu_visible,
             SurfaceRole::Lock => self.locked,
             SurfaceRole::Screenshot => self.screenshot.visible(),
+            SurfaceRole::OnScreenKeyboard => self.keyboard_visible,
             SurfaceRole::CodexChat => true,
         }
     }
@@ -3060,6 +3112,7 @@ impl LiveShell {
             }
         };
         push("desktop", self.desktop_deadline);
+        push("on-screen-keyboard", Some(self.keyboard_deadline));
         push("panel", self.panel_deadline);
         push("lock", self.lock_deadline);
         push("control", self.control_deadline);
@@ -3100,6 +3153,7 @@ impl LiveShell {
                 .as_ref()
                 .map(|host| host_token(host.inspect())),
             SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
+            SurfaceRole::OnScreenKeyboard => Some(host_token(self.keyboard_host.inspect())),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
         }
     }
@@ -3151,6 +3205,12 @@ impl LiveShell {
             events: vec![event],
             ..HostBatch::default()
         });
+        if action == ControllerAction::Confirm
+            && outcome.text_input_active
+            && self.launcher_host.controller_targets_text_input()
+        {
+            self.set_keyboard_visible(true);
+        }
         let actions = self.launcher_host.application_mut().take_effects();
         for action in actions {
             self.apply_launcher_action(action);
@@ -3249,6 +3309,16 @@ impl LiveShell {
             redraw: self.poll_host_deadlines(now),
             ..ShellDeadlineOutcome::default()
         };
+        if now >= self.keyboard_deadline {
+            let visible = self.keyboard_visible;
+            if self.refresh_keyboard() {
+                outcome.redraw.push(SurfaceRole::OnScreenKeyboard);
+                outcome.redraw.push(SurfaceRole::Panel);
+            }
+            outcome.visibility_changed |= visible != self.keyboard_visible;
+            self.keyboard_deadline =
+                now + Duration::from_millis(if self.keyboard_enabled { 100 } else { 1000 });
+        }
         if let Some((index, deadline)) = self.preview_pending
             && now >= deadline
         {
@@ -3413,6 +3483,9 @@ impl LiveShell {
         }
         match action {
             PanelAction::Launcher => self.set_launcher_visible(!self.launcher_visible),
+            PanelAction::OnScreenKeyboard => {
+                self.set_keyboard_visible(!self.keyboard_visible);
+            }
             PanelAction::Task(index) => {
                 let panel_windows = self.panel_windows();
                 let groups = self.launcher.taskbar_applications(&panel_windows);
@@ -3554,6 +3627,60 @@ impl LiveShell {
         target: &ShellSemanticTarget,
     ) -> Option<ResolvedShellTarget> {
         match target {
+            ShellSemanticTarget::OnScreenKeyboard { key } => {
+                use nickel_core::on_screen_keyboard::{
+                    KeyboardPanel, compact_us_keyboard_rows, us_keyboard_rows,
+                };
+                use nickel_ui::on_screen_keyboard::KeyboardMessage;
+                let message = if key == "osk-hide" {
+                    KeyboardMessage::Hide
+                } else if key == "osk-dock" {
+                    KeyboardMessage::ToggleDock
+                } else if key == "osk-persistent-modifiers" {
+                    KeyboardMessage::PersistentModifiers
+                } else {
+                    let definition = [
+                        KeyboardPanel::Letters,
+                        KeyboardPanel::Symbols,
+                        KeyboardPanel::Navigation,
+                    ]
+                    .into_iter()
+                    .flat_map(|panel| {
+                        us_keyboard_rows(panel)
+                            .into_iter()
+                            .chain(compact_us_keyboard_rows(panel))
+                    })
+                    .flatten()
+                    .find(|definition| definition.id == *key)?;
+                    KeyboardMessage::Key(definition.key)
+                };
+                let node = self
+                    .keyboard_host
+                    .semantic_targets_for_message(&message)
+                    .into_iter()
+                    .next()?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::OnScreenKeyboard,
+                    output: None,
+                    x: (node.bounds.origin.x + node.bounds.size.width / 2.0).round() as i32,
+                    y: (node.bounds.origin.y + node.bounds.size.height / 2.0).round() as i32,
+                    interaction: PointerInteraction::LeftClick,
+                })
+            }
+            ShellSemanticTarget::OnScreenKeyboardToggle => {
+                let target = self
+                    .panel_host
+                    .semantic_targets_for_message(&PanelAction::OnScreenKeyboard)
+                    .into_iter()
+                    .next()?;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Panel,
+                    output: self.panel_output.clone(),
+                    x: (target.bounds.origin.x + target.bounds.size.width / 2.0).round() as i32,
+                    y: (target.bounds.origin.y + target.bounds.size.height / 2.0).round() as i32,
+                    interaction: PointerInteraction::LeftClick,
+                })
+            }
             ShellSemanticTarget::PanelApplication {
                 application_id,
                 output,
@@ -3687,6 +3814,7 @@ impl LiveShell {
 
     fn panel_hover_for_action(&self, action: &PanelAction) -> Option<PanelHover> {
         Some(match action {
+            PanelAction::OnScreenKeyboard => PanelHover::OnScreenKeyboard,
             PanelAction::Launcher => PanelHover::Launcher,
             PanelAction::Task(index)
             | PanelAction::TaskContext(index)
@@ -5339,6 +5467,10 @@ impl LiveShell {
             .collect();
         let visible_panel_hover = self.visible_panel_hover();
         let application = self.panel_host.application_mut();
+        let keyboard_changed = application.keyboard_enabled != self.keyboard_enabled
+            || application.keyboard_visible != self.keyboard_visible;
+        application.keyboard_enabled = self.keyboard_enabled;
+        application.keyboard_visible = self.keyboard_visible;
         let task_icons_changed = application.task_icons.len() != task_icons.len()
             || application
                 .task_icons
@@ -5360,7 +5492,8 @@ impl LiveShell {
             || application.control_visible != self.control_visible
             || application.launcher.codex_available() != self.launcher.codex_available()
             || application.launcher.preferences() != self.launcher.preferences()
-            || task_icons_changed;
+            || task_icons_changed
+            || keyboard_changed;
         application.launcher.clone_from(&self.launcher);
         application.windows = panel_windows;
         application.tray.clone_from(&self.tray);
@@ -5533,6 +5666,25 @@ impl PanelApplication {
             );
         }
         row = row.child(Spacer::flex());
+        if self.keyboard_enabled {
+            row = row.child(
+                Container::new()
+                    .id("panel-on-screen-keyboard")
+                    .accessibility_label("On-screen keyboard")
+                    .semantic_role(SemanticRole::Button)
+                    .message(PanelAction::OnScreenKeyboard)
+                    .width(48.0)
+                    .height(height)
+                    .justify_content(nickel_ui::Justify::Center)
+                    .align_items(nickel_ui::Align::Center)
+                    .background(interactive_background(
+                        self.panel_hover == Some(PanelHover::OnScreenKeyboard),
+                        self.keyboard_visible,
+                    ))
+                    .radius(8.0)
+                    .child(Text::new("⌨").scale(24.0).color(self.palette.text)),
+            );
+        }
         if self.launcher.codex_available() {
             row = row.child(
                 Container::new()

@@ -8,6 +8,7 @@ pub enum LauncherVisibility {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LauncherPointerTarget {
     Launcher,
+    OnScreenKeyboard,
     Other,
 }
 
@@ -101,6 +102,7 @@ mod tests {
     fn only_an_outside_pointer_press_dismisses_a_visible_launcher() {
         let mut visibility = LauncherVisibility::Visible;
         assert!(!visibility.pointer_press(LauncherPointerTarget::Launcher));
+        assert!(!visibility.pointer_press(LauncherPointerTarget::OnScreenKeyboard));
         assert!(visibility.is_visible());
         assert!(visibility.pointer_press(LauncherPointerTarget::Other));
         assert!(!visibility.is_visible());

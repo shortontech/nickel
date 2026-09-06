@@ -7,6 +7,7 @@ pub mod document_selection;
 pub mod gpu;
 pub mod input;
 pub mod layout;
+pub mod on_screen_keyboard;
 pub mod overlay;
 pub mod primitives;
 mod runtime;

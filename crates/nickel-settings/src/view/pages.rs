@@ -1,7 +1,7 @@
 use super::*;
 use nickel_ui::{
-    Column, ComponentBuilderExt, GridColumnSpec, RadioGroup, RadioOption, Row, SettingsListCard,
-    Text, TextField, Track,
+    Column, ComponentBuilderExt, Container, GridColumnSpec, RadioGroup, RadioOption, Row,
+    SettingsListCard, Text, TextField, Track,
 };
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
@@ -139,7 +139,7 @@ impl SettingsApp {
         } else {
             AnyView::new(ui! { <Column /> })
         };
-        SettingsCard::titled(
+        let codex = SettingsCard::titled(
             theme,
             "Codex integration",
             "Projects, conversations, and the built-in Codex client",
@@ -190,7 +190,115 @@ impl SettingsApp {
                 "No background workers, subscriptions, or warm Codex surfaces"
             },
         ))
-        .child(retry)
+        .child(retry);
+        use nickel_core::on_screen_keyboard::KeyboardPreference;
+        let preference = self.optional_features.on_screen_keyboard;
+        let editable = !self
+            .keyboard_runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.environment_override);
+        let mode = RadioGroup::new([
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Automatic),
+                "Automatic",
+                preference == KeyboardPreference::Automatic,
+            )
+            .description("Enable when a touchscreen is connected.")
+            .enabled(editable),
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Enabled),
+                "On",
+                preference == KeyboardPreference::Enabled,
+            )
+            .description("Available even without a touchscreen.")
+            .enabled(editable),
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetOnScreenKeyboard(KeyboardPreference::Disabled),
+                "Off",
+                preference == KeyboardPreference::Disabled,
+            )
+            .description("Hide the keyboard and its tray control.")
+            .enabled(editable),
+        ])
+        .id("on-screen-keyboard-mode");
+        let status = if let Some(error) = &self.keyboard_error {
+            format!("Could not save: {error}")
+        } else if let Some(runtime) = &self.keyboard_runtime {
+            if runtime.generation != self.optional_features.on_screen_keyboard_generation {
+                "Saved; waiting for the shell".into()
+            } else if runtime.environment_override {
+                format!(
+                    "{} for this session · controlled by the shell environment",
+                    if runtime.enabled { "On" } else { "Off" }
+                )
+            } else {
+                format!(
+                    "{} · {}",
+                    if runtime.enabled { "On" } else { "Off" },
+                    if runtime.touchscreen_present {
+                        "Touchscreen detected"
+                    } else {
+                        "No touchscreen detected"
+                    }
+                )
+            }
+        } else {
+            "Shell keyboard status unavailable".into()
+        };
+        let keyboard = SettingsCard::titled(
+            theme,
+            "On-screen keyboard",
+            "Type with touch, a controller, or a mouse",
+        )
+        .child(mode)
+        .child(SettingsRow::new(theme, "Current state", status))
+        .child(Text::new("Keyboard test · text is not saved").color(theme.text.secondary))
+        .child(
+            Container::new()
+                .fill_width()
+                .height(48.0)
+                .padding(Insets::all(4.0))
+                .background(theme.surfaces.raised)
+                .border(theme.borders.subtle, 1.0)
+                .radius(theme.radii.control)
+                .child(
+                    TextField::on_change_with_placeholder(
+                        &self.keyboard_preview,
+                        "Try typing here — this text is not saved",
+                        SettingsMessage::KeyboardPreviewChanged,
+                    )
+                    .id("on-screen-keyboard-preview")
+                    .accessibility_label("Keyboard test")
+                    .color(theme.text.primary)
+                    .height(40.0),
+                ),
+        )
+        .child(
+            Button::semantic(
+                theme,
+                SettingsMessage::TryOnScreenKeyboard,
+                "Try keyboard",
+                ButtonPresentation::Secondary,
+            )
+            .id("on-screen-keyboard-try")
+            .height(44.0)
+            .width(160.0)
+            .enabled(
+                self.keyboard_runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.enabled),
+            ),
+        );
+        Column::new()
+            .fill_width()
+            .grow(1.0)
+            .gap(16.0)
+            .overflow_y(nickel_ui::Overflow::Scroll)
+            .child(keyboard.shrink(0.0))
+            .child(codex.shrink(0.0))
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

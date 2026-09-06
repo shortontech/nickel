@@ -1366,6 +1366,16 @@ impl<A: Application> UiHost<A> {
         outcome
     }
 
+    /// Whether controller activation currently addresses an editable text field.
+    /// Controller adjustment mode is reserved for value controls, not text editors.
+    pub fn controller_targets_text_input(&self) -> bool {
+        self.state
+            .navigation()
+            .controller_selected()
+            .or_else(|| self.state.focused())
+            .is_some_and(|target| self.tree.is_text_input(target))
+    }
+
     pub fn inspect(&self) -> HostInspection {
         HostInspection {
             frame_generation: self.frame_generation,
@@ -3215,12 +3225,24 @@ mod tests {
     }
 
     #[test]
+    fn controller_text_entry_does_not_require_slider_adjustment_mode() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        let field = host.semantic_nodes()[0].id.clone();
+        assert!(host.request_focus(field).changed);
+        host.handle_controller_action(ControllerAction::Confirm);
+        assert!(host.controller_targets_text_input());
+        assert!(host.input_context().text_focused);
+        assert!(!host.inspect().controller_editing);
+    }
+
+    #[test]
     fn focused_button_is_not_reported_as_a_text_editor() {
         let mut host = UiHost::new(ControllerApplication, 320, 48);
         let button = host.semantic_nodes()[0].id.clone();
 
         assert!(host.request_focus(button).changed);
         assert!(!host.input_context().text_focused);
+        assert!(!host.controller_targets_text_input());
     }
 
     #[test]

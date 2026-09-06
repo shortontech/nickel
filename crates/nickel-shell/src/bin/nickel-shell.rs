@@ -423,6 +423,7 @@ struct EmbeddedUiSurface<A: Application> {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct EmbeddedControllerTransition {
+    open_keyboard: bool,
     changed: bool,
     dismiss_surface: bool,
 }
@@ -547,6 +548,9 @@ fn step_embedded_codex_controller(
     EmbeddedControllerTransition {
         changed: outcome.changed,
         dismiss_surface: false,
+        open_keyboard: action == ControllerAction::Confirm
+            && outcome.text_input_active
+            && host.host.controller_targets_text_input(),
     }
 }
 
@@ -1263,6 +1267,7 @@ fn session_visibility_role(role: SurfaceRole) -> Option<nickel_session_protocol:
         SurfaceRole::WindowContextMenu => Some(ShellRole::ContextMenu),
         SurfaceRole::CodexProjectMenu => Some(ShellRole::ProjectMenu),
         SurfaceRole::Screenshot => Some(ShellRole::Screenshot),
+        SurfaceRole::OnScreenKeyboard => Some(ShellRole::OnScreenKeyboard),
         SurfaceRole::Desktop
         | SurfaceRole::Panel
         | SurfaceRole::Launcher
@@ -1510,6 +1515,17 @@ fn handle_shell_input(
             .unwrap_or_default();
         if state.lock_host_input(event, width, height) {
             render_role(shell, state, SurfaceRole::Lock)?;
+        }
+        return Ok(());
+    }
+    if role == SurfaceRole::OnScreenKeyboard {
+        let (width, height) = shell
+            .surface(surface)
+            .map(|entry| entry.window().size())
+            .unwrap_or_default();
+        if state.keyboard_host_input(event, width, height) {
+            sync_visibility(shell, state);
+            render_role(shell, state, role)?;
         }
         return Ok(());
     }
@@ -1805,6 +1821,13 @@ fn handle_controller_action(
         }
         return Ok(());
     }
+    if state.surface_visible(SurfaceRole::OnScreenKeyboard) {
+        if state.keyboard_controller(action) {
+            sync_visibility(shell, state);
+            render_role(shell, state, SurfaceRole::OnScreenKeyboard)?;
+        }
+        return Ok(());
+    }
     let focused_surface = shell
         .surfaces()
         .find(|surface| surface.window().has_input_focus())
@@ -1850,6 +1873,10 @@ fn handle_controller_action(
             state.hide_overlay(SurfaceRole::CodexProjectMenu);
             set_surface_visibility(shell, surface, SurfaceRole::CodexProjectMenu, false);
         }
+        if transition.open_keyboard {
+            state.set_keyboard_visible(true);
+            sync_visibility(shell, state);
+        }
         return Ok(());
     }
     let (width, height) = entry.window().size();
@@ -1863,6 +1890,7 @@ fn handle_controller_action(
         SurfaceRole::Desktop => state.desktop_controller(action),
         SurfaceRole::Launcher => unreachable!("launcher controller input is handled semantically"),
         SurfaceRole::Screenshot => state.screenshot_controller(action),
+        SurfaceRole::OnScreenKeyboard => state.keyboard_controller(action),
         _ => false,
     };
     if changed {

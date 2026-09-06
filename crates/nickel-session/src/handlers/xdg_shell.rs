@@ -798,6 +798,7 @@ impl NickelSession {
                     | ShellRole::VolumeOsd
                     | ShellRole::ProjectMenu
                     | ShellRole::Screenshot
+                    | ShellRole::OnScreenKeyboard
                     | ShellRole::Recovery
             )
         );

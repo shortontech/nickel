@@ -217,6 +217,16 @@ impl SettingsApp {
                         "optional-feature-codex-enabled".into(),
                     ),
                 ),
+                SettingsSearchEntry::new(
+                    &optional_features_label,
+                    "On-screen keyboard",
+                    "Screen keyboard · touch keyboard · virtual keyboard",
+                    "on-screen-keyboard-preview",
+                    SettingsMessage::NavigateTarget(
+                        SettingsPage::OptionalFeatures,
+                        "on-screen-keyboard-preview".into(),
+                    ),
+                ),
             ];
             let results = search_settings(&query, &entries);
             if !results.is_empty() {

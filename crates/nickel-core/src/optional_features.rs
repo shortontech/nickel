@@ -11,12 +11,14 @@ use std::{
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OptionalFeatureId {
     Codex,
+    OnScreenKeyboard,
 }
 
 impl OptionalFeatureId {
     pub const fn stable_id(self) -> &'static str {
         match self {
             Self::Codex => "codex",
+            Self::OnScreenKeyboard => "on_screen_keyboard",
         }
     }
 }
@@ -248,6 +250,8 @@ pub struct OptionalFeatureSettings {
     /// Monotonic request identity used to reject stale runtime acknowledgements.
     pub codex_generation: u64,
     pub codex_source: CodexSource,
+    pub on_screen_keyboard: crate::on_screen_keyboard::KeyboardPreference,
+    pub on_screen_keyboard_generation: u64,
 }
 
 impl Default for OptionalFeatureSettings {
@@ -257,6 +261,8 @@ impl Default for OptionalFeatureSettings {
             codex_enabled: true,
             codex_generation: 0,
             codex_source: CodexSource::default(),
+            on_screen_keyboard: Default::default(),
+            on_screen_keyboard_generation: 0,
         }
     }
 }
@@ -357,6 +363,15 @@ impl OptionalFeatureSettings {
                     settings.codex_generation = value.trim().parse().unwrap_or_default();
                 }
                 "codex.source" => settings.codex_source = parse_source(value.trim()),
+                "on_screen_keyboard.preference" => {
+                    settings.on_screen_keyboard =
+                        crate::on_screen_keyboard::KeyboardPreference::parse(value)
+                            .unwrap_or_default();
+                }
+                "on_screen_keyboard.generation" => {
+                    settings.on_screen_keyboard_generation =
+                        value.trim().parse().unwrap_or_default();
+                }
                 _ => {}
             }
         }
@@ -375,8 +390,11 @@ impl OptionalFeatureSettings {
         atomic_write(
             path,
             format!(
-                "version=1\ncodex.enabled={}\ncodex.generation={}\ncodex.source={source}\n",
-                self.codex_enabled, self.codex_generation
+                "version=1\ncodex.enabled={}\ncodex.generation={}\ncodex.source={source}\non_screen_keyboard.preference={}\non_screen_keyboard.generation={}\n",
+                self.codex_enabled,
+                self.codex_generation,
+                self.on_screen_keyboard.as_str(),
+                self.on_screen_keyboard_generation
             ),
         )
     }
@@ -837,6 +855,46 @@ mod tests {
             OptionalFeatureSettings::default()
         );
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn keyboard_preference_updates_preserve_codex_and_migrate_missing_values() {
+        use crate::on_screen_keyboard::KeyboardPreference;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("features.conf");
+        fs::write(
+            &path,
+            "version=1\ncodex.enabled=false\ncodex.generation=42\n",
+        )
+        .unwrap();
+        let loaded = OptionalFeatureSettings::load(&path).unwrap();
+        assert_eq!(loaded.on_screen_keyboard, KeyboardPreference::Automatic);
+        for preference in [
+            KeyboardPreference::Enabled,
+            KeyboardPreference::Disabled,
+            KeyboardPreference::Automatic,
+        ] {
+            let updated = OptionalFeatureSettings::update(&path, |settings| {
+                settings.on_screen_keyboard = preference;
+                settings.on_screen_keyboard_generation += 1;
+            })
+            .unwrap();
+            assert!(!updated.codex_enabled);
+            assert_eq!(updated.codex_generation, 42);
+            assert_eq!(OptionalFeatureSettings::load(&path).unwrap(), updated);
+        }
+        let stored = OptionalFeatureSettings::load(&path).unwrap();
+        assert_eq!(stored.on_screen_keyboard_generation, 3);
+        // Environment resolution cannot mutate the stored preference.
+        assert!(
+            crate::on_screen_keyboard::resolve_enablement(
+                stored.on_screen_keyboard,
+                crate::on_screen_keyboard::KeyboardOverride::Enabled,
+                crate::on_screen_keyboard::TouchscreenPresence::Absent,
+            )
+            .enabled
+        );
+        assert_eq!(OptionalFeatureSettings::load(&path).unwrap(), stored);
     }
 
     #[test]

@@ -20,6 +20,12 @@ Usage:
   nickel-test-input output-set NAME enabled|disabled
   nickel-test-input surfaces
   nickel-test-input readiness
+  nickel-test-input keyboard-status
+  nickel-test-input semantic keyboard KEY_ID
+  nickel-test-input semantic keyboard-toggle
+  nickel-test-input touch down|move SLOT X Y
+  nickel-test-input touch up|cancel SLOT
+  nickel-test-input touch frame
   nickel-test-input output-connect NAME WIDTH HEIGHT SCALE_120 normal|90|180|270
   nickel-test-input output-disconnect NAME
   nickel-test-input workspace-create
@@ -50,6 +56,7 @@ Usage:
 ";
 
 enum Parsed {
+    KeyboardStatus,
     Input(TestInput),
     Semantic(ShellSemanticTarget),
     GroupedWindowsScenario(String),
@@ -118,6 +125,15 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
         }),
         [command] if command == "surfaces" => Ok(Parsed::Surfaces),
         [command] if command == "readiness" => Ok(Parsed::Readiness),
+        [command] if command == "keyboard-status" => Ok(Parsed::KeyboardStatus),
+        [command, kind, key] if command == "semantic" && kind == "keyboard" => {
+            Ok(Parsed::Semantic(ShellSemanticTarget::OnScreenKeyboard {
+                key: key.clone(),
+            }))
+        }
+        [command, kind] if command == "semantic" && kind == "keyboard-toggle" => Ok(
+            Parsed::Semantic(ShellSemanticTarget::OnScreenKeyboardToggle),
+        ),
         [command, name] if command == "output-disconnect" => {
             Ok(Parsed::OutputDisconnect(name.clone()))
         }
@@ -312,6 +328,31 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
             y: y.parse()
                 .map_err(|_| format!("invalid Y coordinate {y:?}"))?,
         })),
+        [command, phase, slot, x, y]
+            if command == "touch" && matches!(phase.as_str(), "down" | "move") =>
+        {
+            let slot = slot.parse().map_err(|_| "invalid touch slot")?;
+            let x = x.parse().map_err(|_| "invalid touch X coordinate")?;
+            let y = y.parse().map_err(|_| "invalid touch Y coordinate")?;
+            Ok(Parsed::Input(if phase == "down" {
+                TestInput::TouchDown { slot, x, y }
+            } else {
+                TestInput::TouchMotion { slot, x, y }
+            }))
+        }
+        [command, phase, slot]
+            if command == "touch" && matches!(phase.as_str(), "up" | "cancel") =>
+        {
+            let slot = slot.parse().map_err(|_| "invalid touch slot")?;
+            Ok(Parsed::Input(if phase == "up" {
+                TestInput::TouchUp { slot }
+            } else {
+                TestInput::TouchCancel { slot }
+            }))
+        }
+        [command, phase] if command == "touch" && phase == "frame" => {
+            Ok(Parsed::Input(TestInput::TouchFrame))
+        }
         [command, dx, dy] if command == "move-relative" => {
             Ok(Parsed::Input(TestInput::PointerMoveRelative {
                 dx: dx.parse().map_err(|_| format!("invalid X delta {dx:?}"))?,
@@ -659,6 +700,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         Parsed::Input(input) => (Some(Request::Command(Command::TestInput { input })), None),
+        Parsed::KeyboardStatus => (
+            Some(Request::Query(
+                nickel_session_protocol::Query::OnScreenKeyboard,
+            )),
+            None,
+        ),
         Parsed::Semantic(target) => (None, Some(target)),
         Parsed::GroupedWindowsScenario(_) => unreachable!("handled above"),
         Parsed::Windows => (
@@ -907,6 +954,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let response = response_envelope;
     match response.message {
         ServerMessage::Ack => Ok(()),
+        ServerMessage::OnScreenKeyboard(snapshot) => {
+            println!("{}", serde_json::to_string(&snapshot)?);
+            Ok(())
+        }
         ServerMessage::Windows(windows) => {
             for window in windows {
                 println!(
