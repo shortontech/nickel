@@ -4640,11 +4640,11 @@ mod tests {
     fn consumer_inventory_is_dependency_ordered_and_unique() {
         assert_eq!(
             validate_consumer_inventory().expect("valid consumer inventory"),
-            21
+            22
         );
         assert_eq!(
             validate_live_acceptance().expect("valid joined live acceptance ledger"),
-            21
+            22
         );
     }
 

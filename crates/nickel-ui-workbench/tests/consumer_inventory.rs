@@ -23,7 +23,7 @@ const HEADER: [&str; 20] = [
     "governing_specs",
 ];
 
-const REQUIRED_SURFACES: [&str; 21] = [
+const REQUIRED_SURFACES: [&str; 22] = [
     "ui-examples",
     "markdown-core",
     "markdown-viewer",
@@ -44,6 +44,7 @@ const REQUIRED_SURFACES: [&str; 21] = [
     "launcher-search",
     "hosted-codex-chat",
     "codex-chat",
+    "terminal",
     "workbench-custom-paint",
 ];
 
