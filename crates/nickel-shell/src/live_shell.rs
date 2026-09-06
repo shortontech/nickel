@@ -2482,6 +2482,21 @@ impl LiveShell {
                 self.send_window_action(window, WindowAction::Close);
             }
             PreviewAction::OpenMenu(window) => {
+                let x = self
+                    .preview_group
+                    .and_then(|index| {
+                        let panel_windows = self.panel_windows();
+                        let groups = self.launcher.taskbar_applications(&panel_windows);
+                        let group = groups.get(index)?;
+                        let (width, _) = preview_dimensions(group.windows.len());
+                        let preview_origin = self.preview_origin_x(index, width);
+                        let card = self
+                            .preview_frame
+                            .as_ref()?
+                            .semantic_bounds(PreviewAction::Activate(window))?;
+                        Some(preview_origin + card.origin.x.round() as i32)
+                    })
+                    .unwrap_or(self.panel_origin_x);
                 self.application_menu_target = None;
                 self.application_menu_host = None;
                 self.window_menu = Some(window);
@@ -2491,10 +2506,6 @@ impl LiveShell {
                     .find(|candidate| candidate.id == window)
                     .cloned();
                 self.window_menu_host = None;
-                let x = self.panel_origin_x
-                    + self.preview_group.map_or(0, |index| {
-                        (PANEL_ITEM_WIDTH + index as f32 * PANEL_ITEM_WIDTH) as i32
-                    });
                 self.window_menu_anchor_x = Some(x);
                 let _ = send_session_command(
                     "show-context-menu",

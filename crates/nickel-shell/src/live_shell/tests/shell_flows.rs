@@ -670,6 +670,34 @@
     }
 
     #[test]
+    fn preview_window_menus_anchor_to_their_distinct_cards() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher.set_preferences(LauncherPreferences::default());
+        let application = ApplicationId::new("org.example.Editor");
+        shell.windows = [WindowId(71), WindowId(72)]
+            .into_iter()
+            .map(|id| OpenWindow {
+                id,
+                application_id: Some(application.clone()),
+                active: id == WindowId(71),
+                title: format!("Document {}", id.0),
+                state: crate::model::WindowState::default(),
+            })
+            .collect();
+        shell.panel_origin_x = 300;
+        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        shell.open_window_preview(0);
+        let _ = shell.scene(SurfaceRole::WindowPreview, 640, 240);
+
+        shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(71)));
+        let first = shell.window_menu_anchor_x.expect("first card anchor");
+        shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(72)));
+        let second = shell.window_menu_anchor_x.expect("second card anchor");
+
+        assert!(second > first + 200, "each card must retain its own anchor");
+    }
+
+    #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
         let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
