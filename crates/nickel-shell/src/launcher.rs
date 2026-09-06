@@ -236,7 +236,7 @@ impl Default for Launcher {
             [
                 "Firefox",
                 "Files",
-                "Konsole",
+                "Nickel Terminal",
                 "System Settings",
                 "Visual Studio Code",
                 "Calculator",

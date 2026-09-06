@@ -18,6 +18,7 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         "nickel-session",
         "nickel",
         "nickel-settings",
+        "nickel-terminal",
     ] {
         executable(&release.join(binary));
     }
@@ -45,6 +46,7 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         "nickel-session",
         "nickel",
         "nickel-settings",
+        "nickel-terminal",
     ] {
         let installed = root.join("usr/local/bin").join(binary);
         let expected: &[u8] = if binary == "nickel-session" {
@@ -67,6 +69,10 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     assert!(desktop.contains("Exec=/usr/local/bin/nickel-login"));
     assert!(desktop.contains("TryExec=/usr/local/bin/nickel-login"));
     assert!(desktop.contains("DesktopNames=Nickel"));
+    let terminal = fs::read_to_string(root.join("usr/share/applications/nickel-terminal.desktop"))
+        .expect("installed terminal entry");
+    assert!(terminal.contains("Exec=nickel-terminal"));
+    assert!(terminal.contains("Terminal=false"));
     let portals = fs::read_to_string(root.join("usr/share/xdg-desktop-portal/nickel-portals.conf"))
         .expect("installed portal preference");
     assert!(portals.contains("default=gtk"));
@@ -86,6 +92,7 @@ fn installer_rejects_session_without_native_backend() {
         "nickel-session",
         "nickel",
         "nickel-settings",
+        "nickel-terminal",
     ] {
         executable(&release.join(binary));
     }

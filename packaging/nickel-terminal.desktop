@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Nickel Terminal
+Comment=Use the command line
+Exec=nickel-terminal
+Icon=utilities-terminal
+Terminal=false
+Categories=System;TerminalEmulator;
+StartupWMClass=nickel-terminal
