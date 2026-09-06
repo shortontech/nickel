@@ -45,7 +45,8 @@ use crate::{
         ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
         application_menu_entries, build_preview_frame, menu_height, menu_height_for_rows,
-        preview_dimensions, semantic_theme_from_palette, window_menu_max_rows,
+        preview_dimensions, semantic_theme_from_palette, validated_application_close_targets,
+        window_menu_max_rows,
     },
     winit_shell::SurfaceRole,
 };
@@ -2627,18 +2628,12 @@ impl LiveShell {
             ApplicationMenuAction::Dismiss => self.dismiss_window_menu(),
             ApplicationMenuAction::TogglePin(application) => self
                 .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
-            ApplicationMenuAction::CloseAll(windows) => {
+            ApplicationMenuAction::CloseAll => {
                 let Some(target) = self.application_menu_target.as_ref() else {
                     return;
                 };
-                for window in windows {
-                    if self.windows.iter().any(|candidate| {
-                        candidate.id == window
-                            && candidate.state.capabilities.close
-                            && target.contains_current_window(candidate)
-                    }) {
-                        self.send_window_action(window, WindowAction::Close);
-                    }
+                for window in validated_application_close_targets(target, &self.windows) {
+                    self.send_window_action(window, WindowAction::Close);
                 }
             }
         }

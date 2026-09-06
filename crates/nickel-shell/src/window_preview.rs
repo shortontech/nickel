@@ -261,7 +261,7 @@ impl ApplicationMenuTarget {
 pub enum ApplicationMenuAction {
     Dismiss,
     TogglePin(ApplicationId),
-    CloseAll(Vec<WindowId>),
+    CloseAll,
 }
 
 pub struct ApplicationMenuApp {
@@ -311,12 +311,27 @@ pub(crate) fn application_menu_entries(
         ));
     }
     if target.all_closeable {
-        entries.push((
-            "Close all windows".into(),
-            ApplicationMenuAction::CloseAll(target.windows.clone()),
-        ));
+        entries.push(("Close all windows".into(), ApplicationMenuAction::CloseAll));
     }
     entries
+}
+
+pub(crate) fn validated_application_close_targets(
+    target: &ApplicationMenuTarget,
+    current_windows: &[OpenWindow],
+) -> Vec<WindowId> {
+    target
+        .windows
+        .iter()
+        .copied()
+        .filter(|id| {
+            current_windows.iter().any(|window| {
+                window.id == *id
+                    && window.state.capabilities.close
+                    && target.contains_current_window(window)
+            })
+        })
+        .collect()
 }
 
 impl Application for ApplicationMenuApp {
@@ -1411,7 +1426,7 @@ mod tests {
         assert!(
             entries
                 .iter()
-                .all(|(_, action)| !matches!(action, ApplicationMenuAction::CloseAll(_)))
+                .all(|(_, action)| !matches!(action, ApplicationMenuAction::CloseAll))
         );
     }
 
@@ -1457,10 +1472,7 @@ mod tests {
                     "Pin to Nickel Bar".into(),
                     ApplicationMenuAction::TogglePin(application)
                 ),
-                (
-                    "Close all windows".into(),
-                    ApplicationMenuAction::CloseAll(vec![WindowId(1), WindowId(2)])
-                ),
+                ("Close all windows".into(), ApplicationMenuAction::CloseAll),
             ]
         );
         assert!(entries.iter().all(|(label, _)| {
@@ -1532,5 +1544,43 @@ mod tests {
             target.survives(&[], true),
             "a closed canonical pin still exists"
         );
+    }
+
+    #[test]
+    fn bulk_close_validation_never_retargets_or_expands_the_capture() {
+        let application = ApplicationId::new("org.nickel.One");
+        let window = |id, application_id: Option<ApplicationId>, close| OpenWindow {
+            id: WindowId(id),
+            application_id,
+            active: false,
+            title: format!("Window {id}"),
+            state: crate::model::WindowState {
+                capabilities: crate::model::WindowCapabilities {
+                    close,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        };
+        let target = ApplicationMenuTarget::capture(&WindowGroup {
+            application_id: Some(application.clone()),
+            application_name: "One".into(),
+            windows: vec![
+                window(3, Some(application.clone()), true),
+                window(1, Some(application.clone()), true),
+            ],
+        });
+        let current = vec![
+            window(1, Some(application.clone()), true),
+            window(2, Some(application.clone()), true), // joined after invocation
+            window(3, Some(ApplicationId::new("org.nickel.Other")), true), // reused
+            window(1, Some(application), true),         // duplicate feed observation
+        ];
+
+        assert_eq!(
+            validated_application_close_targets(&target, &current),
+            [WindowId(1)]
+        );
+        assert!(validated_application_close_targets(&target, &[]).is_empty());
     }
 }
