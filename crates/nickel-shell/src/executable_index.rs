@@ -406,6 +406,7 @@ fn scan_path_generation(
         }
         progress.directories_scanned += 1;
         let Ok(entries) = std::fs::read_dir(canonical) else {
+            complete = false;
             publish(snapshot, &commands, progress, started.elapsed());
             continue;
         };
@@ -419,7 +420,10 @@ fn scan_path_generation(
                 break 'directories;
             }
             progress.entries_inspected += 1;
-            let Ok(entry) = entry else { continue };
+            let Ok(entry) = entry else {
+                complete = false;
+                continue;
+            };
             let Some(command) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -428,6 +432,7 @@ fn scan_path_generation(
             }
             let path = entry.path();
             let Ok(before) = std::fs::metadata(&path) else {
+                complete = false;
                 continue;
             };
             if !before.is_file() || before.mode() & 0o111 == 0 {
@@ -445,6 +450,7 @@ fn scan_path_generation(
                 let Some((evidence, bytes_read)) =
                     inspect_executable(&path, &identity, generation, budgets)
                 else {
+                    complete = false;
                     continue;
                 };
                 progress.bytes_read = progress.bytes_read.saturating_add(bytes_read as u64);
@@ -1132,6 +1138,27 @@ mod tests {
         assert_eq!(snapshot.progress.generation, 9);
         assert_eq!(snapshot.progress.entries_inspected, 3);
         assert_eq!(snapshot.commands.len(), 3);
+    }
+
+    #[test]
+    fn inaccessible_path_directory_publishes_an_explicit_partial_generation() {
+        let missing = tempfile::tempdir().unwrap().path().join("removed");
+        let path = std::env::join_paths([missing]).unwrap();
+        let snapshot = RwLock::new(Arc::new(IndexSnapshot::default()));
+        scan_path_generation(
+            Some(&path),
+            ScanBudgets {
+                max_elapsed: Duration::from_secs(5),
+                ..ScanBudgets::default()
+            },
+            10,
+            &snapshot,
+        );
+        let snapshot = snapshot.read().unwrap();
+        assert!(!snapshot.progress.complete);
+        assert_eq!(snapshot.progress.generation, 10);
+        assert_eq!(snapshot.progress.directories_scanned, 1);
+        assert!(snapshot.commands.is_empty());
     }
 
     #[test]
