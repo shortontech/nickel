@@ -393,6 +393,7 @@ pub struct TerminalEngine {
     dimensions: TerminalDimensions,
     resize_generation: u64,
     scrollback_limit: usize,
+    force_full_damage: bool,
 }
 
 impl TerminalEngine {
@@ -423,6 +424,7 @@ impl TerminalEngine {
             dimensions,
             resize_generation: 0,
             scrollback_limit: scrollback_lines,
+            force_full_damage: true,
         })
     }
 
@@ -438,6 +440,7 @@ impl TerminalEngine {
         self.dimensions = dimensions;
         self.terminal.resize(dimensions.term_size());
         self.resize_generation = generation;
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
         true
     }
@@ -451,7 +454,9 @@ impl TerminalEngine {
     }
 
     pub fn take_damage(&mut self) -> TerminalDamage {
-        take_damage(&mut self.terminal)
+        let damage = take_damage(&mut self.terminal, self.force_full_damage);
+        self.force_full_damage = false;
+        damage
     }
 
     pub fn generation(&self) -> u64 {
@@ -469,6 +474,7 @@ impl TerminalEngine {
 
     pub fn scroll(&mut self, scroll: TerminalScroll) {
         self.terminal.scroll_display(upstream_scroll(scroll));
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -478,18 +484,21 @@ impl TerminalEngine {
             point.upstream(),
             Side::Left,
         ));
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
     pub fn update_selection(&mut self, point: TerminalPoint) {
         if let Some(selection) = &mut self.terminal.selection {
             selection.update(point.upstream(), Side::Right);
+            self.force_full_damage = true;
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
 
     pub fn clear_selection(&mut self) {
         if self.terminal.selection.take().is_some() {
+            self.force_full_damage = true;
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
@@ -576,6 +585,7 @@ pub struct TerminalSession {
     shutdown_deadline: Option<Instant>,
     force_handle: ForceHandle,
     scrollback_limit: usize,
+    force_full_damage: bool,
 }
 
 impl TerminalSession {
@@ -639,6 +649,7 @@ impl TerminalSession {
             shutdown_deadline: None,
             force_handle,
             scrollback_limit,
+            force_full_damage: true,
         })
     }
 
@@ -686,6 +697,7 @@ impl TerminalSession {
         self.terminal.lock().resize(dimensions.term_size());
         self.dimensions = dimensions;
         self.resize_generation = generation;
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
         Ok(true)
     }
@@ -699,11 +711,14 @@ impl TerminalSession {
     }
 
     pub fn take_damage(&mut self) -> TerminalDamage {
-        take_damage(&mut self.terminal.lock())
+        let damage = take_damage(&mut self.terminal.lock(), self.force_full_damage);
+        self.force_full_damage = false;
+        damage
     }
 
     pub fn scroll(&mut self, scroll: TerminalScroll) {
         self.terminal.lock().scroll_display(upstream_scroll(scroll));
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -713,6 +728,7 @@ impl TerminalSession {
             point.upstream(),
             Side::Left,
         ));
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -720,12 +736,14 @@ impl TerminalSession {
         let mut terminal = self.terminal.lock();
         if let Some(selection) = &mut terminal.selection {
             selection.update(point.upstream(), Side::Right);
+            self.force_full_damage = true;
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
 
     pub fn clear_selection(&mut self) {
         if self.terminal.lock().selection.take().is_some() {
+            self.force_full_damage = true;
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
@@ -738,12 +756,14 @@ impl TerminalSession {
         let mut terminal = self.terminal.lock();
         if terminal.is_focused != focused {
             terminal.is_focused = focused;
+            self.force_full_damage = true;
             self.generation.fetch_add(1, Ordering::Release);
         }
     }
 
     pub fn clear_scrollback(&mut self) {
         self.terminal.lock().grid_mut().clear_history();
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -757,6 +777,7 @@ impl TerminalSession {
         let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
         selection.update(end, Side::Right);
         terminal.selection = Some(selection);
+        self.force_full_damage = true;
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -875,8 +896,8 @@ fn proxy() -> ProxyParts {
     }
 }
 
-fn take_damage(terminal: &mut Term<Proxy>) -> TerminalDamage {
-    let damage = match terminal.damage() {
+fn take_damage(terminal: &mut Term<Proxy>, force_full: bool) -> TerminalDamage {
+    let upstream = match terminal.damage() {
         UpstreamDamage::Full => TerminalDamage::Full,
         UpstreamDamage::Partial(lines) => TerminalDamage::Partial(
             lines
@@ -889,7 +910,11 @@ fn take_damage(terminal: &mut Term<Proxy>) -> TerminalDamage {
         ),
     };
     terminal.reset_damage();
-    damage
+    if force_full {
+        TerminalDamage::Full
+    } else {
+        upstream
+    }
 }
 
 fn snapshot(
@@ -1134,6 +1159,15 @@ mod tests {
             panic!("consumed damage should remain partial");
         };
         assert!(lines.len() <= 1, "only cursor damage may remain");
+        engine.begin_selection(
+            TerminalSelectionKind::Simple,
+            TerminalPoint { line: 0, column: 0 },
+        );
+        assert_eq!(engine.take_damage(), TerminalDamage::Full);
+        engine.update_selection(TerminalPoint { line: 0, column: 2 });
+        assert_eq!(engine.take_damage(), TerminalDamage::Full);
+        engine.clear_selection();
+        assert_eq!(engine.take_damage(), TerminalDamage::Full);
         assert!(engine.resize(dimensions(10, 3), 1));
         assert_eq!(engine.take_damage(), TerminalDamage::Full);
     }
