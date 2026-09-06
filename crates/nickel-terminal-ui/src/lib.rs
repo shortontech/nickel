@@ -381,7 +381,12 @@ pub fn translate_input_with_application_cursor(
                     _ => key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write),
                 };
             }
-            if control && let Some(byte) = control_byte(code) {
+            // Ctrl+Alt is the normalized fallback representation of AltGr on backends which
+            // cannot expose a distinct modifier. Printable data must arrive through Text::Commit.
+            if control
+                && !alt
+                && let Some(byte) = control_byte(code)
+            {
                 return Some(TerminalInputCommand::Write(vec![byte]));
             }
             key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write)
@@ -775,7 +780,8 @@ fn blend(foreground: u32, background: u32, amount: f32) -> u32 {
 mod tests {
     use super::*;
     use nickel_input::{
-        DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, ModifierState, Point as InputPoint,
+        DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier, ModifierState,
+        Point as InputPoint,
     };
     use nickel_terminal::{TerminalDimensions, TerminalEngine};
     use nickel_ui::{Rect, SoftwareRenderer, UiFrame};
@@ -914,6 +920,17 @@ mod tests {
         assert_eq!(
             translate_input(&text),
             Some(TerminalInputCommand::Write("é".as_bytes().to_vec()))
+        );
+        let alt_graph = ModifierState::from_sides([Modifier::ControlLeft, Modifier::AltRight]);
+        assert_eq!(translate_input(&key(KeyCode::KeyQ, alt_graph)), None);
+        let alt_graph_text = InputEvent::Text(TextEvent::Commit {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            text: "@".into(),
+        });
+        assert_eq!(
+            translate_input(&alt_graph_text),
+            Some(TerminalInputCommand::Write(vec![b'@']))
         );
         assert_eq!(
             translate_input_with_application_cursor(
