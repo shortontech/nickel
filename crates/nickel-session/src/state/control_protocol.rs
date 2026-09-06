@@ -1,5 +1,8 @@
 use super::*;
 
+static CONTROL_SOCKET_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 impl NickelSession {
     pub(super) fn init_control_socket(
         event_loop: &mut EventLoop<'static, NickelSession>,
@@ -7,7 +10,11 @@ impl NickelSession {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(std::env::temp_dir);
-        let path = runtime.join(format!("nickel-session-{}.sock", std::process::id()));
+        let generation = CONTROL_SOCKET_GENERATION.fetch_add(1, Ordering::Relaxed);
+        let path = runtime.join(format!(
+            "nickel-session-{}-{generation}.sock",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let socket =
             UnixDatagram::bind(&path).expect("failed to bind Nickel session control socket");

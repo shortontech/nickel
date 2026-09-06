@@ -902,8 +902,12 @@ impl NickelSession {
         unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
         let control_socket_path = Self::init_control_socket(event_loop);
         if test_control_enabled {
+            let control_socket_name = control_socket_path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("nickel-session");
             let shell_test_path = control_socket_path
-                .with_file_name(format!("nickel-shell-test-{}.sock", std::process::id()));
+                .with_file_name(format!("nickel-shell-test-{control_socket_name}"));
             // SAFETY: session initialization is single-threaded and precedes shell launch.
             unsafe { std::env::set_var("NICKEL_SHELL_TEST_CONTROL", shell_test_path) };
         } else {
