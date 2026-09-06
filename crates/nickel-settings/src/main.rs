@@ -840,13 +840,7 @@ impl SettingsApp {
             .name("nickel-default-app-discovery".into())
             .spawn(move || {
                 let targets = service.available_targets();
-                let rows = rows
-                    .into_iter()
-                    .map(|target| {
-                        let snapshot = service.inspect(&target);
-                        (target, snapshot)
-                    })
-                    .collect();
+                let rows = service.inspect_many(&rows);
                 let _ = sender.send(DefaultAppsDiscovery {
                     generation,
                     targets,

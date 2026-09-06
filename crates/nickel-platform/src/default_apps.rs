@@ -210,6 +210,22 @@ pub trait AssociationBackend: Send + Sync {
     }
 
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError>;
+    fn inspect_many(
+        &self,
+        targets: &[AssociationTarget],
+    ) -> Vec<(
+        AssociationTarget,
+        Result<AssociationSnapshot, AssociationError>,
+    )> {
+        targets
+            .iter()
+            .cloned()
+            .map(|target| {
+                let snapshot = self.inspect(&target);
+                (target, snapshot)
+            })
+            .collect()
+    }
     fn request_change(
         &self,
         target: &AssociationTarget,
@@ -263,6 +279,40 @@ impl AssociationService {
             }
         }
         Ok(snapshot)
+    }
+
+    pub fn inspect_many(
+        &self,
+        targets: &[AssociationTarget],
+    ) -> Vec<(
+        AssociationTarget,
+        Result<AssociationSnapshot, AssociationError>,
+    )> {
+        let results = self.backend.inspect_many(targets);
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let mut changed_any = false;
+        for (target, result) in &results {
+            let Ok(snapshot) = result else { continue };
+            let changed = state
+                .projections
+                .iter()
+                .find(|(cached, _)| cached == target)
+                .is_none_or(|(_, cached)| cached != snapshot);
+            if changed {
+                changed_any = true;
+                state.projections.retain(|(cached, _)| cached != target);
+                state
+                    .projections
+                    .push_back((target.clone(), snapshot.clone()));
+            }
+        }
+        if changed_any {
+            state.generation = state.generation.saturating_add(1);
+        }
+        while state.projections.len() > ASSOCIATION_CACHE_CAPACITY {
+            state.projections.pop_front();
+        }
+        results
     }
 
     pub fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
@@ -622,6 +672,33 @@ impl LinuxAssociations {
         handlers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
         handlers
     }
+
+    fn inspect_with_entries(
+        target: &AssociationTarget,
+        entries: &[freedesktop_desktop_entry::DesktopEntry],
+        locales: &[String],
+    ) -> Result<AssociationSnapshot, AssociationError> {
+        let effective = Self::query(target)?.map(|id| ApplicationHandler {
+            name: Self::desktop_name(&id, entries, locales),
+            id,
+            icon: None,
+            source: "freedesktop MIME default".into(),
+        });
+        let mut handlers = Self::handlers(target, entries, locales);
+        if let Some(current) = effective.as_ref()
+            && !handlers.iter().any(|handler| handler.id == current.id)
+        {
+            handlers.insert(0, current.clone());
+        }
+        Ok(AssociationSnapshot {
+            target: target.clone(),
+            effective,
+            handlers,
+            capability: AssociationCapability::DirectUserChange,
+            scope: AssociationScope::User,
+            detail: "User-level freedesktop association".into(),
+        })
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -672,26 +749,26 @@ impl AssociationBackend for LinuxAssociations {
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
         let locales = freedesktop_desktop_entry::get_languages_from_env();
         let entries = linux_desktop_entries(&locales);
-        let effective = Self::query(target)?.map(|id| ApplicationHandler {
-            name: Self::desktop_name(&id, &entries, &locales),
-            id,
-            icon: None,
-            source: "freedesktop MIME default".into(),
-        });
-        let mut handlers = Self::handlers(target, &entries, &locales);
-        if let Some(current) = effective.as_ref()
-            && !handlers.iter().any(|handler| handler.id == current.id)
-        {
-            handlers.insert(0, current.clone());
-        }
-        Ok(AssociationSnapshot {
-            target: target.clone(),
-            effective,
-            handlers,
-            capability: AssociationCapability::DirectUserChange,
-            scope: AssociationScope::User,
-            detail: "User-level freedesktop association".into(),
-        })
+        Self::inspect_with_entries(target, &entries, &locales)
+    }
+
+    fn inspect_many(
+        &self,
+        targets: &[AssociationTarget],
+    ) -> Vec<(
+        AssociationTarget,
+        Result<AssociationSnapshot, AssociationError>,
+    )> {
+        let locales = freedesktop_desktop_entry::get_languages_from_env();
+        let entries = linux_desktop_entries(&locales);
+        targets
+            .iter()
+            .cloned()
+            .map(|target| {
+                let snapshot = Self::inspect_with_entries(&target, &entries, &locales);
+                (target, snapshot)
+            })
+            .collect()
     }
 
     fn request_change(
@@ -1200,6 +1277,46 @@ mod tests {
 
     struct LargeFixture;
 
+    struct BatchFixture;
+
+    impl AssociationBackend for BatchFixture {
+        fn inspect(&self, _: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
+            panic!("batched consumers must use inspect_many")
+        }
+
+        fn inspect_many(
+            &self,
+            targets: &[AssociationTarget],
+        ) -> Vec<(
+            AssociationTarget,
+            Result<AssociationSnapshot, AssociationError>,
+        )> {
+            targets
+                .iter()
+                .cloned()
+                .map(|target| {
+                    let snapshot = AssociationSnapshot {
+                        target: target.clone(),
+                        effective: None,
+                        handlers: Vec::new(),
+                        capability: AssociationCapability::DirectUserChange,
+                        scope: AssociationScope::User,
+                        detail: "one batch".into(),
+                    };
+                    (target, Ok(snapshot))
+                })
+                .collect()
+        }
+
+        fn request_change(
+            &self,
+            _: &AssociationTarget,
+            _: &str,
+        ) -> Result<ChangeOutcome, AssociationError> {
+            unreachable!()
+        }
+    }
+
     impl AssociationBackend for LargeFixture {
         fn inspect(
             &self,
@@ -1239,6 +1356,20 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.handlers.len(), 250);
         assert_eq!(snapshot.handlers.last().unwrap().id, "handler-249.desktop");
+    }
+
+    #[test]
+    fn association_service_publishes_one_generation_for_a_batch() {
+        let service = AssociationService::new(Box::new(BatchFixture));
+        let targets = [
+            AssociationTarget::mime("image/svg+xml"),
+            AssociationTarget::mime("video/webm"),
+        ];
+        let results = service.inspect_many(&targets);
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|(_, result)| result.is_ok()));
+        assert_eq!(service.generation(), 1);
     }
 
     #[test]
