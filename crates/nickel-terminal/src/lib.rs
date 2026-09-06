@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{Receiver, SyncSender, TryRecvError, TrySendError, sync_channel},
     },
@@ -234,6 +234,7 @@ struct Proxy {
     events: SyncSender<TerminalEvent>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
+    pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
 }
 
 impl EventListener for Proxy {
@@ -254,11 +255,26 @@ impl EventListener for Proxy {
                 TerminalEvent::ClipboardStore(truncate_utf8(text, MAX_WRITE_BYTES))
             }
             Event::Exit => TerminalEvent::Closed,
-            Event::PtyWrite(_)
-            | Event::ClipboardLoad(_, _)
+            Event::PtyWrite(text) => {
+                if let Some(sender) = self.pty_sender.lock().unwrap().as_ref() {
+                    let bytes = truncate_utf8(text, MAX_WRITE_BYTES).into_bytes();
+                    let _ = sender.send(Msg::Input(Cow::Owned(bytes)));
+                }
+                return;
+            }
+            Event::ClipboardLoad(_, _)
             | Event::ColorRequest(_, _)
             | Event::TextAreaSizeRequest(_) => return,
         };
+        if matches!(
+            projected,
+            TerminalEvent::ChildExited(_) | TerminalEvent::Closed
+        ) {
+            // These lifecycle events are emitted at most once each and must not be lost behind
+            // coalescible redraw/title noise. Blocking after child exit cannot stall PTY output.
+            let _ = self.events.send(projected);
+            return;
+        }
         match self.events.try_send(projected) {
             Ok(()) | Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {}
         }
@@ -284,7 +300,13 @@ impl TerminalEngine {
         if scrollback_lines > MAX_SCROLLBACK {
             return Err(TerminalError::ScrollbackTooLarge);
         }
-        let (proxy, events, generation, wake_pending) = proxy();
+        let ProxyParts {
+            proxy,
+            events,
+            generation,
+            wake_pending,
+            ..
+        } = proxy();
         let config = Config {
             scrolling_history: scrollback_lines,
             ..Config::default()
@@ -384,7 +406,13 @@ pub struct TerminalSession {
 impl TerminalSession {
     pub fn spawn(options: TerminalOptions) -> Result<Self, TerminalError> {
         options.validate()?;
-        let (proxy, events, generation, wake_pending) = proxy();
+        let ProxyParts {
+            proxy,
+            events,
+            generation,
+            wake_pending,
+            pty_sender,
+        } = proxy();
         let config = Config {
             scrolling_history: options.scrollback_lines,
             ..Config::default()
@@ -409,6 +437,7 @@ impl TerminalSession {
         let event_loop = EventLoop::new(Arc::clone(&terminal), proxy, pty, true, false)
             .map_err(TerminalError::Spawn)?;
         let sender = event_loop.channel();
+        *pty_sender.lock().unwrap() = Some(sender.clone());
         let worker = std::thread::Builder::new()
             .name("nickel-terminal-pty".into())
             .spawn(move || {
@@ -526,11 +555,18 @@ impl TerminalSession {
         if event == TerminalEvent::Changed {
             self.wake_pending.store(false, Ordering::Release);
         }
-        if let TerminalEvent::ChildExited(code) = event {
-            self.exit = TerminalExit::Exited(code);
-            Some(TerminalEvent::ChildExited(code))
-        } else {
-            Some(event)
+        match event {
+            TerminalEvent::ChildExited(code) => {
+                self.exit = TerminalExit::Exited(code);
+                Some(TerminalEvent::ChildExited(code))
+            }
+            TerminalEvent::Closed => {
+                if self.exit == TerminalExit::Running {
+                    self.exit = TerminalExit::Hangup;
+                }
+                Some(TerminalEvent::Closed)
+            }
+            event => Some(event),
         }
     }
 
@@ -558,25 +594,31 @@ impl Drop for TerminalSession {
     }
 }
 
-fn proxy() -> (
-    Proxy,
-    Receiver<TerminalEvent>,
-    Arc<AtomicU64>,
-    Arc<AtomicBool>,
-) {
+struct ProxyParts {
+    proxy: Proxy,
+    events: Receiver<TerminalEvent>,
+    generation: Arc<AtomicU64>,
+    wake_pending: Arc<AtomicBool>,
+    pty_sender: Arc<Mutex<Option<EventLoopSender>>>,
+}
+
+fn proxy() -> ProxyParts {
     let (events, receiver) = sync_channel(EVENT_CAPACITY);
     let generation = Arc::new(AtomicU64::new(1));
     let wake_pending = Arc::new(AtomicBool::new(false));
-    (
-        Proxy {
+    let pty_sender = Arc::new(Mutex::new(None));
+    ProxyParts {
+        proxy: Proxy {
             events,
             generation: Arc::clone(&generation),
             wake_pending: Arc::clone(&wake_pending),
+            pty_sender: Arc::clone(&pty_sender),
         },
-        receiver,
+        events: receiver,
         generation,
         wake_pending,
-    )
+        pty_sender,
+    }
 }
 
 fn snapshot(
@@ -767,6 +809,24 @@ mod tests {
         assert_eq!(options.program.unwrap().arguments[1], "space value");
         assert!(TerminalEngine::new(dimensions(80, 24), MAX_SCROLLBACK + 1).is_err());
         assert!(TerminalDimensions::new(MAX_COLUMNS + 1, 24, 8, 16).is_err());
+    }
+
+    #[test]
+    fn lifecycle_event_survives_a_full_noise_queue() {
+        let ProxyParts { proxy, events, .. } = proxy();
+        for index in 0..EVENT_CAPACITY {
+            proxy.send_event(Event::Title(format!("title-{index}")));
+        }
+        let producer = std::thread::spawn(move || proxy.send_event(Event::Exit));
+        let mut closed = false;
+        for _ in 0..=EVENT_CAPACITY {
+            if events.recv().unwrap() == TerminalEvent::Closed {
+                closed = true;
+                break;
+            }
+        }
+        producer.join().unwrap();
+        assert!(closed, "the terminal close event must never be dropped");
     }
 
     #[cfg(unix)]
