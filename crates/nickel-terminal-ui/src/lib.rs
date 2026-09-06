@@ -5,8 +5,8 @@ use nickel_input::{
     PointerEvent, TextEvent,
 };
 use nickel_terminal::{
-    TerminalCell, TerminalColor, TerminalPoint, TerminalScroll, TerminalSelectionKind,
-    TerminalSnapshot, TerminalUnderline,
+    TerminalCell, TerminalColor, TerminalNamedColor, TerminalPoint, TerminalScroll,
+    TerminalSelectionKind, TerminalSnapshot, TerminalUnderline,
 };
 use nickel_ui::{
     Component, Container, Grid, SemanticRole, StyledText, StyledTextSpan, Track, View,
@@ -629,9 +629,11 @@ fn resolve_color(color: &TerminalColor, palette: &TerminalPalette, foreground: b
             let value = 8 + (*index - 232) * 10;
             0xff00_0000 | (u32::from(value) << 16) | (u32::from(value) << 8) | u32::from(value)
         }
-        TerminalColor::Named(name) if name == "Foreground" => palette.foreground,
-        TerminalColor::Named(name) if name == "Background" => palette.background,
-        TerminalColor::Named(name) => named_index(name).map_or_else(
+        TerminalColor::Named(
+            TerminalNamedColor::Foreground | TerminalNamedColor::BrightForeground,
+        ) => palette.foreground,
+        TerminalColor::Named(TerminalNamedColor::Background) => palette.background,
+        TerminalColor::Named(name) => named_index(*name).map_or_else(
             || {
                 if foreground {
                     palette.foreground
@@ -644,24 +646,24 @@ fn resolve_color(color: &TerminalColor, palette: &TerminalPalette, foreground: b
     }
 }
 
-fn named_index(name: &str) -> Option<usize> {
+fn named_index(name: TerminalNamedColor) -> Option<usize> {
     Some(match name {
-        "Black" => 0,
-        "Red" => 1,
-        "Green" => 2,
-        "Yellow" => 3,
-        "Blue" => 4,
-        "Magenta" => 5,
-        "Cyan" => 6,
-        "White" => 7,
-        "BrightBlack" => 8,
-        "BrightRed" => 9,
-        "BrightGreen" => 10,
-        "BrightYellow" => 11,
-        "BrightBlue" => 12,
-        "BrightMagenta" => 13,
-        "BrightCyan" => 14,
-        "BrightWhite" => 15,
+        TerminalNamedColor::Black | TerminalNamedColor::DimBlack => 0,
+        TerminalNamedColor::Red | TerminalNamedColor::DimRed => 1,
+        TerminalNamedColor::Green | TerminalNamedColor::DimGreen => 2,
+        TerminalNamedColor::Yellow | TerminalNamedColor::DimYellow => 3,
+        TerminalNamedColor::Blue | TerminalNamedColor::DimBlue => 4,
+        TerminalNamedColor::Magenta | TerminalNamedColor::DimMagenta => 5,
+        TerminalNamedColor::Cyan | TerminalNamedColor::DimCyan => 6,
+        TerminalNamedColor::White | TerminalNamedColor::DimWhite => 7,
+        TerminalNamedColor::BrightBlack => 8,
+        TerminalNamedColor::BrightRed => 9,
+        TerminalNamedColor::BrightGreen => 10,
+        TerminalNamedColor::BrightYellow => 11,
+        TerminalNamedColor::BrightBlue => 12,
+        TerminalNamedColor::BrightMagenta => 13,
+        TerminalNamedColor::BrightCyan => 14,
+        TerminalNamedColor::BrightWhite => 15,
         _ => return None,
     })
 }

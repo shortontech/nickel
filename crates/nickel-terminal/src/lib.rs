@@ -16,7 +16,7 @@ use std::{
 
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
-    grid::Scroll,
+    grid::{Dimensions, Scroll},
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     sync::FairMutex,
@@ -36,6 +36,41 @@ const MAX_SCROLLBACK: usize = 100_000;
 const MAX_COLUMNS: u16 = 500;
 const MAX_LINES: u16 = 200;
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+
+/// Content-free resource counters suitable for diagnostics and budget verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalDiagnostics {
+    pub generation: u64,
+    pub columns: usize,
+    pub visible_lines: usize,
+    pub retained_lines: usize,
+    pub retained_cells: usize,
+    pub scrollback_lines: usize,
+    pub scrollback_limit: usize,
+    pub pending_input_bytes: usize,
+    pub pending_input_limit: usize,
+}
+
+fn diagnostics(
+    terminal: &Term<Proxy>,
+    generation: u64,
+    scrollback_limit: usize,
+    pending_input_bytes: usize,
+) -> TerminalDiagnostics {
+    let retained_lines = terminal.total_lines();
+    let columns = terminal.columns();
+    TerminalDiagnostics {
+        generation,
+        columns,
+        visible_lines: terminal.screen_lines(),
+        retained_lines,
+        retained_cells: retained_lines.saturating_mul(columns),
+        scrollback_lines: terminal.history_size(),
+        scrollback_limit,
+        pending_input_bytes,
+        pending_input_limit: INPUT_QUEUE_CAPACITY * MAX_WRITE_BYTES,
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalDimensions {
@@ -116,11 +151,44 @@ impl TerminalOptions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalColor {
-    Named(String),
+    Named(TerminalNamedColor),
     Indexed(u8),
     Rgb(u8, u8, u8),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalNamedColor {
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    White,
+    BrightBlack,
+    BrightRed,
+    BrightGreen,
+    BrightYellow,
+    BrightBlue,
+    BrightMagenta,
+    BrightCyan,
+    BrightWhite,
+    Foreground,
+    Background,
+    Cursor,
+    DimBlack,
+    DimRed,
+    DimGreen,
+    DimYellow,
+    DimBlue,
+    DimMagenta,
+    DimCyan,
+    DimWhite,
+    BrightForeground,
+    DimForeground,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -307,6 +375,7 @@ pub struct TerminalEngine {
     events: Receiver<TerminalEvent>,
     dimensions: TerminalDimensions,
     resize_generation: u64,
+    scrollback_limit: usize,
 }
 
 impl TerminalEngine {
@@ -336,6 +405,7 @@ impl TerminalEngine {
             events,
             dimensions,
             resize_generation: 0,
+            scrollback_limit: scrollback_lines,
         })
     }
 
@@ -360,6 +430,15 @@ impl TerminalEngine {
             &self.terminal,
             self.generation.load(Ordering::Acquire),
             self.dimensions,
+        )
+    }
+
+    pub fn diagnostics(&self) -> TerminalDiagnostics {
+        diagnostics(
+            &self.terminal,
+            self.generation.load(Ordering::Acquire),
+            self.scrollback_limit,
+            0,
         )
     }
 
@@ -470,11 +549,13 @@ pub struct TerminalSession {
     workers: Vec<JoinHandle<()>>,
     shutdown_deadline: Option<Instant>,
     force_handle: ForceHandle,
+    scrollback_limit: usize,
 }
 
 impl TerminalSession {
     pub fn spawn(options: TerminalOptions) -> Result<Self, TerminalError> {
         options.validate()?;
+        let scrollback_limit = options.scrollback_lines;
         let ProxyParts {
             proxy,
             events,
@@ -527,6 +608,7 @@ impl TerminalSession {
             workers: vec![event_worker],
             shutdown_deadline: None,
             force_handle,
+            scrollback_limit,
         })
     }
 
@@ -537,9 +619,13 @@ impl TerminalSession {
         enqueue_input(self.input_sender.as_ref(), bytes)
     }
 
-    #[cfg(all(test, unix))]
-    fn pending_input_bytes(&self) -> usize {
-        self.sender.pending_bytes()
+    pub fn diagnostics(&self) -> TerminalDiagnostics {
+        diagnostics(
+            &self.terminal.lock(),
+            self.generation.load(Ordering::Acquire),
+            self.scrollback_limit,
+            self.sender.pending_bytes(),
+        )
     }
 
     /// Native process identity of the PTY child for compositor/window attribution.
@@ -802,7 +888,37 @@ fn snapshot(
 
 fn color(color: ansi::Color) -> TerminalColor {
     match color {
-        ansi::Color::Named(value) => TerminalColor::Named(format!("{value:?}")),
+        ansi::Color::Named(value) => TerminalColor::Named(match value {
+            ansi::NamedColor::Black => TerminalNamedColor::Black,
+            ansi::NamedColor::Red => TerminalNamedColor::Red,
+            ansi::NamedColor::Green => TerminalNamedColor::Green,
+            ansi::NamedColor::Yellow => TerminalNamedColor::Yellow,
+            ansi::NamedColor::Blue => TerminalNamedColor::Blue,
+            ansi::NamedColor::Magenta => TerminalNamedColor::Magenta,
+            ansi::NamedColor::Cyan => TerminalNamedColor::Cyan,
+            ansi::NamedColor::White => TerminalNamedColor::White,
+            ansi::NamedColor::BrightBlack => TerminalNamedColor::BrightBlack,
+            ansi::NamedColor::BrightRed => TerminalNamedColor::BrightRed,
+            ansi::NamedColor::BrightGreen => TerminalNamedColor::BrightGreen,
+            ansi::NamedColor::BrightYellow => TerminalNamedColor::BrightYellow,
+            ansi::NamedColor::BrightBlue => TerminalNamedColor::BrightBlue,
+            ansi::NamedColor::BrightMagenta => TerminalNamedColor::BrightMagenta,
+            ansi::NamedColor::BrightCyan => TerminalNamedColor::BrightCyan,
+            ansi::NamedColor::BrightWhite => TerminalNamedColor::BrightWhite,
+            ansi::NamedColor::Foreground => TerminalNamedColor::Foreground,
+            ansi::NamedColor::Background => TerminalNamedColor::Background,
+            ansi::NamedColor::Cursor => TerminalNamedColor::Cursor,
+            ansi::NamedColor::DimBlack => TerminalNamedColor::DimBlack,
+            ansi::NamedColor::DimRed => TerminalNamedColor::DimRed,
+            ansi::NamedColor::DimGreen => TerminalNamedColor::DimGreen,
+            ansi::NamedColor::DimYellow => TerminalNamedColor::DimYellow,
+            ansi::NamedColor::DimBlue => TerminalNamedColor::DimBlue,
+            ansi::NamedColor::DimMagenta => TerminalNamedColor::DimMagenta,
+            ansi::NamedColor::DimCyan => TerminalNamedColor::DimCyan,
+            ansi::NamedColor::DimWhite => TerminalNamedColor::DimWhite,
+            ansi::NamedColor::BrightForeground => TerminalNamedColor::BrightForeground,
+            ansi::NamedColor::DimForeground => TerminalNamedColor::DimForeground,
+        }),
         ansi::Color::Indexed(value) => TerminalColor::Indexed(value),
         ansi::Color::Spec(value) => TerminalColor::Rgb(value.r, value.g, value.b),
     }
@@ -962,6 +1078,151 @@ mod tests {
         assert_eq!(options.program.unwrap().arguments[1], "space value");
         assert!(TerminalEngine::new(dimensions(80, 24), MAX_SCROLLBACK + 1).is_err());
         assert!(TerminalDimensions::new(MAX_COLUMNS + 1, 24, 8, 16).is_err());
+    }
+
+    #[test]
+    fn diagnostics_prove_grid_and_input_resource_bounds_without_content() {
+        let mut engine = TerminalEngine::new(dimensions(80, 24), 1_000).unwrap();
+        for _ in 0..2_000 {
+            engine.process(b"one bounded line\r\n");
+        }
+
+        let diagnostics = engine.diagnostics();
+        assert_eq!(diagnostics.columns, 80);
+        assert_eq!(diagnostics.visible_lines, 24);
+        assert_eq!(
+            diagnostics.retained_lines,
+            diagnostics.visible_lines + 1_000
+        );
+        assert_eq!(diagnostics.scrollback_lines, diagnostics.scrollback_limit);
+        assert_eq!(
+            diagnostics.retained_cells,
+            diagnostics.retained_lines * diagnostics.columns
+        );
+        assert_eq!(diagnostics.pending_input_bytes, 0);
+        assert_eq!(diagnostics.pending_input_limit, 4 * 1024 * 1024);
+
+        assert!(engine.resize(dimensions(120, 40), 7));
+        let resized = engine.diagnostics();
+        assert_eq!((resized.columns, resized.visible_lines), (120, 40));
+        assert!(resized.scrollback_lines <= resized.scrollback_limit);
+        assert_eq!(resized.generation, engine.snapshot().generation);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "explicit release-mode resource probe; run with --release --ignored --exact"]
+    fn release_resource_budgets() {
+        if cfg!(debug_assertions) {
+            panic!("resource budgets require --release");
+        }
+        const OUTPUT_BUDGET: Duration = Duration::from_secs(2);
+        const SNAPSHOT_BUDGET: Duration = Duration::from_millis(100);
+        const RESIZE_BUDGET: Duration = Duration::from_millis(100);
+        const INPUT_BUDGET: Duration = Duration::from_millis(500);
+        const IDLE_CPU_TICK_BUDGET: u64 = 5;
+        const RETAINED_RSS_BUDGET: usize = 128 * 1024 * 1024;
+        const SNAPSHOT_STORAGE_BUDGET: usize = 1024 * 1024;
+
+        let rss_before = linux_resident_bytes();
+        let mut engine = TerminalEngine::new(dimensions(160, 60), 10_000).unwrap();
+        let output = "0123456789abcdef\r\n".repeat(20_000);
+        let output_started = Instant::now();
+        engine.process(output.as_bytes());
+        let output_elapsed = output_started.elapsed();
+        assert!(output_elapsed <= OUTPUT_BUDGET, "{output_elapsed:?}");
+
+        let snapshot_started = Instant::now();
+        let snapshot = engine.snapshot();
+        let snapshot_elapsed = snapshot_started.elapsed();
+        assert!(snapshot_elapsed <= SNAPSHOT_BUDGET, "{snapshot_elapsed:?}");
+        let snapshot_storage = snapshot.cells.capacity() * std::mem::size_of::<TerminalCell>()
+            + snapshot
+                .cells
+                .iter()
+                .map(|cell| cell.combining.capacity() * std::mem::size_of::<char>())
+                .sum::<usize>();
+        assert!(snapshot_storage <= SNAPSHOT_STORAGE_BUDGET);
+        assert!(std::mem::size_of::<TerminalColor>() <= 4);
+
+        let resize_started = Instant::now();
+        for generation in 1..=200 {
+            let columns = if generation % 2 == 0 { 159 } else { 160 };
+            assert!(engine.resize(dimensions(columns, 60), generation));
+        }
+        let resize_elapsed = resize_started.elapsed();
+        assert!(resize_elapsed <= RESIZE_BUDGET, "{resize_elapsed:?}");
+        let retained_rss = linux_resident_bytes().saturating_sub(rss_before);
+        assert!(retained_rss <= RETAINED_RSS_BUDGET, "{retained_rss}");
+
+        let mut session = TerminalSession::spawn(TerminalOptions {
+            program: Some(TerminalProgram {
+                executable: "/bin/cat".into(),
+                arguments: Vec::new(),
+            }),
+            working_directory: None,
+            environment: HashMap::new(),
+            dimensions: dimensions(80, 24),
+            scrollback_lines: 1_000,
+        })
+        .unwrap();
+        let idle_cpu_before = linux_process_cpu_ticks();
+        std::thread::sleep(Duration::from_millis(300));
+        let idle_cpu_ticks = linux_process_cpu_ticks().saturating_sub(idle_cpu_before);
+        assert!(idle_cpu_ticks <= IDLE_CPU_TICK_BUDGET, "{idle_cpu_ticks}");
+
+        let input_started = Instant::now();
+        session.write(b"nickel-latency-probe\n".to_vec()).unwrap();
+        loop {
+            while session.try_event().is_some() {}
+            if session
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>()
+                .contains("nickel-latency-probe")
+            {
+                break;
+            }
+            assert!(input_started.elapsed() <= INPUT_BUDGET);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let input_elapsed = input_started.elapsed();
+        eprintln!(
+            "terminal resource probe: output={output_elapsed:?}, snapshot={snapshot_elapsed:?}, \
+             snapshot_storage={snapshot_storage}, resize={resize_elapsed:?}, retained_rss={retained_rss}, \
+             idle_cpu_ticks={idle_cpu_ticks}, input={input_elapsed:?}"
+        );
+        session.request_close().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_resident_bytes() -> usize {
+        let status = std::fs::read_to_string("/proc/self/statm").unwrap();
+        let pages = status
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        unsafe extern "C" {
+            fn sysconf(name: i32) -> i64;
+        }
+        // SAFETY: `_SC_PAGESIZE` (30 on Linux) is a read-only process query.
+        pages.saturating_mul(unsafe { sysconf(30) }.try_into().unwrap())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn linux_process_cpu_ticks() -> u64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+        let fields = stat
+            .rsplit_once(") ")
+            .unwrap()
+            .1
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap()
     }
 
     #[test]
@@ -1138,7 +1399,7 @@ mod tests {
                 .map(|cell| cell.character)
                 .collect::<String>();
             if visible.contains("received:bounded-✓") {
-                assert_eq!(session.pending_input_bytes(), 0);
+                assert_eq!(session.diagnostics().pending_input_bytes, 0);
                 return;
             }
             std::thread::sleep(Duration::from_millis(10));

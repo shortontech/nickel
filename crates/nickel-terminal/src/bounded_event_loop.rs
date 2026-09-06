@@ -120,7 +120,6 @@ impl BoundedEventLoopSender {
         self.poller.notify()
     }
 
-    #[cfg(test)]
     pub(crate) fn pending_bytes(&self) -> usize {
         self.pending_bytes.load(Ordering::Acquire)
     }
