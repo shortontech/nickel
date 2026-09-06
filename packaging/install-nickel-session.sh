@@ -58,6 +58,8 @@ install -Dm644 "$repository/Cargo.lock" \
     "$install_root/usr/share/doc/nickel/Cargo.lock"
 install -Dm644 "$repository/packaging/NOTICE.md" \
     "$install_root/usr/share/doc/nickel/NOTICE.md"
+install -Dm644 "$repository/packaging/THIRD_PARTY_LICENSES.txt" \
+    "$install_root/usr/share/doc/nickel/THIRD_PARTY_LICENSES.txt"
 install -Dm644 "$repository/crates/nickel-gaze/models/LICENSE.OpenSeeFace" \
     "$install_root/usr/share/doc/nickel/LICENSE.OpenSeeFace"
 

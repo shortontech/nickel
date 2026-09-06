@@ -85,6 +85,7 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         "LICENSE-APACHE",
         "Cargo.lock",
         "NOTICE.md",
+        "THIRD_PARTY_LICENSES.txt",
         "LICENSE.OpenSeeFace",
     ] {
         assert!(
@@ -95,7 +96,14 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     let notice =
         fs::read_to_string(documentation.join("NOTICE.md")).expect("installed distribution notice");
     assert!(notice.contains("third-party Rust crates"));
+    assert!(notice.contains("THIRD_PARTY_LICENSES.txt"));
     assert!(notice.contains("LICENSE.OpenSeeFace"));
+    let third_party = fs::read_to_string(documentation.join("THIRD_PARTY_LICENSES.txt"))
+        .expect("installed third-party license bundle");
+    assert!(third_party.contains("License: Apache License 2.0"));
+    assert!(third_party.contains("License: MIT License"));
+    assert!(third_party.contains("- smithay "));
+    assert!(third_party.lines().count() > 10_000);
 }
 
 #[test]

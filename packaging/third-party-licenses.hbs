@@ -1,0 +1,22 @@
+Nickel third-party license notices
+==================================
+
+This file is generated from the exact Cargo.lock dependency graph. Each license text is followed by
+the resolved crates that use it. Regenerate with:
+
+    cargo about generate --locked --workspace --all-features \
+      --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-gnu --fail \
+      --config packaging/about.toml packaging/third-party-licenses.hbs \
+      --output-file packaging/THIRD_PARTY_LICENSES.txt
+
+{{#each licenses}}
+--------------------------------------------------------------------------------
+License: {{{name}}}
+Used by:
+{{#each used_by}}
+- {{crate.name}} {{crate.version}}{{#if crate.repository}} ({{crate.repository}}){{/if}}
+{{/each}}
+
+{{{text}}}
+
+{{/each}}
