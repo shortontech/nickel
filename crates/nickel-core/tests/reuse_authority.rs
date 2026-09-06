@@ -95,9 +95,8 @@ fn logical_rectangle_and_intersection_have_one_shared_authority() {
 }
 
 #[test]
-fn nickel_core_has_one_configuration_path_and_atomic_write_authority() {
+fn nickel_core_delegates_configuration_storage_mechanics() {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let authority = source.join("persistence.rs");
     let mut files = Vec::new();
     rust_sources(&source, &mut files);
     let forbidden = [
@@ -108,9 +107,6 @@ fn nickel_core_has_one_configuration_path_and_atomic_write_authority() {
     ];
     let mut violations = Vec::new();
     for file in files {
-        if file == authority {
-            continue;
-        }
         let text = fs::read_to_string(&file).unwrap();
         for token in forbidden {
             if text.contains(token) {
@@ -120,7 +116,7 @@ fn nickel_core_has_one_configuration_path_and_atomic_write_authority() {
     }
     assert!(
         violations.is_empty(),
-        "parallel persistence authority returned:\n{}",
+        "platform storage mechanics leaked into nickel-core:\n{}",
         violations.join("\n")
     );
 
@@ -133,6 +129,10 @@ fn nickel_core_has_one_configuration_path_and_atomic_write_authority() {
     ] {
         let text = fs::read_to_string(source.join(module)).unwrap();
         let production = text.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            production.contains("use nickel_storage::{atomic_write, config_path};"),
+            "{module} must delegate paths and replacement to nickel-storage"
+        );
         assert_eq!(
             production.matches("atomic_write(").count(),
             expected_calls,

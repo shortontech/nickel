@@ -1,11 +1,15 @@
-//! Shared authority for Nickel's small, platform-local configuration files.
+//! Platform storage mechanics shared by Nickel's domain crates.
+//!
+//! This crate owns operating-system configuration roots and durable replacement
+//! of small files. Callers remain responsible for their schemas and policy.
 
 use std::{
     fs, io,
     path::{Path, PathBuf},
 };
 
-pub(crate) fn config_path(file_name: &str) -> io::Result<PathBuf> {
+/// Resolves a file below Nickel's per-user configuration directory.
+pub fn config_path(file_name: &str) -> io::Result<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         let root = std::env::var_os("LOCALAPPDATA")
@@ -27,9 +31,8 @@ pub(crate) fn config_path(file_name: &str) -> io::Result<PathBuf> {
     }
 }
 
-/// Replaces a complete settings file without exposing readers to a partial
-/// write. This is intentionally for small files owned by one Nickel process.
-pub(crate) fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+/// Replaces a complete small file without exposing readers to a partial write.
+pub fn atomic_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let parent = path.parent().ok_or_else(|| {
         io::Error::new(io::ErrorKind::InvalidInput, "settings path has no parent")
     })?;

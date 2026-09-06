@@ -2622,8 +2622,8 @@ name = "nickel-core"
 version = "0.1.0"
 dependencies = [
  "nickel-input",
+ "nickel-storage",
  "tempfile",
- "windows",
 ]
 
 [[package]]
@@ -2876,6 +2876,14 @@ dependencies = [
  "winresource",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "nickel-storage"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "windows",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-use crate::persistence::{atomic_write, config_path};
+use nickel_storage::{atomic_write, config_path};
 use std::{
     fs, io,
     path::{Path, PathBuf},

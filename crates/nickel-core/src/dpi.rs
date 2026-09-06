@@ -7,7 +7,7 @@ use std::{
 };
 
 pub use crate::geometry::LogicalRect;
-use crate::persistence::{atomic_write, config_path};
+use nickel_storage::{atomic_write, config_path};
 
 /// Wayland fractional-scale units. 120 units are exactly one logical-to-physical pixel ratio.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
