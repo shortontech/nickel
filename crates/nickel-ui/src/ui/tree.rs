@@ -1,10 +1,8 @@
 use super::*;
-use std::{
-    collections::BTreeSet,
-    hash::{DefaultHasher, Hash, Hasher},
-};
+use std::collections::BTreeSet;
 
 mod scrollbar;
+mod selection;
 pub use scrollbar::ScrollExtent;
 use scrollbar::{
     SCROLLBAR_GUTTER, SCROLLBAR_THICKNESS, ScrollRegion, ScrollbarAxis, configure_scroll_semantics,
@@ -12,6 +10,10 @@ use scrollbar::{
 };
 #[cfg(test)]
 use scrollbar::{SCROLLBAR_HIT_THICKNESS, SCROLLBAR_INSET};
+use selection::{
+    SelectionGlyph, SelectionRegionBuilder, SelectionRegionLayout, SelectionRunGeometry,
+    document_selection_generation, selection_document_generation,
+};
 
 #[derive(Clone, Debug)]
 struct HitRegion<Message> {
@@ -76,107 +78,6 @@ struct TextCommandRegion {
     id: UiId,
     editor: UiId,
     command: crate::TextEditCommand,
-}
-
-#[derive(Clone, Debug)]
-struct SelectionGlyph {
-    rect: Rect,
-    start: usize,
-    end: usize,
-    rtl: bool,
-}
-
-#[derive(Clone, Debug)]
-struct SelectionRunGeometry {
-    node_index: usize,
-    run_id: String,
-    glyphs: Vec<SelectionGlyph>,
-}
-
-#[derive(Clone, Debug)]
-struct SelectionRegionLayout {
-    id: UiId,
-    rect: Rect,
-    document: Arc<SelectionDocument>,
-    runs: Vec<SelectionRunGeometry>,
-}
-
-impl SelectionRegionLayout {
-    fn endpoint_at(&self, point: Point, nearest: bool) -> Option<SelectionEndpoint> {
-        let mut best: Option<(f32, SelectionEndpoint)> = None;
-        for run in &self.runs {
-            for glyph in &run.glyphs {
-                let inside = contains(glyph.rect, point);
-                let on_line = point.y >= glyph.rect.origin.y
-                    && point.y <= glyph.rect.origin.y + glyph.rect.size.height;
-                if !inside && !nearest && !on_line {
-                    continue;
-                }
-                let midpoint = glyph.rect.origin.x + glyph.rect.size.width * 0.5;
-                let before = point.x < midpoint;
-                let offset = match (glyph.rtl, before) {
-                    (false, true) | (true, false) => glyph.start,
-                    _ => glyph.end,
-                };
-                let dx = if point.x < glyph.rect.origin.x {
-                    glyph.rect.origin.x - point.x
-                } else if point.x > glyph.rect.origin.x + glyph.rect.size.width {
-                    point.x - (glyph.rect.origin.x + glyph.rect.size.width)
-                } else {
-                    0.0
-                };
-                let dy = if point.y < glyph.rect.origin.y {
-                    glyph.rect.origin.y - point.y
-                } else if point.y > glyph.rect.origin.y + glyph.rect.size.height {
-                    point.y - (glyph.rect.origin.y + glyph.rect.size.height)
-                } else {
-                    0.0
-                };
-                let distance = dx * dx + dy * dy;
-                if inside || best.as_ref().is_none_or(|(current, _)| distance < *current) {
-                    best = Some((distance, SelectionEndpoint::new(run.run_id.clone(), offset)));
-                    if inside {
-                        return best.map(|(_, endpoint)| endpoint);
-                    }
-                }
-            }
-        }
-        best.map(|(_, endpoint)| endpoint)
-    }
-}
-
-struct SelectionRegionBuilder {
-    id: UiId,
-    rect: Rect,
-    supplied: Option<Arc<SelectionDocument>>,
-    runs: Vec<SelectionRunGeometry>,
-    logical_runs: Vec<SelectionRun>,
-}
-
-fn selection_document_generation(document: &SelectionDocument) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for run in document.runs() {
-        run.id.hash(&mut hasher);
-        run.text.hash(&mut hasher);
-        (run.boundary_before as u8).hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn document_selection_generation(selection: &crate::DocumentSelection) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for endpoint in [&selection.anchor, &selection.focus] {
-        match endpoint {
-            Some(endpoint) => {
-                true.hash(&mut hasher);
-                endpoint.run_id.hash(&mut hasher);
-                endpoint.offset.hash(&mut hasher);
-                (endpoint.affinity as u8).hash(&mut hasher);
-            }
-            None => false.hash(&mut hasher),
-        }
-    }
-    hasher.finish()
 }
 
 fn text_offset_at<Message>(input: &TextInputRegion<Message>, point: Point) -> usize {
