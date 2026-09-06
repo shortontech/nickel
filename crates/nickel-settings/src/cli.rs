@@ -2,7 +2,7 @@ use std::ffi::OsString;
 
 use crate::SettingsPage;
 
-pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, default-apps, optional-features, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n  -h, --help             Print help\n";
+pub(super) const HELP: &str = "Nickel Settings\n\nUsage: nickel-settings [OPTIONS]\n\nOptions:\n  -s, --screen <SCREEN>  Screen to show initially [default: display]\n                         [values: display, nickel-bar, appearance, network, bluetooth, security, default-apps, optional-features, keyboard-shortcuts, about]\n      --output <OUTPUT>  Select this display connector when opening Display\n  -h, --help             Print help\n";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) enum Action {
@@ -76,12 +76,13 @@ fn parse_screen(value: &str) -> Result<SettingsPage, String> {
         "appearance" => Ok(SettingsPage::Appearance),
         "network" => Ok(SettingsPage::Network),
         "bluetooth" => Ok(SettingsPage::Bluetooth),
+        "security" | "security-updates" => Ok(SettingsPage::Security),
         "default-apps" => Ok(SettingsPage::DefaultApps),
         "optional-features" | "features" => Ok(SettingsPage::OptionalFeatures),
         "keyboard" | "keyboard-shortcuts" => Ok(SettingsPage::KeyboardShortcuts),
         "about" => Ok(SettingsPage::About),
         _ => Err(format!(
-            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, bluetooth, default-apps, optional-features, keyboard-shortcuts, or about"
+            "unknown screen '{value}'; expected display, nickel-bar, appearance, network, bluetooth, security, default-apps, optional-features, keyboard-shortcuts, or about"
         )),
     }
 }
@@ -114,6 +115,7 @@ mod tests {
             ("appearance", SettingsPage::Appearance),
             ("network", SettingsPage::Network),
             ("bluetooth", SettingsPage::Bluetooth),
+            ("security", SettingsPage::Security),
             ("default-apps", SettingsPage::DefaultApps),
             ("optional-features", SettingsPage::OptionalFeatures),
             ("features", SettingsPage::OptionalFeatures),

@@ -251,6 +251,7 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
+    Security,
     DefaultApps,
     OptionalFeatures,
     Keyboard,
@@ -258,13 +259,14 @@ enum SidebarIconKind {
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Search,
         Self::Display,
         Self::Bar,
         Self::Appearance,
         Self::Network,
         Self::Bluetooth,
+        Self::Security,
         Self::DefaultApps,
         Self::OptionalFeatures,
         Self::Keyboard,
@@ -283,6 +285,7 @@ impl SidebarIconKind {
             Self::Appearance => '\u{f1fc}',
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
+            Self::Security => '\u{f132}',
             Self::DefaultApps => '\u{f2d0}',
             Self::OptionalFeatures => '\u{f12e}',
             Self::Keyboard => '\u{f11c}',
@@ -298,6 +301,7 @@ impl SidebarIconKind {
             Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
+            Self::Security => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::DefaultApps => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::OptionalFeatures => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::Keyboard => include_bytes!("../../../assets/icons/start-menu/keyboard.svg"),
@@ -340,7 +344,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 10]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 11]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -407,6 +411,7 @@ enum SettingsPage {
     Appearance,
     Network,
     Bluetooth,
+    Security,
     DefaultApps,
     OptionalFeatures,
     KeyboardShortcuts,
@@ -421,6 +426,7 @@ impl std::fmt::Display for SettingsPage {
             Self::Appearance => "appearance",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
+            Self::Security => "security",
             Self::DefaultApps => "default-apps",
             Self::OptionalFeatures => "optional-features",
             Self::KeyboardShortcuts => "keyboard-shortcuts",
@@ -481,6 +487,8 @@ enum SettingsMessage {
     BluetoothDiscovery,
     BluetoothDevice(usize),
     BluetoothScroll,
+    MaintenanceRefresh,
+    MaintenanceScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
@@ -701,6 +709,52 @@ fn default_app_categories() -> Vec<DefaultAppRow> {
 }
 
 impl SettingsApp {
+    fn load_maintenance(&mut self) {
+        if self.maintenance_rx.is_some() {
+            return;
+        }
+        let service = nickel_platform::maintenance_service();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("nickel-maintenance-inspection".into())
+            .spawn(move || {
+                let _ = sender.send(service.inspect());
+            }) {
+            Ok(_) => {
+                self.maintenance_status = Some("Loading authoritative system status…".into());
+                self.maintenance_rx = Some(receiver);
+            }
+            Err(error) => {
+                self.maintenance_status = Some(format!("System status could not load: {error}"));
+            }
+        }
+    }
+
+    fn poll_maintenance(&mut self) -> bool {
+        let Some(receiver) = self.maintenance_rx.as_ref() else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(nickel_platform::MaintenanceError {
+                    class: nickel_platform::MaintenanceFailureClass::ProviderUnavailable,
+                    detail: "System status provider stopped before returning data".into(),
+                })
+            }
+        };
+        self.maintenance_rx = None;
+        match result {
+            Ok(snapshot) => {
+                self.maintenance_snapshot = Some(snapshot);
+                self.maintenance_status = None;
+            }
+            Err(error) => self.maintenance_status = Some(error.to_string()),
+        }
+        true
+    }
+
     fn refresh_toolkit_scale(&mut self) {
         #[cfg(target_os = "linux")]
         {
@@ -996,6 +1050,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
@@ -1017,6 +1072,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
                     SettingsPage::OptionalFeatures => {
@@ -1133,6 +1189,11 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
+            SettingsMessage::MaintenanceRefresh => {
+                self.maintenance_snapshot = None;
+                self.load_maintenance();
+            }
+            SettingsMessage::MaintenanceScroll => {}
             SettingsMessage::BluetoothDevice(index) => {
                 let Some(device) = self.bluetooth.devices.get(index).cloned() else {
                     return;
@@ -1790,6 +1851,9 @@ impl SettingsApp {
         self.poll_wifi_power();
         self.poll_bluetooth_operation();
         self.poll_codex_probe();
+        if self.poll_maintenance() {
+            self.request_redraw();
+        }
         if self.poll_default_apps_discovery() {
             self.request_redraw();
         }
@@ -2306,6 +2370,9 @@ impl Application for SettingsApp {
         if self.codex_probe_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
         }
+        if self.maintenance_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(16));
+        }
         deadlines
             .into_iter()
             .min()
@@ -2382,6 +2449,8 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
         app.load_linux_network();
         if app.page == SettingsPage::DefaultApps {
             app.load_default_apps();
+        } else if app.page == SettingsPage::Security {
+            app.load_maintenance();
         }
         #[cfg(target_os = "windows")]
         {
@@ -2937,6 +3006,39 @@ mod tests {
                 .is_empty(),
             "consent-only platforms must expose the same candidate chooser"
         );
+    }
+
+    #[test]
+    fn security_page_exposes_every_required_authority_without_false_health() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
+        app.maintenance_rx = None;
+        app.maintenance_snapshot = Some(nickel_platform::maintenance_backend().inspect().unwrap());
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::MaintenanceRefresh)
+                .is_empty()
+        );
+        let labels = tree
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        for required in [
+            "System updates",
+            "Firewall",
+            "Malware protection",
+            "Secure storage",
+            "Camera",
+            "Microphone",
+            "Location",
+            "Notifications",
+            "Screen capture",
+        ] {
+            assert!(labels.contains(&required), "missing status row {required}");
+        }
+        assert!(!labels.contains(&"Healthy"));
     }
 
     #[test]

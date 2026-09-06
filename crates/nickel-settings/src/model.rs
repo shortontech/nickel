@@ -75,6 +75,13 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth_operation: Option<BluetoothOperation>,
     pub(super) bluetooth_operation_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) bluetooth_status: Option<String>,
+    pub(super) maintenance_snapshot: Option<nickel_platform::MaintenanceSnapshot>,
+    pub(super) maintenance_status: Option<String>,
+    pub(super) maintenance_rx: Option<
+        std::sync::mpsc::Receiver<
+            Result<nickel_platform::MaintenanceSnapshot, nickel_platform::MaintenanceError>,
+        >,
+    >,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
     pub(super) confirmed_displays: Vec<DisplayCard>,
@@ -230,6 +237,9 @@ impl Default for SettingsApp {
             bluetooth_operation: None,
             bluetooth_operation_rx: None,
             bluetooth_status: None,
+            maintenance_snapshot: None,
+            maintenance_status: None,
+            maintenance_rx: None,
             next_bluetooth_refresh: Instant::now(),
             next_network_refresh: Instant::now(),
             confirmed_displays: displays,
@@ -255,6 +265,8 @@ impl SettingsApp {
             app.start_codex_probe();
         } else if page == SettingsPage::Bar {
             app.refresh_workspace_state();
+        } else if page == SettingsPage::Security {
+            app.load_maintenance();
         }
         app
     }

@@ -40,6 +40,167 @@ pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
 }
 
 impl SettingsApp {
+    pub(super) fn security_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let palette = self.palette();
+        let observation = |state: nickel_platform::ObservationState,
+                           value: Option<String>,
+                           detail: Option<&str>| {
+            let state = match state {
+                nickel_platform::ObservationState::Current => "Current",
+                nickel_platform::ObservationState::Stale => "Stale",
+                nickel_platform::ObservationState::Unsupported => "Unsupported",
+                nickel_platform::ObservationState::PermissionDenied => "Permission denied",
+                nickel_platform::ObservationState::Failed => "Failed",
+            };
+            [Some(state.to_owned()), value, detail.map(str::to_owned)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" · ")
+        };
+        let content = if let Some(snapshot) = &self.maintenance_snapshot {
+            let provider = match &snapshot.provider {
+                nickel_platform::MaintenanceProvider::LinuxPackageKit { distribution } => {
+                    format!("PackageKit ({distribution})")
+                }
+                nickel_platform::MaintenanceProvider::LinuxUnsupported { distribution } => {
+                    format!("No supported update provider ({distribution})")
+                }
+                nickel_platform::MaintenanceProvider::WindowsUpdateAndSecurity => {
+                    "Windows Update and Windows Security".into()
+                }
+                nickel_platform::MaintenanceProvider::Unsupported { platform } => {
+                    format!("Unsupported platform ({platform})")
+                }
+            };
+            let update_value = snapshot.updates.value.as_ref().map(|status| {
+                format!(
+                    "{} available · {:?}{}",
+                    status.available,
+                    status.phase,
+                    if status.restart_required {
+                        " · Restart required"
+                    } else {
+                        ""
+                    }
+                )
+            });
+            let health = |value: Option<nickel_platform::ProtectionHealth>| {
+                value.map(|value| match value {
+                    nickel_platform::ProtectionHealth::Healthy => "Healthy".into(),
+                    nickel_platform::ProtectionHealth::AttentionRequired => {
+                        "Attention required".into()
+                    }
+                    nickel_platform::ProtectionHealth::Unhealthy => "Unhealthy".into(),
+                })
+            };
+            let mut column = Column::new()
+                .gap(2.0)
+                .child(SettingsRow::new(theme, "System provider", provider))
+                .child(SettingsRow::new(
+                    theme,
+                    "System updates",
+                    observation(
+                        snapshot.updates.state,
+                        update_value,
+                        snapshot.updates.detail.as_deref(),
+                    ),
+                ))
+                .child(SettingsRow::new(
+                    theme,
+                    "Firewall",
+                    observation(
+                        snapshot.protection.firewall.state,
+                        health(snapshot.protection.firewall.value),
+                        snapshot.protection.firewall.detail.as_deref(),
+                    ),
+                ))
+                .child(SettingsRow::new(
+                    theme,
+                    "Malware protection",
+                    observation(
+                        snapshot.protection.malware_protection.state,
+                        health(snapshot.protection.malware_protection.value),
+                        snapshot.protection.malware_protection.detail.as_deref(),
+                    ),
+                ))
+                .child(SettingsRow::new(
+                    theme,
+                    "Secure storage",
+                    observation(
+                        snapshot.secure_storage.state,
+                        snapshot
+                            .secure_storage
+                            .value
+                            .as_ref()
+                            .map(|value| format!("{value:?}")),
+                        snapshot.secure_storage.detail.as_deref(),
+                    ),
+                ));
+            for permission in &snapshot.permissions {
+                let label = match permission.kind {
+                    nickel_platform::PermissionKind::Camera => "Camera",
+                    nickel_platform::PermissionKind::Microphone => "Microphone",
+                    nickel_platform::PermissionKind::Location => "Location",
+                    nickel_platform::PermissionKind::Notifications => "Notifications",
+                    nickel_platform::PermissionKind::ScreenCapture => "Screen capture",
+                };
+                let value = permission.global_enabled.value.map(|enabled| {
+                    if enabled {
+                        "Globally enabled"
+                    } else {
+                        "Globally disabled"
+                    }
+                    .into()
+                });
+                let mut detail = observation(
+                    permission.global_enabled.state,
+                    value,
+                    permission.global_enabled.detail.as_deref(),
+                );
+                if permission.per_application_consent {
+                    detail.push_str(" · Per-application consent");
+                }
+                column = column.child(SettingsRow::new(theme, label, detail));
+            }
+            AnyView::new(column)
+        } else {
+            AnyView::new(
+                Text::new(
+                    self.maintenance_status
+                        .as_deref()
+                        .unwrap_or("System status has not been loaded."),
+                )
+                .color(palette.muted),
+            )
+        };
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 16.0,
+                right: 24.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(8.0)
+            .child(
+                Button::semantic(
+                    theme,
+                    SettingsMessage::MaintenanceRefresh,
+                    "Refresh",
+                    ButtonPresentation::Secondary,
+                )
+                .width(120.0),
+            )
+            .child(
+                nickel_ui::VerticalScroll::new(SettingsMessage::MaintenanceScroll, 0.0)
+                    .height(620.0)
+                    .theme(theme)
+                    .child(content),
+            )
+    }
+
     pub(super) fn optional_features_components(
         &self,
     ) -> impl nickel_ui::Component<SettingsMessage> {

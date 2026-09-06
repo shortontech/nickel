@@ -65,6 +65,7 @@ fn every_disposition_is_complete_unique_and_tied_to_production_source() {
         "Nickel Bar",
         "Appearance",
         "Default Apps",
+        "Security & Updates",
         "Optional Features",
         "Keyboard Shortcuts",
         "About Nickel",

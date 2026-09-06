@@ -44,6 +44,10 @@ impl SettingsApp {
                     self.localizer.text("settings-bluetooth-title"),
                     self.localizer.text("settings-bluetooth-subtitle"),
                 ),
+                SettingsPage::Security => (
+                    "Security & Updates".into(),
+                    "System maintenance, protection, privacy, and secure storage".into(),
+                ),
                 SettingsPage::DefaultApps => (
                     self.localizer.text("settings-default-apps-title"),
                     self.localizer.text("settings-default-apps-subtitle"),
@@ -88,6 +92,7 @@ impl SettingsApp {
         let appearance_label = self.localizer.text("settings-nav-appearance");
         let network_label = self.localizer.text("settings-nav-network");
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
+        let security_label = "Security & Updates".to_owned();
         let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let optional_features_label = "Optional Features".to_owned();
         let keyboard_label = self.localizer.text("settings-nav-keyboard");
@@ -369,6 +374,16 @@ impl SettingsApp {
             .leading(sidebar_icon(SidebarIconKind::Bluetooth))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
+                SettingsPage::Security,
+                security_label,
+                SettingsMessage::Navigate(SettingsPage::Security),
+                self.security_components(),
+            )
+            .header(destination_header(SettingsPage::Security))
+            .leading(sidebar_icon(SidebarIconKind::Security))
+            .section(self.localizer.text("settings-nav-section-system"))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
                 SettingsPage::DefaultApps,
                 default_apps_label,
                 SettingsMessage::Navigate(SettingsPage::DefaultApps),
@@ -376,7 +391,6 @@ impl SettingsApp {
             )
             .header(destination_header(SettingsPage::DefaultApps))
             .leading(sidebar_icon(SidebarIconKind::DefaultApps))
-            .section(self.localizer.text("settings-nav-section-system"))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
                 SettingsPage::OptionalFeatures,
@@ -386,7 +400,6 @@ impl SettingsApp {
             )
             .header(destination_header(SettingsPage::OptionalFeatures))
             .leading(sidebar_icon(SidebarIconKind::OptionalFeatures))
-            .section(self.localizer.text("settings-nav-section-system"))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
                 SettingsPage::KeyboardShortcuts,

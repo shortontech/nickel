@@ -238,7 +238,7 @@ where
         let mut navigation = Column::new()
             .id(format!("{root_id}/destinations"))
             .fill_height()
-            .gap(self.theme.spacing.compact)
+            .gap(2.0)
             .padding(Insets::all(self.theme.spacing.content))
             .overflow_y(Overflow::Auto)
             .scrollbar_theme(self.theme)
@@ -260,7 +260,7 @@ where
                 if let Some(section) = destination.section {
                     navigation = navigation.child(
                         Container::new()
-                            .min_height(21.0)
+                            .min_height(18.0)
                             .child(crate::Text::new(section).color(self.theme.text.secondary)),
                     );
                 }
