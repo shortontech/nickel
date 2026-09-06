@@ -375,8 +375,15 @@ pub fn translate_input_with_modes(
                     KeyCode::KeyC => Some(TerminalInputCommand::Copy),
                     KeyCode::KeyV => Some(TerminalInputCommand::PasteRequested),
                     KeyCode::KeyA => Some(TerminalInputCommand::SelectAll),
-                    _ => key_bytes(code, alt, application_cursor, application_keypad)
-                        .map(TerminalInputCommand::Write),
+                    _ => key_bytes(
+                        code,
+                        shift,
+                        alt,
+                        control,
+                        application_cursor,
+                        application_keypad,
+                    )
+                    .map(TerminalInputCommand::Write),
                 };
             }
             if shift {
@@ -387,8 +394,15 @@ pub fn translate_input_with_modes(
                     }
                     KeyCode::Home => Some(TerminalInputCommand::Scroll(TerminalScroll::Top)),
                     KeyCode::End => Some(TerminalInputCommand::Scroll(TerminalScroll::Bottom)),
-                    _ => key_bytes(code, alt, application_cursor, application_keypad)
-                        .map(TerminalInputCommand::Write),
+                    _ => key_bytes(
+                        code,
+                        shift,
+                        alt,
+                        control,
+                        application_cursor,
+                        application_keypad,
+                    )
+                    .map(TerminalInputCommand::Write),
                 };
             }
             // Ctrl+Alt is the normalized fallback representation of AltGr on backends which
@@ -399,8 +413,15 @@ pub fn translate_input_with_modes(
             {
                 return Some(TerminalInputCommand::Write(vec![byte]));
             }
-            key_bytes(code, alt, application_cursor, application_keypad)
-                .map(TerminalInputCommand::Write)
+            key_bytes(
+                code,
+                shift,
+                alt,
+                control,
+                application_cursor,
+                application_keypad,
+            )
+            .map(TerminalInputCommand::Write)
         }
         _ => None,
     }
@@ -441,10 +462,15 @@ fn control_byte(code: KeyCode) -> Option<u8> {
 
 fn key_bytes(
     code: KeyCode,
+    shift: bool,
     alt: bool,
+    control: bool,
     application_cursor: bool,
     application_keypad: bool,
 ) -> Option<Vec<u8>> {
+    if let Some(sequence) = modified_special_key(code, shift, alt, control) {
+        return Some(sequence);
+    }
     let sequence: &[u8] = match code {
         KeyCode::Numpad0 if application_keypad => b"\x1bOp",
         KeyCode::Numpad1 if application_keypad => b"\x1bOq",
@@ -502,6 +528,42 @@ fn key_bytes(
     }
     bytes.extend_from_slice(sequence);
     Some(bytes)
+}
+
+fn modified_special_key(code: KeyCode, shift: bool, alt: bool, control: bool) -> Option<Vec<u8>> {
+    if shift && !alt && !control && code == KeyCode::Tab {
+        return Some(b"\x1b[Z".to_vec());
+    }
+    let modifier = 1 + u8::from(shift) + 2 * u8::from(alt) + 4 * u8::from(control);
+    if modifier == 1 {
+        return None;
+    }
+    let sequence = match code {
+        KeyCode::ArrowUp => format!("\x1b[1;{modifier}A"),
+        KeyCode::ArrowDown => format!("\x1b[1;{modifier}B"),
+        KeyCode::ArrowRight => format!("\x1b[1;{modifier}C"),
+        KeyCode::ArrowLeft => format!("\x1b[1;{modifier}D"),
+        KeyCode::Home => format!("\x1b[1;{modifier}H"),
+        KeyCode::End => format!("\x1b[1;{modifier}F"),
+        KeyCode::Insert => format!("\x1b[2;{modifier}~"),
+        KeyCode::Delete => format!("\x1b[3;{modifier}~"),
+        KeyCode::PageUp => format!("\x1b[5;{modifier}~"),
+        KeyCode::PageDown => format!("\x1b[6;{modifier}~"),
+        KeyCode::F1 => format!("\x1b[1;{modifier}P"),
+        KeyCode::F2 => format!("\x1b[1;{modifier}Q"),
+        KeyCode::F3 => format!("\x1b[1;{modifier}R"),
+        KeyCode::F4 => format!("\x1b[1;{modifier}S"),
+        KeyCode::F5 => format!("\x1b[15;{modifier}~"),
+        KeyCode::F6 => format!("\x1b[17;{modifier}~"),
+        KeyCode::F7 => format!("\x1b[18;{modifier}~"),
+        KeyCode::F8 => format!("\x1b[19;{modifier}~"),
+        KeyCode::F9 => format!("\x1b[20;{modifier}~"),
+        KeyCode::F10 => format!("\x1b[21;{modifier}~"),
+        KeyCode::F11 => format!("\x1b[23;{modifier}~"),
+        KeyCode::F12 => format!("\x1b[24;{modifier}~"),
+        _ => return None,
+    };
+    Some(sequence.into_bytes())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -991,6 +1053,33 @@ mod tests {
                 true,
             ),
             Some(TerminalInputCommand::Write(b"\x1bOM".to_vec()))
+        );
+    }
+
+    #[test]
+    fn navigation_and_function_keys_preserve_xterm_modifiers() {
+        let control = ModifierState::from_sides_and_unsided([], [AggregateModifier::Control]);
+        let alt = ModifierState::from_sides_and_unsided([], [AggregateModifier::Alt]);
+        let shift = ModifierState::from_sides_and_unsided([], [AggregateModifier::Shift]);
+        let control_shift = ModifierState::from_sides_and_unsided(
+            [],
+            [AggregateModifier::Control, AggregateModifier::Shift],
+        );
+        assert_eq!(
+            translate_input(&key(KeyCode::ArrowRight, control)),
+            Some(TerminalInputCommand::Write(b"\x1b[1;5C".to_vec()))
+        );
+        assert_eq!(
+            translate_input(&key(KeyCode::F5, alt)),
+            Some(TerminalInputCommand::Write(b"\x1b[15;3~".to_vec()))
+        );
+        assert_eq!(
+            translate_input(&key(KeyCode::Tab, shift)),
+            Some(TerminalInputCommand::Write(b"\x1b[Z".to_vec()))
+        );
+        assert_eq!(
+            translate_input(&key(KeyCode::F12, control_shift)),
+            Some(TerminalInputCommand::Write(b"\x1b[24;6~".to_vec()))
         );
     }
 
