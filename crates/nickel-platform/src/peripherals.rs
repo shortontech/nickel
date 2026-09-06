@@ -789,8 +789,27 @@ mod tests {
 
     #[test]
     fn discovery_is_bounded_deduplicated_and_sanitized() {
+        let mut source = snapshot();
+        source.printers.as_mut().unwrap()[0].jobs = (0..MAX_JOBS + 3)
+            .map(|index| PrintJob {
+                id: format!("job-{index}"),
+                name: format!("Job {index}"),
+                state: PrintJobState::Pending,
+            })
+            .collect();
+        source
+            .filesystems
+            .as_mut()
+            .unwrap()
+            .extend((0..MAX_FILESYSTEMS + 3).map(|index| FilesystemUsage {
+                id: format!("filesystem-{index}"),
+                name: format!("Filesystem {index}"),
+                mount_path: format!("/mnt/{index}").into(),
+                capacity_bytes: 100,
+                available_bytes: 50,
+            }));
         let service = PeripheralService::new(Box::new(Fixture {
-            snapshot: Mutex::new(snapshot()),
+            snapshot: Mutex::new(source),
         }));
         let snapshot = service.inspect().unwrap();
         let printers = snapshot.printers.unwrap();
@@ -800,7 +819,12 @@ mod tests {
             1
         );
         assert_eq!(printers[0].name, "OfficePrinter");
-        assert_eq!(snapshot.filesystems.unwrap()[0].available_bytes, 100);
+        assert_eq!(printers[0].jobs.len(), MAX_JOBS);
+        assert_eq!(snapshot.omitted_jobs, 3);
+        let filesystems = snapshot.filesystems.unwrap();
+        assert_eq!(filesystems.len(), MAX_FILESYSTEMS);
+        assert!(snapshot.omitted_filesystems >= 4);
+        assert_eq!(filesystems[0].available_bytes, 100);
     }
 
     #[test]

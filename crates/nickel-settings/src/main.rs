@@ -789,6 +789,7 @@ impl SettingsApp {
             }
         };
         self.peripheral_rx = None;
+        self.next_peripheral_refresh = Instant::now() + Duration::from_secs(2);
         match result {
             Ok((outcome, snapshot)) => {
                 self.peripheral_snapshot = Some(snapshot);
@@ -1973,6 +1974,12 @@ impl SettingsApp {
             self.request_redraw();
         }
         let now = Instant::now();
+        if self.page == SettingsPage::PrintersStorage
+            && self.peripheral_rx.is_none()
+            && now >= self.next_peripheral_refresh
+        {
+            self.load_peripherals();
+        }
         if self
             .pending_display_revert
             .as_ref()
@@ -2465,6 +2472,13 @@ impl Application for SettingsApp {
                 now + Duration::from_millis(16)
             } else {
                 self.next_default_apps_refresh
+            });
+        }
+        if self.page == SettingsPage::PrintersStorage {
+            deadlines.push(if self.peripheral_rx.is_some() {
+                now + Duration::from_millis(16)
+            } else {
+                self.next_peripheral_refresh
             });
         }
         if self.wallpaper_dialog_rx.is_some() {

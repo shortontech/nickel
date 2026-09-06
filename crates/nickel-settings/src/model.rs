@@ -79,6 +79,7 @@ pub(super) struct SettingsApp {
     pub(super) peripheral_status: Option<String>,
     pub(super) peripheral_address: String,
     pub(super) peripheral_rx: Option<std::sync::mpsc::Receiver<PeripheralTaskResult>>,
+    pub(super) next_peripheral_refresh: Instant,
     pub(super) maintenance_snapshot: Option<nickel_platform::MaintenanceSnapshot>,
     pub(super) maintenance_status: Option<String>,
     pub(super) maintenance_rx: Option<
@@ -245,6 +246,7 @@ impl Default for SettingsApp {
             peripheral_status: None,
             peripheral_address: String::new(),
             peripheral_rx: None,
+            next_peripheral_refresh: Instant::now(),
             maintenance_snapshot: None,
             maintenance_status: None,
             maintenance_rx: None,
