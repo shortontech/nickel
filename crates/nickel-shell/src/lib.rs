@@ -1145,6 +1145,7 @@ fn render_role(
 }
 
 fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
+    let configured_primary = state.primary_output_name();
     let outputs = shell
         .surfaces()
         .filter(|surface| surface.role() == SurfaceRole::Desktop)
@@ -1152,6 +1153,7 @@ fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
             let geometry = shell.surface_display_geometry(surface.id())?;
             Some(nickel_file::desktop::DesktopOutput {
                 id: surface.output_name().to_owned(),
+                primary: configured_primary.as_deref() == Some(surface.output_name()),
                 work_area: nickel_file::desktop::Rect {
                     x: geometry.x as f32 / geometry.scale,
                     y: geometry.y as f32 / geometry.scale,

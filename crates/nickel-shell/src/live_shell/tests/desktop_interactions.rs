@@ -6,6 +6,7 @@
         desktop.set_outputs(vec![
             nickel_file::desktop::DesktopOutput {
                 id: "left".into(),
+                primary: true,
                 work_area: nickel_file::desktop::Rect {
                     x: -400.0,
                     y: 0.0,
@@ -16,6 +17,7 @@
             },
             nickel_file::desktop::DesktopOutput {
                 id: "right".into(),
+                primary: false,
                 work_area: nickel_file::desktop::Rect {
                     x: 0.0,
                     y: 0.0,
@@ -96,6 +98,7 @@
         let application = shell.desktop_host.application_mut();
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
+            primary: true,
             work_area: nickel_file::desktop::Rect {
                 x: 0.0,
                 y: 0.0,
@@ -218,6 +221,7 @@
         application.watch = None;
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
+            primary: true,
             work_area: nickel_file::desktop::Rect {
                 x: 0.0,
                 y: 0.0,
@@ -424,6 +428,7 @@
         shell.set_desktop_outputs(vec![
             nickel_file::desktop::DesktopOutput {
                 id: "left".into(),
+                primary: true,
                 work_area: nickel_file::desktop::Rect {
                     x: -800.0,
                     y: 0.0,
@@ -434,6 +439,7 @@
             },
             nickel_file::desktop::DesktopOutput {
                 id: "right".into(),
+                primary: false,
                 work_area: nickel_file::desktop::Rect {
                     x: 0.0,
                     y: 0.0,
@@ -545,6 +551,7 @@
         let mut desktop = super::DesktopApplication::fixture(None, palette);
         let output = |width| nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
+            primary: true,
             work_area: nickel_file::desktop::Rect {
                 x: 0.0,
                 y: 0.0,
@@ -581,6 +588,7 @@
         let application = shell.desktop_host.application_mut();
         application.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "primary".into(),
+            primary: true,
             work_area: nickel_file::desktop::Rect {
                 x: 0.0,
                 y: 0.0,
@@ -1029,6 +1037,7 @@
         desktop.open_background_context(None);
         desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
             id: "new-output".into(),
+            primary: true,
             work_area: nickel_file::desktop::Rect {
                 x: -500.0,
                 y: 0.0,

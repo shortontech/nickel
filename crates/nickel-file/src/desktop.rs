@@ -28,6 +28,8 @@ pub struct Rect {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DesktopOutput {
     pub id: String,
+    /// True only for the display selected by the session/display authority.
+    pub primary: bool,
     /// Available area in global logical coordinates, excluding shell reservations.
     pub work_area: Rect,
     pub scale: f32,
@@ -97,6 +99,7 @@ pub struct DesktopLayout {
     cell: (f32, f32),
     icons_visible: bool,
     remembered_outputs: HashMap<DesktopEntryId, String>,
+    remembered_positions: HashMap<DesktopEntryId, Point>,
     locale: String,
 }
 
@@ -104,7 +107,7 @@ impl DesktopLayout {
     pub fn new(outputs: Vec<DesktopOutput>) -> Self {
         Self {
             items: Vec::new(),
-            outputs,
+            outputs: normalize_outputs(outputs),
             selection: HashSet::new(),
             anchor: None,
             arrangement: Arrangement::Manual,
@@ -112,6 +115,7 @@ impl DesktopLayout {
             cell: (96.0, 112.0),
             icons_visible: true,
             remembered_outputs: HashMap::new(),
+            remembered_positions: HashMap::new(),
             locale: sys_locale::get_locale().unwrap_or_else(|| "en-US".into()),
         }
     }
@@ -159,6 +163,7 @@ impl DesktopLayout {
     pub fn set_grid(&mut self, width: f32, height: f32) {
         self.cell = (width.max(48.0), height.max(48.0));
         self.constrain_all();
+        self.resolve_collisions(&HashSet::new());
     }
 
     /// Reconciles a provider snapshot incrementally by stable file identity. Renames retain layout.
@@ -181,7 +186,7 @@ impl DesktopLayout {
                         .get(&id)
                         .filter(|candidate| self.output(candidate).is_some())
                         .cloned()
-                        .or_else(|| self.outputs.first().map(|output| output.id.clone()))
+                        .or_else(|| self.effective_primary().map(|output| output.id.clone()))
                         .unwrap_or_default();
                     DesktopItem {
                         id,
@@ -198,6 +203,8 @@ impl DesktopLayout {
             .map(|item| item.id)
             .collect::<HashSet<_>>();
         self.selection.retain(|id| ids.contains(id));
+        self.remembered_outputs.retain(|id, _| ids.contains(id));
+        self.remembered_positions.retain(|id, _| ids.contains(id));
         self.anchor = self.anchor.filter(|id| ids.contains(id));
         self.arrange();
     }
@@ -345,6 +352,7 @@ impl DesktopLayout {
                 item.position.y += delta.y;
                 item.position = snap_and_clamp(item.position, work_area, self.cell);
                 self.remembered_outputs.insert(item.id, output.to_owned());
+                self.remembered_positions.insert(item.id, item.position);
             }
         }
         self.resolve_collisions(&moving);
@@ -379,8 +387,8 @@ impl DesktopLayout {
                     .or_insert_with(|| item.output.clone());
             }
         }
-        self.outputs = outputs;
-        let fallback = self.outputs.first().map(|output| output.id.clone());
+        self.outputs = normalize_outputs(outputs);
+        let fallback = self.effective_primary().map(|output| output.id.clone());
         if let Some(fallback) = fallback {
             let valid = self
                 .outputs
@@ -392,11 +400,11 @@ impl DesktopLayout {
                     && valid.contains(affinity.as_str())
                 {
                     item.output.clone_from(affinity);
+                    if let Some(position) = self.remembered_positions.get(&item.id) {
+                        item.position = *position;
+                    }
                 } else if !valid.contains(item.output.as_str()) {
                     item.output.clone_from(&fallback);
-                    self.remembered_outputs
-                        .entry(item.id)
-                        .or_insert_with(|| fallback.clone());
                 }
             }
             self.constrain_all();
@@ -425,13 +433,18 @@ impl DesktopLayout {
                 .remembered_outputs
                 .get(&item.id)
                 .unwrap_or(&item.output);
+            let position = self
+                .remembered_positions
+                .get(&item.id)
+                .copied()
+                .unwrap_or(item.position);
             body.push_str(&format!(
                 "item={}:{}:{}:{}:{}\n",
                 item.id.0.0,
                 item.id.0.1,
                 hex(output.as_bytes()),
-                item.position.x,
-                item.position.y
+                position.x,
+                position.y
             ));
         }
         let temporary = path.with_extension(format!("tmp-{}", std::process::id()));
@@ -484,6 +497,7 @@ impl DesktopLayout {
         for item in &mut self.items {
             if let Some((output, position)) = placements.remove(&item.id) {
                 self.remembered_outputs.insert(item.id, output.clone());
+                self.remembered_positions.insert(item.id, position);
                 if self.outputs.iter().any(|candidate| candidate.id == output) {
                     item.output = output;
                 }
@@ -500,6 +514,10 @@ impl DesktopLayout {
 
     fn output(&self, id: &str) -> Option<&DesktopOutput> {
         self.outputs.iter().find(|output| output.id == id)
+    }
+
+    pub fn effective_primary(&self) -> Option<&DesktopOutput> {
+        self.outputs.iter().find(|output| output.primary)
     }
 
     fn arrange(&mut self) {
@@ -537,6 +555,7 @@ impl DesktopLayout {
                 item.position = cell_position(output.work_area, self.cell, cell_index);
             }
         }
+        self.resolve_collisions(&HashSet::new());
     }
 
     fn constrain_all(&mut self) {
@@ -553,24 +572,99 @@ impl DesktopLayout {
     }
 
     fn resolve_collisions(&mut self, preferred: &HashSet<DesktopEntryId>) {
-        let outputs = self.outputs.clone();
-        for output in outputs {
-            let capacity = grid_capacity(output.work_area, self.cell);
-            let mut occupied = HashSet::new();
-            let mut indices = (0..self.items.len())
-                .filter(|index| self.items[*index].output == output.id)
-                .collect::<Vec<_>>();
-            indices.sort_by_key(|index| !preferred.contains(&self.items[*index].id));
-            for index in indices {
-                let requested = cell_index(output.work_area, self.cell, self.items[index].position);
-                let available = (0..capacity)
-                    .map(|offset| (requested + offset) % capacity.max(1))
-                    .find(|cell| occupied.insert(*cell))
-                    .unwrap_or(requested);
-                self.items[index].position = cell_position(output.work_area, self.cell, available);
+        let Some(primary) = self.effective_primary().cloned() else {
+            return;
+        };
+        let mut occupied = self
+            .outputs
+            .iter()
+            .map(|output| (output.id.clone(), HashSet::<usize>::new()))
+            .collect::<HashMap<_, _>>();
+        let mut indices = (0..self.items.len()).collect::<Vec<_>>();
+        indices.sort_by_key(|index| {
+            (
+                !preferred.contains(&self.items[*index].id),
+                self.items[*index].id,
+            )
+        });
+        let mut overflow = 0;
+        for index in indices {
+            let requested_output = self.items[index].output.clone();
+            let requested_position = self.items[index].position;
+            let mut candidates = Vec::with_capacity(self.outputs.len());
+            if self.output(&requested_output).is_some() {
+                candidates.push(requested_output.clone());
+            }
+            if !candidates.contains(&primary.id) {
+                candidates.push(primary.id.clone());
+            }
+            for output_id in self.outputs.iter().map(|output| output.id.clone()) {
+                if !candidates.contains(&output_id) {
+                    candidates.push(output_id);
+                }
+            }
+            let placement = candidates.into_iter().find_map(|output_id| {
+                let output = self.output(&output_id)?;
+                let capacity = grid_capacity(output.work_area, self.cell);
+                let requested = if output_id == requested_output {
+                    cell_index(output.work_area, self.cell, requested_position)
+                } else {
+                    0
+                };
+                let cells = occupied.get_mut(&output_id)?;
+                (0..capacity)
+                    .map(|offset| (requested + offset) % capacity)
+                    .find(|cell| cells.insert(*cell))
+                    .map(|cell| (output_id, cell))
+            });
+            if let Some((output_id, cell)) = placement {
+                let work_area = self
+                    .output(&output_id)
+                    .expect("candidate output remains live")
+                    .work_area;
+                self.items[index].output = output_id;
+                self.items[index].position = cell_position(work_area, self.cell, cell);
+            } else {
+                // Preserve unique semantic geometry even when the visible grids are exhausted.
+                // The per-output desktop viewport turns these cells into a reachable overflow plane.
+                self.items[index].output.clone_from(&primary.id);
+                self.items[index].position = overflow_position(
+                    primary.work_area,
+                    self.cell,
+                    grid_capacity(primary.work_area, self.cell) + overflow,
+                );
+                overflow += 1;
             }
         }
     }
+}
+
+fn normalize_outputs(outputs: Vec<DesktopOutput>) -> Vec<DesktopOutput> {
+    let mut seen = HashSet::new();
+    let mut outputs = outputs
+        .into_iter()
+        .filter(|output| {
+            !output.id.is_empty()
+                && seen.insert(output.id.clone())
+                && output.scale.is_finite()
+                && output.scale > 0.0
+                && output.work_area.x.is_finite()
+                && output.work_area.y.is_finite()
+                && output.work_area.width.is_finite()
+                && output.work_area.height.is_finite()
+                && output.work_area.width > 0.0
+                && output.work_area.height > 0.0
+        })
+        .collect::<Vec<_>>();
+    outputs.sort_by(|left, right| left.id.cmp(&right.id));
+    let effective = outputs
+        .iter()
+        .position(|output| output.primary)
+        .or((!outputs.is_empty()).then_some(0));
+    for (index, output) in outputs.iter_mut().enumerate() {
+        output.primary = Some(index) == effective;
+    }
+    outputs
 }
 
 fn compare_items(
@@ -644,6 +738,14 @@ fn cell_position(area: Rect, cell: (f32, f32), index: usize) -> Point {
     let rows = (area.height / cell.1).floor().max(1.0) as usize;
     let columns = (area.width / cell.0).floor().max(1.0) as usize;
     let index = index.min(rows * columns - 1);
+    Point {
+        x: area.x + (index / rows) as f32 * cell.0,
+        y: area.y + (index % rows) as f32 * cell.1,
+    }
+}
+
+fn overflow_position(area: Rect, cell: (f32, f32), index: usize) -> Point {
+    let rows = (area.height / cell.1).floor().max(1.0) as usize;
     Point {
         x: area.x + (index / rows) as f32 * cell.0,
         y: area.y + (index % rows) as f32 * cell.1,
@@ -752,6 +854,7 @@ mod tests {
     fn output(id: &str, x: f32) -> DesktopOutput {
         DesktopOutput {
             id: id.into(),
+            primary: false,
             work_area: Rect {
                 x,
                 y: 32.0,
@@ -759,6 +862,13 @@ mod tests {
                 height: 360.0,
             },
             scale: 1.0,
+        }
+    }
+
+    fn primary_output(id: &str, x: f32) -> DesktopOutput {
+        DesktopOutput {
+            primary: true,
+            ..output(id, x)
         }
     }
 
@@ -981,5 +1091,103 @@ mod tests {
                 .with_extension(format!("tmp-{}", std::process::id()))
                 .exists()
         );
+    }
+
+    #[test]
+    fn declared_primary_controls_new_placement_in_every_enumeration_order() {
+        for outputs in [
+            vec![output("left", -300.0), primary_output("right", 100.0)],
+            vec![primary_output("right", 100.0), output("left", -300.0)],
+        ] {
+            let mut layout = DesktopLayout::new(outputs);
+            layout.reconcile(vec![entry(1, "new.svg", false, 1)]);
+            assert_eq!(layout.effective_primary().unwrap().id, "right");
+            assert_eq!(layout.items()[0].output, "right");
+        }
+    }
+
+    #[test]
+    fn topology_reflow_uses_all_capacity_before_unique_overflow_cells() {
+        let one_cell = |id: &str, x: f32, primary| DesktopOutput {
+            id: id.into(),
+            primary,
+            work_area: Rect {
+                x,
+                y: 0.0,
+                width: 48.0,
+                height: 48.0,
+            },
+            scale: 1.0,
+        };
+        let mut layout = DesktopLayout::new(vec![
+            one_cell("secondary", -48.0, false),
+            one_cell("primary", 0.0, true),
+        ]);
+        layout.set_grid(48.0, 48.0);
+        layout.reconcile(vec![
+            entry(1, "one", false, 1),
+            entry(2, "two", false, 2),
+            entry(3, "three", false, 3),
+        ]);
+
+        let presentations = layout
+            .items()
+            .iter()
+            .map(|item| {
+                (
+                    item.output.clone(),
+                    item.position.x.to_bits(),
+                    item.position.y.to_bits(),
+                )
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            presentations.len(),
+            3,
+            "overflow may never alias a visible cell"
+        );
+        assert!(layout.items().iter().any(|item| item.output == "secondary"));
+        assert!(
+            layout
+                .items()
+                .iter()
+                .all(|item| { item.position.x.is_finite() && item.position.y.is_finite() })
+        );
+    }
+
+    #[test]
+    fn invalid_transient_output_facts_do_not_replace_the_primary_authority() {
+        let mut layout = DesktopLayout::new(vec![primary_output("main", 0.0)]);
+        layout.reconcile(vec![entry(1, "one", false, 1)]);
+        layout.set_outputs(vec![DesktopOutput {
+            id: "broken".into(),
+            primary: true,
+            work_area: Rect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 0.0,
+                height: -1.0,
+            },
+            scale: 0.0,
+        }]);
+        assert!(layout.effective_primary().is_none());
+        layout.set_outputs(vec![primary_output("main", 0.0)]);
+        assert_eq!(layout.items()[0].output, "main");
+    }
+
+    #[test]
+    fn temporary_fallback_restores_saved_affinity_and_manual_position() {
+        let mut layout =
+            DesktopLayout::new(vec![primary_output("primary", 0.0), output("dock", 400.0)]);
+        layout.reconcile(vec![entry(1, "placed", false, 1)]);
+        let id = DesktopEntryId(FileIdentity(7, 1));
+        layout.move_group(id, Point { x: 496.0, y: 112.0 }, "dock");
+        let saved = layout.items()[0].position;
+
+        layout.set_outputs(vec![primary_output("primary", 0.0)]);
+        assert_eq!(layout.items()[0].output, "primary");
+        layout.set_outputs(vec![output("dock", 400.0), primary_output("primary", 0.0)]);
+        assert_eq!(layout.items()[0].output, "dock");
+        assert_eq!(layout.items()[0].position, saved);
     }
 }

@@ -1492,6 +1492,7 @@ impl DesktopApplication {
             watch: None,
             layout: DesktopLayout::new(vec![DesktopOutput {
                 id: "primary".into(),
+                primary: true,
                 work_area: DesktopRect {
                     x: 0.0,
                     y: 0.0,
