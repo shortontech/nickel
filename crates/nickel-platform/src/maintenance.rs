@@ -1122,6 +1122,41 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_progress_and_failure_classification_matrix_is_complete() {
+        for phase in [
+            UpdatePhase::Idle,
+            UpdatePhase::Checking,
+            UpdatePhase::Downloading,
+            UpdatePhase::Installing,
+            UpdatePhase::AwaitingRestart,
+        ] {
+            let mut snapshot = StatefulFixture {
+                camera_enabled: Mutex::new(false),
+            }
+            .inspect()
+            .unwrap();
+            snapshot.updates.value.as_mut().unwrap().phase = phase;
+            assert_eq!(snapshot.sanitize().updates.value.unwrap().phase, phase);
+        }
+
+        for class in [
+            MaintenanceFailureClass::Network,
+            MaintenanceFailureClass::Authorization,
+            MaintenanceFailureClass::ProviderUnavailable,
+            MaintenanceFailureClass::Cancelled,
+            MaintenanceFailureClass::Policy,
+            MaintenanceFailureClass::Unknown,
+        ] {
+            let sanitized = sanitize_error(MaintenanceError {
+                class,
+                detail: "token=private classified failure".into(),
+            });
+            assert_eq!(sanitized.class, class);
+            assert_eq!(sanitized.detail, "<redacted> classified failure");
+        }
+    }
+
+    #[test]
     fn default_backend_exposes_every_required_permission_without_implied_consent() {
         let snapshot = maintenance_backend().inspect().unwrap();
         assert_eq!(snapshot.permissions.len(), 5);

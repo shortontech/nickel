@@ -490,13 +490,28 @@ type PeripheralTaskResult = Result<
     ),
     nickel_platform::PeripheralError,
 >;
-type MaintenanceTaskResult = Result<
-    (
-        Option<nickel_platform::MaintenanceOutcome>,
-        nickel_platform::MaintenanceSnapshot,
-    ),
-    nickel_platform::MaintenanceError,
->;
+struct MaintenanceTaskResult {
+    outcome: Option<Result<nickel_platform::MaintenanceOutcome, nickel_platform::MaintenanceError>>,
+    snapshot: Result<nickel_platform::MaintenanceSnapshot, nickel_platform::MaintenanceError>,
+}
+
+fn show_pending_maintenance_phase(
+    snapshot: &mut nickel_platform::MaintenanceSnapshot,
+    action: &nickel_platform::MaintenanceAction,
+) {
+    let Some(status) = snapshot.updates.value.as_mut() else {
+        return;
+    };
+    status.phase = match action {
+        nickel_platform::MaintenanceAction::CheckForUpdates => {
+            nickel_platform::UpdatePhase::Checking
+        }
+        nickel_platform::MaintenanceAction::InstallUpdates => {
+            nickel_platform::UpdatePhase::Installing
+        }
+        _ => return,
+    };
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
@@ -864,8 +879,10 @@ impl SettingsApp {
         match std::thread::Builder::new()
             .name("nickel-maintenance-inspection".into())
             .spawn(move || {
-                let result = service.inspect().map(|snapshot| (None, snapshot));
-                let _ = sender.send(result);
+                let _ = sender.send(MaintenanceTaskResult {
+                    outcome: None,
+                    snapshot: service.inspect(),
+                });
             }) {
             Ok(_) => {
                 self.maintenance_status = Some("Loading authoritative system status…".into());
@@ -884,28 +901,40 @@ impl SettingsApp {
         let result = match receiver.try_recv() {
             Ok(result) => result,
             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                Err(nickel_platform::MaintenanceError {
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => MaintenanceTaskResult {
+                outcome: None,
+                snapshot: Err(nickel_platform::MaintenanceError {
                     class: nickel_platform::MaintenanceFailureClass::ProviderUnavailable,
                     detail: "System status provider stopped before returning data".into(),
-                })
-            }
+                }),
+            },
         };
         self.maintenance_rx = None;
-        match result {
-            Ok((outcome, snapshot)) => {
+        let snapshot_error = match result.snapshot {
+            Ok(snapshot) => {
                 self.maintenance_snapshot = Some(snapshot);
-                self.maintenance_status = outcome.map(|outcome| match outcome {
+                None
+            }
+            Err(error) => Some(error),
+        };
+        self.maintenance_status = match (result.outcome, snapshot_error) {
+            (Some(Ok(outcome)), refresh_error) => {
+                let mut detail = match outcome {
                     nickel_platform::MaintenanceOutcome::Accepted => {
                         "The operating system accepted the maintenance request.".into()
                     }
                     nickel_platform::MaintenanceOutcome::NativeConsentRequired { detail }
                     | nickel_platform::MaintenanceOutcome::Unsupported { detail }
                     | nickel_platform::MaintenanceOutcome::Rejected { detail } => detail,
-                });
+                };
+                if let Some(error) = refresh_error {
+                    detail.push_str(&format!(" Status refresh failed: {error}"));
+                }
+                Some(detail)
             }
-            Err(error) => self.maintenance_status = Some(error.to_string()),
-        }
+            (Some(Err(error)), _) => Some(error.to_string()),
+            (None, refresh_error) => refresh_error.map(|error| error.to_string()),
+        };
         true
     }
 
@@ -915,15 +944,21 @@ impl SettingsApp {
         }
         let service = nickel_platform::maintenance_service();
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let pending_action = action.clone();
         match std::thread::Builder::new()
             .name("nickel-maintenance-action".into())
             .spawn(move || {
-                let result = service.request(action).and_then(|outcome| {
-                    service.inspect().map(|snapshot| (Some(outcome), snapshot))
+                let outcome = service.request(action);
+                let snapshot = service.inspect();
+                let _ = sender.send(MaintenanceTaskResult {
+                    outcome: Some(outcome),
+                    snapshot,
                 });
-                let _ = sender.send(result);
             }) {
             Ok(_) => {
+                if let Some(snapshot) = self.maintenance_snapshot.as_mut() {
+                    show_pending_maintenance_phase(snapshot, &pending_action);
+                }
                 self.maintenance_status = Some("Waiting for the operating system…".into());
                 self.maintenance_rx = Some(receiver);
             }
@@ -2862,11 +2897,12 @@ mod tests {
     use super::{
         ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction,
         DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
-        FeatureSupport, FileIconPreference, NetworkAdapter, OptionalFeatureRuntime,
-        OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter,
-        SettingsMessage, SettingsPage, ThemePreference, UiHost, WallpaperSettings, WifiNetwork,
-        attach_rect_centered, codex_feature_state, constrain_center, resolve_codex_feature_state,
-        shell_behavior_transaction, snap_rect,
+        FeatureSupport, FileIconPreference, MaintenanceTaskResult, NetworkAdapter,
+        OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
+        SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
+        WallpaperSettings, WifiNetwork, attach_rect_centered, codex_feature_state,
+        constrain_center, resolve_codex_feature_state, shell_behavior_transaction,
+        show_pending_maintenance_phase, snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -3626,6 +3662,83 @@ mod tests {
                 "missing supported maintenance action"
             );
         }
+    }
+
+    #[test]
+    fn maintenance_progress_and_failed_action_refresh_are_independent() {
+        let snapshot = |phase| nickel_platform::MaintenanceSnapshot {
+            provider: nickel_platform::MaintenanceProvider::Unsupported {
+                platform: "fixture".into(),
+            },
+            updates: nickel_platform::Observation {
+                state: nickel_platform::ObservationState::Current,
+                value: Some(nickel_platform::UpdateStatus {
+                    available: 2,
+                    phase,
+                    restart_required: false,
+                    last_successful_check: Some(std::time::SystemTime::UNIX_EPOCH),
+                }),
+                observed_at: Some(std::time::SystemTime::UNIX_EPOCH),
+                detail: None,
+            },
+            protection: nickel_platform::ProtectionStatus {
+                firewall: nickel_platform::Observation::unsupported("fixture"),
+                malware_protection: nickel_platform::Observation::unsupported("fixture"),
+            },
+            permissions: Vec::new(),
+            secure_storage: nickel_platform::Observation::unsupported("fixture"),
+        };
+
+        let mut checking = snapshot(nickel_platform::UpdatePhase::Idle);
+        show_pending_maintenance_phase(
+            &mut checking,
+            &nickel_platform::MaintenanceAction::CheckForUpdates,
+        );
+        assert_eq!(
+            checking.updates.value.unwrap().phase,
+            nickel_platform::UpdatePhase::Checking
+        );
+        let mut installing = snapshot(nickel_platform::UpdatePhase::Downloading);
+        show_pending_maintenance_phase(
+            &mut installing,
+            &nickel_platform::MaintenanceAction::InstallUpdates,
+        );
+        assert_eq!(
+            installing.updates.value.unwrap().phase,
+            nickel_platform::UpdatePhase::Installing
+        );
+
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        app.maintenance_snapshot = Some(snapshot(nickel_platform::UpdatePhase::Installing));
+        app.maintenance_rx = Some(receiver);
+        sender
+            .send(MaintenanceTaskResult {
+                outcome: Some(Err(nickel_platform::MaintenanceError {
+                    class: nickel_platform::MaintenanceFailureClass::Cancelled,
+                    detail: "provider cancelled".into(),
+                })),
+                snapshot: Ok(snapshot(nickel_platform::UpdatePhase::Idle)),
+            })
+            .unwrap();
+        assert!(app.poll_maintenance());
+        assert_eq!(
+            app.maintenance_snapshot
+                .as_ref()
+                .unwrap()
+                .updates
+                .value
+                .as_ref()
+                .unwrap()
+                .phase,
+            nickel_platform::UpdatePhase::Idle
+        );
+        assert!(
+            app.maintenance_status
+                .as_deref()
+                .unwrap()
+                .contains("Cancelled")
+        );
     }
 
     #[cfg(target_os = "linux")]
