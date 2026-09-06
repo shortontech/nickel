@@ -702,7 +702,7 @@ impl Fixture for LauncherSearchFixture {
         (920, 680)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::GridCell, "firefox"))
+        Some(Selector::keyed_item("launcher-applications", "firefox"))
     }
 }
 
@@ -771,7 +771,7 @@ impl Fixture for LauncherDashboardFixture {
         (920, 680)
     }
     fn default_activation() -> Option<Selector> {
-        Some(Selector::role_name(SemanticRole::GridCell, "firefox"))
+        Some(Selector::keyed_item("launcher-applications", "firefox"))
     }
 }
 

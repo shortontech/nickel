@@ -1,15 +1,10 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04; implementation dispositions refreshed through 2026-09-06. Scope: every
-checked-in Rust source under `crates/`. The per-crate snapshot in
-`assets/code-reuse-source-inventory.tsv` intentionally remains at the pre-refactor baseline while
-parallel coordinator splits are in flight; final source counts must be regenerated only after those
-splits are integrated. At this refresh the known differences are the new `nickel-build-support` and
-`nickel-storage` crates plus additional sources in `nickel-session`, `nickel-session-protocol`,
-`nickel-shell`, and `nickel-ui`. Consequently the source-inventory test is expected to remain red
-until the integration refresh, while the behavioral authority assertions remain applicable.
-Candidates were grouped by behavior, then traced through callers and tests; same-named trait
-implementations and platform translations were not treated as duplication.
+Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-06.
+Scope: all 231 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+`assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
+or disappears without review. Candidates were grouped by behavior, then traced through callers and
+tests; same-named trait implementations and platform translations were not treated as duplication.
 
 | Candidate locations | Shared behavior | Intended authority | Disposition | Migration order / evidence | Tests | Status |
 |---|---|---|---|---|---|---|
@@ -42,6 +37,12 @@ implementations and platform translations were not treated as duplication.
 | Nickel Shell binary and feature-gated library | Shell module ownership and entry point | `nickel-shell` library root | consolidate | The binary is a thin call to `nickel_shell::run`; production and workbench builds now share one module/type graph instead of compiling the same source through parallel roots. | Shell default/all-feature builds and workbench fixtures | complete |
 | Nickel Shell, Settings, and File build scripts | Windows icon resource generation | `nickel-build-support::embed_windows_icon` | consolidate | Each build script supplies only its icon path and output name; image conversion, resource compilation, and rerun directives have one build-time authority. | workspace default/all-feature builds | complete |
 | `nickel-ui::ui::tree` scrollbar layout/hit helpers | Scrollbar geometry | `nickel-ui::ui::tree::scrollbar` | split-seam | Pure thumb/track geometry and drag mapping moved behind a focused private module while `UiFrame` retains interaction and tree ownership. This reduces coordinator density without introducing a second hit-test authority. | scrollbar unit tests and UI tree interaction suites | complete |
+| `nickel-ui::ui::tree` selection helpers | Selection geometry and generation tracking | `nickel-ui::ui::tree::selection` | split-seam | Glyph/run geometry, endpoint hit mapping, builder state, and selection generations moved behind a focused private API; `UiFrame` retains orchestration. | selection and UI tree interaction suites | complete |
+| Nickel Shell desktop surface behavior | Desktop application state, input, view, and file effects | `nickel-shell::live_shell::desktop` | split-seam | The 1,460-line desktop domain moved out of the shell coordinator while `LiveShell` retains cross-surface coordination and wallpaper ownership. | desktop semantic scenarios and live-shell suites | complete |
+| Nickel Session output-global lifecycle | Bounded two-phase global retirement | `nickel-session::output_retirement` | split-seam | Capacity, grace transitions, and identity visibility are pure policy in one module; `NickelSession` retains compositor side effects. | retirement churn and session output suites | complete |
+| Nickel File application and fixture source layout | Application runtime versus workbench fixture declarations | `nickel-file::{app,app::fixtures}` | split-seam | The library now uses a conventional application module, with the feature-gated fixture catalog isolated from runtime behavior. | Nickel File default/all-feature tests | complete |
+| Nickel Session move and resize grabs | Pointer-event pass-through required by Smithay's grab trait | `nickel-session::grabs::forward_pointer_grab_events` | consolidate | One local macro implements identical relative-motion, axis, frame, gesture, start-data, and unset forwarding while each grab keeps unique motion/button policy. | Nickel Session grab and input suites | complete |
+| Multi-output shell surfaces | Per-surface output identity | `nickel-session-protocol::ShellSurfaceIdentity` | consolidate | Capability-gated registration binds opaque surface IDs, canonical roles, and output names; window titles no longer carry protocol metadata, and reserved identities fail closed for unregistered or unauthenticated clients. | protocol round trips, authorization, and multi-output session tests | complete |
 | `nickel-i18n` and `nickel-i18n-lint` | Runtime lookup versus source enforcement | Separate runtime and build-time crates sharing catalog conventions | keep-distinct | The lint performs source analysis and must not enter shipped runtime dependencies; runtime localization must not depend on repository source. | catalog and localization-lint suites | verified distinct |
 | `nickel-session-protocol` and session state | Wire types versus compositor ownership | protocol crate for wire schema; session for live state | keep-distinct | Mirroring protocol facts into live handles is translation, not duplicated authority; the protocol crate cannot depend on Smithay. | serialization and session state tests | verified distinct |
 | `nickel-gaze::{contract,grid,camera}` | Gaze samples, calibration grid, camera frames | Separate typed stages | keep-distinct | Coordinate conversion is shared through contract types; acquisition and calibration have different timing/lifetime constraints. | contract/grid/camera tests | verified distinct |
@@ -49,18 +50,17 @@ implementations and platform translations were not treated as duplication.
 ## Result
 
 The audit now has lower-level authorities for configuration storage and Windows icon embedding;
-shared Linux authorities for NetworkManager discovery and desktop-entry admission; a single Nickel
-Shell module graph; an explicit feature boundary around Nickel File fixtures; and application host
-adapters as the boundary for session-specific input fencing. Scrollbar extraction establishes the
-first focused seam in the oversized UI tree without duplicating ownership. Earlier geometry and
-validated-scale consolidations remain in force.
+shared Linux authorities for NetworkManager, desktop-entry admission, and icon-theme discovery; a
+single Nickel Shell module graph; an explicit feature boundary around Nickel File fixtures; and
+application host adapters as the boundary for session-specific input fencing. Typed shell-surface
+registration replaces title metadata. Focused scrollbar, selection, desktop, fixture, and output
+retirement modules reduce coordinator density without creating parallel policy authorities.
 
-Final line deltas and per-crate source counts are deliberately deferred until the parallel
-`LiveShell`, session-state, UI-tree/selection, file-app, grab-forwarding, and surface-output work is
-integrated. The final inventory pass must review every newly split source, regenerate
-`assets/code-reuse-source-inventory.tsv`, update the scope count above, run the full
-`reuse_authority` suite, and replace this paragraph with the final measured result. Until then, a
-green behavioral disposition test does not imply that the source inventory is current.
+The strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
+140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
+translations rather than competing product authorities. The exact 231-source inventory is current,
+and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
+boundaries against regression.
 
 ## Authority exception baselines
 

@@ -838,6 +838,7 @@ impl Application for ChatApplication {
                 });
             }
             ChatMessage::ConversationScrolled(offset) => {
+                let was_pinned = self.state.conversation_pinned;
                 let heights = transcript_heights(&self.state);
                 let total = VirtualWindow::from_heights(
                     &heights,
@@ -849,7 +850,7 @@ impl Application for ChatApplication {
                 .total;
                 let maximum = (total - TRANSCRIPT_VIEWPORT_ESTIMATE).max(0.0);
                 self.state.conversation_scroll = offset;
-                self.state.conversation_pinned = offset >= maximum - 2.0;
+                self.state.conversation_pinned = !was_pinned && offset >= maximum - 2.0;
             }
             ChatMessage::ToggleProject(project) => {
                 if !self.state.expanded_projects.remove(&project) {

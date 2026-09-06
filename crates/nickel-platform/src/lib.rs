@@ -73,7 +73,7 @@ pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_fi
 pub use linux::{
     desktop_entry_from_path, desktop_entry_is_application, installed_icon_themes,
     network_manager_saved_wifi_connections, path_display_name, path_icon, path_icon_theme_revision,
-    path_icon_with_theme, path_icon_with_theme_at_size, publish_color_scheme,
+    path_icon_with_theme, path_icon_with_theme_at_size, publish_color_scheme, system_icon_theme,
 };
 
 #[cfg(not(target_os = "linux"))]

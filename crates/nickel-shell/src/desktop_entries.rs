@@ -1,6 +1,5 @@
 use std::{
     collections::HashSet,
-    env, fs,
     path::{Path, PathBuf},
 };
 
@@ -169,38 +168,7 @@ fn resolve_icon(name: &str, theme: &str) -> Option<PathBuf> {
 }
 
 fn icon_theme() -> String {
-    if let Ok(theme) = env::var("NICKEL_ICON_THEME")
-        && !theme.trim().is_empty()
-    {
-        return theme;
-    }
-
-    let config_home = env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")));
-    config_home
-        .and_then(|directory| fs::read_to_string(directory.join("kdeglobals")).ok())
-        .and_then(|contents| value_in_section(&contents, "Icons", "Theme"))
-        .unwrap_or_else(|| "hicolor".to_owned())
-}
-
-fn value_in_section(contents: &str, section: &str, key: &str) -> Option<String> {
-    let mut in_section = false;
-    for line in contents.lines().map(str::trim) {
-        if line.starts_with('[') && line.ends_with(']') {
-            in_section = &line[1..line.len() - 1] == section;
-        } else if in_section
-            && let Some(value) = line
-                .strip_prefix(key)
-                .and_then(|line| line.strip_prefix('='))
-        {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_owned());
-            }
-        }
-    }
-    None
+    nickel_platform::system_icon_theme()
 }
 
 fn visible_on_desktop(entry: &DesktopEntry, desktops: &[String]) -> bool {
@@ -227,9 +195,7 @@ mod tests {
 
     use freedesktop_desktop_entry::DesktopEntry;
 
-    use super::{
-        application_from_entry, application_from_entry_result, discover_entries, value_in_section,
-    };
+    use super::{application_from_entry, application_from_entry_result, discover_entries};
     use crate::model::{ApplicationDiscoveryStatus, ApplicationSkipReason};
 
     fn parse(contents: &str) -> DesktopEntry {
@@ -275,15 +241,6 @@ mod tests {
             "[Desktop Entry]\nType=Application\nName=GNOME Tool\nExec=tool\nOnlyShowIn=GNOME;\n",
         );
         assert!(application_from_entry(&gnome_only, &[], &["kde".into()], "hicolor").is_none());
-    }
-
-    #[test]
-    fn reads_kde_icon_theme_without_a_configuration_dependency() {
-        let config = "[General]\nColorScheme=BreezeDark\n\n[Icons]\nTheme=breeze-dark\n";
-        assert_eq!(
-            value_in_section(config, "Icons", "Theme").as_deref(),
-            Some("breeze-dark")
-        );
     }
 
     #[test]

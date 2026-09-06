@@ -470,7 +470,7 @@ fn icon_search_roots() -> Vec<PathBuf> {
     roots
 }
 
-fn system_icon_theme() -> String {
+pub fn system_icon_theme() -> String {
     if let Ok(theme) = env::var("NICKEL_ICON_THEME")
         && !theme.trim().is_empty()
     {

@@ -6414,6 +6414,8 @@ mod tests {
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
         let _ = shell.scene(SurfaceRole::Lock, 1280, 720);
         let _ = shell.scene(SurfaceRole::ControlCenter, 420, 640);
+        shell.screenshot.request_capture();
+        shell.screenshot.queue_pointer_moved(4.0, 5.0, 800, 600);
         let now = Instant::now();
         shell.desktop_deadline = Some(now);
         shell.panel_deadline = Some(now);
@@ -6421,8 +6423,6 @@ mod tests {
         shell.control_deadline = Some(now);
         shell.preview_pending = Some((usize::MAX, now));
         shell.preview_leave_deadline = Some(now);
-        shell.screenshot.request_capture();
-        shell.screenshot.queue_pointer_moved(4.0, 5.0, 800, 600);
         let due = shell
             .next_host_deadline()
             .expect("the shell advertises its earliest wakeup")
