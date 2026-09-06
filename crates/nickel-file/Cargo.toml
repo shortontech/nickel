@@ -18,7 +18,7 @@ nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
-nickel-ui-testkit = { path = "../nickel-ui-testkit" }
+nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 notify.workspace = true
 tracing.workspace = true
 sys-locale.workspace = true
@@ -28,8 +28,13 @@ winit.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }
 
 [dev-dependencies]
+nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 sha2.workspace = true
 tempfile = "3"
+
+[features]
+default = []
+workbench-fixtures = ["dep:nickel-ui-testkit"]
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [

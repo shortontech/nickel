@@ -8,7 +8,7 @@ description = "Focused semantic and visual fixture workbench for nickel-ui"
 
 [dependencies]
 image.workspace = true
-nickel-file = { path = "../nickel-file", optional = true }
+nickel-file = { path = "../nickel-file", optional = true, features = ["workbench-fixtures"] }
 nickel-gaze = { path = "../nickel-gaze", optional = true }
 nickel-markdown = { path = "../nickel-markdown" }
 nickel-markdown-ui = { path = "../nickel-markdown-ui", optional = true, features = ["workbench-fixtures"] }

@@ -20,9 +20,11 @@ use crate::{
     platform::{LocationGroup, home_directory, location_groups},
     watch::DirectoryWatch,
 };
+#[cfg(any(test, feature = "workbench-fixtures"))]
+use nickel_core::theme::Appearance;
 use nickel_core::{
     shell_settings::{FileIconPreference, ShellSettings},
-    theme::{Appearance, ThemeMode, ThemePalette},
+    theme::{ThemeMode, ThemePalette},
 };
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_i18n::Localizer;
@@ -287,15 +289,20 @@ pub struct FileApp {
     pub(crate) pending_ensure_visible: bool,
     pub(crate) resolved_grid_columns: usize,
     pub(crate) exit_requested: bool,
+    #[cfg(any(test, feature = "workbench-fixtures"))]
     pub(crate) fixture_appearance: Option<Appearance>,
+    #[cfg(any(test, feature = "workbench-fixtures"))]
     pub(crate) fixture_navigation_busy: bool,
     pub(crate) reading_direction: ReadingDirection,
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 pub struct FileFixtureProvider;
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 pub struct FileWorkbenchFixture;
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 macro_rules! file_fixture_variant {
     ($id:literal, $title:literal, $viewport:literal, $width:literal, $height:literal, $theme:ident) => {
         nickel_ui_testkit::FixtureVariant {
@@ -315,6 +322,7 @@ macro_rules! file_fixture_variant {
     };
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
     file_fixture_variant!("wide-grid-dark", "Wide Grid Dark", "wide", 1100, 700, Dark),
     file_fixture_variant!(
@@ -532,6 +540,7 @@ const FILE_FIXTURE_VARIANTS: &[nickel_ui_testkit::FixtureVariant] = &[
     },
 ];
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 static FILE_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
     nickel_ui_testkit::FixtureMetadata {
         id: "file.browser",
@@ -548,6 +557,7 @@ static FILE_FIXTURE_METADATA: nickel_ui_testkit::FixtureMetadata =
         simulated_effects: &[],
     };
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
     type App = FileApp;
     fn metadata() -> &'static nickel_ui_testkit::FixtureMetadata {
@@ -679,6 +689,7 @@ impl nickel_ui_testkit::Fixture for FileWorkbenchFixture {
     }
 }
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
     nickel_ui_testkit::FixtureAsset {
         id: "nickel-file-folder",
@@ -724,6 +735,7 @@ const FILE_FIXTURE_ASSETS: &[nickel_ui_testkit::FixtureAsset] = &[
     },
 ];
 
+#[cfg(any(test, feature = "workbench-fixtures"))]
 impl nickel_ui_testkit::FixtureProvider for FileFixtureProvider {
     fn register(
         &self,
@@ -790,7 +802,17 @@ impl FileApp {
     }
 
     pub(crate) fn navigation_pending(&self) -> bool {
-        self.navigation_rx.is_some() || self.fixture_navigation_busy
+        self.navigation_rx.is_some() || self.fixture_navigation_busy()
+    }
+
+    #[cfg(any(test, feature = "workbench-fixtures"))]
+    fn fixture_navigation_busy(&self) -> bool {
+        self.fixture_navigation_busy
+    }
+
+    #[cfg(not(any(test, feature = "workbench-fixtures")))]
+    fn fixture_navigation_busy(&self) -> bool {
+        false
     }
 
     fn assign_tab_icon(&mut self, path: &std::path::Path, icon: (u16, Arc<image::RgbaImage>)) {
@@ -1075,7 +1097,9 @@ impl FileApp {
             pending_ensure_visible: false,
             resolved_grid_columns: 1,
             exit_requested: false,
+            #[cfg(any(test, feature = "workbench-fixtures"))]
             fixture_appearance: None,
+            #[cfg(any(test, feature = "workbench-fixtures"))]
             fixture_navigation_busy: false,
             reading_direction: if nickel_i18n::Localizer::system().is_right_to_left() {
                 ReadingDirection::RightToLeft
@@ -3076,7 +3100,11 @@ impl Application for FileApp {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        let appearance = self.fixture_appearance.unwrap_or_else(|| {
+        #[cfg(any(test, feature = "workbench-fixtures"))]
+        let fixture_appearance = self.fixture_appearance;
+        #[cfg(not(any(test, feature = "workbench-fixtures")))]
+        let fixture_appearance = None;
+        let appearance = fixture_appearance.unwrap_or_else(|| {
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance())
         });
         self.build_view(
