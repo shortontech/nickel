@@ -365,18 +365,35 @@ impl SettingsApp {
                     nickel_platform::ProtectionHealth::Unhealthy => "Unhealthy".into(),
                 })
             };
+            let pending = self.maintenance_rx.is_some();
+            let update_supported =
+                snapshot.updates.state != nickel_platform::ObservationState::Unsupported;
+            let update_actions = ui! { <Row width={272.0} gap={4.0}>
+                {Button::semantic(theme, SettingsMessage::MaintenanceAction(
+                    nickel_platform::MaintenanceAction::CheckForUpdates), "Check",
+                    ButtonPresentation::Quiet).width(72.0).enabled(update_supported && !pending)}
+                {Button::semantic(theme, SettingsMessage::MaintenanceAction(
+                    nickel_platform::MaintenanceAction::InstallUpdates), "Install",
+                    ButtonPresentation::Quiet).width(76.0).enabled(update_supported && !pending)}
+                {Button::semantic(theme, SettingsMessage::MaintenanceAction(
+                    nickel_platform::MaintenanceAction::ScheduleRestart), "Restart options",
+                    ButtonPresentation::Quiet).width(116.0).enabled(!pending)}
+            </Row> };
             let mut column = Column::new()
                 .gap(2.0)
                 .child(SettingsRow::new(theme, "System provider", provider))
-                .child(SettingsRow::new(
-                    theme,
-                    "System updates",
-                    observation(
-                        snapshot.updates.state,
-                        update_value,
-                        snapshot.updates.detail.as_deref(),
-                    ),
-                ))
+                .child(
+                    SettingsRow::new(
+                        theme,
+                        "System updates",
+                        observation(
+                            snapshot.updates.state,
+                            update_value,
+                            snapshot.updates.detail.as_deref(),
+                        ),
+                    )
+                    .trailing(update_actions),
+                )
                 .child(SettingsRow::new(
                     theme,
                     "Firewall",
@@ -395,19 +412,33 @@ impl SettingsApp {
                         snapshot.protection.malware_protection.detail.as_deref(),
                     ),
                 ))
-                .child(SettingsRow::new(
-                    theme,
-                    "Secure storage",
-                    observation(
-                        snapshot.secure_storage.state,
-                        snapshot
-                            .secure_storage
-                            .value
-                            .as_ref()
-                            .map(|value| format!("{value:?}")),
-                        snapshot.secure_storage.detail.as_deref(),
+                .child(
+                    SettingsRow::new(
+                        theme,
+                        "Secure storage",
+                        observation(
+                            snapshot.secure_storage.state,
+                            snapshot
+                                .secure_storage
+                                .value
+                                .as_ref()
+                                .map(|value| format!("{value:?}")),
+                            snapshot.secure_storage.detail.as_deref(),
+                        ),
+                    )
+                    .trailing(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::MaintenanceAction(
+                                nickel_platform::MaintenanceAction::RecoverSecureStorage,
+                            ),
+                            "Recovery",
+                            ButtonPresentation::Quiet,
+                        )
+                        .width(100.0)
+                        .enabled(!pending),
                     ),
-                ));
+                );
             for permission in &snapshot.permissions {
                 let label = match permission.kind {
                     nickel_platform::PermissionKind::Camera => "Camera",
@@ -432,7 +463,24 @@ impl SettingsApp {
                 if permission.per_application_consent {
                     detail.push_str(" · Per-application consent");
                 }
-                column = column.child(SettingsRow::new(theme, label, detail));
+                let mut row = SettingsRow::new(theme, label, detail);
+                if permission.mutation == nickel_platform::PermissionMutation::NativeConsent {
+                    row = row.trailing(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::MaintenanceAction(
+                                nickel_platform::MaintenanceAction::OpenNativePermissionSettings(
+                                    permission.kind,
+                                ),
+                            ),
+                            "Manage",
+                            ButtonPresentation::Quiet,
+                        )
+                        .width(92.0)
+                        .enabled(!pending),
+                    );
+                }
+                column = column.child(row);
             }
             AnyView::new(column)
         } else {
@@ -461,7 +509,8 @@ impl SettingsApp {
                     "Refresh",
                     ButtonPresentation::Secondary,
                 )
-                .width(120.0),
+                .width(120.0)
+                .enabled(self.maintenance_rx.is_none()),
             )
             .child(
                 nickel_ui::VerticalScroll::new(SettingsMessage::MaintenanceScroll, 0.0)

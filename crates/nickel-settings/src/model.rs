@@ -82,11 +82,7 @@ pub(super) struct SettingsApp {
     pub(super) next_peripheral_refresh: Instant,
     pub(super) maintenance_snapshot: Option<nickel_platform::MaintenanceSnapshot>,
     pub(super) maintenance_status: Option<String>,
-    pub(super) maintenance_rx: Option<
-        std::sync::mpsc::Receiver<
-            Result<nickel_platform::MaintenanceSnapshot, nickel_platform::MaintenanceError>,
-        >,
-    >,
+    pub(super) maintenance_rx: Option<std::sync::mpsc::Receiver<MaintenanceTaskResult>>,
     pub(super) next_bluetooth_refresh: Instant,
     pub(super) next_network_refresh: Instant,
     pub(super) confirmed_displays: Vec<DisplayCard>,

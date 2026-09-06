@@ -490,6 +490,13 @@ type PeripheralTaskResult = Result<
     ),
     nickel_platform::PeripheralError,
 >;
+type MaintenanceTaskResult = Result<
+    (
+        Option<nickel_platform::MaintenanceOutcome>,
+        nickel_platform::MaintenanceSnapshot,
+    ),
+    nickel_platform::MaintenanceError,
+>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
@@ -506,6 +513,7 @@ enum SettingsMessage {
     PeripheralAction(nickel_platform::PeripheralAction),
     PeripheralScroll,
     MaintenanceRefresh,
+    MaintenanceAction(nickel_platform::MaintenanceAction),
     MaintenanceScroll,
     SetWifiPower(bool),
     WifiNetwork(usize),
@@ -817,7 +825,8 @@ impl SettingsApp {
         match std::thread::Builder::new()
             .name("nickel-maintenance-inspection".into())
             .spawn(move || {
-                let _ = sender.send(service.inspect());
+                let result = service.inspect().map(|snapshot| (None, snapshot));
+                let _ = sender.send(result);
             }) {
             Ok(_) => {
                 self.maintenance_status = Some("Loading authoritative system status…".into());
@@ -845,13 +854,45 @@ impl SettingsApp {
         };
         self.maintenance_rx = None;
         match result {
-            Ok(snapshot) => {
+            Ok((outcome, snapshot)) => {
                 self.maintenance_snapshot = Some(snapshot);
-                self.maintenance_status = None;
+                self.maintenance_status = outcome.map(|outcome| match outcome {
+                    nickel_platform::MaintenanceOutcome::Accepted => {
+                        "The operating system accepted the maintenance request.".into()
+                    }
+                    nickel_platform::MaintenanceOutcome::NativeConsentRequired { detail }
+                    | nickel_platform::MaintenanceOutcome::Unsupported { detail }
+                    | nickel_platform::MaintenanceOutcome::Rejected { detail } => detail,
+                });
             }
             Err(error) => self.maintenance_status = Some(error.to_string()),
         }
         true
+    }
+
+    fn request_maintenance_action(&mut self, action: nickel_platform::MaintenanceAction) {
+        if self.maintenance_rx.is_some() {
+            return;
+        }
+        let service = nickel_platform::maintenance_service();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("nickel-maintenance-action".into())
+            .spawn(move || {
+                let result = service.request(action).and_then(|outcome| {
+                    service.inspect().map(|snapshot| (Some(outcome), snapshot))
+                });
+                let _ = sender.send(result);
+            }) {
+            Ok(_) => {
+                self.maintenance_status = Some("Waiting for the operating system…".into());
+                self.maintenance_rx = Some(receiver);
+            }
+            Err(error) => {
+                self.maintenance_status =
+                    Some(format!("Maintenance request could not start: {error}"));
+            }
+        }
     }
 
     fn refresh_toolkit_scale(&mut self) {
@@ -1305,6 +1346,9 @@ impl SettingsApp {
             SettingsMessage::MaintenanceRefresh => {
                 self.maintenance_snapshot = None;
                 self.load_maintenance();
+            }
+            SettingsMessage::MaintenanceAction(action) => {
+                self.request_maintenance_action(action);
             }
             SettingsMessage::MaintenanceScroll => {}
             SettingsMessage::BluetoothDevice(index) => {
@@ -3372,6 +3416,54 @@ mod tests {
             assert!(
                 !expanded.semantic_targets_for_message(&message).is_empty(),
                 "missing Appearance control for {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn security_page_exposes_supported_update_and_native_consent_actions() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Security);
+        app.maintenance_rx = None;
+        app.maintenance_snapshot = Some(nickel_platform::MaintenanceSnapshot {
+            provider: nickel_platform::MaintenanceProvider::WindowsUpdateAndSecurity,
+            updates: nickel_platform::Observation {
+                state: nickel_platform::ObservationState::Current,
+                value: Some(nickel_platform::UpdateStatus {
+                    available: 2,
+                    phase: nickel_platform::UpdatePhase::Idle,
+                    restart_required: true,
+                    last_successful_check: Some(std::time::SystemTime::now()),
+                }),
+                observed_at: Some(std::time::SystemTime::now()),
+                detail: None,
+            },
+            protection: nickel_platform::ProtectionStatus {
+                firewall: nickel_platform::Observation::unsupported("fixture"),
+                malware_protection: nickel_platform::Observation::unsupported("fixture"),
+            },
+            permissions: vec![nickel_platform::PermissionStatus {
+                kind: nickel_platform::PermissionKind::Camera,
+                global_enabled: nickel_platform::Observation::unsupported("fixture"),
+                per_application_consent: true,
+                mutation: nickel_platform::PermissionMutation::NativeConsent,
+            }],
+            secure_storage: nickel_platform::Observation::unsupported("fixture"),
+        });
+        let tree = app.build_ui(850.0, 900.0);
+        for action in [
+            nickel_platform::MaintenanceAction::CheckForUpdates,
+            nickel_platform::MaintenanceAction::InstallUpdates,
+            nickel_platform::MaintenanceAction::ScheduleRestart,
+            nickel_platform::MaintenanceAction::OpenNativePermissionSettings(
+                nickel_platform::PermissionKind::Camera,
+            ),
+            nickel_platform::MaintenanceAction::RecoverSecureStorage,
+        ] {
+            assert!(
+                !tree
+                    .semantic_targets_for_message(&SettingsMessage::MaintenanceAction(action))
+                    .is_empty(),
+                "missing supported maintenance action"
             );
         }
     }
