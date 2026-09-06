@@ -1655,8 +1655,7 @@ pub fn execute_run_command(command: &str) -> Result<(), LaunchError> {
         return Ok(());
     }
     let parts = parse_windows_command(command)?;
-    let (target, arguments) = parts.split_first().ok_or(LaunchError::EmptyCommand)?;
-    shell_execute(target, arguments)
+    super::launch_deferred_terminal(&parts)
 }
 
 fn parse_windows_command(command: &str) -> Result<Vec<String>, LaunchError> {

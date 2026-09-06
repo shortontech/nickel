@@ -302,9 +302,24 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut arguments = std::env::args_os().skip(1);
     let mut cwd = None;
     let mut command = Vec::new();
+    let mut deferred_window = Duration::ZERO;
     while let Some(argument) = arguments.next() {
         if argument == "--working-directory" {
-            cwd = arguments.next().map(PathBuf::from);
+            cwd = Some(PathBuf::from(
+                arguments
+                    .next()
+                    .ok_or("--working-directory requires a path")?,
+            ));
+        } else if argument == "--defer-window-for-child-ms" {
+            let value = arguments
+                .next()
+                .ok_or("--defer-window-for-child-ms requires a value")?
+                .to_string_lossy()
+                .parse::<u64>()?;
+            deferred_window = Duration::from_millis(value);
+            if deferred_window > nickel_terminal::deferred::MAX_CLASSIFICATION_DELAY {
+                return Err("deferred window delay exceeds 2000 ms".into());
+            }
         } else if argument == "--" {
             command.extend(arguments.map(|argument| argument.to_string_lossy().into_owned()));
             break;
@@ -316,5 +331,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         executable: command.remove(0),
         arguments: command,
     });
-    nickel_ui::run_with_adapter(TerminalApp::new(program, cwd)?, TerminalAdapter)
+    // PTY allocation and parsing start before this delay. Until a platform attribution
+    // subscription is available the conservative decision is to show the terminal at expiry.
+    let app = TerminalApp::new(program, cwd)?;
+    if !deferred_window.is_zero() {
+        std::thread::sleep(deferred_window);
+    }
+    nickel_ui::run_with_adapter(app, TerminalAdapter)
 }

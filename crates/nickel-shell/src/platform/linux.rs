@@ -1961,19 +1961,8 @@ pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core:
 }
 
 pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
-    let mut process = std::process::Command::new("sh");
-    process.arg("-c").arg(command);
-    process
-        .env_remove(SESSION_CONTROL_ENV)
-        .env_remove(SESSION_TOKEN_ENV)
-        .env_remove(SHELL_TEST_CONTROL_ENV);
-    if let Some(home) = std::env::var_os("HOME") {
-        process.current_dir(home);
-    }
-    process
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| super::LaunchError::Platform(error.to_string()))
+    let arguments = shlex::split(command).ok_or(super::LaunchError::InvalidQuotes)?;
+    super::launch_deferred_terminal(&arguments)
 }
 
 pub fn launch_application(application: &Application) -> Result<Option<u32>, super::LaunchError> {

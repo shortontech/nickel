@@ -103,6 +103,42 @@ pub enum LaunchError {
     Platform(String),
 }
 
+fn launch_deferred_terminal(arguments: &[String]) -> Result<(), LaunchError> {
+    let (program, rest) = arguments.split_first().ok_or(LaunchError::EmptyCommand)?;
+    let current =
+        std::env::current_exe().map_err(|error| LaunchError::Platform(error.to_string()))?;
+    let terminal_name = if cfg!(target_os = "windows") {
+        "nickel-terminal.exe"
+    } else {
+        "nickel-terminal"
+    };
+    let mut executable = current.with_file_name(terminal_name);
+    if current
+        .parent()
+        .is_some_and(|parent| parent.file_name() == Some("deps".as_ref()))
+    {
+        executable = current
+            .parent()
+            .and_then(std::path::Path::parent)
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .join(terminal_name);
+    }
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--defer-window-for-child-ms")
+        .arg("100")
+        .arg("--")
+        .arg(program)
+        .args(rest)
+        .env_remove("NICKEL_SESSION_CONTROL")
+        .env_remove("NICKEL_SESSION_TOKEN")
+        .env_remove("NICKEL_SHELL_TEST_CONTROL");
+    command
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| LaunchError::Platform(error.to_string()))
+}
+
 /// A failure while making a request over the shell/session control channel.
 ///
 /// This intentionally contains categories rather than OS error strings.  The
