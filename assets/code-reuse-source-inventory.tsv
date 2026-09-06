@@ -3,7 +3,7 @@ nickel-build-support	1
 nickel-codex	11
 nickel-codex-fixture	3
 nickel-codex-ui	7
-nickel-core	28
+nickel-core	29
 nickel-file	16
 nickel-gaze	8
 nickel-i18n	1
@@ -12,13 +12,15 @@ nickel-input	7
 nickel-logging	1
 nickel-markdown	1
 nickel-markdown-ui	4
-nickel-platform	7
+nickel-platform	9
 nickel-render-assets	1
 nickel-session	38
 nickel-session-protocol	2
 nickel-settings	11
-nickel-shell	44
+nickel-shell	45
 nickel-storage	1
+nickel-terminal	3
+nickel-terminal-ui	2
 nickel-ui	36
 nickel-ui-testkit	1
 nickel-ui-workbench	4
