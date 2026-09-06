@@ -2473,6 +2473,34 @@ fn run_external_workbench(features: &str, args: &[String]) -> Result<(), Box<dyn
     }
 }
 
+fn compiled_provider_features() -> Vec<&'static str> {
+    [
+        ("file-provider", cfg!(feature = "file-provider")),
+        ("gaze-provider", cfg!(feature = "gaze-provider")),
+        (
+            "markdown-viewer-provider",
+            cfg!(feature = "markdown-viewer-provider"),
+        ),
+        ("shell-provider", cfg!(feature = "shell-provider")),
+    ]
+    .into_iter()
+    .filter_map(|(feature, enabled)| enabled.then_some(feature))
+    .collect()
+}
+
+fn provider_features_for_launch(
+    mut missing: Vec<&'static str>,
+    compiled: &[&'static str],
+) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    missing.extend_from_slice(compiled);
+    missing.sort_unstable();
+    missing.dedup();
+    Some(missing.join(","))
+}
+
 impl Application for WorkbenchApp {
     type Message = WorkbenchMessage;
 
@@ -4085,7 +4113,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     let catalog = registry()?;
     let full_provider_command = matches!(args.as_slice(), [command, flag] if command == "validate" && flag == "--full-providers")
         || matches!(args.as_slice(), [command, ..] if command == "reachability-report");
-    let mut provider_features = catalog
+    let provider_features = catalog
         .iter()
         .filter(|entry| {
             entry.is_external()
@@ -4098,10 +4126,10 @@ fn run() -> Result<(), Box<dyn Error>> {
                 .map(|provider| provider.workbench_feature)
         })
         .collect::<Vec<_>>();
-    provider_features.sort_unstable();
-    provider_features.dedup();
-    if !provider_features.is_empty() {
-        return run_external_workbench(&provider_features.join(","), &args);
+    if let Some(features) =
+        provider_features_for_launch(provider_features, &compiled_provider_features())
+    {
+        return run_external_workbench(&features, &args);
     }
     match args.as_slice() {
         [] => nickel_ui::run(WorkbenchApp::new()?),
@@ -4199,6 +4227,21 @@ mod tests {
         assert_eq!(
             cargo_executable(Some("/definitely/missing/cargo".into()), Some(path)),
             cargo.into_os_string()
+        );
+    }
+
+    #[test]
+    fn recursive_provider_preserves_compiled_features_until_launch_converges() {
+        assert_eq!(
+            provider_features_for_launch(
+                vec!["file-provider"],
+                &["shell-provider", "file-provider"]
+            ),
+            Some("file-provider,shell-provider".into())
+        );
+        assert_eq!(
+            provider_features_for_launch(Vec::new(), &["shell-provider"]),
+            None
         );
     }
 
