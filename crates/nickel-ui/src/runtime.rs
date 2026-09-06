@@ -3102,7 +3102,13 @@ mod tests {
             .expect("popover anchor");
         let anchor_id = anchor.id.clone();
         host.request_focus(anchor_id.clone());
-        assert!(host.open_transient(OverlayId::new("details-popover"), anchor.id));
+        let opened =
+            host.perform_semantic_action(anchor.id, SemanticAction::Invoke(ActionKind::Activate));
+        assert!(opened.changed);
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(OverlayId::new("details-popover"))
+        );
         let popover = host
             .query_unique(&crate::SemanticSelector::RoleAndName {
                 role: SemanticRole::Popover,

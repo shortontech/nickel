@@ -306,56 +306,37 @@ impl SettingsApp {
         let theme = self.ui_theme();
         let palette = self.palette();
         let rows = self.default_apps.iter().enumerate().map(|(index, row)| {
-            let current = row.snapshot.as_ref().and_then(|snapshot| snapshot.effective.as_ref())
-                .map(|handler| handler.name.clone()).unwrap_or_else(|| "No effective handler reported".into());
-            let handler_query = self.default_app_handler_query.trim().to_lowercase();
-            let mut handlers = row.snapshot.as_ref().map(|snapshot| snapshot.handlers.iter().collect::<Vec<_>>()).unwrap_or_default();
-            let effective_id = row.snapshot.as_ref().and_then(|snapshot| snapshot.effective.as_ref()).map(|handler| handler.id.as_str());
-            handlers.sort_by(|left, right| {
-                (Some(left.id.as_str()) != effective_id).cmp(&(Some(right.id.as_str()) != effective_id))
-                    .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
-                    .then_with(|| left.id.cmp(&right.id))
+            let current = row
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.effective.as_ref())
+                .map(|handler| handler.name.clone())
+                .unwrap_or_else(|| "No default".into());
+            let detail = row
+                .status
+                .clone()
+                .or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone()))
+                .unwrap_or_else(|| "Loading applications…".into());
+            let can_choose = row.snapshot.as_ref().is_some_and(|snapshot| {
+                !snapshot.handlers.is_empty()
+                    && matches!(
+                        snapshot.capability,
+                        nickel_platform::AssociationCapability::DirectUserChange
+                            | nickel_platform::AssociationCapability::NativeConsent
+                    )
             });
-            let options: Vec<(String, SettingsMessage)> = handlers.into_iter().filter(|handler| {
-                handler_query.is_empty()
-                    || handler.name.to_lowercase().contains(&handler_query)
-                    || handler.id.to_lowercase().contains(&handler_query)
-                    || handler.source.to_lowercase().contains(&handler_query)
-            }).map(|handler| {
-                let label = if Some(handler.id.as_str()) == effective_id {
-                    format!("{} (current)", handler.name)
-                } else {
-                    format!("{} — {}", handler.name, handler.id)
-                };
-                (label, SettingsMessage::SetDefaultApp { row: index, handler_id: handler.id.clone() })
-            }).collect();
-            let detail = row.status.clone().or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone())).unwrap_or_else(|| "Not loaded".into());
-            let mutable = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::DirectUserChange);
-            let native_consent = row.snapshot.as_ref().is_some_and(|snapshot| snapshot.capability == nickel_platform::AssociationCapability::NativeConsent);
-            let selector = SelectField::new(theme, row.label.clone(), detail.clone(),
-                SettingsMessage::ToggleDefaultAppSelect(index), current.clone(), options,
-                self.default_app_select_expanded == Some(index)).id(format!("default-app-{index}"));
-            let chooser = if mutable && self.default_app_select_expanded == Some(index) {
-                AnyView::new(Column::new().gap(6.0)
-                    .child(SettingsSearchField::new(
-                        theme,
-                        format!("default-app-handler-search-{index}"),
-                        &self.default_app_handler_query,
-                        "Search installed applications",
-                        default_app_handler_search_message,
-                    ))
-                    .child(selector))
-            } else {
-                AnyView::new(selector)
-            };
             ui! {
                 <Container background={palette.surface} padding={Insets { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }}>
-                    {if mutable { chooser } else if native_consent {
-                        AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current)
-                            .trailing(Button::semantic(theme, SettingsMessage::RequestDefaultAppConsent(index), "Open system settings", ButtonPresentation::Secondary).width(180.0)))
-                    } else {
-                        AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current))
-                    }}
+                    {SettingsRow::new(theme, row.label.clone(), detail).trailing(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::ToggleDefaultAppSelect(index),
+                            current,
+                            if can_choose { ButtonPresentation::Quiet } else { ButtonPresentation::Disabled },
+                        )
+                        .id(format!("default-app-{index}"))
+                        .width(220.0)
+                    )}
                 </Container>
             }
         });
@@ -487,6 +468,146 @@ impl SettingsApp {
                 </VerticalScroll>
             </Column>
         }
+    }
+
+    pub(crate) fn default_app_overlays(
+        &self,
+        context: ViewContext,
+    ) -> Vec<FrameOverlay<SettingsMessage>> {
+        let theme = self.ui_theme();
+        let palette = self.palette();
+        let query = self.default_app_handler_query.trim().to_lowercase();
+        self.default_apps
+            .iter()
+            .enumerate()
+            .map(|(row_index, row)| {
+                let effective_id = row
+                    .snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.effective.as_ref())
+                    .map(|handler| handler.id.clone());
+                let state = match &row.snapshot {
+                    Some(snapshot) => {
+                        let mut handlers = snapshot.handlers.clone();
+                        if let Some(effective) = snapshot.effective.as_ref()
+                            && !handlers.iter().any(|handler| handler.id == effective.id)
+                        {
+                            handlers.push(effective.clone());
+                        }
+                        handlers.retain(|handler| {
+                            query.is_empty()
+                                || handler.name.to_lowercase().contains(&query)
+                                || handler.id.to_lowercase().contains(&query)
+                                || handler.source.to_lowercase().contains(&query)
+                        });
+                        handlers.sort_by(|left, right| {
+                            (Some(&left.id) != effective_id.as_ref())
+                                .cmp(&(Some(&right.id) != effective_id.as_ref()))
+                                .then_with(|| {
+                                    left.name.to_lowercase().cmp(&right.name.to_lowercase())
+                                })
+                                .then_with(|| left.id.cmp(&right.id))
+                        });
+                        CollectionState::Ready(handlers)
+                    }
+                    None if row.status.is_some() => {
+                        CollectionState::Error(row.status.clone().unwrap_or_default())
+                    }
+                    None => CollectionState::Loading,
+                };
+                let current = effective_id.clone();
+                let collection = Collection::try_new(
+                    state,
+                    |handler: &nickel_platform::ApplicationHandler| handler.id.clone(),
+                    move |handler: nickel_platform::ApplicationHandler| {
+                        let is_current = current.as_ref() == Some(&handler.id);
+                        SettingsRow::new(
+                            theme,
+                            handler.name.clone(),
+                            if is_current {
+                                format!("Current • {}", handler.id)
+                            } else {
+                                handler.id.clone()
+                            },
+                        )
+                        .trailing(
+                            Button::semantic(
+                                theme,
+                                SettingsMessage::SetDefaultApp {
+                                    row: row_index,
+                                    handler_id: handler.id,
+                                },
+                                if is_current { "Current" } else { "Choose" },
+                                if is_current {
+                                    ButtonPresentation::Disabled
+                                } else {
+                                    ButtonPresentation::Quiet
+                                },
+                            )
+                            .width(88.0),
+                        )
+                    },
+                )
+                .expect("application handler identities are unique")
+                .id(format!("default-app-handler-list-{row_index}"))
+                .accessibility_label(format!("Applications for {}", row.label))
+                .item_label(|handler| handler.name.clone())
+                .empty_label("No installed applications match")
+                .loading_label("Loading installed applications")
+                .error_prefix("Applications could not be loaded: ")
+                .gap(2.0)
+                .navigation_scope(NavigationScope::group())
+                .reveal_on_focus(&context)
+                .presentation(CollectionPresentation::VirtualList {
+                    item_height: 58.0,
+                    offset: self.default_app_handler_scroll_offset,
+                    viewport_height: 320.0,
+                    overscan: 116.0,
+                });
+                let results = nickel_ui::VerticalScroll::new(
+                    SettingsMessage::DefaultAppHandlerScroll(
+                        self.default_app_handler_scroll_offset.to_bits(),
+                    ),
+                    self.default_app_handler_scroll_offset,
+                )
+                .on_scroll(default_app_handler_scroll_message)
+                .controlled(true)
+                .height(320.0)
+                .id(format!("default-app-handler-scroll-{row_index}"))
+                .navigation_scope(NavigationScope::group())
+                .theme(theme)
+                .child(collection);
+                let content = Column::new()
+                    .gap(8.0)
+                    .padding(Insets::all(10.0))
+                    .background(palette.surface)
+                    .child(SettingsSearchField::new(
+                        theme,
+                        format!("default-app-handler-search-{row_index}"),
+                        &self.default_app_handler_query,
+                        "Search installed applications",
+                        default_app_handler_search_message,
+                    ))
+                    .child(results);
+                Popover::new(
+                    format!("default-app-picker-{row_index}"),
+                    OverlayAnchor::Node(UiId::from(format!("default-app-{row_index}"))),
+                    format!("Choose an application for {}", row.label),
+                    Size::new(520.0, 392.0),
+                    OverlayStyle {
+                        background: palette.surface,
+                        foreground: palette.text,
+                        border: palette.muted,
+                        selected: palette.accent_soft,
+                        radius: 10,
+                    },
+                    content,
+                )
+                .focus(nickel_ui::OverlayFocusPolicy::FirstItem)
+                .focus_return(UiId::from(format!("default-app-{row_index}")))
+                .into()
+            })
+            .collect()
     }
 
     pub(super) fn display_components(

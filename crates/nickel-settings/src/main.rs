@@ -55,13 +55,13 @@ use nickel_input::{DeviceId, InputEvent, KeyEdge, LogicalKey, NamedKey};
 use nickel_ui::{
     ActionLegend, ActionLegendEntry, AdapterOutcome, AnyView, Application, Button,
     ButtonPresentation, ChoiceCard, ChoiceCardGroup, ColorSwatch, DragGesture, DragPhase,
-    GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
-    NavigationItem, PageHeader, PreviewTile, ReadingDirection, ResponsiveNavigation,
-    ResponsiveNavigationDestination, SelectField, SemanticControllerAction, SemanticRole,
-    SemanticSelector, SemanticTheme, SettingsCard, SettingsNavigation, SettingsRow,
-    SettingsSearchEntry, SettingsSearchField, SettingsStatus, SettingsStatusKind, SliderField,
-    Surface, SurfaceRole, Switch, SwitchState, TextAlign, UiHost, UiId, ViewContext,
-    search_settings, ui,
+    FrameOverlay, GlobalAction, HostAdapter, HostServices, Image, ImageFit, InputModality, Insets,
+    NavigationItem, OverlayAnchor, OverlayStyle, PageHeader, Popover, PreviewTile,
+    ReadingDirection, ResponsiveNavigation, ResponsiveNavigationDestination, SelectField,
+    SemanticControllerAction, SemanticRole, SemanticSelector, SemanticTheme, SettingsCard,
+    SettingsNavigation, SettingsRow, SettingsSearchEntry, SettingsSearchField, SettingsStatus,
+    SettingsStatusKind, Size, SliderField, Surface, SurfaceRole, Switch, SwitchState, TextAlign,
+    UiHost, UiId, ViewContext, search_settings, ui,
 };
 use winit::{dpi::LogicalSize, event::WindowEvent};
 
@@ -480,9 +480,9 @@ enum SettingsMessage {
     DefaultAppTargetChanged(String),
     DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
     DefaultAppHandlerSearchChanged(String),
+    DefaultAppHandlerScroll(u32),
     BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
     ToggleDefaultAppSelect(usize),
-    RequestDefaultAppConsent(usize),
     SetDefaultApp {
         row: usize,
         handler_id: String,
@@ -640,6 +640,10 @@ fn default_app_target_search_message(value: String) -> SettingsMessage {
 
 fn default_app_handler_search_message(value: String) -> SettingsMessage {
     SettingsMessage::DefaultAppHandlerSearchChanged(value)
+}
+
+fn default_app_handler_scroll_message(value: f32) -> SettingsMessage {
+    SettingsMessage::DefaultAppHandlerScroll(value.max(0.0).to_bits())
 }
 
 fn default_apps_scroll_message(value: f32) -> SettingsMessage {
@@ -870,7 +874,6 @@ impl SettingsApp {
                 row.status = Some(error.to_string());
             }
         }
-        self.default_app_select_expanded = None;
     }
 
     fn request_redraw(&self) {
@@ -1268,21 +1271,22 @@ impl SettingsApp {
             }
             SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
                 self.default_app_handler_query = value;
+                self.default_app_handler_scroll_offset = 0.0;
+            }
+            SettingsMessage::DefaultAppHandlerScroll(offset) => {
+                self.default_app_handler_scroll_offset = f32::from_bits(offset).max(0.0);
             }
             SettingsMessage::BrowseDefaultAppTarget(target) => {
                 self.add_default_app_target(target);
             }
             SettingsMessage::ToggleDefaultAppSelect(index) => {
+                let _ = index;
                 self.default_app_handler_query.clear();
-                self.default_app_select_expanded =
-                    (self.default_app_select_expanded != Some(index)).then_some(index);
+                self.default_app_handler_scroll_offset = 0.0;
             }
             SettingsMessage::SetDefaultApp { row, handler_id } => {
                 self.change_default_app(row, &handler_id);
                 self.default_app_handler_query.clear();
-            }
-            SettingsMessage::RequestDefaultAppConsent(row) => {
-                self.change_default_app(row, "");
             }
         }
         self.request_redraw();
@@ -2150,6 +2154,14 @@ impl Application for SettingsApp {
         )
     }
 
+    fn frame_overlays(&self, context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        if self.page == SettingsPage::DefaultApps {
+            self.default_app_overlays(context)
+        } else {
+            Vec::new()
+        }
+    }
+
     fn poll(&mut self) -> bool {
         self.tick();
         self.redraw_requested.replace(false)
@@ -2722,23 +2734,33 @@ mod tests {
             detail: "User-level association".into(),
         });
         let tree = app.build_ui(850.0, 900.0);
+        let anchor = tree
+            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
+            .into_iter()
+            .next()
+            .expect("default association row has one chooser");
+        let mut host = UiHost::new(app, 850, 900);
+        let opened = host.perform_semantic_action(
+            anchor.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
+        assert!(opened.changed);
+        assert!(host.inspect().open_overlay.is_some());
+        let overlay_names = host
+            .semantic_nodes()
+            .into_iter()
+            .filter_map(|node| node.name)
+            .collect::<Vec<_>>();
         assert!(
-            !tree
-                .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
-                .is_empty()
+            overlay_names.iter().any(|name| name == "Other Browser"),
+            "the searchable chooser must be hosted in the transient overlay: {overlay_names:?}"
         );
 
-        app.default_app_select_expanded = Some(0);
-        let expanded = app.build_ui(850.0, 900.0);
-        assert!(
-            !expanded
-                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
-                    row: 0,
-                    handler_id: "other.desktop".into(),
-                })
-                .is_empty()
-        );
-        app.default_apps[0].snapshot.as_mut().unwrap().handlers = (0..250)
+        host.application_mut().default_apps[0]
+            .snapshot
+            .as_mut()
+            .unwrap()
+            .handlers = (0..250)
             .map(|index| nickel_platform::ApplicationHandler {
                 id: format!("handler-{index:03}.desktop"),
                 name: format!("Browser {index:03}"),
@@ -2746,29 +2768,35 @@ mod tests {
                 source: format!("fixture protocol support {index:03}"),
             })
             .collect();
-        app.update(SettingsMessage::DefaultAppHandlerSearchChanged(
-            "handler-249".into(),
-        ));
-        let searched = app.build_ui(850.0, 900.0);
+        host.application_mut()
+            .update(SettingsMessage::DefaultAppHandlerSearchChanged(
+                "handler-249".into(),
+            ));
+        host.handle_event(nickel_ui::UiEvent::ControllerBack);
+        let chooser = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/default-app-0"))
+            .expect("default app chooser remains available");
+        host.perform_semantic_action(
+            chooser.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+        );
         assert!(
-            !searched
-                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
-                    row: 0,
-                    handler_id: "handler-249.desktop".into(),
-                })
-                .is_empty(),
+            host.semantic_nodes()
+                .iter()
+                .any(|node| node.name.as_deref() == Some("Browser 249")),
             "the final compatible handler must remain searchable without a result cap"
         );
         assert!(
-            searched
-                .semantic_targets_for_message(&SettingsMessage::SetDefaultApp {
-                    row: 0,
-                    handler_id: "handler-001.desktop".into(),
-                })
-                .is_empty(),
+            !host
+                .semantic_nodes()
+                .iter()
+                .any(|node| node.name.as_deref() == Some("Browser 001")),
             "a handler search must filter unrelated choices"
         );
 
+        let app = host.application_mut();
         app.default_app_targets = (0..250)
             .map(|index| {
                 nickel_platform::AssociationTarget::mime(format!(
@@ -2799,15 +2827,14 @@ mod tests {
         assert!(!app.default_apps.iter().any(|row| {
             matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")
         }));
-        app.default_app_select_expanded = None;
         app.default_apps[0].snapshot.as_mut().unwrap().capability =
             nickel_platform::AssociationCapability::NativeConsent;
         let consent = app.build_ui(850.0, 900.0);
         assert!(
             !consent
-                .semantic_targets_for_message(&SettingsMessage::RequestDefaultAppConsent(0))
+                .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(0))
                 .is_empty(),
-            "consent-only platforms must expose their supported system workflow"
+            "consent-only platforms must expose the same candidate chooser"
         );
     }
 

@@ -407,6 +407,7 @@ pub struct UiFrame<Message = String> {
     diagnostics_enabled: bool,
     viewport: Rect,
     overlay_invokers: Vec<(UiId, crate::OverlayId)>,
+    primary_overlay_invokers: Vec<(UiId, crate::OverlayId)>,
     active_overlay: Option<(crate::OverlayId, Rect)>,
     active_overlay_dismiss: Option<crate::DismissPolicy>,
 }
@@ -437,6 +438,7 @@ impl<Message> Default for UiFrame<Message> {
             diagnostics_enabled: false,
             viewport: Rect::new(0.0, 0.0, 0.0, 0.0),
             overlay_invokers: Vec::new(),
+            primary_overlay_invokers: Vec::new(),
             active_overlay: None,
             active_overlay_dismiss: None,
         }
@@ -444,6 +446,17 @@ impl<Message> Default for UiFrame<Message> {
 }
 
 impl<Message: Clone> UiFrame<Message> {
+    fn open_primary_overlay(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+    ) -> Option<Invalidation> {
+        self.primary_overlay_invokers
+            .iter()
+            .find(|(invoker, _)| invoker == target)
+            .map(|(invoker, overlay)| state.open_overlay(overlay.clone(), invoker.clone()))
+    }
+
     fn drag_message(&self, id: &UiId, phase: DragPhase, position: Point) -> Option<Message> {
         let hit = self.hits.iter().rev().find(|hit| &hit.id == id)?;
         Some((hit.drag_mapper?)(
@@ -533,7 +546,7 @@ impl<Message: Clone> UiFrame<Message> {
             return Err(SemanticActionError::AmbiguousTarget);
         }
         surface.anchor = surface.anchor.with_resolved_target(target);
-        self.overlay_invokers
+        self.primary_overlay_invokers
             .push((surface.anchor.id().clone(), surface.id.clone()));
         if state.open_overlay_id() != Some(&surface.id) {
             return Ok(());
@@ -1578,7 +1591,14 @@ impl<Message: Clone> UiFrame<Message> {
         let mut outcome = match intent {
             InteractionIntent::Event(event) => self.reduce_event(state, event),
             InteractionIntent::Invoke { target, action } => {
-                if action == SemanticAction::Invoke(ActionKind::ContextMenu)
+                if action == SemanticAction::Invoke(ActionKind::Activate)
+                    && let Some(invalidation) = self.open_primary_overlay(state, &target)
+                {
+                    EventOutcome {
+                        invalidation,
+                        ..EventOutcome::default()
+                    }
+                } else if action == SemanticAction::Invoke(ActionKind::ContextMenu)
                     && let Some((invocation_target, overlay)) = self
                         .overlay_invokers
                         .iter()
@@ -2611,8 +2631,12 @@ impl<Message: Clone> UiFrame<Message> {
                 } else {
                     Invalidation::None
                 };
+                let primary_overlay_invalidation = activates
+                    .then(|| released.and_then(|target| self.open_primary_overlay(state, target)))
+                    .flatten();
                 if activates
                     && text_command_invalidation == Invalidation::None
+                    && primary_overlay_invalidation.is_none()
                     && let Some(message) = self.message_at_owned(point)
                 {
                     outcome.messages.push(message);
@@ -2655,6 +2679,7 @@ impl<Message: Clone> UiFrame<Message> {
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
                     .merge(option_invalidation)
+                    .merge(primary_overlay_invalidation.unwrap_or(Invalidation::None))
                     .merge(text_command_invalidation);
                 if overlay_action {
                     invalidation.merge(state.dismiss_overlay(crate::DismissReason::Action))
@@ -2876,6 +2901,14 @@ impl<Message: Clone> UiFrame<Message> {
                         ..outcome
                     };
                 }
+                if let Some(target) = state.focused().cloned()
+                    && let Some(invalidation) = self.open_primary_overlay(state, &target)
+                {
+                    return EventOutcome {
+                        invalidation,
+                        ..outcome
+                    };
+                }
                 if let Some(message) = state
                     .focused()
                     .and_then(|id| self.message_for_id(id))
@@ -2898,6 +2931,14 @@ impl<Message: Clone> UiFrame<Message> {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        ..outcome
+                    };
+                }
+                if let Some(target) = selected.as_ref()
+                    && let Some(invalidation) = self.open_primary_overlay(state, target)
+                {
+                    return EventOutcome {
+                        invalidation,
                         ..outcome
                     };
                 }
@@ -3107,6 +3148,12 @@ impl<Message: Clone> UiFrame<Message> {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        ..outcome
+                    };
+                }
+                if let Some(invalidation) = self.open_primary_overlay(state, &id) {
+                    return EventOutcome {
+                        invalidation,
                         ..outcome
                     };
                 }
