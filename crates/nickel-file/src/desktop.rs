@@ -161,6 +161,9 @@ impl DesktopLayout {
     }
 
     pub fn set_grid(&mut self, width: f32, height: f32) {
+        if !width.is_finite() || !height.is_finite() {
+            return;
+        }
         self.cell = (width.max(48.0), height.max(48.0));
         self.constrain_all();
         self.resolve_collisions(&HashSet::new());
@@ -337,6 +340,9 @@ impl DesktopLayout {
 
     /// Moves the selected group. Moving an unselected item selects only that item first.
     pub fn move_group(&mut self, dragged: DesktopEntryId, delta: Point, output: &str) {
+        if !delta.x.is_finite() || !delta.y.is_finite() {
+            return;
+        }
         if !self.selection.contains(&dragged) {
             self.select(dragged, SelectionModifiers::default());
         }
@@ -1041,6 +1047,60 @@ mod tests {
                 .all(|item| item.position.x >= 100.0 && item.position.y >= 32.0)
         );
         assert_ne!(layout.items()[0].position, layout.items()[1].position);
+    }
+
+    #[test]
+    fn non_finite_grid_and_drag_input_leave_layout_unchanged() {
+        let mut layout = DesktopLayout::new(vec![output("main", 0.0)]);
+        layout.reconcile(vec![entry(1, "a", false, 1), entry(2, "b", false, 2)]);
+        layout.set_arrangement(
+            Arrangement::Sorted {
+                key: SortKey::Name,
+                direction: SortDirection::Ascending,
+            },
+            FolderGrouping::Mixed,
+        );
+        let grid = layout.grid();
+        let positions = layout
+            .items()
+            .iter()
+            .map(|item| item.position)
+            .collect::<Vec<_>>();
+
+        layout.set_grid(f32::INFINITY, 96.0);
+        layout.set_grid(96.0, f32::NAN);
+        layout.move_group(
+            DesktopEntryId(FileIdentity(7, 2)),
+            Point {
+                x: f32::NAN,
+                y: f32::NEG_INFINITY,
+            },
+            "main",
+        );
+
+        assert_eq!(layout.grid(), grid);
+        assert_eq!(
+            layout.arrangement(),
+            Arrangement::Sorted {
+                key: SortKey::Name,
+                direction: SortDirection::Ascending,
+            }
+        );
+        assert!(layout.selected().is_empty());
+        assert_eq!(
+            layout
+                .items()
+                .iter()
+                .map(|item| item.position)
+                .collect::<Vec<_>>(),
+            positions
+        );
+        assert!(
+            layout
+                .items()
+                .iter()
+                .all(|item| { item.position.x.is_finite() && item.position.y.is_finite() })
+        );
     }
 
     #[test]
