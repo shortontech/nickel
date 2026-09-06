@@ -1980,10 +1980,10 @@ pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     }
     // Start/consult the bounded classifier without waiting for it. Heuristic evidence remains
     // diagnostic-only: unknown and likely classes all retain the conservative deferred terminal.
-    if let Some(program) = arguments.first() {
-        let _ = crate::executable_index::global_executable_index().classify(program);
-    }
-    launch_observed_deferred_terminal(&arguments)
+    let evidence = arguments
+        .first()
+        .and_then(|program| crate::executable_index::global_executable_index().classify(program));
+    launch_observed_deferred_terminal(&arguments, evidence)
 }
 
 static PENDING_LAUNCH_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -2011,7 +2011,10 @@ fn process_start_time(pid: u32) -> Option<u64> {
         .ok()
 }
 
-fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::LaunchError> {
+fn launch_observed_deferred_terminal(
+    arguments: &[String],
+    evidence: Option<crate::executable_index::ExecutableEvidence>,
+) -> Result<(), super::LaunchError> {
     use std::io::Write;
 
     let mut terminal = super::spawn_deferred_terminal(arguments)?;
@@ -2061,8 +2064,14 @@ fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::
                 let _ = input.write_all(b"start\n");
                 let _ = input.flush();
             }
-            if registered
-                && receiver.recv_timeout(Duration::from_millis(100)).is_ok()
+            let observation = registered
+                .then(|| receiver.recv_timeout(Duration::from_millis(100)).ok())
+                .flatten();
+            crate::executable_index::record_prediction_observation(
+                evidence.as_ref(),
+                observation.map(|(_, descendant)| descendant),
+            );
+            if observation.is_some()
                 && let Some(input) = decision_input.as_mut()
             {
                 let _ = input.write_all(b"suppress\n");

@@ -9,7 +9,7 @@ use std::{
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock, RwLock, mpsc},
+    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -67,6 +67,51 @@ pub(crate) struct ExecutableEvidence {
     pub generation: u64,
     pub resolved_path: PathBuf,
     pub reasons: Vec<EvidenceReason>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PredictionMetrics {
+    /// Rows are likely-graphical, likely-terminal, unknown, and unavailable;
+    /// columns are no qualifying window and qualifying window.
+    pub observations: [[u64; 2]; 4],
+    pub descendant_windows: u64,
+}
+
+impl PredictionMetrics {
+    fn record(&mut self, evidence: Option<&ExecutableEvidence>, window: Option<bool>) {
+        let class = match evidence.map(|evidence| evidence.class) {
+            Some(ExecutableClass::LikelyGraphical) => 0,
+            Some(ExecutableClass::LikelyTerminal) => 1,
+            Some(ExecutableClass::Unknown) => 2,
+            None => 3,
+        };
+        let observed = usize::from(window.is_some());
+        self.observations[class][observed] = self.observations[class][observed].saturating_add(1);
+        if window == Some(true) {
+            self.descendant_windows = self.descendant_windows.saturating_add(1);
+        }
+    }
+}
+
+static PREDICTION_METRICS: OnceLock<Mutex<PredictionMetrics>> = OnceLock::new();
+
+pub(crate) fn record_prediction_observation(
+    evidence: Option<&ExecutableEvidence>,
+    descendant_window: Option<bool>,
+) {
+    let mut metrics = PREDICTION_METRICS
+        .get_or_init(|| Mutex::new(PredictionMetrics::default()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    metrics.record(evidence, descendant_window);
+}
+
+#[allow(dead_code)]
+pub(crate) fn prediction_metrics() -> PredictionMetrics {
+    *PREDICTION_METRICS
+        .get_or_init(|| Mutex::new(PredictionMetrics::default()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -868,5 +913,34 @@ mod tests {
         assert!(
             progress.bytes_read <= progress.entries_inspected as u64 * budgets.max_prefix_bytes
         );
+    }
+
+    #[test]
+    fn prediction_metrics_compare_classes_with_attributed_windows_without_identity_data() {
+        let evidence = |class| ExecutableEvidence {
+            class,
+            confidence_percent: 50,
+            generation: 9,
+            resolved_path: "/private/command".into(),
+            reasons: vec![EvidenceReason::GuiLibrary],
+        };
+        let graphical = evidence(ExecutableClass::LikelyGraphical);
+        let terminal = evidence(ExecutableClass::LikelyTerminal);
+        let unknown = evidence(ExecutableClass::Unknown);
+        let mut metrics = PredictionMetrics::default();
+
+        metrics.record(Some(&graphical), Some(false));
+        metrics.record(Some(&terminal), None);
+        metrics.record(Some(&unknown), Some(true));
+        metrics.record(None, None);
+
+        assert_eq!(metrics.observations[0], [0, 1]);
+        assert_eq!(metrics.observations[1], [1, 0]);
+        assert_eq!(metrics.observations[2], [0, 1]);
+        assert_eq!(metrics.observations[3], [1, 0]);
+        assert_eq!(metrics.descendant_windows, 1);
+        let debug = format!("{metrics:?}");
+        assert!(!debug.contains("private"));
+        assert!(!debug.contains("command"));
     }
 }
