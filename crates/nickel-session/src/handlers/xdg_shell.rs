@@ -709,6 +709,14 @@ impl NickelSession {
         self.space.map_element(window.clone(), location, true);
         if let Some(toplevel) = window.toplevel() {
             self.update_window_metadata(toplevel);
+            if let Some(client_pid) = toplevel
+                .wl_surface()
+                .client()
+                .and_then(|client| client.get_credentials(&self.display_handle).ok())
+                .and_then(|credentials| u32::try_from(credentials.pid).ok())
+            {
+                self.observe_pending_launch_window(client_pid);
+            }
         }
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(id) = registry_id.filter(|id| {

@@ -268,6 +268,9 @@ impl NickelSession {
                 Some(surface.class()),
             );
             self.x11_windows.insert(surface.window_id(), id);
+            if let Some(client_pid) = surface.pid() {
+                self.observe_pending_launch_window(client_pid);
+            }
             if let Some(wl_surface) = surface.wl_surface() {
                 self.surface_windows.insert(wl_surface.id(), id);
             }

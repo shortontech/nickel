@@ -3,11 +3,12 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 22;
+pub const PROTOCOL_VERSION: u16 = 23;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
 pub const MAX_SUBSCRIBERS: usize = 8;
+pub const MAX_PENDING_LAUNCHES: usize = 32;
 pub const MAX_WINDOWS: usize = 128;
 pub const MAX_WINDOW_TITLE_BYTES: usize = 384;
 pub const MAX_WINDOW_APP_ID_BYTES: usize = 96;
@@ -75,6 +76,16 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    /// Observe qualifying application windows created by one process lineage. Only the authenticated
+    /// Nickel shell may establish this short-lived attribution authority.
+    ObservePendingLaunch {
+        generation: u64,
+        root_pid: u32,
+        deadline_ms: u16,
+    },
+    CancelPendingLaunch {
+        generation: u64,
+    },
     /// Bind an opaque XDG application identity to an authenticated shell
     /// role. Output-scoped roles carry the monitor identity separately from
     /// presentation metadata such as the window title.
@@ -707,21 +718,43 @@ pub enum ErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "data", rename_all = "snake_case")]
 pub enum Event {
+    PendingLaunchWindow {
+        generation: u64,
+        observed_after_ms: u16,
+        descendant: bool,
+    },
     ShellSettingsChanged,
     ShellBehaviorChanged(ShellBehaviorSnapshot),
     Snapshot(Snapshot),
-    LauncherVisibility { visible: bool },
+    LauncherVisibility {
+        visible: bool,
+    },
     Windows(Vec<WindowSnapshot>),
     Outputs(Vec<OutputSnapshot>),
-    Focus { window: Option<WindowId> },
-    Stacking { front_to_back: Vec<WindowId> },
-    WindowRemoved { window: WindowId },
+    Focus {
+        window: Option<WindowId>,
+    },
+    Stacking {
+        front_to_back: Vec<WindowId>,
+    },
+    WindowRemoved {
+        window: WindowId,
+    },
     Preview(PreviewFrame),
-    OutputCaptureCompleted { path: String, result: CaptureResult },
+    OutputCaptureCompleted {
+        path: String,
+        result: CaptureResult,
+    },
     Workspaces(WorkspaceState),
-    LockState { locked: bool },
-    GlobalShortcut { action: ShortcutAction },
-    ConsumerControl { control: ConsumerControl },
+    LockState {
+        locked: bool,
+    },
+    GlobalShortcut {
+        action: ShortcutAction,
+    },
+    ConsumerControl {
+        control: ConsumerControl,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1921,6 +1954,35 @@ mod tests {
         assert_eq!(
             decode::<ServerEnvelope>(&encode(&response).unwrap()).unwrap(),
             response
+        );
+    }
+
+    #[test]
+    fn pending_launch_authority_round_trips_without_command_text() {
+        let request = ClientEnvelope {
+            token: "session-token".into(),
+            request_id: 91,
+            request: Request::Command(Command::ObservePendingLaunch {
+                generation: 27,
+                root_pid: 4_242,
+                deadline_ms: 100,
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
+        );
+        let event = ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(Event::PendingLaunchWindow {
+                generation: 27,
+                observed_after_ms: 99,
+                descendant: true,
+            }),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&event).unwrap()).unwrap(),
+            event
         );
     }
 }

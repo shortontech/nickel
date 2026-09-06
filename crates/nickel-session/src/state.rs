@@ -10,7 +10,7 @@ use std::{
         Arc,
         atomic::{AtomicU8, AtomicU32, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use nickel_core::{
@@ -225,6 +225,40 @@ fn same_session_user(pid: u32) -> bool {
     process_uid(pid).is_some_and(|uid| process_uid(std::process::id()).as_deref() == Some(&uid))
 }
 
+#[derive(Clone, Debug)]
+struct PendingLaunchObservation {
+    generation: u64,
+    root_pid: u32,
+    registered_at: Instant,
+    deadline: Duration,
+}
+
+fn linux_process_parent(pid: u32) -> Option<u32> {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("PPid:\t"))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn process_descends_from(mut pid: u32, root_pid: u32) -> bool {
+    for _ in 0..64 {
+        if pid == root_pid {
+            return true;
+        }
+        let Some(parent) = linux_process_parent(pid) else {
+            return false;
+        };
+        if parent == 0 || parent == pid {
+            return false;
+        }
+        pid = parent;
+    }
+    false
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellRegistrationRejection {
     ClaimedPeerMismatch,
@@ -256,6 +290,8 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
     matches!(
         command,
         SessionCommand::LogOut
+            | SessionCommand::ObservePendingLaunch { .. }
+            | SessionCommand::CancelPendingLaunch { .. }
             | SessionCommand::Unlock
             | SessionCommand::SessionAction { .. }
             | SessionCommand::FocusShellRole { .. }
@@ -401,6 +437,7 @@ pub struct NickelSession {
     launcher_focus: FocusTransactions<ObjectId>,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
+    pending_launch_observations: Vec<PendingLaunchObservation>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
     shell_surface_identities: HashMap<String, ShellSurfaceIdentity>,
@@ -996,6 +1033,7 @@ impl NickelSession {
             launcher_focus: FocusTransactions::default(),
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
+            pending_launch_observations: Vec::new(),
             protocol_token,
             authenticated_shell_pids: HashSet::new(),
             shell_surface_identities: HashMap::new(),
@@ -1991,6 +2029,46 @@ impl NickelSession {
         self.launcher_subscribers
             .retain(|path| socket.send_to(&event, path).is_ok());
         self.notify_protocol_snapshot();
+    }
+
+    pub(crate) fn observe_pending_launch_window(&mut self, client_pid: u32) {
+        let now = Instant::now();
+        let mut observations = Vec::new();
+        self.pending_launch_observations.retain(|pending| {
+            let elapsed = now.saturating_duration_since(pending.registered_at);
+            if elapsed > pending.deadline {
+                return false;
+            }
+            let attributed = process_descends_from(client_pid, pending.root_pid);
+            if attributed {
+                observations.push((
+                    pending.generation,
+                    elapsed.as_millis().min(u128::from(u16::MAX)) as u16,
+                    client_pid != pending.root_pid,
+                ));
+            }
+            !attributed
+        });
+        if observations.is_empty() {
+            return;
+        }
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        for (generation, observed_after_ms, descendant) in observations {
+            let Ok(event) = encode(&ServerEnvelope {
+                request_id: 0,
+                message: ServerMessage::Event(SessionEvent::PendingLaunchWindow {
+                    generation,
+                    observed_after_ms,
+                    descendant,
+                }),
+            }) else {
+                continue;
+            };
+            self.launcher_subscribers
+                .retain(|path| socket.send_to(&event, path).is_ok());
+        }
     }
 
     fn notify_workspace_state(&mut self) {
@@ -5975,6 +6053,12 @@ mod protocol_tests {
     fn privileged_shell_commands_require_the_registered_shell_pid() {
         for command in [
             Command::LogOut,
+            Command::ObservePendingLaunch {
+                generation: 7,
+                root_pid: 42,
+                deadline_ms: 100,
+            },
+            Command::CancelPendingLaunch { generation: 7 },
             Command::Unlock,
             Command::SessionAction {
                 action: SessionAction::Lock,
@@ -5990,6 +6074,25 @@ mod protocol_tests {
             assert!(command_requires_shell_identity(&command));
         }
         assert!(!command_requires_shell_identity(&Command::ToggleLauncher));
+    }
+
+    #[test]
+    fn process_lineage_accepts_self_and_a_live_descendant_only() {
+        assert!(super::process_descends_from(
+            std::process::id(),
+            std::process::id()
+        ));
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "sleep 2"])
+            .spawn()
+            .expect("spawn lineage fixture");
+        assert!(super::process_descends_from(child.id(), std::process::id()));
+        assert!(!super::process_descends_from(
+            std::process::id(),
+            child.id()
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

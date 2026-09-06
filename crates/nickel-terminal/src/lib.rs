@@ -408,7 +408,6 @@ impl TerminalEngine {
 
 #[derive(Clone, Copy)]
 struct ForceHandle {
-    #[cfg(unix)]
     pid: u32,
     #[cfg(target_os = "windows")]
     process: usize,
@@ -425,6 +424,10 @@ impl ForceHandle {
         #[cfg(target_os = "windows")]
         {
             Self {
+                pid: pty
+                    .child_watcher()
+                    .pid()
+                    .map_or(0, std::num::NonZeroU32::get),
                 process: pty.child_watcher().raw_handle() as usize,
             }
         }
@@ -546,6 +549,15 @@ impl TerminalSession {
             return Err(TerminalError::WriteTooLarge);
         }
         enqueue_input(self.input_sender.as_ref(), bytes)
+    }
+
+    /// Native process identity of the PTY child for compositor/window attribution.
+    pub const fn child_process_id(&self) -> Option<u32> {
+        if self.force_handle.pid == 0 {
+            None
+        } else {
+            Some(self.force_handle.pid)
+        }
     }
 
     pub fn resize(

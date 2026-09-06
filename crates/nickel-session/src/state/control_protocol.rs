@@ -330,6 +330,64 @@ impl NickelSession {
         request_id: u64,
     ) -> ServerMessage {
         match command {
+            SessionCommand::ObservePendingLaunch {
+                generation,
+                root_pid,
+                deadline_ms,
+            } => {
+                if root_pid == 0 || deadline_ms == 0 || deadline_ms > 2_000 {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "invalid pending-launch observation",
+                    );
+                }
+                if self
+                    .pending_launch_observations
+                    .iter()
+                    .any(|pending| pending.generation == generation)
+                {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "pending-launch generation is already active",
+                    );
+                }
+                if self.pending_launch_observations.len()
+                    >= nickel_session_protocol::MAX_PENDING_LAUNCHES
+                {
+                    return protocol_error(
+                        ErrorCode::ResourceLimit,
+                        "pending-launch observation limit reached",
+                    );
+                }
+                self.pending_launch_observations
+                    .push(PendingLaunchObservation {
+                        generation,
+                        root_pid,
+                        registered_at: Instant::now(),
+                        deadline: Duration::from_millis(u64::from(deadline_ms)),
+                    });
+                let timer = Timer::from_duration(Duration::from_millis(u64::from(deadline_ms)));
+                if self
+                    .event_loop_handle
+                    .insert_source(timer, move |_, _, data| {
+                        data.pending_launch_observations
+                            .retain(|pending| pending.generation != generation);
+                        TimeoutAction::Drop
+                    })
+                    .is_err()
+                {
+                    self.pending_launch_observations
+                        .retain(|pending| pending.generation != generation);
+                    return protocol_error(
+                        ErrorCode::Internal,
+                        "pending-launch expiry could not be scheduled",
+                    );
+                }
+            }
+            SessionCommand::CancelPendingLaunch { generation } => {
+                self.pending_launch_observations
+                    .retain(|pending| pending.generation != generation);
+            }
             SessionCommand::RegisterShellSurface { mut identity } => {
                 let output_scoped = matches!(
                     identity.role,
