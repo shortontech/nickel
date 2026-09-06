@@ -36,6 +36,10 @@ fn next_poll_delay(previous: Duration, changed: bool) -> Duration {
     }
 }
 
+fn close_after_exit(enabled: bool, code: Option<i32>) -> bool {
+    enabled && code == Some(0)
+}
+
 struct TerminalApp {
     session: TerminalSession,
     snapshot: TerminalSnapshot,
@@ -46,6 +50,8 @@ struct TerminalApp {
     paste_confirmation: Option<String>,
     resize_generation: u64,
     poll_delay: Duration,
+    close_on_successful_exit: bool,
+    exit_requested: bool,
 }
 
 #[derive(Clone)]
@@ -101,6 +107,8 @@ impl TerminalApp {
             paste_confirmation: None,
             resize_generation: 0,
             poll_delay: Duration::from_millis(16),
+            close_on_successful_exit: settings.close_on_successful_exit,
+            exit_requested: false,
         })
     }
 
@@ -330,6 +338,7 @@ impl Application for TerminalApp {
                         Some(code) => format!("Process exited with status {code}"),
                         None => "Process exited".into(),
                     });
+                    self.exit_requested = close_after_exit(self.close_on_successful_exit, code);
                 }
                 TerminalEvent::ClipboardStore(text) => {
                     if let Err(error) =
@@ -370,6 +379,7 @@ impl Application for TerminalApp {
 struct TerminalAdapter {
     pointer: TerminalPointerTranslator,
     started: Instant,
+    monitor_exit: bool,
 }
 
 impl Default for TerminalAdapter {
@@ -377,11 +387,28 @@ impl Default for TerminalAdapter {
         Self {
             pointer: TerminalPointerTranslator::default(),
             started: Instant::now(),
+            monitor_exit: false,
         }
     }
 }
 
 impl HostAdapter<TerminalApp> for TerminalAdapter {
+    fn poll_interval(&self) -> Option<Duration> {
+        self.monitor_exit.then_some(Duration::from_millis(100))
+    }
+
+    fn poll(
+        &mut self,
+        host: &mut UiHost<TerminalApp>,
+        _: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        Ok(if host.application().exit_requested {
+            AdapterOutcome::exit()
+        } else {
+            AdapterOutcome::default()
+        })
+    }
+
     fn normalized_input(
         &mut self,
         host: &mut UiHost<TerminalApp>,
@@ -474,7 +501,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !deferred_window.is_zero() {
         std::thread::sleep(deferred_window);
     }
-    nickel_ui::run_with_adapter(app, TerminalAdapter::default())
+    nickel_ui::run_with_adapter(
+        app,
+        TerminalAdapter {
+            monitor_exit: settings.close_on_successful_exit,
+            ..TerminalAdapter::default()
+        },
+    )
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -526,5 +559,13 @@ mod tests {
         }
         assert_eq!(delay, Duration::from_millis(100));
         assert_eq!(next_poll_delay(delay, true), Duration::from_millis(16));
+    }
+
+    #[test]
+    fn exit_policy_closes_only_after_an_explicit_success() {
+        assert!(close_after_exit(true, Some(0)));
+        assert!(!close_after_exit(false, Some(0)));
+        assert!(!close_after_exit(true, Some(1)));
+        assert!(!close_after_exit(true, None));
     }
 }
