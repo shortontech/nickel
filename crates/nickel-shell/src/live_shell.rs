@@ -2787,8 +2787,23 @@ impl LiveShell {
     fn apply_application_menu_action(&mut self, action: ApplicationMenuAction) {
         match action {
             ApplicationMenuAction::Dismiss => self.dismiss_window_menu(),
-            ApplicationMenuAction::TogglePin(application) => self
-                .apply_launcher_action(LauncherAction::TogglePin(application.as_str().to_owned())),
+            ApplicationMenuAction::TogglePin(application) => {
+                let Some(target) = self.application_menu_target.as_ref() else {
+                    return;
+                };
+                let canonical_item_available = target
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|id| self.launcher.is_pinned(id.as_str()));
+                if target.application_id.as_ref() != Some(&application)
+                    || !target.survives(&self.windows, canonical_item_available)
+                {
+                    return;
+                }
+                self.apply_launcher_action(LauncherAction::TogglePin(
+                    application.as_str().to_owned(),
+                ));
+            }
             ApplicationMenuAction::CloseAll => {
                 let Some(target) = self.application_menu_target.as_ref() else {
                     return;

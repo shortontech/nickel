@@ -188,9 +188,22 @@
         }));
 
         shell.apply_application_menu_action(crate::window_preview::ApplicationMenuAction::TogglePin(
+            crate::model::ApplicationId::new("org.example.unrelated"),
+        ));
+        assert!(shell.launcher.is_pinned("org.example.pinned"));
+        assert!(!shell.launcher.is_pinned("org.example.unrelated"));
+
+        shell.apply_application_menu_action(crate::window_preview::ApplicationMenuAction::TogglePin(
             crate::model::ApplicationId::new("org.example.pinned"),
         ));
         assert!(!shell.launcher.is_pinned("org.example.pinned"));
+        shell.apply_application_menu_action(crate::window_preview::ApplicationMenuAction::TogglePin(
+            crate::model::ApplicationId::new("org.example.pinned"),
+        ));
+        assert!(
+            !shell.launcher.is_pinned("org.example.pinned"),
+            "a stale closed-pin menu cannot recreate its removed target"
+        );
     }
 
     #[test]
