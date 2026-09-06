@@ -14,13 +14,12 @@ nickel-markdown	1
 nickel-markdown-ui	4
 nickel-platform	7
 nickel-render-assets	1
-nickel-session	36
+nickel-session	38
 nickel-session-protocol	2
 nickel-settings	11
-nickel-shapes-test	5
-nickel-shell	38
+nickel-shell	44
 nickel-storage	1
-nickel-ui	34
+nickel-ui	36
 nickel-ui-testkit	1
 nickel-ui-workbench	4
 ui-declarative-macros	1

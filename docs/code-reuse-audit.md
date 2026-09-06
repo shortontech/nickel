@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-06.
-Scope: all 231 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 236 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -38,8 +38,11 @@ tests; same-named trait implementations and platform translations were not treat
 | Nickel Shell, Settings, and File build scripts | Windows icon resource generation | `nickel-build-support::embed_windows_icon` | consolidate | Each build script supplies only its icon path and output name; image conversion, resource compilation, and rerun directives have one build-time authority. | workspace default/all-feature builds | complete |
 | `nickel-ui::ui::tree` scrollbar layout/hit helpers | Scrollbar geometry | `nickel-ui::ui::tree::scrollbar` | split-seam | Pure thumb/track geometry and drag mapping moved behind a focused private module while `UiFrame` retains interaction and tree ownership. This reduces coordinator density without introducing a second hit-test authority. | scrollbar unit tests and UI tree interaction suites | complete |
 | `nickel-ui::ui::tree` selection helpers | Selection geometry and generation tracking | `nickel-ui::ui::tree::selection` | split-seam | Glyph/run geometry, endpoint hit mapping, builder state, and selection generations moved behind a focused private API; `UiFrame` retains orchestration. | selection and UI tree interaction suites | complete |
+| `nickel-ui::ui::tree` layout and display-list traversal | Tree measurement versus rendering emission | `nickel-ui::ui::tree::{layout,emission}` | split-seam | Recursive layout, flex/grid track resolution, and transient state application are isolated from recursive command emission, clipping, hit registration, and custom-paint validation. `UiFrame` retains cross-phase orchestration and the public API. | all-feature Nickel UI unit, integration, Clippy, and authority suites | complete |
 | Nickel Shell desktop surface behavior | Desktop application state, input, view, and file effects | `nickel-shell::live_shell::desktop` | split-seam | The 1,460-line desktop domain moved out of the shell coordinator while `LiveShell` retains cross-surface coordination and wallpaper ownership. | desktop semantic scenarios and live-shell suites | complete |
+| Nickel Shell panel application and live-shell behavioral tests | Panel state/view policy versus cross-surface coordination | `nickel-shell::live_shell::panel`; domain-grouped `live_shell::tests` | split-seam | Panel actions, drag reduction, menus, clock deadlines, tray normalization, and icon preparation now have one focused production module. The former inline test block is grouped by shell flows, desktop interactions, panel/cache behavior, and wallpaper behavior. | Nickel Shell library suite and strict source inventory | complete |
 | Nickel Session output-global lifecycle | Bounded two-phase global retirement | `nickel-session::output_retirement` | split-seam | Capacity, grace transitions, and identity visibility are pure policy in one module; `NickelSession` retains compositor side effects. | retirement churn and session output suites | complete |
+| Nickel Session preview caching and authenticated control protocol | Preview resource policy and wire-command handling | `nickel-session::state::{preview,control_protocol}` | split-seam | Capture admission, retry lifecycle, byte accounting, and retirement are isolated from authenticated socket ingestion, command/query dispatch, and protocol projections. The session coordinator retains compositor ownership and delegates through narrow internal APIs. | all-feature Nickel Session tests and strict Clippy | complete |
 | Nickel File application and fixture source layout | Application runtime versus workbench fixture declarations | `nickel-file::{app,app::fixtures}` | split-seam | The library now uses a conventional application module, with the feature-gated fixture catalog isolated from runtime behavior. | Nickel File default/all-feature tests | complete |
 | Nickel Session move and resize grabs | Pointer-event pass-through required by Smithay's grab trait | `nickel-session::grabs::forward_pointer_grab_events` | consolidate | One local macro implements identical relative-motion, axis, frame, gesture, start-data, and unset forwarding while each grab keeps unique motion/button policy. | Nickel Session grab and input suites | complete |
 | Multi-output shell surfaces | Per-surface output identity | `nickel-session-protocol::ShellSurfaceIdentity` | consolidate | Capability-gated registration binds opaque surface IDs, canonical roles, and output names; window titles no longer carry protocol metadata, and reserved identities fail closed for unregistered or unauthenticated clients. | protocol round trips, authorization, and multi-output session tests | complete |
@@ -53,12 +56,13 @@ The audit now has lower-level authorities for configuration storage and Windows 
 shared Linux authorities for NetworkManager, desktop-entry admission, and icon-theme discovery; a
 single Nickel Shell module graph; an explicit feature boundary around Nickel File fixtures; and
 application host adapters as the boundary for session-specific input fencing. Typed shell-surface
-registration replaces title metadata. Focused scrollbar, selection, desktop, fixture, and output
-retirement modules reduce coordinator density without creating parallel policy authorities.
+registration replaces title metadata. Focused scrollbar, selection, layout, display emission,
+desktop, panel, fixture, preview, control-protocol, and output-retirement modules reduce coordinator
+density without creating parallel policy authorities.
 
 The strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 231-source inventory is current,
+translations rather than competing product authorities. The exact 236-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
