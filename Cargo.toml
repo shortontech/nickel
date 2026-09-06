@@ -25,6 +25,7 @@ members = [
     "crates/nickel-session-protocol",
     "crates/nickel-settings",
     "crates/nickel-terminal",
+    "crates/nickel-terminal-ui",
 ]
 default-members = ["crates/nickel-shell"]
 resolver = "3"

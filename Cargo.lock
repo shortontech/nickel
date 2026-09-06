@@ -2746,6 +2746,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-terminal-ui"
+version = "0.1.0"
+dependencies = [
+ "nickel-input",
+ "nickel-terminal",
+ "nickel-ui",
+]
+
+[[package]]
 name = "nickel-ui"
 version = "0.1.0"
 dependencies = [
