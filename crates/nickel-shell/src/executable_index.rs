@@ -208,9 +208,7 @@ impl ExecutableIndex {
     }
 
     pub(crate) fn classify(&self, command: &str) -> Option<ExecutableEvidence> {
-        let command = Path::new(command)
-            .file_name()
-            .and_then(|name| name.to_str())?;
+        let command = normalized_command_name(command)?;
         self.snapshot
             .read()
             .unwrap_or_else(|error| error.into_inner())
@@ -231,6 +229,13 @@ impl ExecutableIndex {
     pub(crate) fn request_refresh(&self) {
         let _ = self.refresh.try_send(());
     }
+}
+
+fn normalized_command_name(command: &str) -> Option<&str> {
+    let path = Path::new(command);
+    (path.components().count() == 1)
+        .then(|| path.file_name().and_then(|name| name.to_str()))
+        .flatten()
 }
 
 pub(crate) fn global_executable_index() -> &'static ExecutableIndex {
@@ -295,6 +300,7 @@ fn scan_path_generation(
         ..IndexSnapshot::default().progress
     };
     let directories = path.map(std::env::split_paths).into_iter().flatten();
+    let current_directory = std::env::current_dir().ok();
     let mut complete = true;
 
     'directories: for (directory_index, directory) in directories.enumerate() {
@@ -302,6 +308,10 @@ fn scan_path_generation(
             complete = false;
             break;
         }
+        let Some(directory) = effective_path_directory(directory, current_directory.as_deref())
+        else {
+            continue;
+        };
         let canonical = std::fs::canonicalize(&directory).unwrap_or(directory);
         if !seen_directories.insert(canonical.clone()) {
             continue;
@@ -361,6 +371,17 @@ fn scan_path_generation(
     }
     progress.complete = complete;
     publish(snapshot, &commands, progress, started.elapsed());
+}
+
+fn effective_path_directory(
+    directory: PathBuf,
+    current_directory: Option<&Path>,
+) -> Option<PathBuf> {
+    if directory.as_os_str().is_empty() {
+        current_directory.map(Path::to_owned)
+    } else {
+        Some(directory)
+    }
 }
 
 fn inspect_executable(
@@ -850,6 +871,28 @@ mod tests {
         assert_eq!(snapshot.progress.generation, 7);
         assert!(snapshot.progress.complete);
         assert!(snapshot.progress.retained_bytes_estimate > 0);
+    }
+
+    #[test]
+    fn lookup_never_substitutes_a_path_entry_with_the_same_basename() {
+        assert_eq!(normalized_command_name("tool"), Some("tool"));
+        assert_eq!(normalized_command_name("./tool"), None);
+        assert_eq!(normalized_command_name("/tmp/tool"), None);
+        assert_eq!(normalized_command_name("directory/tool"), None);
+    }
+
+    #[test]
+    fn empty_path_segments_resolve_to_the_captured_current_directory() {
+        let current = Path::new("/work/current");
+        assert_eq!(
+            effective_path_directory(PathBuf::new(), Some(current)).as_deref(),
+            Some(current)
+        );
+        assert_eq!(effective_path_directory(PathBuf::new(), None), None);
+        assert_eq!(
+            effective_path_directory(PathBuf::from("/bin"), Some(current)),
+            Some(PathBuf::from("/bin"))
+        );
     }
 
     #[test]
