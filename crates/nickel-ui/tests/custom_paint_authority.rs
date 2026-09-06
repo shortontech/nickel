@@ -1,11 +1,52 @@
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    ActionKind, CustomPaint, Rect, SemanticAction, SemanticRole, SemanticSelector, UiFrame,
+    ActionKind, ComponentBuilderExt, CustomPaint, Rect, Row, SemanticAction, SemanticRole,
+    SemanticSelector, Spacer, UiFrame,
 };
 
 #[derive(Clone, Debug, PartialEq)]
 enum Message {
     Activate,
+}
+
+#[test]
+fn precomputed_custom_commands_are_local_clipped_and_cannot_emit_overlays() {
+    let frame = UiFrame::<()>::layout(
+        Row::new().child(Spacer::new().width(10.0)).child(
+            CustomPaint::commands(vec![
+                PaintCommand::Fill {
+                    rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                    color: 0x123456,
+                },
+                PaintCommand::Fill {
+                    rect: Rect::new(21.0, 0.0, 1.0, 1.0),
+                    color: 0x654321,
+                },
+                PaintCommand::OverlayFill {
+                    rect: Rect::new(0.0, 0.0, 20.0, 20.0),
+                    color: 0xffffff,
+                },
+            ])
+            .width(20.0)
+            .height(20.0),
+        ),
+        Rect::new(0.0, 0.0, 30.0, 20.0),
+    );
+    assert!(frame.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::Fill { rect, color }
+            if *color == 0x123456 && *rect == Rect::new(10.0, 0.0, 20.0, 20.0)
+    )));
+    assert!(!frame.commands().iter().any(|command| matches!(
+        command,
+        PaintCommand::Fill { color, .. } if *color == 0x654321
+    )));
+    assert!(
+        !frame
+            .commands()
+            .iter()
+            .any(|command| matches!(command, PaintCommand::OverlayFill { .. }))
+    );
 }
 
 fn paint(bounds: Rect) -> Vec<PaintCommand> {

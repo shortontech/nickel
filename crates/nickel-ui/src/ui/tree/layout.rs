@@ -244,6 +244,7 @@ pub(super) fn layout_element<Message: Clone>(
         Kind::Text { .. }
         | Kind::StyledText { .. }
         | Kind::CustomPaint { .. }
+        | Kind::CustomPaintCommands { .. }
         | Kind::Image { .. }
         | Kind::Slider { .. }
         | Kind::Dropdown { .. } => {}

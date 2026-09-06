@@ -1104,6 +1104,26 @@ impl<Message> CustomPaint<Message> {
         })
     }
 
+    /// Paint precomputed renderer primitives expressed relative to this component's origin.
+    pub fn commands(commands: Vec<PaintCommand>) -> Self {
+        Self(Element {
+            id: None,
+            source: None,
+            kind: Kind::CustomPaintCommands { commands },
+            style: Style::default(),
+            message: None,
+            context_message: None,
+            message_mapper: None,
+            drag_mapper: None,
+            text_mapper: None,
+            option_messages: Vec::new(),
+            inline_messages: Vec::new(),
+            children: Vec::new(),
+            navigation_scope: None,
+            adjustment_step: 0.05,
+        })
+    }
+
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
         self

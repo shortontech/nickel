@@ -4865,7 +4865,7 @@ pub(super) fn measure_element<Message>(
     );
     let child_constraints = Constraints::loose(child_max);
     let content = match &element.kind {
-        Kind::CustomPaint { .. } => Size::default(),
+        Kind::CustomPaint { .. } | Kind::CustomPaintCommands { .. } => Size::default(),
         Kind::Text {
             value,
             scale,

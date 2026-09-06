@@ -997,6 +997,9 @@ enum Kind {
     CustomPaint {
         paint: fn(Rect) -> Vec<PaintCommand>,
     },
+    CustomPaintCommands {
+        commands: Vec<PaintCommand>,
+    },
     Text {
         value: String,
         scale: f32,
@@ -1051,7 +1054,7 @@ impl Kind {
             Self::Layer => "Layer",
             Self::VerticalScroll { .. } => "VerticalScroll",
             Self::Grid { .. } => "Grid",
-            Self::CustomPaint { .. } => "CustomPaint",
+            Self::CustomPaint { .. } | Self::CustomPaintCommands { .. } => "CustomPaint",
             Self::Text { .. } => "Text",
             Self::StyledText { .. } => "StyledText",
             Self::Image { .. } => "Image",

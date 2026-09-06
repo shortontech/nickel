@@ -24,6 +24,28 @@ fn rect_contains(outer: Rect, inner: Rect) -> bool {
         && inner.origin.y + inner.size.height <= outer.origin.y + outer.size.height
 }
 
+fn translate_custom_command(mut command: PaintCommand, origin: Point) -> PaintCommand {
+    let translate = |rect: &mut Rect| {
+        rect.origin.x += origin.x;
+        rect.origin.y += origin.y;
+    };
+    match &mut command {
+        PaintCommand::Fill { rect, .. }
+        | PaintCommand::TopRoundedFill { rect, .. }
+        | PaintCommand::RoundedFill { rect, .. }
+        | PaintCommand::Gradient { rect, .. }
+        | PaintCommand::Stroke { rect, .. } => translate(rect),
+        PaintCommand::Text { bounds, .. }
+        | PaintCommand::StyledText { bounds, .. }
+        | PaintCommand::Image { bounds, .. } => translate(bounds),
+        PaintCommand::OverlayFill { .. }
+        | PaintCommand::OverlayStroke { .. }
+        | PaintCommand::PushClip(_)
+        | PaintCommand::PopClip => {}
+    }
+    command
+}
+
 pub(super) fn emit_element<Message: Clone>(
     element: &Element<Message>,
     node_index: usize,
@@ -270,6 +292,17 @@ pub(super) fn emit_element<Message: Clone>(
             tree.commands
                 .extend((paint)(rect).into_iter().filter(|command| {
                     custom_paint_bounds(command).is_some_and(|bounds| rect_contains(rect, bounds))
+                }));
+            tree.commands.push(PaintCommand::PopClip);
+        }
+        Kind::CustomPaintCommands { commands } => {
+            tree.commands.push(PaintCommand::PushClip(rect));
+            tree.commands
+                .extend(commands.iter().cloned().filter_map(|command| {
+                    let command = translate_custom_command(command, rect.origin);
+                    custom_paint_bounds(&command)
+                        .is_some_and(|bounds| rect_contains(rect, bounds))
+                        .then_some(command)
                 }));
             tree.commands.push(PaintCommand::PopClip);
         }

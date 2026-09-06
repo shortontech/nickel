@@ -1,5 +1,60 @@
 //! Declarative Nickel UI projection and normalized input policy for one terminal viewport.
 
+#[cfg(test)]
+mod allocation_probe {
+    use std::{
+        alloc::{GlobalAlloc, Layout, System},
+        sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    };
+
+    pub(super) struct CountingAllocator;
+    static ENABLED: AtomicBool = AtomicBool::new(false);
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    static BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if ENABLED.load(Ordering::Relaxed) {
+                CALLS.fetch_add(1, Ordering::Relaxed);
+                BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            // SAFETY: Forwarded unchanged to the system allocator.
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: The pointer and layout came from the system allocator above.
+            unsafe { System.dealloc(pointer, layout) }
+        }
+
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            if ENABLED.load(Ordering::Relaxed) {
+                CALLS.fetch_add(1, Ordering::Relaxed);
+                BYTES.fetch_add(size, Ordering::Relaxed);
+            }
+            // SAFETY: The pointer/layout came from System and the new size is forwarded unchanged.
+            unsafe { System.realloc(pointer, layout, size) }
+        }
+    }
+
+    pub(super) fn measure<T>(operation: impl FnOnce() -> T) -> (T, usize, usize) {
+        CALLS.store(0, Ordering::Relaxed);
+        BYTES.store(0, Ordering::Relaxed);
+        ENABLED.store(true, Ordering::SeqCst);
+        let result = operation();
+        ENABLED.store(false, Ordering::SeqCst);
+        (
+            result,
+            CALLS.load(Ordering::Relaxed),
+            BYTES.load(Ordering::Relaxed),
+        )
+    }
+}
+
+#[cfg(test)]
+#[global_allocator]
+static TEST_ALLOCATOR: allocation_probe::CountingAllocator = allocation_probe::CountingAllocator;
+
 use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, ModifierState, PhysicalKey, PointerButton,
     PointerEvent, TextEvent,
@@ -9,7 +64,7 @@ use nickel_terminal::{
     TerminalSelectionKind, TerminalSnapshot, TerminalUnderline,
 };
 use nickel_ui::{
-    Component, Container, Grid, SemanticRole, StyledText, StyledTextSpan, Track, View,
+    CustomPaint, Rect, SemanticRole, StyledTextSpan, TextAlign, View, backend::PaintCommand,
 };
 
 pub const MAX_PASTE_BYTES: usize = 1024 * 1024;
@@ -494,16 +549,8 @@ impl<'a> TerminalViewport<'a> {
     }
 
     pub fn view<Message: Clone>(&self) -> impl View<Message> + use<Message> {
-        let mut grid = Grid::tracks([Track::repeat(
-            self.snapshot.columns,
-            Track::px(self.metrics.width),
-        )])
-        .gap(0.0);
-        for (index, cell) in self.snapshot.cells.iter().enumerate() {
-            grid = grid.child(self.cell::<Message>(cell, index));
-        }
         let visible = visible_text(self.snapshot);
-        Container::new()
+        CustomPaint::commands(self.paint_commands())
             .id("terminal-viewport")
             .semantic_role(SemanticRole::GraphicalCustomControl)
             .accessibility_label(format!(
@@ -514,11 +561,23 @@ impl<'a> TerminalViewport<'a> {
             ))
             .width(self.snapshot.columns as f32 * self.metrics.width)
             .height(self.snapshot.lines as f32 * self.metrics.height)
-            .background(self.palette.background)
-            .child(grid)
     }
 
-    fn cell<Message: Clone>(&self, cell: &TerminalCell, index: usize) -> impl Component<Message> {
+    fn paint_commands(&self) -> Vec<PaintCommand> {
+        let width = self.snapshot.columns as f32 * self.metrics.width;
+        let height = self.snapshot.lines as f32 * self.metrics.height;
+        let mut commands = Vec::with_capacity(self.snapshot.lines.saturating_mul(4) + 1);
+        commands.push(PaintCommand::Fill {
+            rect: Rect::new(0.0, 0.0, width, height),
+            color: self.palette.background,
+        });
+        for (index, cell) in self.snapshot.cells.iter().enumerate() {
+            self.paint_cell(cell, index, &mut commands);
+        }
+        commands
+    }
+
+    fn paint_cell(&self, cell: &TerminalCell, index: usize, commands: &mut Vec<PaintCommand>) {
         let cursor = self.snapshot.cursor.visible
             && index / self.snapshot.columns == self.snapshot.cursor.line
             && index % self.snapshot.columns == self.snapshot.cursor.column;
@@ -543,55 +602,79 @@ impl<'a> TerminalViewport<'a> {
             background = self.palette.cursor;
             foreground = self.palette.background;
         }
-        let mut value = if cell.wide_spacer {
-            String::new()
-        } else {
-            cell.character.to_string()
-        };
-        value.extend(cell.combining.iter());
-        let end = value.len();
-        let styled = StyledText::new(
-            value,
-            vec![StyledTextSpan {
-                range: 0..end,
-                bold: cell.bold,
-                italic: cell.italic,
-                monospace: true,
-                font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
-                strikethrough: false,
-                underline: if cursor
-                    && self.palette.cursor_style
-                        == nickel_core::terminal_settings::TerminalCursorStyle::Underline
-                {
-                    nickel_ui::TextUnderlineStyle::Single
-                } else {
-                    match cell.underline {
+        let column = index % self.snapshot.columns;
+        let line = index / self.snapshot.columns;
+        let rect = Rect::new(
+            column as f32 * self.metrics.width,
+            line as f32 * self.metrics.height,
+            self.metrics.width,
+            self.metrics.height,
+        );
+        if background != self.palette.background {
+            commands.push(PaintCommand::Fill {
+                rect,
+                color: background,
+            });
+        }
+        let paints_text = !cell.concealed
+            && !cell.wide_spacer
+            && (cell.character != ' '
+                || !cell.combining.is_empty()
+                || cell.underline != TerminalUnderline::None);
+        if paints_text {
+            let mut value = cell.character.to_string();
+            value.extend(cell.combining.iter());
+            let end = value.len();
+            commands.push(PaintCommand::StyledText {
+                bounds: rect,
+                text: value,
+                spans: vec![StyledTextSpan {
+                    range: 0..end,
+                    bold: cell.bold,
+                    italic: cell.italic,
+                    monospace: true,
+                    font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
+                    strikethrough: false,
+                    underline: match cell.underline {
                         TerminalUnderline::None => nickel_ui::TextUnderlineStyle::None,
                         TerminalUnderline::Single => nickel_ui::TextUnderlineStyle::Single,
                         TerminalUnderline::Double => nickel_ui::TextUnderlineStyle::Double,
                         TerminalUnderline::Curly => nickel_ui::TextUnderlineStyle::Curly,
                         TerminalUnderline::Dotted => nickel_ui::TextUnderlineStyle::Dotted,
                         TerminalUnderline::Dashed => nickel_ui::TextUnderlineStyle::Dashed,
-                    }
-                },
-                color: Some(foreground),
-                background: None,
-            }],
-        )
-        .scale(self.metrics.text_scale)
-        .color(foreground);
-        let mut container = Container::new()
-            .width(self.metrics.width)
-            .height(self.metrics.height)
-            .background(background)
-            .child(styled);
+                    },
+                    color: Some(foreground),
+                    background: None,
+                }],
+                scale: self.metrics.text_scale,
+                color: foreground,
+                align: TextAlign::Start,
+            });
+        }
         if cursor
             && self.palette.cursor_style
                 == nickel_core::terminal_settings::TerminalCursorStyle::Beam
         {
-            container = container.border(self.palette.cursor, 1.0);
+            commands.push(PaintCommand::Stroke {
+                rect: Rect::new(rect.origin.x, rect.origin.y, 1.0, rect.size.height),
+                color: self.palette.cursor,
+                width: 1.0,
+            });
+        } else if cursor
+            && self.palette.cursor_style
+                == nickel_core::terminal_settings::TerminalCursorStyle::Underline
+        {
+            commands.push(PaintCommand::Stroke {
+                rect: Rect::new(
+                    rect.origin.x,
+                    rect.origin.y + rect.size.height - 1.0,
+                    rect.size.width,
+                    1.0,
+                ),
+                color: self.palette.cursor,
+                width: 1.0,
+            });
         }
-        container
     }
 }
 
@@ -726,6 +809,45 @@ mod tests {
         assert!(
             frame.commands().len() <= 100,
             "visible work stays bounded by the grid"
+        );
+    }
+
+    #[test]
+    #[ignore = "explicit release-mode full-frame allocation probe"]
+    fn release_full_frame_allocation_budget() {
+        if cfg!(debug_assertions) {
+            panic!("frame allocation budgets require --release");
+        }
+        let dimensions = TerminalDimensions::new(160, 60, 8, 16).unwrap();
+        let mut engine = TerminalEngine::new(dimensions, 10_000).unwrap();
+        let dense_output = format!("{}\r\n", "X".repeat(159)).repeat(60);
+        engine.process(dense_output.as_bytes());
+        let snapshot = engine.snapshot();
+        let palette = TerminalPalette::default();
+        let started = std::time::Instant::now();
+        let (frame, allocation_calls, allocation_bytes) = crate::allocation_probe::measure(|| {
+            UiFrame::<()>::layout(
+                TerminalViewport::new(
+                    &snapshot,
+                    &palette,
+                    CellMetrics::integral(14.0, 1.0),
+                    "Resource probe",
+                )
+                .view(),
+                Rect::new(0.0, 0.0, 1600.0, 1140.0),
+            )
+        });
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= std::time::Duration::from_millis(20),
+            "{elapsed:?}"
+        );
+        assert!(allocation_calls <= 50_000, "{allocation_calls}");
+        assert!(allocation_bytes <= 8 * 1024 * 1024, "{allocation_bytes}");
+        eprintln!(
+            "terminal full-frame probe: elapsed={elapsed:?}, allocations={allocation_calls}, \
+             allocated_bytes={allocation_bytes}, commands={}",
+            frame.commands().len()
         );
     }
 
