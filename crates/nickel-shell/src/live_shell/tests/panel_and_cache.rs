@@ -197,6 +197,10 @@
             crate::model::ApplicationId::new("org.example.pinned"),
         ));
         assert!(!shell.launcher.is_pinned("org.example.pinned"));
+        assert!(
+            shell.application_menu_target.is_none(),
+            "a successful application command consumes and dismisses its menu"
+        );
         shell.apply_application_menu_action(crate::window_preview::ApplicationMenuAction::TogglePin(
             crate::model::ApplicationId::new("org.example.pinned"),
         ));
@@ -204,6 +208,39 @@
             !shell.launcher.is_pinned("org.example.pinned"),
             "a stale closed-pin menu cannot recreate its removed target"
         );
+    }
+
+    #[test]
+    fn successful_close_all_consumes_and_dismisses_the_application_menu() {
+        let mut shell = LiveShell::new().unwrap();
+        let application = ApplicationId::new("org.example.group");
+        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
+            application.as_str().into(),
+            "Grouped Example".into(),
+            None,
+            None,
+            Some(vec!["example".into()]),
+        )]);
+        shell.windows = [81, 82]
+            .into_iter()
+            .map(|id| OpenWindow {
+                id: WindowId(id),
+                application_id: Some(application.clone()),
+                active: id == 81,
+                title: format!("Window {id}"),
+                state: crate::model::WindowState::default(),
+            })
+            .collect();
+        shell.sync_panel_host();
+        shell.apply_panel_action(super::PanelAction::TaskContext(0));
+        assert!(shell.application_menu_target.is_some());
+
+        shell.apply_application_menu_action(
+            crate::window_preview::ApplicationMenuAction::CloseAll,
+        );
+
+        assert!(shell.application_menu_target.is_none());
+        assert!(shell.application_menu_host.is_none());
     }
 
     #[test]

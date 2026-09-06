@@ -2803,13 +2803,18 @@ impl LiveShell {
                 self.apply_launcher_action(LauncherAction::TogglePin(
                     application.as_str().to_owned(),
                 ));
+                self.dismiss_window_menu();
             }
             ApplicationMenuAction::CloseAll => {
                 let Some(target) = self.application_menu_target.as_ref() else {
                     return;
                 };
-                for window in validated_application_close_targets(target, &self.windows) {
-                    self.send_window_action(window, WindowAction::Close);
+                let targets = validated_application_close_targets(target, &self.windows);
+                let dispatched = targets.into_iter().fold(false, |dispatched, window| {
+                    self.try_send_window_action(window, WindowAction::Close) || dispatched
+                });
+                if dispatched {
+                    self.dismiss_window_menu();
                 }
             }
         }
@@ -3082,10 +3087,14 @@ impl LiveShell {
     }
 
     fn send_window_action(&self, window: crate::model::WindowId, action: WindowAction) {
-        let _ = send_session_command(
+        let _ = self.try_send_window_action(window, action);
+    }
+
+    fn try_send_window_action(&self, window: crate::model::WindowId, action: WindowAction) -> bool {
+        send_session_command(
             "window-action",
             ShellCommand::WindowAction { window, action },
-        );
+        )
     }
 
     fn open_window_preview(&mut self, index: usize) {
