@@ -648,9 +648,9 @@ fn window_frame_elements(
         if client_elements.is_empty() {
             continue;
         }
-        // Nested decoration overlays must remain below the nonactivating keyboard,
-        // just as the native backend's interleaved client/frame pass does.
-        if state.is_on_screen_keyboard_window(window) {
+        // Preserve shell stacking in the decoration pass too: screenshots and
+        // locks must cover both ordinary titlebars and the nonactivating keyboard.
+        if state.is_shell_owned_window(window) && !state.desktop_windows.contains(window) {
             groups.push(
                 client_elements
                     .into_iter()

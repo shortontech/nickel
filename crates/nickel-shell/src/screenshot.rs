@@ -520,6 +520,9 @@ impl ScreenshotTool {
     }
 
     pub fn controller_action(&mut self, action: nickel_ui::ControllerAction) -> bool {
+        if action == nickel_ui::ControllerAction::Cancel {
+            return self.escape();
+        }
         let outcome = self.host.step(HostBatch {
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -875,6 +878,14 @@ mod tests {
     use image::{Rgba, RgbaImage};
 
     use super::{ScreenshotApp, ScreenshotMessage, ScreenshotTool, ToolbarAction, normalized};
+
+    #[test]
+    fn controller_cancel_dismisses_capture_before_a_selection_exists() {
+        let mut tool = ScreenshotTool::default();
+        tool.show(RgbaImage::new(1280, 720));
+        assert!(tool.controller_action(nickel_ui::ControllerAction::Cancel));
+        assert!(!tool.visible());
+    }
 
     fn toolbar_host() -> nickel_ui::UiHost<ScreenshotApp> {
         let mut app = ScreenshotApp::new(1200, 760);

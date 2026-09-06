@@ -4727,7 +4727,15 @@ impl LiveShell {
     }
 
     pub fn screenshot_pointer_released(&mut self) -> bool {
-        self.screenshot.pointer_released()
+        let was_visible = self.screenshot.visible();
+        let handled = self.screenshot.pointer_released();
+        // Toolbar buttons complete on release, including Save and Copy. Return
+        // focus before the screenshot surface is unmapped so the OSK recipient
+        // remains the application the capture was opened from.
+        if was_visible && !self.screenshot.visible() {
+            self.set_screenshot_focus(false);
+        }
+        handled
     }
 
     pub fn screenshot_key(&mut self, key: Option<KeyCode>) -> bool {

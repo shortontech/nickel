@@ -867,7 +867,7 @@ impl NickelSession {
                             for effect in window_effects {
                                 match effect {
                                     WindowPointerEffect::ActivateWindow(id)
-                                        if actual_window == Some(id) =>
+                                        if activate && actual_window == Some(id) =>
                                     {
                                         self.windows.raise(id);
                                         self.workspaces.focused(&id);

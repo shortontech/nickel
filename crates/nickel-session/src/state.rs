@@ -3963,6 +3963,9 @@ impl NickelSession {
     }
 
     pub(crate) fn focus_shell_role(&mut self, role: ShellRole) -> bool {
+        if !shell_role_accepts_ordinary_focus(role) {
+            return false;
+        }
         if role == ShellRole::Screenshot {
             self.screenshot_output_name = self.preferred_interaction_output_name();
         }
@@ -4502,6 +4505,9 @@ impl NickelSession {
             self.utility_windows.push(window.clone());
         }
         if role == ShellRole::Screenshot {
+            // Cropping is modal over the captured desktop, including the OSK.
+            // Keep it below the lock surface (100), but above the keyboard (60).
+            window.override_z_index(90);
             self.place_screenshot_surface(&window);
         }
         if role == ShellRole::OnScreenKeyboard {
@@ -5082,6 +5088,12 @@ impl NickelSession {
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
+        if self
+            .window_for_registry_id(id)
+            .is_some_and(|window| self.is_on_screen_keyboard_window(&window))
+        {
+            return;
+        }
         if let Some(workspace) = self.workspaces.workspace_for(&id)
             && workspace != self.workspaces.active()
             && let Ok(mut transition) = self.workspaces.switch_to(workspace, None)

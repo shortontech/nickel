@@ -1804,6 +1804,19 @@ fn controller_target_role(
         .or(focused_role)
 }
 
+fn modal_controller_target(
+    screenshot_visible: bool,
+    keyboard_visible: bool,
+) -> Option<SurfaceRole> {
+    if screenshot_visible {
+        Some(SurfaceRole::Screenshot)
+    } else if keyboard_visible {
+        Some(SurfaceRole::OnScreenKeyboard)
+    } else {
+        None
+    }
+}
+
 fn handle_controller_action(
     shell: &mut WinitShell,
     state: &mut LiveShell,
@@ -1811,7 +1824,9 @@ fn handle_controller_action(
     action: ControllerAction,
     family: nickel_ui::ControllerFamily,
 ) -> Result<(), String> {
-    if controller_launcher_shortcut(action).is_some() {
+    if !state.surface_visible(SurfaceRole::Screenshot)
+        && controller_launcher_shortcut(action).is_some()
+    {
         state.set_launcher_controller_family(family);
         let changed = state.request_launcher_toggle();
         if changed {
@@ -1821,10 +1836,18 @@ fn handle_controller_action(
         }
         return Ok(());
     }
-    if state.surface_visible(SurfaceRole::OnScreenKeyboard) {
-        if state.keyboard_controller(action) {
+    if let Some(role) = modal_controller_target(
+        state.surface_visible(SurfaceRole::Screenshot),
+        state.surface_visible(SurfaceRole::OnScreenKeyboard),
+    ) {
+        let changed = match role {
+            SurfaceRole::Screenshot => state.screenshot_controller(action),
+            SurfaceRole::OnScreenKeyboard => state.keyboard_controller(action),
+            _ => unreachable!("modal controller target is a screenshot or keyboard"),
+        };
+        if changed {
             sync_visibility(shell, state);
-            render_role(shell, state, SurfaceRole::OnScreenKeyboard)?;
+            render_role(shell, state, role)?;
         }
         return Ok(());
     }
@@ -3007,6 +3030,24 @@ mod tests {
             super::controller_launcher_shortcut(ControllerAction::Confirm),
             None
         );
+    }
+
+    #[test]
+    fn screenshot_owns_controller_input_over_visible_keyboard() {
+        use super::SurfaceRole;
+        assert_eq!(
+            super::modal_controller_target(true, true),
+            Some(SurfaceRole::Screenshot)
+        );
+        assert_eq!(
+            super::modal_controller_target(true, false),
+            Some(SurfaceRole::Screenshot)
+        );
+        assert_eq!(
+            super::modal_controller_target(false, true),
+            Some(SurfaceRole::OnScreenKeyboard)
+        );
+        assert_eq!(super::modal_controller_target(false, false), None);
     }
 
     #[test]
