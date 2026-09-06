@@ -1149,7 +1149,7 @@ fn windows_registered_handlers(target: &AssociationTarget) -> Vec<ApplicationHan
             let Some(associations) = windows_open_registry_key(root, &association_path) else {
                 continue;
             };
-            if windows_registry_string(&associations, query_key).is_none() {
+            if windows_registry_string(&associations, query_key.as_ref()).is_none() {
                 continue;
             }
             let name = windows_registry_string(&capabilities, "ApplicationName")
@@ -1278,40 +1278,86 @@ fn windows_effective_handler(
 /// identifiers accepted by Windows `AssocQueryStringW`. Windows does not
 /// understand freedesktop MIME names or `x-scheme-handler/` keys.
 #[cfg(any(target_os = "windows", test))]
-fn windows_association_query_key(target: &AssociationTarget) -> Option<&str> {
+fn windows_association_query_key(target: &AssociationTarget) -> Option<std::borrow::Cow<'_, str>> {
     match target {
-        AssociationTarget::Extension(extension) => Some(extension.as_str()),
-        AssociationTarget::Scheme(scheme) => Some(scheme.as_str()),
-        AssociationTarget::Mime(mime) => Some(match mime.as_str() {
-            "text/plain" => ".txt",
-            "text/markdown" => ".md",
-            "image/png" => ".png",
-            "image/jpeg" => ".jpg",
-            "image/gif" => ".gif",
-            "image/svg+xml" => ".svg",
-            "image/webp" => ".webp",
-            "image/avif" => ".avif",
-            "application/pdf" => ".pdf",
-            "application/rtf" => ".rtf",
-            "application/epub+zip" => ".epub",
-            "application/vnd.oasis.opendocument.text" => ".odt",
-            "application/vnd.oasis.opendocument.spreadsheet" => ".ods",
-            "application/vnd.oasis.opendocument.presentation" => ".odp",
-            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation" => ".pptx",
-            "audio/mpeg" => ".mp3",
-            "audio/flac" => ".flac",
-            "audio/ogg" => ".ogg",
-            "audio/wav" | "audio/x-wav" => ".wav",
-            "video/mp4" => ".mp4",
-            "video/webm" => ".webm",
-            "video/x-matroska" => ".mkv",
-            "video/mpeg" => ".mpeg",
-            "video/quicktime" => ".mov",
-            _ => return None,
-        }),
+        AssociationTarget::Extension(extension) => Some(extension.as_str().into()),
+        AssociationTarget::Scheme(scheme) => Some(scheme.as_str().into()),
+        AssociationTarget::Mime(mime) => windows_resolve_mime_extension(mime),
     }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_resolve_mime_extension(mime: &str) -> Option<std::borrow::Cow<'_, str>> {
+    windows_known_mime_extension(mime)
+        .map(Into::into)
+        .or_else(|| windows_registry_mime_extension(mime).map(Into::into))
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+fn windows_resolve_mime_extension(mime: &str) -> Option<std::borrow::Cow<'_, str>> {
+    windows_known_mime_extension(mime).map(Into::into)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_known_mime_extension(mime: &str) -> Option<&'static str> {
+    Some(match mime {
+        "text/plain" => ".txt",
+        "text/markdown" => ".md",
+        "image/png" => ".png",
+        "image/jpeg" => ".jpg",
+        "image/gif" => ".gif",
+        "image/svg+xml" => ".svg",
+        "image/webp" => ".webp",
+        "image/avif" => ".avif",
+        "application/pdf" => ".pdf",
+        "application/rtf" => ".rtf",
+        "application/epub+zip" => ".epub",
+        "application/vnd.oasis.opendocument.text" => ".odt",
+        "application/vnd.oasis.opendocument.spreadsheet" => ".ods",
+        "application/vnd.oasis.opendocument.presentation" => ".odp",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => ".pptx",
+        "audio/mpeg" => ".mp3",
+        "audio/flac" => ".flac",
+        "audio/ogg" => ".ogg",
+        "audio/wav" | "audio/x-wav" => ".wav",
+        "video/mp4" => ".mp4",
+        "video/webm" => ".webm",
+        "video/x-matroska" => ".mkv",
+        "video/mpeg" => ".mpeg",
+        "video/quicktime" => ".mov",
+        _ => return None,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn windows_registry_mime_extension(mime: &str) -> Option<String> {
+    use windows::Win32::System::Registry::HKEY_CLASSES_ROOT;
+
+    if mime.is_empty()
+        || mime.len() > 255
+        || mime.contains(['\\', '\0'])
+        || mime.chars().any(char::is_control)
+    {
+        return None;
+    }
+    let key = windows_open_registry_key(
+        HKEY_CLASSES_ROOT,
+        &format!("MIME\\Database\\Content Type\\{mime}"),
+    )?;
+    let extension = windows_registry_string(&key, "Extension")?;
+    normalize_windows_mime_extension(&extension).map(str::to_owned)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_mime_extension(extension: &str) -> Option<&str> {
+    let extension = extension.trim();
+    (extension.starts_with('.')
+        && extension.len() <= 64
+        && !extension.contains(['/', '\\'])
+        && !extension.chars().any(char::is_control))
+    .then_some(extension)
 }
 
 #[cfg(target_os = "windows")]
@@ -1411,18 +1457,26 @@ mod tests {
             ("video/x-matroska", ".mkv"),
         ] {
             assert_eq!(
-                windows_association_query_key(&AssociationTarget::mime(mime)),
+                windows_association_query_key(&AssociationTarget::mime(mime)).as_deref(),
                 Some(extension)
             );
         }
         assert_eq!(
-            windows_association_query_key(&AssociationTarget::scheme("https")),
+            windows_association_query_key(&AssociationTarget::scheme("https")).as_deref(),
             Some("https")
         );
         assert_eq!(
-            windows_association_query_key(&AssociationTarget::mime("application/x-unknown")),
+            windows_association_query_key(&AssociationTarget::mime("application/x-unknown"))
+                .as_deref(),
             None
         );
+        assert_eq!(
+            normalize_windows_mime_extension("  .custom  "),
+            Some(".custom")
+        );
+        for invalid in ["custom", ".bad/path", ".bad\\path", ".bad\npath"] {
+            assert_eq!(normalize_windows_mime_extension(invalid), None);
+        }
     }
 
     struct Fixture {
