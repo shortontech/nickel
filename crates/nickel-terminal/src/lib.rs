@@ -1119,6 +1119,7 @@ mod tests {
         const OUTPUT_BUDGET: Duration = Duration::from_secs(2);
         const SNAPSHOT_BUDGET: Duration = Duration::from_millis(100);
         const RESIZE_BUDGET: Duration = Duration::from_millis(100);
+        const STARTUP_BUDGET: Duration = Duration::from_millis(500);
         const INPUT_BUDGET: Duration = Duration::from_millis(500);
         const IDLE_CPU_TICK_BUDGET: u64 = 5;
         const RETAINED_RSS_BUDGET: usize = 128 * 1024 * 1024;
@@ -1155,6 +1156,7 @@ mod tests {
         let retained_rss = linux_resident_bytes().saturating_sub(rss_before);
         assert!(retained_rss <= RETAINED_RSS_BUDGET, "{retained_rss}");
 
+        let startup_started = Instant::now();
         let mut session = TerminalSession::spawn(TerminalOptions {
             program: Some(TerminalProgram {
                 executable: "/bin/cat".into(),
@@ -1166,6 +1168,8 @@ mod tests {
             scrollback_lines: 1_000,
         })
         .unwrap();
+        let startup_elapsed = startup_started.elapsed();
+        assert!(startup_elapsed <= STARTUP_BUDGET, "{startup_elapsed:?}");
         let idle_cpu_before = linux_process_cpu_ticks();
         std::thread::sleep(Duration::from_millis(300));
         let idle_cpu_ticks = linux_process_cpu_ticks().saturating_sub(idle_cpu_before);
@@ -1192,7 +1196,7 @@ mod tests {
         eprintln!(
             "terminal resource probe: output={output_elapsed:?}, snapshot={snapshot_elapsed:?}, \
              snapshot_storage={snapshot_storage}, resize={resize_elapsed:?}, retained_rss={retained_rss}, \
-             idle_cpu_ticks={idle_cpu_ticks}, input={input_elapsed:?}"
+             idle_cpu_ticks={idle_cpu_ticks}, startup={startup_elapsed:?}, input={input_elapsed:?}"
         );
         session.request_close().unwrap();
     }
