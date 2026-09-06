@@ -1213,6 +1213,33 @@ mod tests {
                         printer.jobs.retain(|job| job.id != job_id);
                     }
                 }
+                PeripheralAction::AddPrinter { address } => {
+                    if let Ok(printers) = &mut snapshot.printers {
+                        printers.push(Printer {
+                            id: address.clone(),
+                            name: address,
+                            is_default: false,
+                            state: PrinterState::Ready,
+                            jobs: Vec::new(),
+                        });
+                    }
+                }
+                PeripheralAction::RemovePrinter(id) => {
+                    if let Ok(printers) = &mut snapshot.printers {
+                        printers.retain(|printer| printer.id != id);
+                    }
+                }
+                PeripheralAction::PrintTestPage(id) => {
+                    if let Ok(printers) = &mut snapshot.printers
+                        && let Some(printer) = printers.iter_mut().find(|printer| printer.id == id)
+                    {
+                        printer.jobs.push(PrintJob {
+                            id: format!("{id}-test"),
+                            name: "Test page".into(),
+                            state: PrintJobState::Pending,
+                        });
+                    }
+                }
                 _ => {}
             }
             Ok(PeripheralOutcome::Accepted)
@@ -1367,6 +1394,129 @@ mod tests {
             changed.volumes.as_ref().unwrap()[0].state,
             VolumeState::Mounted
         );
+    }
+
+    #[test]
+    fn recorded_virtual_printer_workflow_adds_tests_and_removes() {
+        let service = PeripheralService::new(Box::new(Fixture {
+            snapshot: Mutex::new(snapshot()),
+        }));
+        let address = "ipp://fixture/printer";
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::AddPrinter {
+                address: address.into(),
+            })
+            .unwrap();
+        assert!(
+            changed
+                .printers
+                .unwrap()
+                .iter()
+                .any(|printer| printer.id == address)
+        );
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::PrintTestPage(address.into()))
+            .unwrap();
+        assert_eq!(
+            changed
+                .printers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|printer| printer.id == address)
+                .unwrap()
+                .jobs
+                .len(),
+            1
+        );
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::RemovePrinter(address.into()))
+            .unwrap();
+        assert!(
+            !changed
+                .printers
+                .unwrap()
+                .iter()
+                .any(|printer| printer.id == address)
+        );
+    }
+
+    struct BusyFixture;
+
+    impl PeripheralBackend for BusyFixture {
+        fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
+            Ok(snapshot())
+        }
+
+        fn request(&self, _: PeripheralAction) -> Result<PeripheralOutcome, PeripheralError> {
+            Ok(PeripheralOutcome::Busy {
+                detail: "Device is in use".into(),
+            })
+        }
+    }
+
+    #[test]
+    fn busy_media_preserves_the_authoritative_mounted_snapshot() {
+        let service = PeripheralService::new(Box::new(BusyFixture));
+        let (outcome, changed) = service
+            .request_and_refresh(PeripheralAction::EjectVolume("usb".into()))
+            .unwrap();
+        assert!(matches!(outcome, PeripheralOutcome::Busy { .. }));
+        let volumes = changed.volumes.unwrap();
+        assert_eq!(volumes[0].id, "usb");
+        assert_eq!(volumes[0].state, VolumeState::Mounted);
+        assert_eq!(
+            volumes[0].mount_path.as_deref(),
+            Some(std::path::Path::new("/media/usb"))
+        );
+    }
+
+    struct FailingFixture;
+
+    impl PeripheralBackend for FailingFixture {
+        fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
+            Err(PeripheralError {
+                class: PeripheralFailureClass::ProviderUnavailable,
+                detail: "service stopped".into(),
+            })
+        }
+
+        fn request(&self, _: PeripheralAction) -> Result<PeripheralOutcome, PeripheralError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn service_failure_remains_classified() {
+        let error = PeripheralService::new(Box::new(FailingFixture))
+            .inspect()
+            .unwrap_err();
+        assert_eq!(error.class, PeripheralFailureClass::ProviderUnavailable);
+    }
+
+    struct HotplugFixture(std::sync::atomic::AtomicBool);
+
+    impl PeripheralBackend for HotplugFixture {
+        fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
+            let mut snapshot = snapshot();
+            if !self.0.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                snapshot.volumes = Ok(Vec::new());
+            }
+            Ok(snapshot)
+        }
+
+        fn request(&self, _: PeripheralAction) -> Result<PeripheralOutcome, PeripheralError> {
+            unreachable!()
+        }
+    }
+
+    #[test]
+    fn repeated_discovery_observes_hotplug_without_recreating_the_service() {
+        let service = PeripheralService::new(Box::new(HotplugFixture(
+            std::sync::atomic::AtomicBool::new(false),
+        )));
+        assert!(service.inspect().unwrap().volumes.unwrap().is_empty());
+        assert_eq!(service.inspect().unwrap().volumes.unwrap()[0].id, "usb");
     }
 
     #[test]
