@@ -10,7 +10,6 @@ thread_local! {
     static THREAD_ALLOCATION_OPERATIONS: Cell<u64> = const { Cell::new(0) };
 }
 
-#[allow(dead_code)] // The library fixture exposes the allocator without installing it.
 fn record_allocation() {
     TRACKING_INSTALLED.store(true, Ordering::Relaxed);
     ALLOCATION_OPERATIONS.fetch_add(1, Ordering::Relaxed);
@@ -22,8 +21,7 @@ fn record_allocation() {
 /// The counter measures allocation operations rather than bytes. Sampling it
 /// around a frame is conservative: allocations from any shell thread during
 /// that interval are charged to the frame.
-#[allow(dead_code)] // The reusable fixture library reads the counter but does not install it.
-pub(crate) struct CountingSystemAllocator;
+pub struct CountingSystemAllocator;
 
 // SAFETY: Every allocation operation is forwarded to `System` unchanged. The
 // relaxed atomic counter is observational and neither retains nor modifies

@@ -19,11 +19,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-mod allocation_counter;
-
-#[global_allocator]
-static GLOBAL_ALLOCATOR: allocation_counter::CountingSystemAllocator =
-    allocation_counter::CountingSystemAllocator;
+#[doc(hidden)]
+pub mod allocation_counter;
 
 fn is_clipboard_paste(event: &InputEvent) -> bool {
     matches!(event, InputEvent::Key(key)
