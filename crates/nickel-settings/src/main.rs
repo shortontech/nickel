@@ -251,6 +251,7 @@ enum SidebarIconKind {
     Appearance,
     Network,
     Bluetooth,
+    PrintersStorage,
     Security,
     DefaultApps,
     OptionalFeatures,
@@ -259,13 +260,14 @@ enum SidebarIconKind {
 }
 
 impl SidebarIconKind {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::Search,
         Self::Display,
         Self::Bar,
         Self::Appearance,
         Self::Network,
         Self::Bluetooth,
+        Self::PrintersStorage,
         Self::Security,
         Self::DefaultApps,
         Self::OptionalFeatures,
@@ -285,6 +287,7 @@ impl SidebarIconKind {
             Self::Appearance => '\u{f1fc}',
             Self::Network => '\u{f0ac}',
             Self::Bluetooth => '\u{f294}',
+            Self::PrintersStorage => '\u{f02f}',
             Self::Security => '\u{f132}',
             Self::DefaultApps => '\u{f2d0}',
             Self::OptionalFeatures => '\u{f12e}',
@@ -301,6 +304,7 @@ impl SidebarIconKind {
             Self::Appearance => include_bytes!("../../../assets/icons/settings/appearance.svg"),
             Self::Network => include_bytes!("../../../assets/icons/settings/network.svg"),
             Self::Bluetooth => include_bytes!("../../../assets/icons/settings/bluetooth.svg"),
+            Self::PrintersStorage => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::Security => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::DefaultApps => include_bytes!("../../../assets/icons/start-menu/about.svg"),
             Self::OptionalFeatures => include_bytes!("../../../assets/icons/start-menu/about.svg"),
@@ -344,7 +348,7 @@ fn rasterize_sidebar_icon(kind: SidebarIconKind) -> Arc<image::RgbaImage> {
 }
 
 fn sidebar_icon<Message>(kind: SidebarIconKind) -> Image<Message> {
-    static ICONS: OnceLock<[Arc<image::RgbaImage>; 11]> = OnceLock::new();
+    static ICONS: OnceLock<[Arc<image::RgbaImage>; 12]> = OnceLock::new();
     let icons = ICONS.get_or_init(|| SidebarIconKind::ALL.map(rasterize_sidebar_icon));
     Image::new(400 + kind.index() as u16, icons[kind.index()].clone())
         .fit(ImageFit::Contain)
@@ -411,6 +415,7 @@ enum SettingsPage {
     Appearance,
     Network,
     Bluetooth,
+    PrintersStorage,
     Security,
     DefaultApps,
     OptionalFeatures,
@@ -426,6 +431,7 @@ impl std::fmt::Display for SettingsPage {
             Self::Appearance => "appearance",
             Self::Network => "network",
             Self::Bluetooth => "bluetooth",
+            Self::PrintersStorage => "printers-storage",
             Self::Security => "security",
             Self::DefaultApps => "default-apps",
             Self::OptionalFeatures => "optional-features",
@@ -477,6 +483,14 @@ struct DefaultAppsDiscovery {
     )>,
 }
 
+type PeripheralTaskResult = Result<
+    (
+        Option<nickel_platform::PeripheralOutcome>,
+        nickel_platform::PeripheralSnapshot,
+    ),
+    nickel_platform::PeripheralError,
+>;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
@@ -487,6 +501,10 @@ enum SettingsMessage {
     BluetoothDiscovery,
     BluetoothDevice(usize),
     BluetoothScroll,
+    PeripheralRefresh,
+    PeripheralAddressChanged(String),
+    PeripheralAction(nickel_platform::PeripheralAction),
+    PeripheralScroll,
     MaintenanceRefresh,
     MaintenanceScroll,
     SetWifiPower(bool),
@@ -709,6 +727,86 @@ fn default_app_categories() -> Vec<DefaultAppRow> {
 }
 
 impl SettingsApp {
+    fn load_peripherals(&mut self) {
+        if self.peripheral_rx.is_some() {
+            return;
+        }
+        let service = nickel_platform::peripheral_service();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("nickel-peripheral-inspection".into())
+            .spawn(move || {
+                let _ = sender.send(service.inspect().map(|snapshot| (None, snapshot)));
+            }) {
+            Ok(_) => {
+                self.peripheral_status = Some("Loading printers and storage…".into());
+                self.peripheral_rx = Some(receiver);
+            }
+            Err(error) => {
+                self.peripheral_status =
+                    Some(format!("Printers and storage could not load: {error}"));
+            }
+        }
+    }
+
+    fn request_peripheral_action(&mut self, action: nickel_platform::PeripheralAction) {
+        if self.peripheral_rx.is_some() {
+            return;
+        }
+        let service = nickel_platform::peripheral_service();
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("nickel-peripheral-action".into())
+            .spawn(move || {
+                let _ = sender.send(
+                    service
+                        .request_and_refresh(action)
+                        .map(|(outcome, snapshot)| (Some(outcome), snapshot)),
+                );
+            }) {
+            Ok(_) => {
+                self.peripheral_status = Some("Waiting for the operating system…".into());
+                self.peripheral_rx = Some(receiver);
+            }
+            Err(error) => {
+                self.peripheral_status = Some(format!("The request could not start: {error}"));
+            }
+        }
+    }
+
+    fn poll_peripherals(&mut self) -> bool {
+        let Some(receiver) = self.peripheral_rx.as_ref() else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err(nickel_platform::PeripheralError {
+                    class: nickel_platform::PeripheralFailureClass::ProviderUnavailable,
+                    detail: "The peripheral provider stopped before returning data".into(),
+                })
+            }
+        };
+        self.peripheral_rx = None;
+        match result {
+            Ok((outcome, snapshot)) => {
+                self.peripheral_snapshot = Some(snapshot);
+                self.peripheral_status = outcome.map(|outcome| match outcome {
+                    nickel_platform::PeripheralOutcome::Accepted => {
+                        "The operating system confirmed the request.".into()
+                    }
+                    nickel_platform::PeripheralOutcome::Busy { detail }
+                    | nickel_platform::PeripheralOutcome::AuthorizationRequired { detail }
+                    | nickel_platform::PeripheralOutcome::Unsupported { detail }
+                    | nickel_platform::PeripheralOutcome::Rejected { detail } => detail,
+                });
+            }
+            Err(error) => self.peripheral_status = Some(error.to_string()),
+        }
+        true
+    }
+
     fn load_maintenance(&mut self) {
         if self.maintenance_rx.is_some() {
             return;
@@ -1050,6 +1148,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::PrintersStorage => self.load_peripherals(),
                     SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
@@ -1072,6 +1171,7 @@ impl SettingsApp {
                 match page {
                     SettingsPage::Network => self.load_linux_network(),
                     SettingsPage::Bluetooth => self.load_bluetooth(),
+                    SettingsPage::PrintersStorage => self.load_peripherals(),
                     SettingsPage::Security => self.load_maintenance(),
                     SettingsPage::DefaultApps => self.load_default_apps(),
                     SettingsPage::Bar => self.refresh_workspace_state(),
@@ -1189,6 +1289,18 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
+            SettingsMessage::PeripheralRefresh => {
+                self.peripheral_snapshot = None;
+                self.load_peripherals();
+            }
+            SettingsMessage::PeripheralAddressChanged(value) => self.peripheral_address = value,
+            SettingsMessage::PeripheralAction(action) => {
+                if matches!(action, nickel_platform::PeripheralAction::AddPrinter { .. }) {
+                    self.peripheral_address.clear();
+                }
+                self.request_peripheral_action(action);
+            }
+            SettingsMessage::PeripheralScroll => {}
             SettingsMessage::MaintenanceRefresh => {
                 self.maintenance_snapshot = None;
                 self.load_maintenance();
@@ -1851,6 +1963,9 @@ impl SettingsApp {
         self.poll_wifi_power();
         self.poll_bluetooth_operation();
         self.poll_codex_probe();
+        if self.poll_peripherals() {
+            self.request_redraw();
+        }
         if self.poll_maintenance() {
             self.request_redraw();
         }
@@ -2373,6 +2488,9 @@ impl Application for SettingsApp {
         if self.maintenance_rx.is_some() {
             deadlines.push(now + Duration::from_millis(16));
         }
+        if self.peripheral_rx.is_some() {
+            deadlines.push(now + Duration::from_millis(16));
+        }
         deadlines
             .into_iter()
             .min()
@@ -2451,6 +2569,8 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
             app.load_default_apps();
         } else if app.page == SettingsPage::Security {
             app.load_maintenance();
+        } else if app.page == SettingsPage::PrintersStorage {
+            app.load_peripherals();
         }
         #[cfg(target_os = "windows")]
         {
@@ -3039,6 +3159,73 @@ mod tests {
             assert!(labels.contains(&required), "missing status row {required}");
         }
         assert!(!labels.contains(&"Healthy"));
+    }
+
+    #[test]
+    fn printers_and_storage_page_exposes_safe_async_actions() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::PrintersStorage);
+        app.peripheral_rx = None;
+        app.peripheral_snapshot = Some(nickel_platform::PeripheralSnapshot {
+            provider: nickel_platform::PeripheralProvider::Unsupported {
+                platform: "fixture".into(),
+            },
+            printers: Ok(vec![nickel_platform::Printer {
+                id: "office".into(),
+                name: "Office printer".into(),
+                is_default: false,
+                state: nickel_platform::PrinterState::Ready,
+                jobs: vec![nickel_platform::PrintJob {
+                    id: "office-1".into(),
+                    name: "Report".into(),
+                    state: nickel_platform::PrintJobState::Pending,
+                }],
+            }]),
+            volumes: Ok(vec![nickel_platform::RemovableVolume {
+                id: "/dev/fixture".into(),
+                name: "Backup drive".into(),
+                capacity_bytes: Some(1_000),
+                available_bytes: Some(500),
+                mount_path: Some("/media/backup".into()),
+                state: nickel_platform::VolumeState::Mounted,
+                ejectable: true,
+                detail: None,
+            }]),
+            filesystems: Ok(vec![nickel_platform::FilesystemUsage {
+                id: "root".into(),
+                name: "Root".into(),
+                mount_path: "/".into(),
+                capacity_bytes: 1_000,
+                available_bytes: 400,
+            }]),
+            omitted_printers: 0,
+            omitted_jobs: 0,
+            omitted_volumes: 0,
+            omitted_filesystems: 0,
+        });
+        let tree = app.build_ui(850.0, 900.0);
+
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::PeripheralAction(
+                    nickel_platform::PeripheralAction::CancelPrintJob {
+                        printer_id: "office".into(),
+                        job_id: "office-1".into(),
+                    },
+                ))
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::PeripheralAction(
+                    nickel_platform::PeripheralAction::OpenCleanupLocation("/".into()),
+                ))
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::PeripheralRefresh)
+                .is_empty()
+        );
     }
 
     #[test]

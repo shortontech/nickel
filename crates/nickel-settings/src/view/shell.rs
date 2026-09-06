@@ -44,6 +44,10 @@ impl SettingsApp {
                     self.localizer.text("settings-bluetooth-title"),
                     self.localizer.text("settings-bluetooth-subtitle"),
                 ),
+                SettingsPage::PrintersStorage => (
+                    "Printers & Storage".into(),
+                    "Print queues, removable media, and filesystem usage".into(),
+                ),
                 SettingsPage::Security => (
                     "Security & Updates".into(),
                     "System maintenance, protection, privacy, and secure storage".into(),
@@ -92,6 +96,7 @@ impl SettingsApp {
         let appearance_label = self.localizer.text("settings-nav-appearance");
         let network_label = self.localizer.text("settings-nav-network");
         let bluetooth_label = self.localizer.text("settings-nav-bluetooth");
+        let printers_storage_label = "Printers & Storage".to_owned();
         let security_label = "Security & Updates".to_owned();
         let default_apps_label = self.localizer.text("settings-nav-default-apps");
         let optional_features_label = "Optional Features".to_owned();
@@ -374,6 +379,15 @@ impl SettingsApp {
             .leading(sidebar_icon(SidebarIconKind::Bluetooth))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
+                SettingsPage::PrintersStorage,
+                printers_storage_label,
+                SettingsMessage::Navigate(SettingsPage::PrintersStorage),
+                self.peripherals_components(),
+            )
+            .header(destination_header(SettingsPage::PrintersStorage))
+            .leading(sidebar_icon(SidebarIconKind::PrintersStorage))
+            .visible(query.is_empty()),
+            ResponsiveNavigationDestination::new(
                 SettingsPage::Security,
                 security_label,
                 SettingsMessage::Navigate(SettingsPage::Security),
@@ -381,7 +395,6 @@ impl SettingsApp {
             )
             .header(destination_header(SettingsPage::Security))
             .leading(sidebar_icon(SidebarIconKind::Security))
-            .section(self.localizer.text("settings-nav-section-system"))
             .visible(query.is_empty()),
             ResponsiveNavigationDestination::new(
                 SettingsPage::DefaultApps,

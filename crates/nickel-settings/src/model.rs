@@ -75,6 +75,10 @@ pub(super) struct SettingsApp {
     pub(super) bluetooth_operation: Option<BluetoothOperation>,
     pub(super) bluetooth_operation_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     pub(super) bluetooth_status: Option<String>,
+    pub(super) peripheral_snapshot: Option<nickel_platform::PeripheralSnapshot>,
+    pub(super) peripheral_status: Option<String>,
+    pub(super) peripheral_address: String,
+    pub(super) peripheral_rx: Option<std::sync::mpsc::Receiver<PeripheralTaskResult>>,
     pub(super) maintenance_snapshot: Option<nickel_platform::MaintenanceSnapshot>,
     pub(super) maintenance_status: Option<String>,
     pub(super) maintenance_rx: Option<
@@ -237,6 +241,10 @@ impl Default for SettingsApp {
             bluetooth_operation: None,
             bluetooth_operation_rx: None,
             bluetooth_status: None,
+            peripheral_snapshot: None,
+            peripheral_status: None,
+            peripheral_address: String::new(),
+            peripheral_rx: None,
             maintenance_snapshot: None,
             maintenance_status: None,
             maintenance_rx: None,
@@ -267,6 +275,8 @@ impl SettingsApp {
             app.refresh_workspace_state();
         } else if page == SettingsPage::Security {
             app.load_maintenance();
+        } else if page == SettingsPage::PrintersStorage {
+            app.load_peripherals();
         }
         app
     }

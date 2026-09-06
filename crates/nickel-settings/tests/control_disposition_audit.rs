@@ -62,6 +62,7 @@ fn every_disposition_is_complete_unique_and_tied_to_production_source() {
         "Display",
         "Network",
         "Bluetooth",
+        "Printers & Storage",
         "Nickel Bar",
         "Appearance",
         "Default Apps",

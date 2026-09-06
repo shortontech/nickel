@@ -40,6 +40,276 @@ pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
 }
 
 impl SettingsApp {
+    pub(super) fn peripherals_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
+        let theme = self.ui_theme();
+        let palette = self.palette();
+        let pending = self.peripheral_rx.is_some();
+        let bytes = |value: u64| {
+            const GIB: f64 = 1_073_741_824.0;
+            if value >= 1_073_741_824 {
+                format!("{:.1} GiB", value as f64 / GIB)
+            } else {
+                format!("{:.1} MiB", value as f64 / 1_048_576.0)
+            }
+        };
+        let mut content = Column::new().gap(4.0);
+        if let Some(status) = &self.peripheral_status {
+            content = content.child(Text::new(status).color(palette.muted));
+        }
+        if let Some(snapshot) = &self.peripheral_snapshot {
+            let provider = match &snapshot.provider {
+                nickel_platform::PeripheralProvider::LinuxCupsAndUDisks2 {
+                    cups_available,
+                    udisks2_available,
+                } => format!(
+                    "Linux · CUPS {} · UDisks2 {}",
+                    if *cups_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    },
+                    if *udisks2_available {
+                        "available"
+                    } else {
+                        "unavailable"
+                    }
+                ),
+                nickel_platform::PeripheralProvider::WindowsPrintAndStorage => {
+                    "Windows print and storage services".into()
+                }
+                nickel_platform::PeripheralProvider::Unsupported { platform } => {
+                    format!("Unsupported platform ({platform})")
+                }
+            };
+            content = content
+                .child(SettingsRow::new(theme, "System provider", provider))
+                .child(Text::new("Printers").color(palette.text));
+            match &snapshot.printers {
+                Ok(printers) if printers.is_empty() => {
+                    content = content
+                        .child(Text::new("No printers were discovered.").color(palette.muted));
+                }
+                Ok(printers) => {
+                    for printer in printers {
+                        let id = printer.id.clone();
+                        let state = format!(
+                            "{:?}{} · {} queued",
+                            printer.state,
+                            if printer.is_default {
+                                " · Default"
+                            } else {
+                                ""
+                            },
+                            printer.jobs.len()
+                        );
+                        let actions = Row::new()
+                            .gap(4.0)
+                            .child(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::PeripheralAction(
+                                        nickel_platform::PeripheralAction::SetDefaultPrinter(
+                                            id.clone(),
+                                        ),
+                                    ),
+                                    "Default",
+                                    ButtonPresentation::Quiet,
+                                )
+                                .enabled(!pending && !printer.is_default),
+                            )
+                            .child(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::PeripheralAction(
+                                        nickel_platform::PeripheralAction::PrintTestPage(
+                                            id.clone(),
+                                        ),
+                                    ),
+                                    "Test",
+                                    ButtonPresentation::Quiet,
+                                )
+                                .enabled(!pending),
+                            )
+                            .child(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::PeripheralAction(
+                                        nickel_platform::PeripheralAction::RemovePrinter(id),
+                                    ),
+                                    "Remove",
+                                    ButtonPresentation::Quiet,
+                                )
+                                .enabled(!pending),
+                            );
+                        content = content.child(
+                            SettingsRow::new(theme, printer.name.clone(), state).trailing(actions),
+                        );
+                        for job in &printer.jobs {
+                            content = content.child(
+                                SettingsRow::new(
+                                    theme,
+                                    format!("↳ {}", job.name),
+                                    format!("Job {} · {:?}", job.id, job.state),
+                                )
+                                .trailing(
+                                    Button::semantic(
+                                        theme,
+                                        SettingsMessage::PeripheralAction(
+                                            nickel_platform::PeripheralAction::CancelPrintJob {
+                                                printer_id: printer.id.clone(),
+                                                job_id: job.id.clone(),
+                                            },
+                                        ),
+                                        "Cancel",
+                                        ButtonPresentation::Quiet,
+                                    )
+                                    .enabled(!pending),
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(error) => content = content.child(Text::new(error).color(palette.muted)),
+            }
+            content = content.child(Text::new("Removable media").color(palette.text));
+            match &snapshot.volumes {
+                Ok(volumes) if volumes.is_empty() => {
+                    content = content
+                        .child(Text::new("No removable media is connected.").color(palette.muted));
+                }
+                Ok(volumes) => {
+                    for volume in volumes {
+                        let capacity = volume
+                            .capacity_bytes
+                            .map(&bytes)
+                            .unwrap_or_else(|| "Unknown size".into());
+                        let action = match volume.state {
+                            nickel_platform::VolumeState::Unmounted => {
+                                nickel_platform::PeripheralAction::MountVolume(volume.id.clone())
+                            }
+                            nickel_platform::VolumeState::Mounted => {
+                                nickel_platform::PeripheralAction::UnmountVolume(volume.id.clone())
+                            }
+                            nickel_platform::VolumeState::Busy
+                            | nickel_platform::VolumeState::Error => {
+                                nickel_platform::PeripheralAction::EjectVolume(volume.id.clone())
+                            }
+                        };
+                        let label = match volume.state {
+                            nickel_platform::VolumeState::Unmounted => "Mount",
+                            nickel_platform::VolumeState::Mounted => "Unmount",
+                            nickel_platform::VolumeState::Busy
+                            | nickel_platform::VolumeState::Error => "Eject",
+                        };
+                        content = content.child(
+                            SettingsRow::new(
+                                theme,
+                                volume.name.clone(),
+                                format!("{:?} · {capacity}", volume.state),
+                            )
+                            .trailing(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::PeripheralAction(action),
+                                    label,
+                                    ButtonPresentation::Quiet,
+                                )
+                                .enabled(!pending),
+                            ),
+                        );
+                    }
+                }
+                Err(error) => content = content.child(Text::new(error).color(palette.muted)),
+            }
+            content = content.child(Text::new("Storage usage").color(palette.text));
+            match &snapshot.filesystems {
+                Ok(filesystems) => {
+                    for filesystem in filesystems {
+                        let used = filesystem
+                            .capacity_bytes
+                            .saturating_sub(filesystem.available_bytes);
+                        content = content.child(
+                            SettingsRow::new(
+                                theme,
+                                filesystem.name.clone(),
+                                format!(
+                                    "{} used of {} · {}",
+                                    bytes(used),
+                                    bytes(filesystem.capacity_bytes),
+                                    filesystem.mount_path.display()
+                                ),
+                            )
+                            .trailing(
+                                Button::semantic(
+                                    theme,
+                                    SettingsMessage::PeripheralAction(
+                                        nickel_platform::PeripheralAction::OpenCleanupLocation(
+                                            filesystem.mount_path.clone(),
+                                        ),
+                                    ),
+                                    "Open in Nickel File",
+                                    ButtonPresentation::Quiet,
+                                )
+                                .enabled(!pending),
+                            ),
+                        );
+                    }
+                }
+                Err(error) => content = content.child(Text::new(error).color(palette.muted)),
+            }
+        }
+        let add_enabled = !pending && !self.peripheral_address.trim().is_empty();
+        let add_action = nickel_platform::PeripheralAction::AddPrinter {
+            address: self.peripheral_address.trim().to_owned(),
+        };
+        Column::new()
+            .grow(1.0)
+            .padding(Insets {
+                top: 16.0,
+                right: 24.0,
+                bottom: 20.0,
+                left: 20.0,
+            })
+            .gap(8.0)
+            .child(
+                Row::new()
+                    .gap(8.0)
+                    .child(
+                        TextField::on_change_with_placeholder(
+                            &self.peripheral_address,
+                            "Printer address or URI",
+                            SettingsMessage::PeripheralAddressChanged,
+                        )
+                        .id("peripheral-printer-address")
+                        .width(360.0),
+                    )
+                    .child(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::PeripheralAction(add_action),
+                            "Add printer",
+                            ButtonPresentation::Secondary,
+                        )
+                        .enabled(add_enabled),
+                    )
+                    .child(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::PeripheralRefresh,
+                            "Refresh",
+                            ButtonPresentation::Secondary,
+                        )
+                        .enabled(!pending),
+                    ),
+            )
+            .child(
+                nickel_ui::VerticalScroll::new(SettingsMessage::PeripheralScroll, 0.0)
+                    .height(620.0)
+                    .theme(theme)
+                    .child(content),
+            )
+    }
+
     pub(super) fn security_components(&self) -> impl nickel_ui::Component<SettingsMessage> {
         let theme = self.ui_theme();
         let palette = self.palette();
