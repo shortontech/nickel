@@ -53,6 +53,12 @@ pub(crate) enum InputSendError {
     Io(io::Error),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkerExit {
+    Hangup,
+    IoFailed,
+}
+
 impl BoundedEventLoopSender {
     #[cfg(test)]
     pub(crate) fn test_channel(
@@ -135,6 +141,7 @@ pub(crate) struct BoundedEventLoop<T: EventedPty, U: EventListener> {
     resize: Arc<Mutex<Option<WindowSize>>>,
     shutdown: Arc<AtomicBool>,
     drain_on_exit: bool,
+    worker_exit: SyncSender<WorkerExit>,
 }
 
 impl<T, U> BoundedEventLoop<T, U>
@@ -148,12 +155,13 @@ where
         pty: T,
         drain_on_exit: bool,
         maximum_pending_bytes: usize,
-    ) -> io::Result<(Self, BoundedEventLoopSender)> {
+    ) -> io::Result<(Self, BoundedEventLoopSender, Receiver<WorkerExit>)> {
         let (input, receiver) = mpsc::sync_channel(INPUT_PACKET_CAPACITY);
         let poller = Arc::new(Poller::new()?);
         let pending_bytes = Arc::new(AtomicUsize::new(0));
         let resize = Arc::new(Mutex::new(None));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let (worker_exit, worker_events) = mpsc::sync_channel(1);
         let sender = BoundedEventLoopSender {
             input,
             poller: Arc::clone(&poller),
@@ -173,8 +181,10 @@ where
                 resize,
                 shutdown,
                 drain_on_exit,
+                worker_exit,
             },
             sender,
+            worker_events,
         ))
     }
 
@@ -202,14 +212,14 @@ where
         }
     }
 
-    fn pty_read(&mut self, state: &mut State, buffer: &mut [u8]) -> io::Result<()> {
+    fn pty_read(&mut self, state: &mut State, buffer: &mut [u8]) -> io::Result<bool> {
         let mut unprocessed = 0;
         let mut processed = 0;
         let _terminal_lease = self.terminal.lease();
         let mut terminal = None;
         loop {
             match self.pty.reader().read(&mut buffer[unprocessed..]) {
-                Ok(0) if unprocessed == 0 => break,
+                Ok(0) if unprocessed == 0 => return Ok(false),
                 Ok(read) => unprocessed += read,
                 Err(error) => match error.kind() {
                     ErrorKind::Interrupted | ErrorKind::WouldBlock if unprocessed == 0 => break,
@@ -237,7 +247,7 @@ where
         if state.parser.sync_bytes_count() < processed && processed > 0 {
             self.event_proxy.send_event(Event::Wakeup);
         }
-        Ok(())
+        Ok(true)
     }
 
     fn pty_write(&mut self, state: &mut State) -> io::Result<()> {
@@ -280,6 +290,7 @@ where
                 // SAFETY: the PTY remains owned by this loop until deregistration.
                 if let Err(error) = unsafe { self.pty.register(&self.poller, interest, mode) } {
                     tracing::error!(%error, "terminal PTY registration failed");
+                    let _ = self.worker_exit.try_send(WorkerExit::IoFailed);
                     return;
                 }
                 let mut events = Events::with_capacity(NonZeroUsize::new(1024).unwrap());
@@ -295,6 +306,7 @@ where
                             continue;
                         }
                         tracing::error!(%error, "terminal PTY polling failed");
+                        let _ = self.worker_exit.try_send(WorkerExit::IoFailed);
                         break;
                     }
                     if events.is_empty() {
@@ -322,20 +334,29 @@ where
                                 }
                             }
                             PTY_READ_WRITE_TOKEN if !event.is_interrupt() => {
-                                if event.readable
-                                    && let Err(error) = self.pty_read(&mut state, &mut buffer)
-                                {
-                                    #[cfg(target_os = "linux")]
-                                    if error.raw_os_error() == Some(5) {
-                                        continue;
+                                if event.readable {
+                                    match self.pty_read(&mut state, &mut buffer) {
+                                        Ok(true) => {}
+                                        Ok(false) => {
+                                            let _ = self.worker_exit.try_send(WorkerExit::Hangup);
+                                            break 'event_loop;
+                                        }
+                                        Err(error) => {
+                                            #[cfg(target_os = "linux")]
+                                            if error.raw_os_error() == Some(5) {
+                                                continue;
+                                            }
+                                            tracing::error!(%error, "terminal PTY read failed");
+                                            let _ = self.worker_exit.try_send(WorkerExit::IoFailed);
+                                            break 'event_loop;
+                                        }
                                     }
-                                    tracing::error!(%error, "terminal PTY read failed");
-                                    break 'event_loop;
                                 }
                                 if event.writable
                                     && let Err(error) = self.pty_write(&mut state)
                                 {
                                     tracing::error!(%error, "terminal PTY write failed");
+                                    let _ = self.worker_exit.try_send(WorkerExit::IoFailed);
                                     break 'event_loop;
                                 }
                             }
@@ -347,6 +368,7 @@ where
                         interest.writable = needs_write;
                         if let Err(error) = self.pty.reregister(&self.poller, interest, mode) {
                             tracing::error!(%error, "terminal PTY registration update failed");
+                            let _ = self.worker_exit.try_send(WorkerExit::IoFailed);
                             break;
                         }
                     }

@@ -26,7 +26,7 @@ use alacritty_terminal::{
 };
 
 mod bounded_event_loop;
-use bounded_event_loop::{BoundedEventLoop, BoundedEventLoopSender, InputSendError};
+use bounded_event_loop::{BoundedEventLoop, BoundedEventLoopSender, InputSendError, WorkerExit};
 
 const EVENT_CAPACITY: usize = 128;
 const INPUT_QUEUE_CAPACITY: usize = 64;
@@ -547,6 +547,7 @@ pub struct TerminalSession {
     terminal: Arc<FairMutex<Term<Proxy>>>,
     sender: BoundedEventLoopSender,
     events: Receiver<TerminalEvent>,
+    worker_events: Receiver<WorkerExit>,
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
     dimensions: TerminalDimensions,
@@ -595,7 +596,7 @@ impl TerminalSession {
         let pty = tty::new(&tty_options, options.dimensions.window_size(), 0)
             .map_err(TerminalError::Spawn)?;
         let force_handle = ForceHandle::from_pty(&pty);
-        let (event_loop, sender) = BoundedEventLoop::new(
+        let (event_loop, sender, worker_events) = BoundedEventLoop::new(
             Arc::clone(&terminal),
             proxy,
             pty,
@@ -609,6 +610,7 @@ impl TerminalSession {
             terminal,
             sender: sender.clone(),
             events,
+            worker_events,
             generation,
             wake_pending,
             dimensions: options.dimensions,
@@ -738,6 +740,9 @@ impl TerminalSession {
 
     pub fn try_event(&mut self) -> Option<TerminalEvent> {
         self.advance_shutdown();
+        if let Ok(worker_exit) = self.worker_events.try_recv() {
+            return Some(project_worker_exit(&mut self.exit, worker_exit));
+        }
         let event = self.events.try_recv().ok()?;
         if event == TerminalEvent::Changed {
             self.wake_pending.store(false, Ordering::Release);
@@ -786,6 +791,16 @@ impl TerminalSession {
             self.shutdown_deadline = None;
         }
     }
+}
+
+fn project_worker_exit(exit: &mut TerminalExit, worker_exit: WorkerExit) -> TerminalEvent {
+    if *exit == TerminalExit::Running {
+        *exit = match worker_exit {
+            WorkerExit::Hangup => TerminalExit::Hangup,
+            WorkerExit::IoFailed => TerminalExit::IoFailed,
+        };
+    }
+    TerminalEvent::Closed
 }
 
 fn enqueue_input(
@@ -1436,6 +1451,27 @@ mod tests {
         }
         producer.join().unwrap();
         assert!(closed, "the terminal close event must never be dropped");
+    }
+
+    #[test]
+    fn worker_hangup_and_io_failure_have_distinct_terminal_states() {
+        let mut exit = TerminalExit::Running;
+        assert_eq!(
+            project_worker_exit(&mut exit, WorkerExit::Hangup),
+            TerminalEvent::Closed
+        );
+        assert_eq!(exit, TerminalExit::Hangup);
+
+        exit = TerminalExit::Running;
+        assert_eq!(
+            project_worker_exit(&mut exit, WorkerExit::IoFailed),
+            TerminalEvent::Closed
+        );
+        assert_eq!(exit, TerminalExit::IoFailed);
+
+        exit = TerminalExit::CloseRequested;
+        project_worker_exit(&mut exit, WorkerExit::IoFailed);
+        assert_eq!(exit, TerminalExit::CloseRequested);
     }
 
     #[cfg(unix)]
