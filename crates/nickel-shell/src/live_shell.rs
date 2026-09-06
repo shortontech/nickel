@@ -1255,7 +1255,9 @@ impl LiveShell {
     }
 
     pub fn set_desktop_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        let topology_changed = self.desktop_host.application().outputs != outputs;
         self.desktop_host.application_mut().set_outputs(outputs);
+        self.desktop_application_dirty |= topology_changed;
     }
 
     pub fn desktop_output_projection(&self, output: &str) -> Option<(DesktopPoint, f32)> {

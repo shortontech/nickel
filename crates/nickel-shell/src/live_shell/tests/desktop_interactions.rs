@@ -132,6 +132,37 @@
     }
 
     #[test]
+    fn desktop_topology_changes_invalidate_without_a_viewport_switch() {
+        let mut shell = LiveShell::new().unwrap();
+        let output = |primary, width| nickel_file::desktop::DesktopOutput {
+            id: "same-output".into(),
+            primary,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 600.0,
+            },
+            scale: 1.0,
+        };
+        shell.set_desktop_outputs(vec![output(true, 800.0)]);
+        shell.set_desktop_output("same-output".into(), 0.0, 0.0, 1.0);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        let initial = shell.desktop_change_token.frame_generation;
+
+        shell.set_desktop_outputs(vec![output(true, 640.0)]);
+        assert!(shell.desktop_application_dirty);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(shell.desktop_change_token.frame_generation > initial);
+
+        let stable = shell.desktop_change_token.frame_generation;
+        shell.set_desktop_outputs(vec![output(true, 640.0)]);
+        assert!(!shell.desktop_application_dirty);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert_eq!(shell.desktop_change_token.frame_generation, stable);
+    }
+
+    #[test]
     fn desktop_live_input_rebuilds_selection_and_keyboard_navigation() {
         use std::{ffi::OsString, path::PathBuf};
         let mut shell = LiveShell::new().unwrap();
