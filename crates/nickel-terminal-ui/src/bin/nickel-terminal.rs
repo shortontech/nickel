@@ -143,6 +143,12 @@ impl TerminalApp {
                 self.session.update_selection(point);
                 return true;
             }
+            TerminalInputCommand::UpdateSelectionAndScroll(point, lines) => {
+                self.session
+                    .scroll(nickel_terminal::TerminalScroll::Lines(lines));
+                self.session.update_selection(point);
+                return true;
+            }
             TerminalInputCommand::ClearSelection => {
                 self.session.clear_selection();
                 return true;

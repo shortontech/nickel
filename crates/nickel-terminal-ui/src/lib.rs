@@ -24,6 +24,7 @@ pub enum TerminalInputCommand {
     ClearScrollback,
     BeginSelection(TerminalSelectionKind, TerminalPoint),
     UpdateSelection(TerminalPoint),
+    UpdateSelectionAndScroll(TerminalPoint, i32),
     ClearSelection,
     Focus(bool),
 }
@@ -35,6 +36,7 @@ pub struct TerminalPointerTranslator {
     pressed_button: Option<PointerButton>,
     last_click: Option<(TerminalPoint, u64)>,
     click_count: u8,
+    last_point: Option<TerminalPoint>,
 }
 
 impl TerminalPointerTranslator {
@@ -59,6 +61,7 @@ impl TerminalPointerTranslator {
                 ..
             }) => {
                 let point = terminal_point(position.x, position.y, snapshot, metrics);
+                self.last_point = Some(point);
                 if mouse_reporting {
                     if *edge == KeyEdge::Pressed {
                         self.pressed_button = Some(button.clone());
@@ -94,28 +97,54 @@ impl TerminalPointerTranslator {
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
                 let point = terminal_point(position.x, position.y, snapshot, metrics);
+                self.last_point = Some(point);
                 if mouse_reporting {
                     let button = self.pressed_button.as_ref()?;
                     mouse_motion_bytes(button, point, snapshot.sgr_mouse)
                         .map(TerminalInputCommand::Write)
                 } else if self.selecting {
-                    Some(TerminalInputCommand::UpdateSelection(point))
+                    let viewport_height = snapshot.lines as f64 * f64::from(metrics.height);
+                    let scroll = if position.y < 0.0 {
+                        1
+                    } else if position.y >= viewport_height {
+                        -1
+                    } else {
+                        0
+                    };
+                    if scroll == 0 {
+                        Some(TerminalInputCommand::UpdateSelection(point))
+                    } else {
+                        Some(TerminalInputCommand::UpdateSelectionAndScroll(
+                            point, scroll,
+                        ))
+                    }
                 } else {
                     None
                 }
             }
             InputEvent::Pointer(PointerEvent::Axis {
-                delta, discrete, ..
+                delta,
+                discrete,
+                position,
+                ..
             }) => {
                 let lines = discrete.map_or_else(
-                    || if delta.y > 0.0 { -3 } else { 3 },
+                    || match delta.y.total_cmp(&0.0) {
+                        std::cmp::Ordering::Greater => -3,
+                        std::cmp::Ordering::Less => 3,
+                        std::cmp::Ordering::Equal => 0,
+                    },
                     |(_, vertical)| -vertical,
                 );
                 if lines == 0 {
                     return None;
                 }
                 if mouse_reporting {
-                    let point = TerminalPoint { line: 0, column: 0 };
+                    let point = position
+                        .map(|position| terminal_point(position.x, position.y, snapshot, metrics))
+                        .or(self.last_point)
+                        .unwrap_or(TerminalPoint { line: 0, column: 0 });
+                    self.last_point = Some(point);
                     mouse_wheel_bytes(lines, point, snapshot.sgr_mouse)
                         .map(TerminalInputCommand::Write)
                 } else {
@@ -209,11 +238,12 @@ fn mouse_motion_bytes(button: &PointerButton, point: TerminalPoint, sgr: bool) -
 
 fn mouse_wheel_bytes(lines: i32, point: TerminalPoint, sgr: bool) -> Option<Vec<u8>> {
     let code = if lines > 0 { 64 } else { 65 };
-    Some(if sgr {
+    let one = if sgr {
         sgr_mouse(code, point, false)
     } else {
         legacy_mouse(code, point)?
-    })
+    };
+    Some(one.repeat(lines.unsigned_abs().clamp(1, 32) as usize))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -782,6 +812,19 @@ mod tests {
                 column: 5,
             }))
         );
+        let beyond_bottom = InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            position: InputPoint { x: 55.0, y: 80.0 },
+            delta: None,
+        });
+        assert_eq!(
+            pointer.translate(&beyond_bottom, &selection_snapshot, metrics, 320),
+            Some(TerminalInputCommand::UpdateSelectionAndScroll(
+                TerminalPoint { line: 2, column: 5 },
+                -1,
+            ))
+        );
 
         let reporting = snapshot(b"\x1b[?1000h\x1b[?1006h");
         let shift = ModifierState::from_sides_and_unsided([], [AggregateModifier::Shift]);
@@ -820,6 +863,19 @@ mod tests {
                 1,
             ),
             Some(TerminalInputCommand::Write(b"\x1b[<3;3;2m".to_vec()))
+        );
+        let wheel = InputEvent::Pointer(PointerEvent::Axis {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            delta: nickel_input::Vector { x: 0.0, y: -1.0 },
+            discrete: Some((0, -2)),
+            position: Some(InputPoint { x: 45.0, y: 5.0 }),
+        });
+        assert_eq!(
+            pointer.translate(&wheel, &reporting, metrics, 2),
+            Some(TerminalInputCommand::Write(
+                b"\x1b[<64;5;1M\x1b[<64;5;1M".to_vec()
+            ))
         );
     }
 
