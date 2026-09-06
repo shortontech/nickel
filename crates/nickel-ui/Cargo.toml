@@ -9,7 +9,6 @@ readme = "README.md"
 
 [dependencies]
 nickel-core = { path = "../nickel-core" }
-nickel-session-protocol = { path = "../nickel-session-protocol" }
 cosmic-text.workspace = true
 gilrs.workspace = true
 image.workspace = true
@@ -28,6 +27,7 @@ tracing.workspace = true
 windows = { workspace = true, features = ["Win32_System_Com", "Win32_System_Ole", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
 
 [dev-dependencies]
+nickel-session-protocol = { path = "../nickel-session-protocol" }
 proptest.workspace = true
 sha2.workspace = true
 toml.workspace = true

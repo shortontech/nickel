@@ -2272,6 +2272,14 @@ impl SettingsHostAdapter {
 }
 
 impl HostAdapter<SettingsApp> for SettingsHostAdapter {
+    fn controller_fence(&mut self, _services: HostServices<'_>) -> nickel_ui::ControllerFence {
+        session_controller_fence()
+    }
+
+    fn request_text_entry(&mut self, _services: HostServices<'_>) {
+        request_session_text_entry();
+    }
+
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         self.sync_requested.then_some(now)
     }
@@ -2344,6 +2352,40 @@ impl HostAdapter<SettingsApp> for SettingsHostAdapter {
             }
         }
         Ok(AdapterOutcome::default())
+    }
+}
+
+fn session_controller_fence() -> nickel_ui::ControllerFence {
+    #[cfg(target_os = "linux")]
+    {
+        use nickel_session_protocol::{Query, Request, ServerMessage};
+        match nickel_session_protocol::client::request_from_environment(
+            Request::Query(Query::OnScreenKeyboard),
+            Duration::from_millis(25),
+        ) {
+            Ok(None) => nickel_ui::ControllerFence::default(),
+            Ok(Some(ServerMessage::OnScreenKeyboard(snapshot))) => nickel_ui::ControllerFence {
+                blocked: snapshot.visible,
+                barrier_unix_ms: snapshot.controller_barrier_unix_ms,
+            },
+            _ => nickel_ui::ControllerFence {
+                blocked: true,
+                ..nickel_ui::ControllerFence::default()
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    nickel_ui::ControllerFence::default()
+}
+
+fn request_session_text_entry() {
+    #[cfg(target_os = "linux")]
+    {
+        use nickel_session_protocol::{Command, Request};
+        let _ = nickel_session_protocol::client::request_from_environment(
+            Request::Command(Command::RequestOnScreenKeyboard),
+            Duration::from_millis(25),
+        );
     }
 }
 

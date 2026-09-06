@@ -18,6 +18,7 @@ nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-i18n = { path = "../nickel-i18n" }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
+nickel-session-protocol = { path = "../nickel-session-protocol" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 notify.workspace = true
 tracing.workspace = true

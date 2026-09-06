@@ -15,8 +15,8 @@ use winit::{
 };
 
 use crate::{
-    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerFamily, ControllerInput,
-    DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
+    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerFamily, ControllerFence,
+    ControllerInput, DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
     FrameResourceDiagnostics, InputCommand, InputContext, InputModality, InputSource,
     InteractionIntent, Invalidation, LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect,
     SemanticAction, SemanticActionError, SemanticNodeSnapshot, SemanticQueryError,
@@ -744,6 +744,15 @@ impl<'a> HostServices<'a> {
 /// Injects platform-specific effects into the canonical Nickel UI runtime
 /// without creating an application-owned event loop.
 pub trait HostAdapter<A: Application> {
+    /// Returns session-owned controller admission state. Session-aware adapters
+    /// should fail closed when ownership cannot be established.
+    fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
+        ControllerFence::default()
+    }
+
+    /// Requests session-owned text entry for a controller-activated text field.
+    fn request_text_entry(&mut self, _services: HostServices<'_>) {}
+
     fn poll_interval(&self) -> Option<Duration> {
         None
     }
@@ -2178,7 +2187,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 .host
                 .as_ref()
                 .is_some_and(|host| host.inspect().window_focused);
-            let actions = self.controller.poll(now, focused);
+            let actions = self.controller.poll_with_fence(now, focused, || {
+                self.adapter
+                    .controller_fence(HostServices { window: &window })
+            });
             if let Some(family) = self.controller.active_family()
                 && self
                     .host
@@ -2196,7 +2208,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     && outcome.text_input_active
                     && host.controller_targets_text_input()
                 {
-                    crate::session_keyboard::request_text_entry();
+                    self.adapter
+                        .request_text_entry(HostServices { window: &window });
                 }
                 if outcome.changed {
                     self.scheduler.invalidate();

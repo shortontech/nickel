@@ -4,8 +4,8 @@ use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, HostAdapter, HostServices, Point, ReadingDirection,
-    SemanticNodeSnapshot, UiHost,
+    AdapterOutcome, Application, ControllerFence, HostAdapter, HostServices, Point,
+    ReadingDirection, SemanticNodeSnapshot, UiHost,
 };
 use winit::{
     dpi::LogicalSize,
@@ -225,6 +225,14 @@ impl Default for FileHostAdapter {
 }
 
 impl HostAdapter<FileApp> for FileHostAdapter {
+    fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
+        session_controller_fence()
+    }
+
+    fn request_text_entry(&mut self, _services: HostServices<'_>) {
+        request_session_text_entry();
+    }
+
     fn next_deadline(&self, now: Instant) -> Option<Instant> {
         self.sync_requested
             .then_some(now)
@@ -562,6 +570,40 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 ..AdapterOutcome::default()
             }
         })
+    }
+}
+
+fn session_controller_fence() -> ControllerFence {
+    #[cfg(target_os = "linux")]
+    {
+        use nickel_session_protocol::{Query, Request, ServerMessage};
+        match nickel_session_protocol::client::request_from_environment(
+            Request::Query(Query::OnScreenKeyboard),
+            std::time::Duration::from_millis(25),
+        ) {
+            Ok(None) => ControllerFence::default(),
+            Ok(Some(ServerMessage::OnScreenKeyboard(snapshot))) => ControllerFence {
+                blocked: snapshot.visible,
+                barrier_unix_ms: snapshot.controller_barrier_unix_ms,
+            },
+            _ => ControllerFence {
+                blocked: true,
+                ..ControllerFence::default()
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    ControllerFence::default()
+}
+
+fn request_session_text_entry() {
+    #[cfg(target_os = "linux")]
+    {
+        use nickel_session_protocol::{Command, Request};
+        let _ = nickel_session_protocol::client::request_from_environment(
+            Request::Command(Command::RequestOnScreenKeyboard),
+            std::time::Duration::from_millis(25),
+        );
     }
 }
 

@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
 
 use gilrs::Gilrs;
 use nickel_input::{
@@ -21,6 +24,27 @@ pub enum ControllerAction {
     ContextMenu,
     PreviousPane,
     NextPane,
+}
+
+/// Host-supplied admission state for controller events produced by ordinary clients.
+///
+/// Session-aware hosts use this to prevent controller input from reaching both an
+/// on-screen keyboard and its recipient. Generic UI code deliberately does not know
+/// how that state is transported.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ControllerFence {
+    pub blocked: bool,
+    pub barrier_unix_ms: u64,
+}
+
+impl ControllerFence {
+    pub fn admits(&self, produced_at: SystemTime) -> bool {
+        !self.blocked
+            && (self.barrier_unix_ms == 0
+                || produced_at
+                    .duration_since(UNIX_EPOCH)
+                    .is_ok_and(|age| age.as_millis() > u128::from(self.barrier_unix_ms)))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -140,34 +164,48 @@ impl ControllerInput {
     /// Polls controller input for a window. Events are drained but never emitted while the
     /// window is unfocused, preventing stale input from being replayed when focus returns.
     pub fn poll(&mut self, now: Instant, window_focused: bool) -> Vec<ControllerAction> {
-        self.poll_inner(now, Some(window_focused))
+        self.poll_with_fence(now, window_focused, ControllerFence::default)
+    }
+
+    /// Polls an ordinary client and asks its host for session admission only when
+    /// there is controller input (including a pending repeat) to dispatch.
+    pub fn poll_with_fence(
+        &mut self,
+        now: Instant,
+        window_focused: bool,
+        fence: impl FnOnce() -> ControllerFence,
+    ) -> Vec<ControllerAction> {
+        self.poll_inner(now, Some((window_focused, fence)))
     }
 
     /// Polls controller input for a session-global owner such as the desktop shell.
     /// Ordinary applications should use [`Self::poll`] so background input is discarded.
     pub fn poll_global(&mut self, now: Instant) -> Vec<ControllerAction> {
-        self.poll_inner(now, None)
+        self.poll_inner::<fn() -> ControllerFence>(now, None)
     }
 
-    fn poll_inner(&mut self, now: Instant, focused: Option<bool>) -> Vec<ControllerAction> {
+    fn poll_inner<F>(&mut self, now: Instant, focused: Option<(bool, F)>) -> Vec<ControllerAction>
+    where
+        F: FnOnce() -> ControllerFence,
+    {
         let mut actions = Vec::new();
         let Some(gilrs) = &mut self.gilrs else {
             return actions;
         };
         let events: Vec<_> = std::iter::from_fn(|| gilrs.next_event()).collect();
         let fence = match focused {
-            None => crate::session_keyboard::ControllerFence::default(),
-            Some(false) => crate::session_keyboard::ControllerFence {
+            None => ControllerFence::default(),
+            Some((false, _)) => ControllerFence {
                 blocked: true,
                 barrier_unix_ms: self.barrier_unix_ms,
             },
-            Some(true) if events.is_empty() && !self.normalizer.has_pending_repeat() => {
-                crate::session_keyboard::ControllerFence {
+            Some((true, _)) if events.is_empty() && !self.normalizer.has_pending_repeat() => {
+                ControllerFence {
                     blocked: false,
                     barrier_unix_ms: self.barrier_unix_ms,
                 }
             }
-            Some(true) => crate::session_keyboard::controller_fence(),
+            Some((true, fence)) => fence(),
         };
         if fence.blocked || fence.barrier_unix_ms != self.barrier_unix_ms {
             self.normalizer.suppress_held();
@@ -310,12 +348,35 @@ fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ControllerAction, ControllerFamily, signal_action, signal_action_for_family};
+    use super::{
+        ControllerAction, ControllerFamily, ControllerFence, signal_action,
+        signal_action_for_family,
+    };
     use nickel_input::NativeCode;
     use nickel_input::controller::{
         AxisDirection, ControllerAxis, ControllerButton, ControllerEvent, ControllerId,
         ControllerIdentity, ControllerNormalizer, ControllerSignal,
     };
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn controller_fence_blocks_visibility_and_events_at_or_before_barrier() {
+        let fence = ControllerFence {
+            blocked: false,
+            barrier_unix_ms: 100,
+        };
+        for millis in [80, 99, 100] {
+            assert!(!fence.admits(UNIX_EPOCH + Duration::from_millis(millis)));
+        }
+        assert!(fence.admits(UNIX_EPOCH + Duration::from_millis(101)));
+        assert!(
+            !ControllerFence {
+                blocked: true,
+                ..fence
+            }
+            .admits(SystemTime::now())
+        );
+    }
 
     fn identity(name: &str, fingerprint: Option<&str>) -> ControllerIdentity {
         ControllerIdentity {

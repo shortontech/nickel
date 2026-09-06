@@ -11,14 +11,13 @@ pub mod on_screen_keyboard;
 pub mod overlay;
 pub mod primitives;
 mod runtime;
-mod session_keyboard;
 pub mod state;
 pub mod text_context_menu;
 pub mod text_editor;
 pub mod theme;
 mod ui;
 
-pub use controller::{ControllerAction, ControllerFamily, ControllerInput};
+pub use controller::{ControllerAction, ControllerFamily, ControllerFence, ControllerInput};
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,
     TextBoundary,

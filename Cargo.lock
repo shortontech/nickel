@@ -2649,6 +2649,7 @@ dependencies = [
  "nickel-input",
  "nickel-logging",
  "nickel-platform",
+ "nickel-session-protocol",
  "nickel-ui",
  "nickel-ui-testkit",
  "notify",
