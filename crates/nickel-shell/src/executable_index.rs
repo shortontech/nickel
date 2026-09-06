@@ -195,27 +195,40 @@ impl Default for IndexSnapshot {
 
 pub(crate) struct ExecutableIndex {
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
-    refresh: mpsc::SyncSender<RefreshReason>,
-    _watcher: Option<RecommendedWatcher>,
+    refresh: Arc<mpsc::SyncSender<RefreshReason>>,
+    _watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum RefreshReason {
     Filesystem,
-    Environment,
+    Environment(Option<std::ffi::OsString>),
 }
 
 impl ExecutableIndex {
     fn start(path: Option<std::ffi::OsString>, budgets: ScanBudgets) -> Self {
         let snapshot = Arc::new(RwLock::new(Arc::new(IndexSnapshot::default())));
         let (refresh, receiver) = mpsc::sync_channel(1);
+        let refresh = Arc::new(refresh);
         let watcher = path
             .as_deref()
-            .and_then(|path| watch_effective_path(path, budgets, refresh.clone()));
+            .and_then(|path| watch_effective_path(path, budgets, Arc::clone(&refresh)));
+        let watcher = Arc::new(Mutex::new(watcher));
         let worker_snapshot = Arc::clone(&snapshot);
+        let worker_watcher = Arc::downgrade(&watcher);
+        let worker_refresh = Arc::downgrade(&refresh);
         let _ = std::thread::Builder::new()
             .name("nickel-executable-index".into())
-            .spawn(move || scan_worker(path, budgets, worker_snapshot, receiver));
+            .spawn(move || {
+                scan_worker(
+                    path,
+                    budgets,
+                    worker_snapshot,
+                    receiver,
+                    worker_watcher,
+                    worker_refresh,
+                );
+            });
         Self {
             snapshot,
             refresh,
@@ -243,14 +256,21 @@ impl ExecutableIndex {
 
     #[allow(dead_code)]
     pub(crate) fn request_refresh(&self) {
-        let _ = self.refresh.try_send(RefreshReason::Environment);
+        let _ = self
+            .refresh
+            .try_send(RefreshReason::Environment(std::env::var_os("PATH")));
+    }
+
+    #[cfg(test)]
+    fn request_path_refresh(&self, path: Option<std::ffi::OsString>) {
+        let _ = self.refresh.try_send(RefreshReason::Environment(path));
     }
 }
 
 fn watch_effective_path(
     path: &std::ffi::OsStr,
     budgets: ScanBudgets,
-    refresh: mpsc::SyncSender<RefreshReason>,
+    refresh: Arc<mpsc::SyncSender<RefreshReason>>,
 ) -> Option<RecommendedWatcher> {
     let callback_refresh = refresh;
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -291,6 +311,8 @@ fn scan_worker(
     budgets: ScanBudgets,
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
     receiver: mpsc::Receiver<RefreshReason>,
+    watcher: std::sync::Weak<Mutex<Option<RecommendedWatcher>>>,
+    refresh: std::sync::Weak<mpsc::SyncSender<RefreshReason>>,
 ) {
     let mut generation = 1_u64;
     loop {
@@ -298,12 +320,33 @@ fn scan_worker(
         generation = generation.saturating_add(1);
         match receiver.recv_timeout(Duration::from_secs(30)) {
             Ok(RefreshReason::Filesystem) => {}
-            Ok(RefreshReason::Environment) | Err(mpsc::RecvTimeoutError::Timeout) => {
-                path = std::env::var_os("PATH");
+            Ok(RefreshReason::Environment(updated)) => {
+                replace_path_watcher(&watcher, &refresh, updated.as_deref(), budgets);
+                path = updated;
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let updated = std::env::var_os("PATH");
+                if updated != path {
+                    replace_path_watcher(&watcher, &refresh, updated.as_deref(), budgets);
+                    path = updated;
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
+}
+
+fn replace_path_watcher(
+    watcher: &std::sync::Weak<Mutex<Option<RecommendedWatcher>>>,
+    refresh: &std::sync::Weak<mpsc::SyncSender<RefreshReason>>,
+    path: Option<&std::ffi::OsStr>,
+    budgets: ScanBudgets,
+) {
+    let (Some(watcher), Some(refresh)) = (watcher.upgrade(), refresh.upgrade()) else {
+        return;
+    };
+    *watcher.lock().unwrap_or_else(|error| error.into_inner()) =
+        path.and_then(|path| watch_effective_path(path, budgets, refresh));
 }
 
 fn publish(
@@ -977,6 +1020,77 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert_eq!(index.progress().refresh_queue_capacity, 1);
+    }
+
+    #[test]
+    fn adopted_path_replaces_the_native_watcher_set() {
+        let original = tempfile::tempdir().unwrap();
+        let adopted = tempfile::tempdir().unwrap();
+        let index = ExecutableIndex::start(
+            Some(std::env::join_paths([original.path()]).unwrap()),
+            ScanBudgets {
+                max_elapsed: Duration::from_secs(1),
+                ..ScanBudgets::default()
+            },
+        );
+        let initial_deadline = Instant::now() + Duration::from_secs(2);
+        while !index.progress().complete {
+            assert!(
+                Instant::now() < initial_deadline,
+                "initial scan did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let initial_generation = index.progress().generation;
+        index.request_path_refresh(Some(std::env::join_paths([adopted.path()]).unwrap()));
+        let adoption_deadline = Instant::now() + Duration::from_secs(2);
+        while index.progress().generation <= initial_generation || !index.progress().complete {
+            assert!(
+                Instant::now() < adoption_deadline,
+                "adopted PATH scan did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let adoption_generation = index.progress().generation;
+        executable(&adopted.path().join("adopted-tool"), b"#!/bin/sh\n");
+        let notification_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if index.progress().generation > adoption_generation
+                && index.progress().complete
+                && index.classify("adopted-tool").is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < notification_deadline,
+                "the adopted PATH directory was not watched"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn scan_worker_stops_after_all_refresh_owners_are_dropped() {
+        let snapshot = Arc::new(RwLock::new(Arc::new(IndexSnapshot::default())));
+        let (refresh, receiver) = mpsc::sync_channel(1);
+        let refresh = Arc::new(refresh);
+        let weak_refresh = Arc::downgrade(&refresh);
+        drop(refresh);
+
+        std::thread::spawn(move || {
+            scan_worker(
+                None,
+                ScanBudgets::default(),
+                snapshot,
+                receiver,
+                std::sync::Weak::new(),
+                weak_refresh,
+            );
+        })
+        .join()
+        .expect("disconnected executable-index worker must stop");
     }
 
     #[test]
