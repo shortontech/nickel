@@ -321,10 +321,10 @@ fn scan_path_generation(
             publish(snapshot, &commands, progress, started.elapsed());
             continue;
         };
-        for (entry_index, entry) in entries.enumerate() {
-            if entry_index >= budgets.max_directory_entries {
+        for entry in entries {
+            if progress.entries_inspected >= budgets.max_directory_entries {
                 complete = false;
-                break;
+                break 'directories;
             }
             if commands.len() >= budgets.max_commands || started.elapsed() >= budgets.max_elapsed {
                 complete = false;
@@ -907,15 +907,22 @@ mod tests {
 
     #[test]
     fn entry_caps_publish_an_explicit_partial_generation() {
-        let directory = tempfile::tempdir().unwrap();
-        executable(&directory.path().join("one"), b"#!/bin/sh\n");
-        executable(&directory.path().join("two"), b"#!/bin/sh\n");
-        let path = std::env::join_paths([directory.path()]).unwrap();
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        for (directory, names) in [
+            (first.path(), ["one", "two"]),
+            (second.path(), ["three", "four"]),
+        ] {
+            for name in names {
+                executable(&directory.join(name), b"#!/bin/sh\n");
+            }
+        }
+        let path = std::env::join_paths([first.path(), second.path()]).unwrap();
         let snapshot = RwLock::new(Arc::new(IndexSnapshot::default()));
         scan_path_generation(
             Some(&path),
             ScanBudgets {
-                max_directory_entries: 1,
+                max_directory_entries: 3,
                 max_elapsed: Duration::from_secs(5),
                 ..ScanBudgets::default()
             },
@@ -925,8 +932,8 @@ mod tests {
         let snapshot = snapshot.read().unwrap();
         assert!(!snapshot.progress.complete);
         assert_eq!(snapshot.progress.generation, 9);
-        assert_eq!(snapshot.progress.entries_inspected, 1);
-        assert_eq!(snapshot.commands.len(), 1);
+        assert_eq!(snapshot.progress.entries_inspected, 3);
+        assert_eq!(snapshot.commands.len(), 3);
     }
 
     #[test]
