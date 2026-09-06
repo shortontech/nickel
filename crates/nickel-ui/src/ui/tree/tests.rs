@@ -312,6 +312,7 @@ fn text_measure_cache_bypass_preserves_plain_styled_semantic_and_raster_authorit
                         italic: false,
                         monospace: false,
                         strikethrough: false,
+                        underline: false,
                         color: None,
                         background: None,
                     }],
@@ -1924,6 +1925,7 @@ fn repeated_styled_text_measurement_reuses_a_bounded_cache_entry() {
         italic: false,
         monospace: false,
         strikethrough: false,
+        underline: false,
         color: None,
         background: None,
     }];
@@ -1956,6 +1958,7 @@ fn text_measure_caches_have_measured_equivalent_benefit() {
         italic: false,
         monospace: false,
         strikethrough: false,
+        underline: false,
         color: None,
         background: None,
     }];

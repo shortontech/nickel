@@ -124,6 +124,7 @@ pub struct StyledTextSpan {
     pub italic: bool,
     pub monospace: bool,
     pub strikethrough: bool,
+    pub underline: bool,
     pub color: Option<Color>,
     pub background: Option<Color>,
 }

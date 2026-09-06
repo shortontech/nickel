@@ -962,16 +962,24 @@ fn styled_strikes(
             else {
                 continue;
             };
-            if !span.strikethrough {
-                continue;
+            if span.strikethrough {
+                let rect = Rect::new(
+                    bounds.origin.x + glyph.x,
+                    bounds.origin.y + run.line_top + run.line_height * 0.52,
+                    glyph.w.max(1.0),
+                    (font_size / 14.0).max(1.0),
+                );
+                strikes.push((rect, span.color.unwrap_or(default_color)));
             }
-            let rect = Rect::new(
-                bounds.origin.x + glyph.x,
-                bounds.origin.y + run.line_top + run.line_height * 0.52,
-                glyph.w.max(1.0),
-                (font_size / 14.0).max(1.0),
-            );
-            strikes.push((rect, span.color.unwrap_or(default_color)));
+            if span.underline {
+                let rect = Rect::new(
+                    bounds.origin.x + glyph.x,
+                    bounds.origin.y + run.line_top + run.line_height * 0.88,
+                    glyph.w.max(1.0),
+                    (font_size / 14.0).max(1.0),
+                );
+                strikes.push((rect, span.color.unwrap_or(default_color)));
+            }
         }
     }
     strikes
