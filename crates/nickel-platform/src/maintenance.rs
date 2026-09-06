@@ -46,7 +46,12 @@ impl<T> Observation<T> {
 
     fn sanitize(mut self) -> Self {
         self.detail = self.detail.as_deref().map(redact_detail);
-        if self.state != ObservationState::Current {
+        if matches!(
+            self.state,
+            ObservationState::Unsupported
+                | ObservationState::PermissionDenied
+                | ObservationState::Failed
+        ) {
             self.value = None;
         }
         self
@@ -134,6 +139,16 @@ impl MaintenanceSnapshot {
         self.updates = self.updates.sanitize();
         self.protection.firewall = self.protection.firewall.sanitize();
         self.protection.malware_protection = self.protection.malware_protection.sanitize();
+        for protection in [
+            &mut self.protection.firewall,
+            &mut self.protection.malware_protection,
+        ] {
+            if protection.state != ObservationState::Current
+                && protection.value == Some(ProtectionHealth::Healthy)
+            {
+                protection.value = None;
+            }
+        }
         for permission in &mut self.permissions {
             permission.global_enabled = permission.global_enabled.clone().sanitize();
         }
@@ -376,7 +391,12 @@ mod tests {
                     detail: Some("token=private stale cache".into()),
                 },
                 protection: ProtectionStatus {
-                    firewall: Observation::unsupported("missing"),
+                    firewall: Observation {
+                        state: ObservationState::Stale,
+                        value: Some(ProtectionHealth::Healthy),
+                        observed_at: Some(SystemTime::now()),
+                        detail: Some("stale provider".into()),
+                    },
                     malware_protection: Observation::unsupported("missing"),
                 },
                 permissions: Vec::new(),
@@ -398,7 +418,7 @@ mod tests {
             .inspect()
             .unwrap();
         assert_eq!(snapshot.updates.state, ObservationState::Stale);
-        assert!(snapshot.updates.value.is_none());
+        assert!(snapshot.updates.value.is_some());
         assert_eq!(
             snapshot.updates.detail.as_deref(),
             Some("<redacted> stale cache")
@@ -410,6 +430,8 @@ mod tests {
                 .unwrap()
                 .starts_with("<redacted>")
         );
+        assert_eq!(snapshot.protection.firewall.state, ObservationState::Stale);
+        assert_eq!(snapshot.protection.firewall.value, None);
     }
 
     #[test]
