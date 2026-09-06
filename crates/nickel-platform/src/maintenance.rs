@@ -601,12 +601,18 @@ fn windows_powershell(script: &str) -> Result<String, MaintenanceError> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
+        let diagnostic = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let class = classify_command_failure(output.status.code(), &diagnostic);
         Err(MaintenanceError {
-            class: match output.status.code() {
-                Some(5) => MaintenanceFailureClass::Authorization,
-                _ => MaintenanceFailureClass::Unknown,
-            },
-            detail: format!("Windows authority failed with {}", output.status),
+            class,
+            detail: format!(
+                "Windows authority reported a {class:?} failure ({})",
+                output.status
+            ),
         })
     }
 }
@@ -853,9 +859,9 @@ fn command_health(
 
 #[cfg(target_os = "linux")]
 fn run_packagekit(arguments: &[&str]) -> Result<MaintenanceOutcome, MaintenanceError> {
-    let status = std::process::Command::new("pkcon")
+    let output = std::process::Command::new("pkcon")
         .args(arguments)
-        .status()
+        .output()
         .map_err(|error| MaintenanceError {
             class: if error.kind() == std::io::ErrorKind::PermissionDenied {
                 MaintenanceFailureClass::Authorization
@@ -864,13 +870,57 @@ fn run_packagekit(arguments: &[&str]) -> Result<MaintenanceOutcome, MaintenanceE
             },
             detail: format!("PackageKit could not start: {error}"),
         })?;
-    Ok(if status.success() {
-        MaintenanceOutcome::Accepted
-    } else {
-        MaintenanceOutcome::Rejected {
-            detail: format!("PackageKit rejected the request with {status}"),
-        }
+    if output.status.success() {
+        return Ok(MaintenanceOutcome::Accepted);
+    }
+    let diagnostic = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let class = classify_command_failure(output.status.code(), &diagnostic);
+    Err(MaintenanceError {
+        class,
+        detail: format!(
+            "PackageKit reported a {class:?} failure ({})",
+            output.status
+        ),
     })
+}
+
+fn classify_command_failure(exit_code: Option<i32>, diagnostic: &str) -> MaintenanceFailureClass {
+    if exit_code == Some(5) {
+        return MaintenanceFailureClass::Authorization;
+    }
+    let diagnostic = diagnostic.to_ascii_lowercase();
+    if diagnostic.contains("cancelled") || diagnostic.contains("canceled") {
+        MaintenanceFailureClass::Cancelled
+    } else if diagnostic.contains("permission denied")
+        || diagnostic.contains("access denied")
+        || diagnostic.contains("unauthorized")
+        || diagnostic.contains("not authorized")
+        || diagnostic.contains("authentication")
+    {
+        MaintenanceFailureClass::Authorization
+    } else if diagnostic.contains("network")
+        || diagnostic.contains("offline")
+        || diagnostic.contains("timed out")
+        || diagnostic.contains("timeout")
+        || diagnostic.contains("could not resolve")
+        || diagnostic.contains("name resolution")
+    {
+        MaintenanceFailureClass::Network
+    } else if diagnostic.contains("policy") || diagnostic.contains("managed by") {
+        MaintenanceFailureClass::Policy
+    } else if diagnostic.contains("service unavailable")
+        || diagnostic.contains("service is not running")
+        || diagnostic.contains("provider unavailable")
+        || diagnostic.contains("no such service")
+    {
+        MaintenanceFailureClass::ProviderUnavailable
+    } else {
+        MaintenanceFailureClass::Unknown
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1153,6 +1203,40 @@ mod tests {
             });
             assert_eq!(sanitized.class, class);
             assert_eq!(sanitized.detail, "<redacted> classified failure");
+        }
+    }
+
+    #[test]
+    fn native_command_diagnostics_map_to_actionable_failure_classes() {
+        for (code, diagnostic, expected) in [
+            (Some(5), "", MaintenanceFailureClass::Authorization),
+            (
+                Some(1),
+                "The transaction was cancelled by the user",
+                MaintenanceFailureClass::Cancelled,
+            ),
+            (
+                Some(1),
+                "Could not resolve update.example.test",
+                MaintenanceFailureClass::Network,
+            ),
+            (
+                Some(1),
+                "Updates are managed by organization policy",
+                MaintenanceFailureClass::Policy,
+            ),
+            (
+                Some(1),
+                "Package service is not running",
+                MaintenanceFailureClass::ProviderUnavailable,
+            ),
+            (
+                Some(1),
+                "unclassified provider error",
+                MaintenanceFailureClass::Unknown,
+            ),
+        ] {
+            assert_eq!(classify_command_failure(code, diagnostic), expected);
         }
     }
 
