@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/nickel-build-support",
     "crates/nickel-codex",
     "crates/nickel-codex-fixture",
     "crates/nickel-codex-ui",

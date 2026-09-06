@@ -49,6 +49,4 @@ wl-clipboard-rs = "0.9"
 url.workspace = true
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
-ico.workspace = true
-image.workspace = true
-winresource.workspace = true
+nickel-build-support = { path = "../nickel-build-support" }

@@ -2567,6 +2567,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel-build-support"
+version = "0.1.0"
+dependencies = [
+ "ico",
+ "image",
+ "winresource",
+]
+
+[[package]]
 name = "nickel-codex"
 version = "0.1.0"
 dependencies = [
@@ -2631,10 +2640,10 @@ name = "nickel-file"
 version = "0.1.0"
 dependencies = [
  "arboard",
- "ico",
  "icu_collator",
  "icu_locale",
  "image",
+ "nickel-build-support",
  "nickel-core",
  "nickel-i18n",
  "nickel-input",
@@ -2650,7 +2659,6 @@ dependencies = [
  "url",
  "windows",
  "winit 0.30.13",
- "winresource",
  "wl-clipboard-rs",
 ]
 
@@ -2802,8 +2810,8 @@ dependencies = [
 name = "nickel-settings"
 version = "0.1.0"
 dependencies = [
- "ico",
  "image",
+ "nickel-build-support",
  "nickel-codex",
  "nickel-core",
  "nickel-i18n",
@@ -2817,7 +2825,6 @@ dependencies = [
  "tracing",
  "windows",
  "winit 0.30.13",
- "winresource",
  "zbus",
 ]
 
@@ -2842,10 +2849,10 @@ dependencies = [
  "arboard",
  "freedesktop-desktop-entry",
  "freedesktop-icons",
- "ico",
  "image",
  "jiff",
  "libloading",
+ "nickel-build-support",
  "nickel-codex",
  "nickel-codex-ui",
  "nickel-core",
@@ -2873,7 +2880,6 @@ dependencies = [
  "windows",
  "windows-core",
  "winit 0.30.13",
- "winresource",
  "zbus",
  "zeroize",
 ]

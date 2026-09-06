@@ -106,6 +106,4 @@ path = "src/bin/nickel-launcher-verify.rs"
 required-features = ["workbench-fixtures"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
-ico.workspace = true
-image.workspace = true
-winresource.workspace = true
+nickel-build-support = { path = "../nickel-build-support" }
