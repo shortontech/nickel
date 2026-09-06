@@ -699,6 +699,34 @@
         let second = shell.window_menu_anchor_x.expect("second card anchor");
 
         assert!(second > first + 200, "each card must retain its own anchor");
+
+        shell.window_menu = None;
+        let card = shell
+            .preview_frame
+            .as_ref()
+            .and_then(|frame| frame.semantic_bounds(crate::window_preview::PreviewAction::Activate(
+                WindowId(71),
+            )))
+            .expect("first preview card");
+        let touch = Point {
+            x: card.origin.x + card.size.width / 2.0,
+            y: card.origin.y + card.size.height / 2.0,
+        };
+        let frame = shell.preview_frame.as_mut().unwrap();
+        frame.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::TouchLongPress(touch))],
+            ..HostBatch::default()
+        });
+        let actions = frame.take_actions();
+        assert_eq!(
+            actions,
+            vec![crate::window_preview::PreviewAction::OpenMenu(WindowId(71))]
+        );
+        for action in actions {
+            shell.apply_preview_action(action);
+        }
+        assert_eq!(shell.window_menu, Some(WindowId(71)));
+        assert_eq!(shell.window_menu_anchor_x, Some(first));
     }
 
     #[test]
