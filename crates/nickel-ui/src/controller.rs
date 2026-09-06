@@ -80,6 +80,7 @@ pub struct ControllerInput {
     connected: bool,
     families: BTreeMap<ControllerId, ControllerFamily>,
     active_family: Option<ControllerFamily>,
+    barrier_unix_ms: u64,
 }
 
 impl ControllerInput {
@@ -122,6 +123,7 @@ impl ControllerInput {
             connected,
             families,
             active_family: None,
+            barrier_unix_ms: 0,
         }
     }
 
@@ -138,18 +140,42 @@ impl ControllerInput {
     /// Polls controller input for a window. Events are drained but never emitted while the
     /// window is unfocused, preventing stale input from being replayed when focus returns.
     pub fn poll(&mut self, now: Instant, window_focused: bool) -> Vec<ControllerAction> {
-        let actions = self.poll_global(now);
-        if window_focused { actions } else { Vec::new() }
+        self.poll_inner(now, Some(window_focused))
     }
 
     /// Polls controller input for a session-global owner such as the desktop shell.
     /// Ordinary applications should use [`Self::poll`] so background input is discarded.
     pub fn poll_global(&mut self, now: Instant) -> Vec<ControllerAction> {
+        self.poll_inner(now, None)
+    }
+
+    fn poll_inner(&mut self, now: Instant, focused: Option<bool>) -> Vec<ControllerAction> {
         let mut actions = Vec::new();
         let Some(gilrs) = &mut self.gilrs else {
             return actions;
         };
-        while let Some(event) = gilrs.next_event() {
+        let events: Vec<_> = std::iter::from_fn(|| gilrs.next_event()).collect();
+        let fence = match focused {
+            None => crate::session_keyboard::ControllerFence::default(),
+            Some(false) => crate::session_keyboard::ControllerFence {
+                blocked: true,
+                barrier_unix_ms: self.barrier_unix_ms,
+            },
+            Some(true) if events.is_empty() && !self.normalizer.has_pending_repeat() => {
+                crate::session_keyboard::ControllerFence {
+                    blocked: false,
+                    barrier_unix_ms: self.barrier_unix_ms,
+                }
+            }
+            Some(true) => crate::session_keyboard::controller_fence(),
+        };
+        if fence.blocked || fence.barrier_unix_ms != self.barrier_unix_ms {
+            self.normalizer.suppress_held();
+        }
+        self.barrier_unix_ms = fence.barrier_unix_ms;
+        for event in events {
+            let admitted = fence.admits(event.time);
+
             let identity = matches!(event.event, gilrs::EventType::Connected).then(|| {
                 let gamepad = gilrs.gamepad(event.id);
                 self.families.insert(
@@ -166,7 +192,11 @@ impl ControllerInput {
                 .then_some(ControllerId(usize::from(event.id) as u64));
             if let Some(event) = nickel_input::gilrs::event(&event, identity) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
-                for signal in self.normalizer.handle(event, now_ms) {
+                let signals = self.normalizer.handle(event, now_ms);
+                if !admitted {
+                    self.normalizer.suppress_held();
+                }
+                for signal in signals.into_iter().filter(|_| admitted) {
                     let family = signal_id(&signal)
                         .and_then(|id| self.families.get(&id).copied())
                         .unwrap_or(ControllerFamily::Generic);
@@ -182,6 +212,9 @@ impl ControllerInput {
         }
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
         let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
+        if fence.blocked {
+            self.normalizer.suppress_held();
+        }
         for signal in self.normalizer.tick(now_ms) {
             let family = signal_id(&signal)
                 .and_then(|id| self.families.get(&id).copied())

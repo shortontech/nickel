@@ -11,6 +11,7 @@ pub mod on_screen_keyboard;
 pub mod overlay;
 pub mod primitives;
 mod runtime;
+mod session_keyboard;
 pub mod state;
 pub mod text_context_menu;
 pub mod text_editor;

@@ -1,6 +1,9 @@
+#[cfg(unix)]
+pub mod client;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 19;
+pub const PROTOCOL_VERSION: u16 = 20;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -800,6 +803,8 @@ pub struct WindowId(pub u64);
 /// No surrounding text or typed content is included in recipient diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnScreenKeyboardSnapshot {
+    /// Discard controller events produced at or before the last keyboard ownership transition.
+    pub controller_barrier_unix_ms: u64,
     pub dock_top: bool,
     pub auto_show_requested: bool,
     pub touchscreen_present: bool,

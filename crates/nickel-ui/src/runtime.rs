@@ -2192,6 +2192,12 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     break;
                 };
                 let outcome = host.handle_controller_action(action);
+                if action == ControllerAction::Confirm
+                    && outcome.text_input_active
+                    && host.controller_targets_text_input()
+                {
+                    crate::session_keyboard::request_text_entry();
+                }
                 if outcome.changed {
                     self.scheduler.invalidate();
                 }

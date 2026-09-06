@@ -2890,6 +2890,7 @@ dependencies = [
  "nickel-i18n",
  "nickel-input",
  "nickel-render-assets",
+ "nickel-session-protocol",
  "proptest",
  "sha2",
  "smallvec",

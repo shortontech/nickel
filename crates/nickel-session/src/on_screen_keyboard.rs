@@ -16,6 +16,7 @@ pub(crate) struct OnScreenKeyboardState {
     pub(crate) dock_top: bool,
     pub(crate) auto_show_requested: bool,
     pub(crate) touchscreens: std::collections::HashSet<String>,
+    controller_barrier_unix_ms: u64,
     generation: u64,
     environment_override: bool,
     epoch: u64,
@@ -29,6 +30,7 @@ impl Default for OnScreenKeyboardState {
         Self {
             dock_top: false,
             auto_show_requested: false,
+            controller_barrier_unix_ms: controller_barrier_now(),
             generation: 0,
             environment_override: false,
             touchscreens: Default::default(),
@@ -86,6 +88,7 @@ impl NickelSession {
             .text_input()
             .with_active_text_input(|_, _| text_input_active = true);
         OnScreenKeyboardSnapshot {
+            controller_barrier_unix_ms: self.on_screen_keyboard.controller_barrier_unix_ms,
             dock_top: self.on_screen_keyboard.dock_top,
             auto_show_requested: self.on_screen_keyboard.auto_show_requested
                 && text_input_active
@@ -118,6 +121,8 @@ impl NickelSession {
         }
         if self.on_screen_keyboard.enabled != enabled || self.on_screen_keyboard.visible != visible
         {
+            self.on_screen_keyboard.controller_barrier_unix_ms =
+                controller_barrier_now().max(self.on_screen_keyboard.controller_barrier_unix_ms);
             self.on_screen_keyboard_focus_changed();
         }
         self.on_screen_keyboard.enabled = enabled;
@@ -210,4 +215,13 @@ impl NickelSession {
         self.note_input_activity();
         Ok(())
     }
+}
+
+fn controller_barrier_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }

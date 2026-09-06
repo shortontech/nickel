@@ -120,6 +120,8 @@ struct ControllerState {
     active: bool,
     fingerprint: Option<String>,
     buttons: BTreeSet<ControllerButton>,
+    suppressed_buttons: BTreeSet<ControllerButton>,
+    axes_suppressed: bool,
     left_x: f32,
     left_y: f32,
     direction: Option<AxisDirection>,
@@ -140,6 +142,25 @@ impl ControllerNormalizer {
             states: BTreeMap::new(),
             fingerprints: BTreeMap::new(),
         }
+    }
+
+    /// Withdraw actions owned by a previous focus/consumer until physical release or neutral.
+    pub fn suppress_held(&mut self) {
+        for state in self.states.values_mut() {
+            state
+                .suppressed_buttons
+                .extend(state.buttons.iter().cloned());
+            let threshold = f32::from(self.config.release_threshold_milli) / 1_000.0;
+            state.axes_suppressed |= state.left_x.abs().max(state.left_y.abs()) >= threshold;
+            state.direction = None;
+            state.next_repeat_ms = None;
+        }
+    }
+
+    pub fn has_pending_repeat(&self) -> bool {
+        self.states
+            .values()
+            .any(|state| state.active && state.next_repeat_ms.is_some())
     }
 
     pub fn handle(&mut self, event: ControllerEvent, now_ms: u64) -> Vec<ControllerSignal> {
@@ -200,6 +221,12 @@ impl ControllerNormalizer {
                     KeyEdge::Pressed => state.buttons.insert(button.clone()),
                     KeyEdge::Released => state.buttons.remove(&button),
                 };
+                if state.suppressed_buttons.contains(&button) {
+                    if edge == KeyEdge::Released {
+                        state.suppressed_buttons.remove(&button);
+                    }
+                    return Vec::new();
+                }
                 if !changed && !repeat {
                     return Vec::new();
                 }
@@ -218,6 +245,13 @@ impl ControllerNormalizer {
                     ControllerAxis::LeftX => state.left_x = value.clamp(-1.0, 1.0),
                     ControllerAxis::LeftY => state.left_y = value.clamp(-1.0, 1.0),
                     _ => return Vec::new(),
+                }
+                if state.axes_suppressed {
+                    let threshold = f32::from(self.config.release_threshold_milli) / 1_000.0;
+                    if state.left_x.abs().max(state.left_y.abs()) < threshold {
+                        state.axes_suppressed = false;
+                    }
+                    return Vec::new();
                 }
                 reconcile_direction(self.config, id, state, now_ms)
             }
@@ -316,6 +350,44 @@ mod tests {
             native: NativeCode::Numeric(1),
             fingerprint: fingerprint.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn relinquished_input_requires_button_release_and_stick_neutral() {
+        let mut n = ControllerNormalizer::default();
+        let id = ControllerId(1);
+        n.handle(
+            ControllerEvent::Connected {
+                id,
+                identity: identity(None),
+            },
+            0,
+        );
+        let button = |edge, repeat| ControllerEvent::Button {
+            id,
+            button: ControllerButton::South,
+            edge,
+            repeat,
+        };
+        let axis = |value| ControllerEvent::Axis {
+            id,
+            axis: ControllerAxis::LeftX,
+            value,
+        };
+        assert!(!n.handle(button(KeyEdge::Pressed, false), 1).is_empty());
+        assert!(!n.handle(axis(0.9), 2).is_empty());
+        n.suppress_held();
+        assert!(!n.has_pending_repeat());
+        assert!(n.tick(10_000).is_empty());
+        assert!(n.handle(button(KeyEdge::Pressed, true), 10_001).is_empty());
+        assert!(n.handle(axis(-0.9), 10_002).is_empty());
+        assert!(
+            n.handle(button(KeyEdge::Released, false), 10_003)
+                .is_empty()
+        );
+        assert!(n.handle(axis(0.0), 10_004).is_empty());
+        assert!(!n.handle(button(KeyEdge::Pressed, false), 10_005).is_empty());
+        assert!(!n.handle(axis(-0.9), 10_006).is_empty());
     }
 
     #[test]
