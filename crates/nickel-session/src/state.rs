@@ -234,6 +234,30 @@ struct PendingLaunchObservation {
     deadline: Duration,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingLaunchWindowDisposition {
+    AwaitExpiry,
+    Unrelated,
+    Attributed { descendant: bool },
+}
+
+fn pending_launch_window_disposition(
+    pending: &PendingLaunchObservation,
+    now: Instant,
+    client_pid: u32,
+) -> PendingLaunchWindowDisposition {
+    if now.saturating_duration_since(pending.registered_at) > pending.deadline {
+        return PendingLaunchWindowDisposition::AwaitExpiry;
+    }
+    if process_descends_from(client_pid, pending.root_pid, pending.root_start_time) {
+        PendingLaunchWindowDisposition::Attributed {
+            descendant: client_pid != pending.root_pid,
+        }
+    } else {
+        PendingLaunchWindowDisposition::Unrelated
+    }
+}
+
 fn linux_process_parent(pid: u32) -> Option<u32> {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()?
@@ -2045,22 +2069,22 @@ impl NickelSession {
     pub(crate) fn observe_pending_launch_window(&mut self, client_pid: u32) {
         let now = Instant::now();
         let mut observations = Vec::new();
-        self.pending_launch_observations.retain(|pending| {
-            let elapsed = now.saturating_duration_since(pending.registered_at);
-            if elapsed > pending.deadline {
-                return false;
-            }
-            let attributed =
-                process_descends_from(client_pid, pending.root_pid, pending.root_start_time);
-            if attributed {
-                observations.push((
-                    pending.generation,
-                    elapsed.as_millis().min(u128::from(u16::MAX)) as u16,
-                    client_pid != pending.root_pid,
-                ));
-            }
-            !attributed
-        });
+        self.pending_launch_observations
+            .retain(
+                |pending| match pending_launch_window_disposition(pending, now, client_pid) {
+                    PendingLaunchWindowDisposition::AwaitExpiry
+                    | PendingLaunchWindowDisposition::Unrelated => true,
+                    PendingLaunchWindowDisposition::Attributed { descendant } => {
+                        let elapsed = now.saturating_duration_since(pending.registered_at);
+                        observations.push((
+                            pending.generation,
+                            elapsed.as_millis().min(u128::from(u16::MAX)) as u16,
+                            descendant,
+                        ));
+                        false
+                    }
+                },
+            );
         if observations.is_empty() {
             return;
         }
@@ -4999,12 +5023,13 @@ impl ClientData for ClientState {
 mod protocol_tests {
     use super::{
         DisplacedWindow, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
-        PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, RegisteredShellRole,
-        ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
-        apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
-        clamp_window_location, command_requires_shell_identity, drag_icon_location,
-        identification_expiry_is_current, maximized_content_geometry,
-        output_index_for_shell_surface, prepare_shell_behavior_update,
+        PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, PendingLaunchObservation,
+        PendingLaunchWindowDisposition, RegisteredShellRole, ShellRegistrationRejection,
+        admitted_preview_ids, advance_preview_content_generation, apply_shell_behavior_value,
+        bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
+        command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
+        maximized_content_geometry, output_index_for_shell_surface,
+        pending_launch_window_disposition, prepare_shell_behavior_update,
         preview_mapping_has_exact_size, protocol_preview_from_cached,
         record_preview_capture_attempt, restored_drag_content_geometry,
         retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
@@ -5033,6 +5058,23 @@ mod protocol_tests {
     };
     use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn late_window_callback_leaves_expiry_owned_by_the_registered_timer() {
+        let now = Instant::now();
+        let pending = PendingLaunchObservation {
+            generation: 7,
+            root_pid: std::process::id(),
+            root_start_time: 1,
+            registered_at: now - Duration::from_millis(101),
+            deadline: Duration::from_millis(100),
+        };
+
+        assert_eq!(
+            pending_launch_window_disposition(&pending, now, std::process::id()),
+            PendingLaunchWindowDisposition::AwaitExpiry
+        );
+    }
 
     #[test]
     fn shell_behavior_values_are_typed_and_desktop_counts_are_validated() {
