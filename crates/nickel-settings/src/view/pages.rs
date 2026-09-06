@@ -354,7 +354,9 @@ impl SettingsApp {
             })
             .cloned()
             .collect::<Vec<_>>();
-        let target_results = if matching_targets.is_empty() {
+        let target_results = if self.default_apps_loading && self.default_app_targets.is_empty() {
+            AnyView::new(Text::new("Loading file and protocol associations…").color(palette.muted))
+        } else if matching_targets.is_empty() {
             AnyView::new(
                 Text::new(if self.default_app_target_status.is_some() {
                     "The operating-system association catalog is unavailable."
@@ -413,7 +415,11 @@ impl SettingsApp {
             "File types and links",
             self.default_app_target_status
                 .as_deref()
-                .unwrap_or("All associations reported by the operating system"),
+                .unwrap_or(if self.default_apps_loading {
+                    "Refreshing associations…"
+                } else {
+                    "All associations reported by the operating system"
+                }),
         )
         .trailing(
             SettingsSearchField::new(

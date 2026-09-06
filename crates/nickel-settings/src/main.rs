@@ -462,6 +462,15 @@ struct DefaultAppRow {
     status: Option<String>,
 }
 
+struct DefaultAppsDiscovery {
+    generation: u64,
+    targets: Result<Vec<nickel_platform::AssociationTarget>, nickel_platform::AssociationError>,
+    rows: Vec<(
+        nickel_platform::AssociationTarget,
+        Result<nickel_platform::AssociationSnapshot, nickel_platform::AssociationError>,
+    )>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum SettingsMessage {
     Navigate(SettingsPage),
@@ -814,20 +823,98 @@ impl SettingsApp {
     }
 
     fn load_default_apps(&mut self) {
+        if self.default_apps_discovery_rx.is_some() {
+            return;
+        }
+        self.default_apps_discovery_generation =
+            self.default_apps_discovery_generation.wrapping_add(1);
+        let generation = self.default_apps_discovery_generation;
+        let rows = self
+            .default_apps
+            .iter()
+            .map(|row| row.target.clone())
+            .collect::<Vec<_>>();
         let service = nickel_platform::association_service();
-        if self.default_app_targets.is_empty() {
-            match service.available_targets() {
-                Ok(mut targets) => {
-                    targets.sort_by_key(|target| (target.family(), target.platform_key()));
-                    targets.dedup();
-                    self.default_app_targets = targets;
-                    self.default_app_target_status = None;
-                }
-                Err(error) => self.default_app_target_status = Some(error.to_string()),
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        match std::thread::Builder::new()
+            .name("nickel-default-app-discovery".into())
+            .spawn(move || {
+                let targets = service.available_targets();
+                let rows = rows
+                    .into_iter()
+                    .map(|target| {
+                        let snapshot = service.inspect(&target);
+                        (target, snapshot)
+                    })
+                    .collect();
+                let _ = sender.send(DefaultAppsDiscovery {
+                    generation,
+                    targets,
+                    rows,
+                });
+            }) {
+            Ok(_) => {
+                self.default_apps_loading = true;
+                self.default_apps_discovery_rx = Some(receiver);
+                self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
+            }
+            Err(error) => {
+                self.default_apps_loading = false;
+                self.default_app_target_status =
+                    Some(format!("Association discovery could not start: {error}"));
+                self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
             }
         }
-        for row in &mut self.default_apps {
-            match service.inspect(&row.target) {
+    }
+
+    fn poll_default_apps_discovery(&mut self) -> bool {
+        let outcome = self
+            .default_apps_discovery_rx
+            .as_ref()
+            .map(std::sync::mpsc::Receiver::try_recv);
+        let discovery = match outcome {
+            Some(Ok(discovery)) => discovery,
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => return false,
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.default_apps_discovery_rx = None;
+                self.default_apps_loading = false;
+                self.default_app_target_status =
+                    Some("Association discovery stopped before returning a result".into());
+                self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
+                return true;
+            }
+        };
+        self.default_apps_discovery_rx = None;
+        if discovery.generation != self.default_apps_discovery_generation {
+            self.default_apps_loading = false;
+            return false;
+        }
+        self.default_apps_loading = false;
+        match discovery.targets {
+            Ok(mut targets) => {
+                targets.sort_by_key(|target| (target.family(), target.platform_key()));
+                targets.dedup();
+                self.default_app_targets = targets;
+                self.default_app_target_status = None;
+            }
+            Err(error) => {
+                let prefix = if self.default_app_targets.is_empty() {
+                    "Association catalog unavailable"
+                } else {
+                    "Partial association catalog; refresh failed"
+                };
+                self.default_app_target_status = Some(format!("{prefix}: {error}"));
+            }
+        }
+        for (target, result) in discovery.rows {
+            let Some(row) = self
+                .default_apps
+                .iter_mut()
+                .find(|row| row.target == target)
+            else {
+                continue;
+            };
+            match result {
                 Ok(snapshot) => {
                     row.snapshot = Some(snapshot);
                     row.status = None;
@@ -837,18 +924,31 @@ impl SettingsApp {
                 }
             }
         }
-        self.next_default_apps_refresh = Instant::now() + Duration::from_secs(2);
+        let needs_followup = self
+            .default_apps
+            .iter()
+            .any(|row| row.snapshot.is_none() && row.status.is_none());
+        self.next_default_apps_refresh = Instant::now()
+            + if needs_followup {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(2)
+            };
+        if needs_followup {
+            self.load_default_apps();
+        }
+        true
     }
 
     fn add_default_app_target(&mut self, target: nickel_platform::AssociationTarget) {
         if !self.default_apps.iter().any(|row| row.target == target) {
-            let snapshot = nickel_platform::association_service().inspect(&target);
             self.default_apps.push(DefaultAppRow {
                 label: target.platform_key(),
                 target,
-                snapshot: snapshot.as_ref().ok().cloned(),
-                status: snapshot.err().map(|error| error.to_string()),
+                snapshot: None,
+                status: None,
             });
+            self.load_default_apps();
         }
         self.default_app_target_query.clear();
     }
@@ -1696,6 +1796,9 @@ impl SettingsApp {
         self.poll_wifi_power();
         self.poll_bluetooth_operation();
         self.poll_codex_probe();
+        if self.poll_default_apps_discovery() {
+            self.request_redraw();
+        }
         let now = Instant::now();
         if self
             .pending_display_revert
@@ -2185,7 +2288,11 @@ impl Application for SettingsApp {
             deadlines.push(self.next_network_refresh);
         }
         if self.page == SettingsPage::DefaultApps {
-            deadlines.push(self.next_default_apps_refresh);
+            deadlines.push(if self.default_apps_discovery_rx.is_some() {
+                now + Duration::from_millis(16)
+            } else {
+                self.next_default_apps_refresh
+            });
         }
         if self.wallpaper_dialog_rx.is_some() {
             deadlines.push(now + self.wallpaper_poll_delay);
@@ -2413,11 +2520,11 @@ mod tests {
     use super::view::codex_switch_state;
     use super::{
         ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction,
-        FeatureEffectiveState, FeatureHealth, FeatureInstallation, FeatureSupport,
-        FileIconPreference, NetworkAdapter, OptionalFeatureRuntime, OptionalFeatureSettings, Rect,
-        SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter, SettingsMessage, SettingsPage,
-        ThemePreference, UiHost, WallpaperSettings, WifiNetwork, attach_rect_centered,
-        codex_feature_state, constrain_center, resolve_codex_feature_state,
+        DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
+        FeatureSupport, FileIconPreference, NetworkAdapter, OptionalFeatureRuntime,
+        OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp, SettingsHostAdapter,
+        SettingsMessage, SettingsPage, ThemePreference, UiHost, WallpaperSettings, WifiNetwork,
+        attach_rect_centered, codex_feature_state, constrain_center, resolve_codex_feature_state,
         shell_behavior_transaction, snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
@@ -2836,6 +2943,46 @@ mod tests {
                 .is_empty(),
             "consent-only platforms must expose the same candidate chooser"
         );
+    }
+
+    #[test]
+    fn default_app_discovery_reports_partial_refresh_and_applies_rows_atomically() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
+        let retained = nickel_platform::AssociationTarget::mime("image/svg+xml");
+        app.default_app_targets = vec![retained.clone()];
+        app.default_apps_loading = true;
+        app.default_apps_discovery_generation = 7;
+        for row in app.default_apps.iter_mut().skip(1) {
+            row.status = Some("fixture unavailable".into());
+        }
+        let target = app.default_apps[0].target.clone();
+        let snapshot = nickel_platform::AssociationSnapshot {
+            target: target.clone(),
+            effective: None,
+            handlers: Vec::new(),
+            capability: nickel_platform::AssociationCapability::DirectUserChange,
+            scope: nickel_platform::AssociationScope::User,
+            detail: "No registered handlers".into(),
+        };
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender
+            .send(DefaultAppsDiscovery {
+                generation: 7,
+                targets: Err(nickel_platform::AssociationError("registry busy".into())),
+                rows: vec![(target, Ok(snapshot.clone()))],
+            })
+            .unwrap();
+        app.default_apps_discovery_rx = Some(receiver);
+
+        assert!(app.poll_default_apps_discovery());
+        assert!(!app.default_apps_loading);
+        assert_eq!(app.default_app_targets, vec![retained]);
+        assert!(
+            app.default_app_target_status
+                .as_deref()
+                .is_some_and(|status| status.contains("Partial association catalog"))
+        );
+        assert_eq!(app.default_apps[0].snapshot, Some(snapshot));
     }
 
     #[test]
