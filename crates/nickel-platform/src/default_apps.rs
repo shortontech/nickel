@@ -572,60 +572,51 @@ impl LinuxAssociations {
         Ok((!id.is_empty()).then_some(id))
     }
 
-    fn desktop_name(id: &str) -> String {
-        desktop_file_paths(id)
-            .into_iter()
-            .find_map(|path| std::fs::read_to_string(path).ok())
-            .and_then(|contents| {
-                contents.lines().find_map(|line| {
-                    line.strip_prefix("Name=")
-                        .filter(|name| !name.trim().is_empty())
-                        .map(str::to_owned)
-                })
-            })
+    fn desktop_name(
+        id: &str,
+        entries: &[freedesktop_desktop_entry::DesktopEntry],
+        locales: &[String],
+    ) -> String {
+        entries
+            .iter()
+            .find(|entry| entry.id() == id.trim_end_matches(".desktop"))
+            .and_then(|entry| entry.name(locales))
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| name.into_owned())
             .unwrap_or_else(|| id.trim_end_matches(".desktop").to_owned())
     }
 
-    fn handlers(target: &AssociationTarget) -> Vec<ApplicationHandler> {
+    fn handlers(
+        target: &AssociationTarget,
+        entries: &[freedesktop_desktop_entry::DesktopEntry],
+        locales: &[String],
+    ) -> Vec<ApplicationHandler> {
         let key = target.platform_key();
         let mut handlers = Vec::new();
-        for root in desktop_data_roots() {
-            let Ok(entries) = std::fs::read_dir(root.join("applications")) else {
+        for entry in entries {
+            let id = format!("{}.desktop", entry.id());
+            if handlers
+                .iter()
+                .any(|item: &ApplicationHandler| item.id == id)
+            {
                 continue;
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
-                    continue;
-                };
-                if !id.ends_with(".desktop")
-                    || handlers
-                        .iter()
-                        .any(|item: &ApplicationHandler| item.id == id)
-                {
-                    continue;
-                }
-                let Ok(contents) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                let supports = contents
-                    .lines()
-                    .filter_map(|line| line.strip_prefix("MimeType="))
-                    .flat_map(|types| types.split(';'))
-                    .any(|kind| kind == key);
-                let hidden = contents
-                    .lines()
-                    .any(|line| line == "Hidden=true" || line == "NoDisplay=true");
-                if supports && !hidden {
-                    handlers.push(ApplicationHandler {
-                        id: id.into(),
-                        name: Self::desktop_name(id),
-                        icon: contents
-                            .lines()
-                            .find_map(|line| line.strip_prefix("Icon=").map(str::to_owned)),
-                        source: path.display().to_string(),
-                    });
-                }
+            }
+            let supports = entry
+                .mime_type()
+                .is_some_and(|types| types.into_iter().any(|kind| kind == key));
+            // NoDisplay suppresses launcher/menu presentation; it does not unregister the
+            // application as a compatible association handler. Hidden, however, is the
+            // freedesktop deletion/override marker and must win over lower-precedence entries.
+            if supports && !entry.hidden() {
+                handlers.push(ApplicationHandler {
+                    name: entry
+                        .name(locales)
+                        .filter(|name| !name.trim().is_empty())
+                        .map_or_else(|| entry.id().to_owned(), |name| name.into_owned()),
+                    id,
+                    icon: entry.icon().map(str::to_owned),
+                    source: entry.path.display().to_string(),
+                });
             }
         }
         handlers.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
@@ -679,13 +670,15 @@ impl AssociationBackend for LinuxAssociations {
     }
 
     fn inspect(&self, target: &AssociationTarget) -> Result<AssociationSnapshot, AssociationError> {
+        let locales = freedesktop_desktop_entry::get_languages_from_env();
+        let entries = linux_desktop_entries(&locales);
         let effective = Self::query(target)?.map(|id| ApplicationHandler {
-            name: Self::desktop_name(&id),
+            name: Self::desktop_name(&id, &entries, &locales),
             id,
             icon: None,
             source: "freedesktop MIME default".into(),
         });
-        let mut handlers = Self::handlers(target);
+        let mut handlers = Self::handlers(target, &entries, &locales);
         if let Some(current) = effective.as_ref()
             && !handlers.iter().any(|handler| handler.id == current.id)
         {
@@ -711,9 +704,10 @@ impl AssociationBackend for LinuxAssociations {
                 detail: "the selected application is not a desktop-entry identity".into(),
             });
         }
-        if !desktop_file_paths(handler_id)
+        let locales = freedesktop_desktop_entry::get_languages_from_env();
+        if !linux_desktop_entries(&locales)
             .iter()
-            .any(|path| path.is_file())
+            .any(|entry| format!("{}.desktop", entry.id()) == handler_id)
         {
             return Ok(ChangeOutcome::Rejected {
                 detail: "the selected application is no longer installed".into(),
@@ -733,11 +727,14 @@ impl AssociationBackend for LinuxAssociations {
 }
 
 #[cfg(target_os = "linux")]
-fn desktop_file_paths(id: &str) -> Vec<std::path::PathBuf> {
-    desktop_data_roots()
-        .into_iter()
-        .map(|root| root.join("applications").join(id))
-        .collect()
+fn linux_desktop_entries(locales: &[String]) -> Vec<freedesktop_desktop_entry::DesktopEntry> {
+    freedesktop_desktop_entry::Iter::new(
+        desktop_data_roots()
+            .into_iter()
+            .map(|root| root.join("applications")),
+    )
+    .entries(Some(locales))
+    .collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -1292,6 +1289,44 @@ mod tests {
         ] {
             assert!(keys.contains(expected), "missing association {expected}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_handlers_use_recursive_desktop_ids_and_localized_names() {
+        let entry = freedesktop_desktop_entry::DesktopEntry::from_str(
+            "/fixture/applications/vendor/viewer.desktop",
+            "[Desktop Entry]\nName=Viewer\nName[fr]=Visionneuse\nIcon=image-viewer\nMimeType=image/svg+xml;image/png;\n",
+            Some(&["fr"]),
+        )
+        .unwrap();
+        let handlers = LinuxAssociations::handlers(
+            &AssociationTarget::mime("image/svg+xml"),
+            &[entry],
+            &["fr".to_owned()],
+        );
+
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0].id, "vendor-viewer.desktop");
+        assert_eq!(handlers[0].name, "Visionneuse");
+        assert_eq!(handlers[0].icon.as_deref(), Some("image-viewer"));
+
+        let no_display = freedesktop_desktop_entry::DesktopEntry::from_str(
+            "/fixture/applications/helper.desktop",
+            "[Desktop Entry]\nName=Helper\nNoDisplay=true\nMimeType=image/svg+xml;\n",
+            None::<&[&str]>,
+        )
+        .unwrap();
+        assert_eq!(
+            LinuxAssociations::handlers(
+                &AssociationTarget::mime("image/svg+xml"),
+                &[no_display],
+                &[],
+            )
+            .len(),
+            1,
+            "NoDisplay handlers remain valid association candidates"
+        );
     }
 
     impl AssociationBackend for Fixture {
