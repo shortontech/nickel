@@ -4,7 +4,9 @@ use nickel_session_protocol::{OnScreenKeyboardInput, OnScreenKeyboardSnapshot, S
 use smithay::{
     backend::input::{InputTime, KeyState},
     desktop::Window,
-    input::keyboard::{FilterResult, KeyboardSource, Keysym},
+    input::keyboard::{
+        FilterResult, KeyboardSource, KeyboardTarget, Keycode, Keysym, ModifiersState, xkb,
+    },
     reexports::wayland_server::Resource,
     utils::SERIAL_COUNTER,
     wayland::{seat::WaylandFocus, text_input::TextInputSeat},
@@ -185,6 +187,47 @@ impl NickelSession {
                 });
                 if committed {
                     text_input.done(false);
+                } else if matches!(
+                    keyboard.current_focus(),
+                    Some(crate::focus::KeyboardFocusTarget::X11(_))
+                ) {
+                    // Xwayland does not apply the throwaway keymap used by
+                    // inject_text_keysyms: its spare code 9 arrives as Escape.
+                    // Resolve real codes and modifier levels in the existing map.
+                    let plan = keyboard.with_xkb_state(self, |context| {
+                        let xkb = context.xkb().lock().unwrap();
+                        // SAFETY: the borrowed keymap and the temporary state made
+                        // by text_key_plan are dropped before this Xkb guard. Only
+                        // owned keycodes and modifier values leave the closure.
+                        text_key_plan(unsafe { xkb.keymap() }, xkb.active_layout().0, &text)
+                    })?;
+                    let focus = keyboard
+                        .current_focus()
+                        .ok_or("seat recipient unavailable")?;
+                    let seat = self.seat.clone();
+                    let original_modifiers = keyboard.modifier_state();
+                    for (code, modifiers) in plan {
+                        // Override the recipient's interpretation, not the shared
+                        // seat state: physically held modifiers remain held.
+                        focus.modifiers(&seat, self, modifiers, SERIAL_COUNTER.next_serial());
+                        for state in [KeyState::Pressed, KeyState::Released] {
+                            keyboard.input_from_source::<(), _>(
+                                self.on_screen_keyboard.source,
+                                self,
+                                code,
+                                state,
+                                SERIAL_COUNTER.next_serial(),
+                                InputTime::now(),
+                                |_, _, _| FilterResult::Forward,
+                            );
+                        }
+                    }
+                    focus.modifiers(
+                        &seat,
+                        self,
+                        original_modifiers,
+                        SERIAL_COUNTER.next_serial(),
+                    );
                 } else {
                     let symbols: Vec<_> = text.chars().map(Keysym::from_char).collect();
                     keyboard.inject_text_keysyms(self, &symbols);
@@ -238,6 +281,44 @@ impl NickelSession {
     }
 }
 
+/// Resolve the complete string before delivering anything, so unsupported text
+/// fails without partially typing or changing the recipient's modifiers.
+fn text_key_plan(
+    keymap: &xkb::Keymap,
+    layout: u32,
+    text: &str,
+) -> Result<Vec<(Keycode, ModifiersState)>, &'static str> {
+    let mut state = xkb::State::new(keymap);
+    text.chars()
+        .map(|character| {
+            let symbol = Keysym::from_char(character);
+            for code in keymap.min_keycode().raw()..=keymap.max_keycode().raw() {
+                let code = Keycode::new(code);
+                for level in 0..keymap.num_levels_for_key(code, layout) {
+                    if !keymap
+                        .key_get_syms_by_level(code, layout, level)
+                        .contains(&symbol)
+                    {
+                        continue;
+                    }
+                    let mut masks = [0; 32];
+                    let count = keymap.key_get_mods_for_level(code, layout, level, &mut masks);
+                    masks[..count].sort_by_key(|mask| (mask.count_ones(), *mask));
+                    for &mask in &masks[..count] {
+                        state.update_mask(mask, 0, 0, 0, 0, layout);
+                        if state.key_get_one_sym(code) == symbol {
+                            let mut modifiers = ModifiersState::default();
+                            modifiers.update_with(&state);
+                            return Ok((code, modifiers));
+                        }
+                    }
+                }
+            }
+            Err("text unavailable in the current X11 keyboard layout")
+        })
+        .collect()
+}
+
 fn controller_barrier_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -245,4 +326,52 @@ fn controller_barrier_now() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verify_layout(layout: &str, text: &str) {
+        let context = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
+        let keymap = xkb::Keymap::new_from_names(
+            &context,
+            "",
+            "",
+            layout,
+            "",
+            None,
+            xkb::KEYMAP_COMPILE_NO_FLAGS,
+        )
+        .unwrap();
+        let plan = text_key_plan(&keymap, 0, text).unwrap();
+        let mut state = xkb::State::new(&keymap);
+        for ((code, modifiers), character) in plan.into_iter().zip(text.chars()) {
+            let mods = modifiers.serialized;
+            state.update_mask(
+                mods.depressed,
+                mods.latched,
+                mods.locked,
+                0,
+                0,
+                mods.layout_effective,
+            );
+            assert_eq!(state.key_get_one_sym(code), Keysym::from_char(character));
+            assert_ne!(code.raw(), 9, "text must not reuse the Escape keycode");
+        }
+        assert!(text_key_plan(&keymap, 0, "h🦀").is_err());
+    }
+
+    #[test]
+    fn x11_text_uses_real_us_letter_and_punctuation_levels() {
+        verify_layout(
+            "us",
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789`~!@#$%^&*()-_=+[]{}\\|;:'\",.<>/? ",
+        );
+    }
+
+    #[test]
+    fn x11_text_resolves_altgr_and_non_us_letter_positions() {
+        verify_layout("de", "hHzZyY@€äÄöÖß");
+    }
 }
