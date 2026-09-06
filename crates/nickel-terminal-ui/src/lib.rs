@@ -340,12 +340,20 @@ fn encode_paste(text: String, bracketed: bool) -> Vec<u8> {
 /// Converts normalized input to terminal intent. Printable input is accepted only from committed
 /// text events, so key and IME streams can never insert the same text twice.
 pub fn translate_input(input: &InputEvent) -> Option<TerminalInputCommand> {
-    translate_input_with_application_cursor(input, false)
+    translate_input_with_modes(input, false, false)
 }
 
 pub fn translate_input_with_application_cursor(
     input: &InputEvent,
     application_cursor: bool,
+) -> Option<TerminalInputCommand> {
+    translate_input_with_modes(input, application_cursor, false)
+}
+
+pub fn translate_input_with_modes(
+    input: &InputEvent,
+    application_cursor: bool,
+    application_keypad: bool,
 ) -> Option<TerminalInputCommand> {
     match input {
         InputEvent::Text(TextEvent::Commit { text, .. }) if !text.is_empty() => {
@@ -367,7 +375,8 @@ pub fn translate_input_with_application_cursor(
                     KeyCode::KeyC => Some(TerminalInputCommand::Copy),
                     KeyCode::KeyV => Some(TerminalInputCommand::PasteRequested),
                     KeyCode::KeyA => Some(TerminalInputCommand::SelectAll),
-                    _ => key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write),
+                    _ => key_bytes(code, alt, application_cursor, application_keypad)
+                        .map(TerminalInputCommand::Write),
                 };
             }
             if shift {
@@ -378,7 +387,8 @@ pub fn translate_input_with_application_cursor(
                     }
                     KeyCode::Home => Some(TerminalInputCommand::Scroll(TerminalScroll::Top)),
                     KeyCode::End => Some(TerminalInputCommand::Scroll(TerminalScroll::Bottom)),
-                    _ => key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write),
+                    _ => key_bytes(code, alt, application_cursor, application_keypad)
+                        .map(TerminalInputCommand::Write),
                 };
             }
             // Ctrl+Alt is the normalized fallback representation of AltGr on backends which
@@ -389,7 +399,8 @@ pub fn translate_input_with_application_cursor(
             {
                 return Some(TerminalInputCommand::Write(vec![byte]));
             }
-            key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write)
+            key_bytes(code, alt, application_cursor, application_keypad)
+                .map(TerminalInputCommand::Write)
         }
         _ => None,
     }
@@ -428,8 +439,29 @@ fn control_byte(code: KeyCode) -> Option<u8> {
     Some(value)
 }
 
-fn key_bytes(code: KeyCode, alt: bool, application_cursor: bool) -> Option<Vec<u8>> {
+fn key_bytes(
+    code: KeyCode,
+    alt: bool,
+    application_cursor: bool,
+    application_keypad: bool,
+) -> Option<Vec<u8>> {
     let sequence: &[u8] = match code {
+        KeyCode::Numpad0 if application_keypad => b"\x1bOp",
+        KeyCode::Numpad1 if application_keypad => b"\x1bOq",
+        KeyCode::Numpad2 if application_keypad => b"\x1bOr",
+        KeyCode::Numpad3 if application_keypad => b"\x1bOs",
+        KeyCode::Numpad4 if application_keypad => b"\x1bOt",
+        KeyCode::Numpad5 if application_keypad => b"\x1bOu",
+        KeyCode::Numpad6 if application_keypad => b"\x1bOv",
+        KeyCode::Numpad7 if application_keypad => b"\x1bOw",
+        KeyCode::Numpad8 if application_keypad => b"\x1bOx",
+        KeyCode::Numpad9 if application_keypad => b"\x1bOy",
+        KeyCode::NumpadDecimal if application_keypad => b"\x1bOn",
+        KeyCode::NumpadAdd if application_keypad => b"\x1bOk",
+        KeyCode::NumpadSubtract if application_keypad => b"\x1bOm",
+        KeyCode::NumpadMultiply if application_keypad => b"\x1bOj",
+        KeyCode::NumpadDivide if application_keypad => b"\x1bOo",
+        KeyCode::NumpadEnter if application_keypad => b"\x1bOM",
         KeyCode::Enter | KeyCode::NumpadEnter => b"\r",
         KeyCode::Tab => b"\t",
         KeyCode::Backspace => b"\x7f",
@@ -938,6 +970,27 @@ mod tests {
                 true,
             ),
             Some(TerminalInputCommand::Write(b"\x1bOA".to_vec()))
+        );
+    }
+
+    #[test]
+    fn application_keypad_emits_vt_keypad_sequences() {
+        let numpad_seven = key(KeyCode::Numpad7, ModifierState::default());
+        assert_eq!(
+            translate_input_with_modes(&numpad_seven, false, false),
+            None
+        );
+        assert_eq!(
+            translate_input_with_modes(&numpad_seven, false, true),
+            Some(TerminalInputCommand::Write(b"\x1bOw".to_vec()))
+        );
+        assert_eq!(
+            translate_input_with_modes(
+                &key(KeyCode::NumpadEnter, ModifierState::default()),
+                false,
+                true,
+            ),
+            Some(TerminalInputCommand::Write(b"\x1bOM".to_vec()))
         );
     }
 

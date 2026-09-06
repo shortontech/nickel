@@ -14,7 +14,7 @@ use nickel_terminal::{
 };
 use nickel_terminal_ui::{
     CellMetrics, PasteDecision, TerminalInputCommand, TerminalPalette, TerminalPointerTranslator,
-    TerminalViewport, confirm_paste, prepare_paste, translate_input_with_application_cursor,
+    TerminalViewport, confirm_paste, prepare_paste, translate_input_with_modes,
 };
 use nickel_ui::{
     AdapterOutcome, Application, Column, Container, FrameOverlay, HostAdapter, HostServices,
@@ -468,9 +468,12 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             host.application().metrics,
             self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         );
-        let application_cursor = host.application().snapshot.application_cursor;
+        let (application_cursor, application_keypad) = {
+            let snapshot = &host.application().snapshot;
+            (snapshot.application_cursor, snapshot.application_keypad)
+        };
         let Some(command) = pointer_command
-            .or_else(|| translate_input_with_application_cursor(input, application_cursor))
+            .or_else(|| translate_input_with_modes(input, application_cursor, application_keypad))
         else {
             return Ok(AdapterOutcome::default());
         };

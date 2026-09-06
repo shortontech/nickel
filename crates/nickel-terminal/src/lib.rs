@@ -267,6 +267,7 @@ pub struct TerminalSnapshot {
     pub mouse_reporting: bool,
     pub sgr_mouse: bool,
     pub application_cursor: bool,
+    pub application_keypad: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -892,6 +893,7 @@ fn snapshot(
         mouse_reporting: content.mode.intersects(TermMode::MOUSE_MODE),
         sgr_mouse: content.mode.contains(TermMode::SGR_MOUSE),
         application_cursor: content.mode.contains(TermMode::APP_CURSOR),
+        application_keypad: content.mode.contains(TermMode::APP_KEYPAD),
     }
 }
 
@@ -1030,6 +1032,16 @@ mod tests {
         let snapshot = engine.snapshot();
         assert!(!snapshot.alternate_screen);
         assert!(snapshot.cells.iter().any(|cell| cell.character == 'p'));
+    }
+
+    #[test]
+    fn application_keypad_mode_is_projected_in_snapshots() {
+        let mut engine = TerminalEngine::new(dimensions(8, 2), 10).unwrap();
+        assert!(!engine.snapshot().application_keypad);
+        engine.process(b"\x1b=");
+        assert!(engine.snapshot().application_keypad);
+        engine.process(b"\x1b>");
+        assert!(!engine.snapshot().application_keypad);
     }
 
     #[test]
