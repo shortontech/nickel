@@ -40,7 +40,7 @@ fn close_after_exit(enabled: bool, code: Option<i32>) -> bool {
     enabled && code == Some(0)
 }
 
-fn deferred_window_suppressed(delay: Duration) -> bool {
+fn deferred_window_suppressed(delay: Duration, app: &mut TerminalApp) -> bool {
     use std::io::{BufRead, Read};
 
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
@@ -58,7 +58,33 @@ fn deferred_window_suppressed(delay: Duration) -> bool {
                 let _ = sender.try_send(());
             }
         });
-    receiver.recv_timeout(delay).is_ok()
+    await_deferred_decision(delay, app, &receiver)
+}
+
+fn await_deferred_decision(
+    delay: Duration,
+    app: &mut TerminalApp,
+    receiver: &std::sync::mpsc::Receiver<()>,
+) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        app.poll();
+        if !matches!(app.session.exit_state(), TerminalExit::Running) {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let wait = deadline
+            .saturating_duration_since(now)
+            .min(Duration::from_millis(2));
+        match receiver.recv_timeout(wait) {
+            Ok(()) => return true,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
 }
 
 fn is_suppress_decision(decision: &str) -> bool {
@@ -553,7 +579,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let remaining = deferred_started
         .map(|started| deferred_window.saturating_sub(started.elapsed()))
         .unwrap_or_default();
-    if !remaining.is_zero() && deferred_window_suppressed(remaining) {
+    if !remaining.is_zero() && deferred_window_suppressed(remaining, &mut app) {
         supervise_hidden_session(&mut app.session);
         return Ok(());
     }
@@ -630,5 +656,30 @@ mod tests {
         assert!(is_suppress_decision("suppress\n"));
         assert!(!is_suppress_decision("start\n"));
         assert!(!is_suppress_decision("suppress now\n"));
+    }
+
+    #[test]
+    fn fast_child_exit_wins_before_the_deferred_window_deadline() {
+        let mut app = TerminalApp::new(
+            Some(TerminalProgram {
+                executable: "/bin/true".into(),
+                arguments: Vec::new(),
+            }),
+            None,
+            &TerminalSettings::default(),
+        )
+        .expect("fixture PTY");
+        let (_sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let started = Instant::now();
+        assert!(!await_deferred_decision(
+            Duration::from_secs(2),
+            &mut app,
+            &receiver,
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "child exit must not wait for the visibility deadline"
+        );
+        assert!(matches!(app.session.exit_state(), TerminalExit::Exited(_)));
     }
 }
