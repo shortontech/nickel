@@ -104,6 +104,18 @@ pub(crate) fn record_prediction_observation(
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     metrics.record(evidence, descendant_window);
+    tracing::debug!(
+        likely_graphical_without_window = metrics.observations[0][0],
+        likely_graphical_with_window = metrics.observations[0][1],
+        likely_terminal_without_window = metrics.observations[1][0],
+        likely_terminal_with_window = metrics.observations[1][1],
+        unknown_without_window = metrics.observations[2][0],
+        unknown_with_window = metrics.observations[2][1],
+        unavailable_without_window = metrics.observations[3][0],
+        unavailable_with_window = metrics.observations[3][1],
+        descendant_windows = metrics.descendant_windows,
+        "updated bounded executable prediction outcomes"
+    );
 }
 
 #[allow(dead_code)]
