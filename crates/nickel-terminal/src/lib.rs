@@ -32,6 +32,8 @@ const EVENT_CAPACITY: usize = 128;
 const INPUT_QUEUE_CAPACITY: usize = 64;
 const MAX_WRITE_BYTES: usize = 64 * 1024;
 const MAX_TITLE_BYTES: usize = 4 * 1024;
+const TERMINAL_TERM: &str = "xterm-256color";
+const TERMINAL_COLORTERM: &str = "truecolor";
 const MAX_SCROLLBACK: usize = 100_000;
 const MAX_COLUMNS: u16 = 500;
 const MAX_LINES: u16 = 200;
@@ -561,6 +563,9 @@ impl TerminalSession {
     pub fn spawn(options: TerminalOptions) -> Result<Self, TerminalError> {
         options.validate()?;
         let scrollback_limit = options.scrollback_lines;
+        let mut environment = options.environment;
+        environment.insert("TERM".into(), TERMINAL_TERM.into());
+        environment.insert("COLORTERM".into(), TERMINAL_COLORTERM.into());
         let ProxyParts {
             proxy,
             events,
@@ -583,7 +588,7 @@ impl TerminalSession {
                 .map(|program| Shell::new(program.executable, program.arguments)),
             working_directory: options.working_directory,
             drain_on_exit: true,
-            env: options.environment,
+            env: environment,
             #[cfg(target_os = "windows")]
             escape_args: true,
         };
@@ -1290,6 +1295,75 @@ mod tests {
         println!("nickel-force-fixture-ready");
         std::io::Write::flush(&mut std::io::stdout()).unwrap();
         std::thread::sleep(Duration::from_secs(30));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "child-process fixture launched by live_pty_applies_typed_cwd_and_environment_policy"]
+    fn environment_policy_child_fixture() {
+        if std::env::var_os("NICKEL_TERMINAL_ENV_FIXTURE").is_none() {
+            return;
+        }
+        assert_eq!(std::env::var("TERM").as_deref(), Ok(TERMINAL_TERM));
+        assert_eq!(
+            std::env::var("COLORTERM").as_deref(),
+            Ok(TERMINAL_COLORTERM)
+        );
+        assert_eq!(std::env::var("NICKEL_TYPED_ENV").as_deref(), Ok("exact"));
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(
+            cwd.file_name().and_then(|name| name.to_str()),
+            Some("space ✓")
+        );
+        println!("nickel-environment-policy-ready");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_pty_applies_typed_cwd_and_environment_policy() {
+        let temporary = tempfile::tempdir().unwrap();
+        let working_directory = temporary.path().join("space ✓");
+        std::fs::create_dir(&working_directory).unwrap();
+        let environment = HashMap::from([
+            ("NICKEL_TERMINAL_ENV_FIXTURE".into(), "1".into()),
+            ("NICKEL_TYPED_ENV".into(), "exact".into()),
+            ("TERM".into(), "caller-value-must-not-leak".into()),
+            ("COLORTERM".into(), "caller-value-must-not-leak".into()),
+        ]);
+        let mut session = TerminalSession::spawn(TerminalOptions {
+            program: Some(TerminalProgram {
+                executable: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                arguments: vec![
+                    "--ignored".into(),
+                    "--exact".into(),
+                    "tests::environment_policy_child_fixture".into(),
+                    "--nocapture".into(),
+                ],
+            }),
+            working_directory: Some(working_directory),
+            environment,
+            dimensions: dimensions(80, 10),
+            scrollback_lines: 100,
+        })
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            while session.try_event().is_some() {}
+            let visible = session
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            if visible.contains("nickel-environment-policy-ready") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("typed cwd and environment policy did not reach the PTY child");
     }
 
     #[cfg(target_os = "linux")]
