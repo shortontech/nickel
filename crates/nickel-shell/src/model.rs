@@ -32,6 +32,15 @@ pub struct Application {
     icon: Option<String>,
     icon_path: Option<PathBuf>,
     launch_command: Option<Vec<String>>,
+    launch_class: ApplicationLaunchClass,
+    working_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ApplicationLaunchClass {
+    #[default]
+    Graphical,
+    Terminal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,10 +61,11 @@ pub enum ApplicationSkipReason {
     EmptyName,
     MissingExec,
     InvalidExec,
+    InvalidTerminal,
 }
 
 impl ApplicationSkipReason {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::ParseFailure,
         Self::UnsupportedType,
         Self::Hidden,
@@ -65,6 +75,7 @@ impl ApplicationSkipReason {
         Self::EmptyName,
         Self::MissingExec,
         Self::InvalidExec,
+        Self::InvalidTerminal,
     ];
 
     const fn index(self) -> usize {
@@ -78,13 +89,14 @@ impl ApplicationSkipReason {
             Self::EmptyName => 6,
             Self::MissingExec => 7,
             Self::InvalidExec => 8,
+            Self::InvalidTerminal => 9,
         }
     }
 
     const fn is_failure(self) -> bool {
         matches!(
             self,
-            Self::ParseFailure | Self::MissingName | Self::InvalidExec
+            Self::ParseFailure | Self::MissingName | Self::InvalidExec | Self::InvalidTerminal
         )
     }
 }
@@ -209,6 +221,8 @@ impl Application {
             icon,
             icon_path,
             launch_command,
+            launch_class: ApplicationLaunchClass::Graphical,
+            working_directory: None,
         }
     }
 
@@ -255,6 +269,24 @@ impl Application {
         self.launch_command.as_deref()
     }
 
+    pub fn launch_class(&self) -> ApplicationLaunchClass {
+        self.launch_class
+    }
+
+    pub fn working_directory(&self) -> Option<&Path> {
+        self.working_directory.as_deref()
+    }
+
+    pub fn with_launch_policy(
+        mut self,
+        launch_class: ApplicationLaunchClass,
+        working_directory: Option<PathBuf>,
+    ) -> Self {
+        self.launch_class = launch_class;
+        self.working_directory = working_directory;
+        self
+    }
+
     pub fn launch(&self) -> io::Result<Child> {
         self.process()?.spawn()
     }
@@ -292,9 +324,23 @@ impl Application {
             .as_deref()
             .and_then(|command| command.split_first())
             .ok_or_else(|| io::Error::other("application has no launch command"))?;
-        let mut command = Command::new(program);
-        command.args(arguments);
-        if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let mut command = if self.launch_class == ApplicationLaunchClass::Terminal {
+            let mut command = Command::new(nickel_terminal_executable()?);
+            if let Some(path) = &self.working_directory {
+                command.arg("--working-directory").arg(path);
+            }
+            command.arg("--").arg(program).args(arguments);
+            command
+        } else {
+            let mut command = Command::new(program);
+            command.args(arguments);
+            command
+        };
+        if let Some(path) = &self.working_directory {
+            command.current_dir(path);
+        } else if let Some(home) =
+            std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        {
             command.current_dir(home);
         }
         Ok(command)
@@ -306,6 +352,28 @@ impl Application {
         command.env_remove("NICKEL_SHELL_TEST_CONTROL");
         Ok(command)
     }
+}
+
+fn nickel_terminal_executable() -> io::Result<PathBuf> {
+    let current = std::env::current_exe()?;
+    let name = if cfg!(target_os = "windows") {
+        "nickel-terminal.exe"
+    } else {
+        "nickel-terminal"
+    };
+    let sibling = current.with_file_name(name);
+    if sibling.is_file()
+        || current
+            .parent()
+            .is_none_or(|parent| parent.file_name() != Some("deps".as_ref()))
+    {
+        return Ok(sibling);
+    }
+    Ok(current
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new("."))
+        .join(name))
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -376,7 +444,7 @@ impl WindowGroup {
 
 #[cfg(test)]
 mod tests {
-    use super::{Application, ApplicationId};
+    use super::{Application, ApplicationId, ApplicationLaunchClass};
 
     #[test]
     fn application_ids_are_opaque() {
@@ -401,6 +469,34 @@ mod tests {
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
+    }
+
+    #[test]
+    fn explicit_terminal_launch_wraps_the_exact_argument_vector() {
+        let application = Application::new(
+            "console-tool".into(),
+            "Console Tool".into(),
+            None,
+            None,
+            Some(vec!["tool".into(), "--label".into(), "two words".into()]),
+        )
+        .with_launch_policy(ApplicationLaunchClass::Terminal, Some("/tmp".into()));
+        let command = application.process_with_capabilities().unwrap();
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            arguments,
+            [
+                "--working-directory",
+                "/tmp",
+                "--",
+                "tool",
+                "--label",
+                "two words"
+            ]
+        );
     }
 
     #[cfg(target_os = "linux")]

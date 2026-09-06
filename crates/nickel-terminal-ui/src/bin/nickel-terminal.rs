@@ -303,7 +303,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut cwd = None;
     let mut command = Vec::new();
     while let Some(argument) = arguments.next() {
-        if argument == "--cwd" {
+        if argument == "--working-directory" {
             cwd = arguments.next().map(PathBuf::from);
         } else if argument == "--" {
             command.extend(arguments.map(|argument| argument.to_string_lossy().into_owned()));

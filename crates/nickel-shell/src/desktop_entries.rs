@@ -9,7 +9,10 @@ use freedesktop_desktop_entry::{
 
 use crate::{
     launcher::Application,
-    model::{ApplicationDiscovery, ApplicationDiscoveryReport, ApplicationSkipReason},
+    model::{
+        ApplicationDiscovery, ApplicationDiscoveryReport, ApplicationLaunchClass,
+        ApplicationSkipReason,
+    },
 };
 
 pub fn load_applications() -> ApplicationDiscovery {
@@ -35,6 +38,7 @@ pub fn load_applications() -> ApplicationDiscovery {
         empty_name = discovery.report().skipped(ApplicationSkipReason::EmptyName),
         missing_exec = discovery.report().skipped(ApplicationSkipReason::MissingExec),
         invalid_exec = discovery.report().skipped(ApplicationSkipReason::InvalidExec),
+        invalid_terminal = discovery.report().skipped(ApplicationSkipReason::InvalidTerminal),
         status = ?discovery.status(),
         "desktop-entry discovery complete"
     );
@@ -118,6 +122,11 @@ fn application_from_entry_result(
         None if !entry.dbus_activatable() => return Err(ApplicationSkipReason::MissingExec),
         None => Vec::new(),
     };
+    let launch_class = match entry.desktop_entry("Terminal") {
+        None | Some("false") => ApplicationLaunchClass::Graphical,
+        Some("true") => ApplicationLaunchClass::Terminal,
+        Some(_) => return Err(ApplicationSkipReason::InvalidTerminal),
+    };
 
     let icon = entry.icon().map(str::to_owned);
     let icon_path = icon
@@ -129,7 +138,8 @@ fn application_from_entry_result(
         icon,
         icon_path,
         (!launch_command.is_empty()).then_some(launch_command),
-    );
+    )
+    .with_launch_policy(launch_class, entry.path().map(PathBuf::from));
     if let Some(startup_wm_class) = entry.startup_wm_class() {
         application = application.with_identity_alias(startup_wm_class);
     }
@@ -228,6 +238,44 @@ mod tests {
                 ]
                 .as_slice()
             )
+        );
+    }
+
+    #[test]
+    fn terminal_and_working_directory_are_canonical_launch_metadata() {
+        let entry = parse(
+            "[Desktop Entry]\nType=Application\nName=Console Tool\nExec=tool --label \"two words\"\nTerminal=true\nPath=/tmp\n",
+        );
+        let application = application_from_entry(&entry, &[], &[], "hicolor").unwrap();
+        assert_eq!(
+            application.launch_class(),
+            crate::model::ApplicationLaunchClass::Terminal
+        );
+        assert_eq!(
+            application.working_directory(),
+            Some(std::path::Path::new("/tmp"))
+        );
+        assert_eq!(
+            application.launch_command(),
+            Some(
+                [
+                    "tool".to_owned(),
+                    "--label".to_owned(),
+                    "two words".to_owned()
+                ]
+                .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn malformed_terminal_value_rejects_the_entry_instead_of_guessing() {
+        let entry = parse(
+            "[Desktop Entry]\nType=Application\nName=Ambiguous\nExec=tool\nTerminal=perhaps\n",
+        );
+        assert_eq!(
+            application_from_entry_result(&entry, &[], &[], "hicolor"),
+            Err(ApplicationSkipReason::InvalidTerminal)
         );
     }
 
