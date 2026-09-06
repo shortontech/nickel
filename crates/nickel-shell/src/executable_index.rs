@@ -76,6 +76,10 @@ pub(crate) struct ScanProgress {
     pub entries_inspected: usize,
     pub commands_published: usize,
     pub retained_bytes_estimate: usize,
+    pub bytes_read: u64,
+    pub elapsed_micros: u64,
+    pub refresh_queue_capacity: usize,
+    pub peak_open_files: usize,
     pub evictions: usize,
     pub complete: bool,
 }
@@ -97,7 +101,7 @@ impl Default for ScanBudgets {
             max_directory_entries: 8_192,
             max_commands: 4_096,
             max_aliases_per_file: 16,
-            max_prefix_bytes: 1024 * 1024,
+            max_prefix_bytes: 64 * 1024,
             max_elapsed: Duration::from_secs(2),
         }
     }
@@ -119,6 +123,10 @@ impl Default for IndexSnapshot {
                 entries_inspected: 0,
                 commands_published: 0,
                 retained_bytes_estimate: 0,
+                bytes_read: 0,
+                elapsed_micros: 0,
+                refresh_queue_capacity: 1,
+                peak_open_files: 1,
                 evictions: 0,
                 complete: false,
             },
@@ -174,7 +182,7 @@ pub(crate) fn global_executable_index() -> &'static ExecutableIndex {
 }
 
 fn scan_worker(
-    path: Option<std::ffi::OsString>,
+    mut path: Option<std::ffi::OsString>,
     budgets: ScanBudgets,
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
     receiver: mpsc::Receiver<()>,
@@ -187,6 +195,7 @@ fn scan_worker(
             Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
+        path = std::env::var_os("PATH");
     }
 }
 
@@ -194,6 +203,7 @@ fn publish(
     snapshot: &RwLock<Arc<IndexSnapshot>>,
     commands: &HashMap<String, Arc<ExecutableEvidence>>,
     mut progress: ScanProgress,
+    elapsed: Duration,
 ) {
     progress.commands_published = commands.len();
     progress.retained_bytes_estimate = commands
@@ -205,6 +215,7 @@ fn publish(
                 + std::mem::size_of::<ExecutableEvidence>()
         })
         .sum();
+    progress.elapsed_micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
     *snapshot.write().unwrap_or_else(|error| error.into_inner()) = Arc::new(IndexSnapshot {
         commands: commands.clone(),
         progress,
@@ -240,7 +251,7 @@ fn scan_path_generation(
         }
         progress.directories_scanned += 1;
         let Ok(entries) = std::fs::read_dir(canonical) else {
-            publish(snapshot, &commands, progress);
+            publish(snapshot, &commands, progress, started.elapsed());
             continue;
         };
         for (entry_index, entry) in entries.enumerate() {
@@ -276,10 +287,12 @@ fn scan_path_generation(
             let evidence = if let Some(evidence) = identities.get(&identity) {
                 Arc::clone(evidence)
             } else {
-                let Some(evidence) = inspect_executable(&path, &identity, generation, budgets)
+                let Some((evidence, bytes_read)) =
+                    inspect_executable(&path, &identity, generation, budgets)
                 else {
                     continue;
                 };
+                progress.bytes_read = progress.bytes_read.saturating_add(bytes_read as u64);
                 let evidence = Arc::new(evidence);
                 identities.insert(identity.clone(), Arc::clone(&evidence));
                 evidence
@@ -287,10 +300,10 @@ fn scan_path_generation(
             *aliases += 1;
             commands.insert(command, evidence);
         }
-        publish(snapshot, &commands, progress);
+        publish(snapshot, &commands, progress, started.elapsed());
     }
     progress.complete = complete;
-    publish(snapshot, &commands, progress);
+    publish(snapshot, &commands, progress, started.elapsed());
 }
 
 fn inspect_executable(
@@ -298,7 +311,7 @@ fn inspect_executable(
     identity: &FileIdentity,
     generation: u64,
     budgets: ScanBudgets,
-) -> Option<ExecutableEvidence> {
+) -> Option<(ExecutableEvidence, usize)> {
     let mut file = File::open(path).ok()?;
     let mut bytes = Vec::new();
     file.by_ref()
@@ -311,13 +324,17 @@ fn inspect_executable(
     }
     let (class, confidence_percent, reasons) =
         classify_bytes(&bytes, identity.size > bytes.len() as u64);
-    Some(ExecutableEvidence {
-        class,
-        confidence_percent,
-        generation,
-        resolved_path: path.to_owned(),
-        reasons,
-    })
+    let inspected_bytes = bytes.len();
+    Some((
+        ExecutableEvidence {
+            class,
+            confidence_percent,
+            generation,
+            resolved_path: path.to_owned(),
+            reasons,
+        },
+        inspected_bytes,
+    ))
 }
 
 fn classify_bytes(bytes: &[u8], truncated: bool) -> (ExecutableClass, u8, Vec<EvidenceReason>) {
@@ -414,6 +431,9 @@ fn elf_needed_libraries(bytes: &[u8]) -> Result<Vec<String>, EvidenceReason> {
         Some(2) => false,
         _ => return Err(EvidenceReason::Malformed),
     };
+    if let Some(dependencies) = elf_program_needed_libraries(bytes, class, little_endian)? {
+        return Ok(dependencies);
+    }
     let number = |offset: usize, width: usize| -> Result<u64, EvidenceReason> {
         let end = offset.checked_add(width).ok_or(EvidenceReason::Malformed)?;
         let value = bytes
@@ -516,6 +536,140 @@ fn elf_needed_libraries(bytes: &[u8]) -> Result<Vec<String>, EvidenceReason> {
         }
     }
     Ok(dependencies)
+}
+
+fn elf_program_needed_libraries(
+    bytes: &[u8],
+    class: u8,
+    little_endian: bool,
+) -> Result<Option<Vec<String>>, EvidenceReason> {
+    let number = |offset: usize, width: usize| -> Result<u64, EvidenceReason> {
+        let end = offset.checked_add(width).ok_or(EvidenceReason::Malformed)?;
+        let value = bytes
+            .get(offset..end)
+            .ok_or(EvidenceReason::InspectionBudget)?;
+        Ok(if little_endian {
+            value
+                .iter()
+                .enumerate()
+                .fold(0_u64, |total, (shift, byte)| {
+                    total | (u64::from(*byte) << (shift * 8))
+                })
+        } else {
+            value
+                .iter()
+                .fold(0_u64, |total, byte| (total << 8) | u64::from(*byte))
+        })
+    };
+    let (program_offset, program_size, program_count, word_size, dynamic_entry_size) = match class {
+        1 => (
+            number(28, 4)?,
+            number(42, 2)?,
+            number(44, 2)?,
+            4_usize,
+            8_usize,
+        ),
+        2 => (
+            number(32, 8)?,
+            number(54, 2)?,
+            number(56, 2)?,
+            8_usize,
+            16_usize,
+        ),
+        _ => return Err(EvidenceReason::Malformed),
+    };
+    let program_offset = usize::try_from(program_offset).map_err(|_| EvidenceReason::Malformed)?;
+    let program_size = usize::try_from(program_size).map_err(|_| EvidenceReason::Malformed)?;
+    let program_count = usize::try_from(program_count).map_err(|_| EvidenceReason::Malformed)?;
+    if program_count == 0 {
+        return Ok(None);
+    }
+    let minimum_size = if class == 1 { 32 } else { 56 };
+    if program_size < minimum_size || program_count > 1_024 {
+        return Err(EvidenceReason::Malformed);
+    }
+    let mut loads = Vec::new();
+    let mut dynamic = None;
+    for index in 0..program_count {
+        let base = program_offset
+            .checked_add(
+                index
+                    .checked_mul(program_size)
+                    .ok_or(EvidenceReason::Malformed)?,
+            )
+            .ok_or(EvidenceReason::Malformed)?;
+        let kind = number(base, 4)?;
+        let (offset_at, address_at, size_at) = if class == 1 { (4, 8, 16) } else { (8, 16, 32) };
+        let offset = usize::try_from(number(base + offset_at, word_size)?)
+            .map_err(|_| EvidenceReason::Malformed)?;
+        let address = number(base + address_at, word_size)?;
+        let size = usize::try_from(number(base + size_at, word_size)?)
+            .map_err(|_| EvidenceReason::Malformed)?;
+        match kind {
+            1 => loads.push((address, offset, size)),
+            2 => dynamic = Some((offset, size)),
+            _ => {}
+        }
+    }
+    let Some((dynamic_offset, dynamic_size)) = dynamic else {
+        return Ok(None);
+    };
+    let dynamic_end = dynamic_offset
+        .checked_add(dynamic_size)
+        .ok_or(EvidenceReason::Malformed)?;
+    let dynamic = bytes
+        .get(dynamic_offset..dynamic_end)
+        .ok_or(EvidenceReason::InspectionBudget)?;
+    let mut needed = Vec::new();
+    let mut string_address = None;
+    let mut string_size = None;
+    for entry in dynamic.chunks_exact(dynamic_entry_size).take(4_096) {
+        let entry_offset = entry.as_ptr() as usize - bytes.as_ptr() as usize;
+        let tag = number(entry_offset, word_size)?;
+        let value = number(entry_offset + word_size, word_size)?;
+        match tag {
+            0 => break,
+            1 if needed.len() < 256 => needed.push(value),
+            5 => string_address = Some(value),
+            10 => string_size = Some(value),
+            _ => {}
+        }
+    }
+    let string_address = string_address.ok_or(EvidenceReason::Malformed)?;
+    let string_size = usize::try_from(string_size.ok_or(EvidenceReason::Malformed)?)
+        .map_err(|_| EvidenceReason::Malformed)?;
+    if string_size > 4 * 1024 * 1024 {
+        return Err(EvidenceReason::InspectionBudget);
+    }
+    let string_offset = loads
+        .iter()
+        .find_map(|(address, offset, size)| {
+            let relative = string_address.checked_sub(*address)?;
+            (relative < *size as u64)
+                .then(|| offset.checked_add(relative as usize))
+                .flatten()
+        })
+        .ok_or(EvidenceReason::Malformed)?;
+    let strings_end = string_offset
+        .checked_add(string_size)
+        .ok_or(EvidenceReason::Malformed)?;
+    let strings = bytes
+        .get(string_offset..strings_end)
+        .ok_or(EvidenceReason::InspectionBudget)?;
+    let dependencies = needed
+        .into_iter()
+        .map(|offset| {
+            let offset = usize::try_from(offset).map_err(|_| EvidenceReason::Malformed)?;
+            strings
+                .get(offset..)
+                .and_then(|tail| tail.split(|byte| *byte == 0).next())
+                .filter(|name| !name.is_empty() && name.len() <= 512)
+                .and_then(|name| std::str::from_utf8(name).ok())
+                .map(str::to_owned)
+                .ok_or(EvidenceReason::Malformed)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(dependencies))
 }
 
 #[cfg(test)]
@@ -673,5 +827,46 @@ mod tests {
         assert_eq!(snapshot.progress.generation, 9);
         assert_eq!(snapshot.progress.entries_inspected, 1);
         assert_eq!(snapshot.commands.len(), 1);
+    }
+
+    #[test]
+    fn native_path_scan_reports_bounded_resource_evidence() {
+        let snapshot = RwLock::new(Arc::new(IndexSnapshot::default()));
+        let budgets = ScanBudgets::default();
+        scan_path_generation(std::env::var_os("PATH").as_deref(), budgets, 11, &snapshot);
+        let snapshot = snapshot.read().unwrap();
+        let progress = snapshot.progress;
+        let graphical = snapshot
+            .commands
+            .values()
+            .filter(|evidence| evidence.class == ExecutableClass::LikelyGraphical)
+            .count();
+        let terminal = snapshot
+            .commands
+            .values()
+            .filter(|evidence| evidence.class == ExecutableClass::LikelyTerminal)
+            .count();
+        eprintln!(
+            "generation={} directories={} inspected={} commands={} graphical={} terminal={} bytes_read={} retained_bytes={} elapsed_us={} complete={} evictions={}",
+            progress.generation,
+            progress.directories_scanned,
+            progress.entries_inspected,
+            progress.commands_published,
+            graphical,
+            terminal,
+            progress.bytes_read,
+            progress.retained_bytes_estimate,
+            progress.elapsed_micros,
+            progress.complete,
+            progress.evictions,
+        );
+        assert!(progress.directories_scanned <= budgets.max_directories);
+        assert!(progress.commands_published <= budgets.max_commands);
+        assert!(progress.elapsed_micros <= 3_000_000);
+        assert_eq!(progress.refresh_queue_capacity, 1);
+        assert_eq!(progress.peak_open_files, 1);
+        assert!(
+            progress.bytes_read <= progress.entries_inspected as u64 * budgets.max_prefix_bytes
+        );
     }
 }
