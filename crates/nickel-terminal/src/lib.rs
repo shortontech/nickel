@@ -1,5 +1,7 @@
 //! Bounded, renderer-independent terminal emulation and PTY ownership for Nickel.
 
+pub mod deferred;
+
 use std::{
     borrow::Cow,
     collections::HashMap,
