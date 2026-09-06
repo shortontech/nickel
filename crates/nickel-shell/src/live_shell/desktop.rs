@@ -58,6 +58,49 @@ pub struct DesktopApplication {
     pub(super) error: Option<String>,
 }
 
+pub(super) struct DesktopViewportState {
+    active_output: String,
+    output_origin: DesktopPoint,
+    active_scale: f32,
+    pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
+    drag_commit_position: Option<DesktopPoint>,
+    selection_start: Option<DesktopPoint>,
+    pointer_position: DesktopPoint,
+    pointer_seen: bool,
+    pointer_dragged: bool,
+}
+
+impl DesktopViewportState {
+    pub(super) fn new(
+        active_output: String,
+        output_origin: DesktopPoint,
+        active_scale: f32,
+    ) -> Self {
+        Self {
+            active_output,
+            output_origin,
+            active_scale: active_scale.max(1.0),
+            pointer_down: None,
+            drag_commit_position: None,
+            selection_start: None,
+            pointer_position: DesktopPoint::default(),
+            pointer_seen: false,
+            pointer_dragged: false,
+        }
+    }
+
+    pub(super) fn set_projection(
+        &mut self,
+        active_output: String,
+        output_origin: DesktopPoint,
+        active_scale: f32,
+    ) {
+        self.active_output = active_output;
+        self.output_origin = output_origin;
+        self.active_scale = active_scale.max(1.0);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(super) struct DesktopMenuContext {
     pub(super) anchor: Option<DesktopPoint>,
@@ -277,6 +320,29 @@ impl DesktopApplication {
         self.active_output = id;
         self.output_origin = origin;
         self.active_scale = scale.max(1.0);
+    }
+
+    pub(super) fn replace_viewport_state(
+        &mut self,
+        viewport: DesktopViewportState,
+    ) -> DesktopViewportState {
+        DesktopViewportState {
+            active_output: std::mem::replace(&mut self.active_output, viewport.active_output),
+            output_origin: std::mem::replace(&mut self.output_origin, viewport.output_origin),
+            active_scale: std::mem::replace(&mut self.active_scale, viewport.active_scale),
+            pointer_down: std::mem::replace(&mut self.pointer_down, viewport.pointer_down),
+            drag_commit_position: std::mem::replace(
+                &mut self.drag_commit_position,
+                viewport.drag_commit_position,
+            ),
+            selection_start: std::mem::replace(&mut self.selection_start, viewport.selection_start),
+            pointer_position: std::mem::replace(
+                &mut self.pointer_position,
+                viewport.pointer_position,
+            ),
+            pointer_seen: std::mem::replace(&mut self.pointer_seen, viewport.pointer_seen),
+            pointer_dragged: std::mem::replace(&mut self.pointer_dragged, viewport.pointer_dragged),
+        }
     }
 
     fn projection_origin(&self) -> DesktopPoint {

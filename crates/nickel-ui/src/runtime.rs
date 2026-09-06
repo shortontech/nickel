@@ -578,6 +578,25 @@ pub struct UiHost<A: Application> {
     pending_long_press: Option<PendingLongPress>,
 }
 
+/// Runtime-owned state for one independently presented viewport of an application.
+///
+/// Embedders with several native surfaces backed by one application can park a
+/// viewport here while another surface is active.  The application remains in
+/// `UiHost`; layout, hit testing, focus, pointer state, and frame generations do
+/// not leak between surfaces.
+pub struct UiHostViewport<Message> {
+    state: UiStateStore,
+    tree: UiFrame<Message>,
+    bounds: Rect,
+    scale_factor: f32,
+    input_dispatcher: FocusedInputDispatcher,
+    frame_generation: u64,
+    pointer_icon: PointerIcon,
+    overlay_failures: Vec<OverlayDeclarationFailure>,
+    next_application_deadline: Option<Instant>,
+    pending_long_press: Option<PendingLongPress>,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct PendingLongPress {
     contact: nickel_input::TouchId,
@@ -1083,6 +1102,71 @@ pub struct SemanticActionFailure {
 }
 
 impl<A: Application> UiHost<A> {
+    /// Builds fresh runtime state for a new native viewport without cloning the
+    /// application or borrowing interaction state from another surface.
+    pub fn new_viewport(&self, width: u32, height: u32) -> UiHostViewport<A::Message> {
+        let bounds = Rect::new(0.0, 0.0, width as f32, height as f32);
+        let mut state = UiStateStore::default();
+        let context = ViewContext::from_host(bounds, &state, None::<&UiFrame<A::Message>>);
+        let mut tree = UiFrame::resolve(
+            self.application.view(context.clone()),
+            FrameRequest::new(bounds, &mut state),
+        );
+        let overlay_failures = apply_frame_overlays(
+            &mut tree,
+            &mut state,
+            self.application.frame_overlays(context),
+        );
+        UiHostViewport {
+            state,
+            tree,
+            bounds,
+            scale_factor: 1.0,
+            input_dispatcher: FocusedInputDispatcher::default(),
+            frame_generation: 1,
+            pointer_icon: PointerIcon::Default,
+            overlay_failures,
+            next_application_deadline: self
+                .application
+                .poll_interval()
+                .map(|interval| Instant::now() + interval),
+            pending_long_press: None,
+        }
+    }
+
+    /// Activates one viewport and returns the previously active viewport.
+    pub fn replace_viewport(
+        &mut self,
+        viewport: UiHostViewport<A::Message>,
+    ) -> UiHostViewport<A::Message> {
+        UiHostViewport {
+            state: std::mem::replace(&mut self.state, viewport.state),
+            tree: std::mem::replace(&mut self.tree, viewport.tree),
+            bounds: std::mem::replace(&mut self.bounds, viewport.bounds),
+            scale_factor: std::mem::replace(&mut self.scale_factor, viewport.scale_factor),
+            input_dispatcher: std::mem::replace(
+                &mut self.input_dispatcher,
+                viewport.input_dispatcher,
+            ),
+            frame_generation: std::mem::replace(
+                &mut self.frame_generation,
+                viewport.frame_generation,
+            ),
+            pointer_icon: std::mem::replace(&mut self.pointer_icon, viewport.pointer_icon),
+            overlay_failures: std::mem::replace(
+                &mut self.overlay_failures,
+                viewport.overlay_failures,
+            ),
+            next_application_deadline: std::mem::replace(
+                &mut self.next_application_deadline,
+                viewport.next_application_deadline,
+            ),
+            pending_long_press: std::mem::replace(
+                &mut self.pending_long_press,
+                viewport.pending_long_press,
+            ),
+        }
+    }
     pub fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool {
         if self.application.paste_clipboard_image(width, height, rgba) {
             self.rebuild();

@@ -48,7 +48,7 @@ pub use runtime::{
     FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
     HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
     MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure, Popover, SemanticActionFailure,
-    Shortcut, Tooltip, UiHost, ViewContext, run, run_with_adapter,
+    Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
 };
 pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
 pub use text_context_menu::{

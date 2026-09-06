@@ -527,7 +527,6 @@
         ]);
         shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
-        let left_generation = shell.desktop_change_token.frame_generation;
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Button {
                 device: nickel_input::DeviceId(1),
@@ -546,14 +545,21 @@
                 .map(|menu| menu.output.as_str()),
             Some("left")
         );
+        let left_menu_generation = shell.desktop_change_token.frame_generation;
+        let left_pointer = shell.desktop_host.application().pointer_position;
 
         // Simulate the shell's all-surface redraw ending on the other output.
+        // Each native surface now resumes its own retained host viewport.
         shell.set_desktop_output("right".into(), 0.0, 0.0, 1.0);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
         let right_generation = shell.desktop_change_token.frame_generation;
-        assert!(
-            right_generation > left_generation,
-            "changing output viewport must rebuild the output-scoped tree"
+        assert_eq!(
+            shell
+                .desktop_viewports
+                .get("left")
+                .map(|viewport| viewport.change_token.frame_generation),
+            Some(left_menu_generation),
+            "rendering another surface must not advance the left surface token"
         );
         assert!(
             shell
@@ -575,13 +581,30 @@
             },
         )));
         assert!(shell.desktop_host.application().context_menu.is_some());
-        assert!(shell.desktop_host.inspect().open_overlay.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
+        assert_ne!(
+            shell.desktop_host.application().pointer_position,
+            left_pointer,
+            "the right surface owns its own pointer viewport"
+        );
 
         shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
+        assert_eq!(
+            shell.desktop_host.application().pointer_position,
+            left_pointer,
+            "returning to the left surface restores its pointer viewport"
+        );
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
         assert!(
-            shell.desktop_change_token.frame_generation > right_generation,
-            "reversing render order must rebuild the original output projection"
+            shell.desktop_change_token.frame_generation > left_menu_generation,
+            "the original surface must resume and rebuild its own tree"
+        );
+        assert_eq!(
+            shell
+                .desktop_viewports
+                .get("right")
+                .map(|viewport| viewport.change_token.frame_generation),
+            Some(right_generation)
         );
         assert!(
             shell
@@ -629,6 +652,55 @@
             dismissal.reason,
             super::desktop::DesktopMenuDismissReason::OutsidePress
         );
+    }
+
+    #[test]
+    fn parked_desktop_viewport_deadlines_are_polled_independently() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_desktop_outputs(vec![
+            nickel_file::desktop::DesktopOutput {
+                id: "left".into(),
+                primary: true,
+                work_area: nickel_file::desktop::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                scale: 1.0,
+            },
+            nickel_file::desktop::DesktopOutput {
+                id: "right".into(),
+                primary: false,
+                work_area: nickel_file::desktop::Rect {
+                    x: 800.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                scale: 1.0,
+            },
+        ]);
+        let now = Instant::now();
+        shell.set_desktop_output("left".into(), 0.0, 0.0, 1.0);
+        shell.desktop_deadline = Some(now);
+        shell.set_desktop_output("right".into(), 800.0, 0.0, 1.0);
+        shell.desktop_deadline = Some(now);
+
+        let _ = shell.poll_host_deadlines(now);
+
+        let deadline_for = |output: &str| {
+            if shell.desktop_active_viewport == output {
+                shell.desktop_deadline
+            } else {
+                shell
+                    .desktop_viewports
+                    .get(output)
+                    .and_then(|viewport| viewport.deadline)
+            }
+        };
+        assert!(deadline_for("left").is_some_and(|deadline| deadline > now));
+        assert!(deadline_for("right").is_some_and(|deadline| deadline > now));
     }
 
     #[test]

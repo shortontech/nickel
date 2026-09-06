@@ -23,7 +23,7 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     Application as UiApplication, Button, Column, Container, ControllerAction, HostBatch,
     HostChangeToken, HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text,
-    TextAlign, TextField, UiEvent, ViewContext,
+    TextAlign, TextField, UiEvent, UiHostViewport, ViewContext,
 };
 
 use crate::{
@@ -466,6 +466,8 @@ pub struct LiveShell {
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
+    desktop_viewports: HashMap<String, DesktopSurfaceViewport>,
+    desktop_active_viewport: String,
     desktop_change_token: HostChangeToken,
     desktop_deadline: Option<Instant>,
     desktop_application_dirty: bool,
@@ -548,6 +550,14 @@ pub struct LiveShell {
     keyboard_deadline: Instant,
     keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
     keyboard_recipient: Option<nickel_session_protocol::OnScreenKeyboardSnapshot>,
+}
+
+struct DesktopSurfaceViewport {
+    host: UiHostViewport<desktop::DesktopMessage>,
+    application: desktop::DesktopViewportState,
+    change_token: HostChangeToken,
+    deadline: Option<Instant>,
+    overlay_pointer_capture: Option<nickel_input::PointerButton>,
 }
 
 #[derive(Default)]
@@ -838,6 +848,8 @@ impl LiveShell {
             wallpaper,
             wallpaper_size,
             desktop_host,
+            desktop_viewports: HashMap::new(),
+            desktop_active_viewport: "primary".into(),
             desktop_change_token: HostChangeToken::default(),
             desktop_deadline: None,
             desktop_application_dirty: false,
@@ -1256,8 +1268,16 @@ impl LiveShell {
 
     pub fn set_desktop_outputs(&mut self, outputs: Vec<DesktopOutput>) {
         let topology_changed = self.desktop_host.application().outputs != outputs;
+        let live_outputs = outputs
+            .iter()
+            .map(|output| output.id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.desktop_viewports
+            .retain(|output, _| live_outputs.contains(output));
         self.desktop_host.application_mut().set_outputs(outputs);
-        self.desktop_application_dirty |= topology_changed;
+        if topology_changed {
+            self.desktop_application_dirty = true;
+        }
     }
 
     pub fn desktop_output_projection(&self, output: &str) -> Option<(DesktopPoint, f32)> {
@@ -1279,12 +1299,67 @@ impl LiveShell {
 
     pub fn set_desktop_output(&mut self, output: String, x: f32, y: f32, scale: f32) {
         let origin = DesktopPoint { x, y };
-        let application = self.desktop_host.application_mut();
-        let viewport_changed = application.active_output != output
-            || application.output_origin != origin
-            || application.active_scale != scale.max(1.0);
-        application.set_active_output(output, origin, scale);
-        self.desktop_application_dirty |= viewport_changed;
+        if self.desktop_active_viewport != output {
+            let next = self.desktop_viewports.remove(&output);
+            let (
+                mut next_application,
+                next_host,
+                next_token,
+                next_deadline,
+                next_overlay_pointer_capture,
+            ) = match next {
+                Some(viewport) => (
+                    viewport.application,
+                    Some(viewport.host),
+                    viewport.change_token,
+                    viewport.deadline,
+                    viewport.overlay_pointer_capture,
+                ),
+                None => (
+                    desktop::DesktopViewportState::new(output.clone(), origin, scale),
+                    None,
+                    HostChangeToken::default(),
+                    None,
+                    None,
+                ),
+            };
+            next_application.set_projection(output.clone(), origin, scale);
+            let previous_application = self
+                .desktop_host
+                .application_mut()
+                .replace_viewport_state(next_application);
+            let next_host = next_host.unwrap_or_else(|| self.desktop_host.new_viewport(1, 1));
+            let previous_host = self.desktop_host.replace_viewport(next_host);
+            let previous_output = std::mem::replace(&mut self.desktop_active_viewport, output);
+            if self
+                .desktop_host
+                .application()
+                .outputs
+                .iter()
+                .any(|candidate| candidate.id == previous_output)
+            {
+                self.desktop_viewports.insert(
+                    previous_output,
+                    DesktopSurfaceViewport {
+                        host: previous_host,
+                        application: previous_application,
+                        change_token: self.desktop_change_token,
+                        deadline: self.desktop_deadline,
+                        overlay_pointer_capture: self.desktop_overlay_pointer_capture.take(),
+                    },
+                );
+            }
+            self.desktop_change_token = next_token;
+            self.desktop_deadline = next_deadline;
+            self.desktop_overlay_pointer_capture = next_overlay_pointer_capture;
+            // The application model is shared and may have changed while this
+            // surface was parked. Always rebuild its retained tree before use.
+            self.desktop_application_dirty = true;
+        } else {
+            self.desktop_host
+                .application_mut()
+                .set_active_output(output, origin, scale);
+        }
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
@@ -1600,7 +1675,14 @@ impl LiveShell {
                 sources.push((name, deadline));
             }
         };
-        push("desktop", self.desktop_deadline);
+        push(
+            "desktop",
+            self.desktop_viewports
+                .values()
+                .filter_map(|viewport| viewport.deadline)
+                .chain(self.desktop_deadline)
+                .min(),
+        );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
         push("panel", self.panel_deadline);
         push("lock", self.lock_deadline);
@@ -1759,10 +1841,25 @@ impl LiveShell {
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
         let mut changed = Vec::new();
 
+        let mut due_desktop_outputs = self
+            .desktop_viewports
+            .iter()
+            .filter(|(_, viewport)| viewport.deadline.is_some_and(|deadline| now >= deadline))
+            .map(|(output, _)| output.clone())
+            .collect::<Vec<_>>();
         if self
             .desktop_deadline
             .is_some_and(|deadline| now >= deadline)
         {
+            due_desktop_outputs.push(self.desktop_active_viewport.clone());
+        }
+        let mut desktop_changed = false;
+        for output in due_desktop_outputs {
+            if output != self.desktop_active_viewport
+                && let Some((origin, scale)) = self.desktop_output_projection(&output)
+            {
+                self.set_desktop_output(output, origin.x, origin.y, scale);
+            }
             let outcome = self.desktop_host.step(HostBatch {
                 now: Some(now),
                 events: vec![HostEvent::Poll],
@@ -1770,9 +1867,10 @@ impl LiveShell {
             });
             self.desktop_change_token = outcome.change_token;
             self.desktop_deadline = outcome.next_deadline;
-            if outcome.changed {
-                changed.push(SurfaceRole::Desktop);
-            }
+            desktop_changed |= outcome.changed;
+        }
+        if desktop_changed {
+            changed.push(SurfaceRole::Desktop);
         }
         if self.panel_deadline.is_some_and(|deadline| now >= deadline) {
             let outcome = self.panel_host.step(HostBatch {
