@@ -640,22 +640,31 @@ impl DesktopLayout {
 }
 
 fn normalize_outputs(outputs: Vec<DesktopOutput>) -> Vec<DesktopOutput> {
-    let mut seen = HashSet::new();
-    let mut outputs = outputs
-        .into_iter()
-        .filter(|output| {
-            !output.id.is_empty()
-                && seen.insert(output.id.clone())
-                && output.scale.is_finite()
-                && output.scale > 0.0
-                && output.work_area.x.is_finite()
-                && output.work_area.y.is_finite()
-                && output.work_area.width.is_finite()
-                && output.work_area.height.is_finite()
-                && output.work_area.width > 0.0
-                && output.work_area.height > 0.0
-        })
-        .collect::<Vec<_>>();
+    let mut by_id = HashMap::<String, DesktopOutput>::new();
+    for mut output in outputs.into_iter().filter(|output| {
+        !output.id.is_empty()
+            && output.scale.is_finite()
+            && output.scale > 0.0
+            && output.work_area.x.is_finite()
+            && output.work_area.y.is_finite()
+            && output.work_area.width.is_finite()
+            && output.work_area.height.is_finite()
+            && output.work_area.width > 0.0
+            && output.work_area.height > 0.0
+    }) {
+        if let Some(existing) = by_id.get_mut(&output.id) {
+            let primary = existing.primary || output.primary;
+            if output_geometry_key(&output) < output_geometry_key(existing) {
+                output.primary = primary;
+                *existing = output;
+            } else {
+                existing.primary = primary;
+            }
+        } else {
+            by_id.insert(output.id.clone(), output);
+        }
+    }
+    let mut outputs = by_id.into_values().collect::<Vec<_>>();
     outputs.sort_by(|left, right| left.id.cmp(&right.id));
     let effective = outputs
         .iter()
@@ -665,6 +674,16 @@ fn normalize_outputs(outputs: Vec<DesktopOutput>) -> Vec<DesktopOutput> {
         output.primary = Some(index) == effective;
     }
     outputs
+}
+
+fn output_geometry_key(output: &DesktopOutput) -> [u32; 5] {
+    [
+        output.work_area.x.to_bits(),
+        output.work_area.y.to_bits(),
+        output.work_area.width.to_bits(),
+        output.work_area.height.to_bits(),
+        output.scale.to_bits(),
+    ]
 }
 
 fn compare_items(
@@ -1173,6 +1192,61 @@ mod tests {
         assert!(layout.effective_primary().is_none());
         layout.set_outputs(vec![primary_output("main", 0.0)]);
         assert_eq!(layout.items()[0].output, "main");
+    }
+
+    #[test]
+    fn duplicate_output_facts_normalize_independently_of_enumeration_order() {
+        let invalid = DesktopOutput {
+            id: "main".into(),
+            primary: false,
+            work_area: Rect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+            },
+            scale: 0.0,
+        };
+        let valid_secondary = DesktopOutput {
+            id: "main".into(),
+            primary: false,
+            work_area: Rect {
+                x: 20.0,
+                y: 10.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            scale: 1.25,
+        };
+        let valid_primary = DesktopOutput {
+            id: "main".into(),
+            primary: true,
+            work_area: Rect {
+                x: 10.0,
+                y: 10.0,
+                width: 300.0,
+                height: 200.0,
+            },
+            scale: 1.25,
+        };
+
+        let permutations = [
+            vec![
+                invalid.clone(),
+                valid_secondary.clone(),
+                valid_primary.clone(),
+            ],
+            vec![
+                valid_primary.clone(),
+                invalid.clone(),
+                valid_secondary.clone(),
+            ],
+            vec![valid_secondary, valid_primary, invalid],
+        ];
+        let normalized = permutations.map(normalize_outputs);
+        assert!(normalized.iter().all(|outputs| outputs.len() == 1));
+        assert!(normalized.iter().all(|outputs| outputs[0].primary));
+        assert!(normalized.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
