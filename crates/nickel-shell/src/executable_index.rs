@@ -13,6 +13,8 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ExecutableClass {
     LikelyGraphical,
@@ -193,18 +195,32 @@ impl Default for IndexSnapshot {
 
 pub(crate) struct ExecutableIndex {
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
-    refresh: mpsc::SyncSender<()>,
+    refresh: mpsc::SyncSender<RefreshReason>,
+    _watcher: Option<RecommendedWatcher>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RefreshReason {
+    Filesystem,
+    Environment,
 }
 
 impl ExecutableIndex {
     fn start(path: Option<std::ffi::OsString>, budgets: ScanBudgets) -> Self {
         let snapshot = Arc::new(RwLock::new(Arc::new(IndexSnapshot::default())));
         let (refresh, receiver) = mpsc::sync_channel(1);
+        let watcher = path
+            .as_deref()
+            .and_then(|path| watch_effective_path(path, budgets, refresh.clone()));
         let worker_snapshot = Arc::clone(&snapshot);
         let _ = std::thread::Builder::new()
             .name("nickel-executable-index".into())
             .spawn(move || scan_worker(path, budgets, worker_snapshot, receiver));
-        Self { snapshot, refresh }
+        Self {
+            snapshot,
+            refresh,
+            _watcher: watcher,
+        }
     }
 
     pub(crate) fn classify(&self, command: &str) -> Option<ExecutableEvidence> {
@@ -227,8 +243,35 @@ impl ExecutableIndex {
 
     #[allow(dead_code)]
     pub(crate) fn request_refresh(&self) {
-        let _ = self.refresh.try_send(());
+        let _ = self.refresh.try_send(RefreshReason::Environment);
     }
+}
+
+fn watch_effective_path(
+    path: &std::ffi::OsStr,
+    budgets: ScanBudgets,
+    refresh: mpsc::SyncSender<RefreshReason>,
+) -> Option<RecommendedWatcher> {
+    let callback_refresh = refresh;
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if event.is_ok() {
+            let _ = callback_refresh.try_send(RefreshReason::Filesystem);
+        }
+    })
+    .ok()?;
+    let current_directory = std::env::current_dir().ok();
+    let mut watched = HashSet::new();
+    for directory in std::env::split_paths(path).take(budgets.max_directories) {
+        let Some(directory) = effective_path_directory(directory, current_directory.as_deref())
+        else {
+            continue;
+        };
+        let canonical = std::fs::canonicalize(&directory).unwrap_or(directory);
+        if watched.insert(canonical.clone()) {
+            let _ = watcher.watch(&canonical, RecursiveMode::NonRecursive);
+        }
+    }
+    (!watched.is_empty()).then_some(watcher)
 }
 
 fn normalized_command_name(command: &str) -> Option<&str> {
@@ -247,17 +290,19 @@ fn scan_worker(
     mut path: Option<std::ffi::OsString>,
     budgets: ScanBudgets,
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
-    receiver: mpsc::Receiver<()>,
+    receiver: mpsc::Receiver<RefreshReason>,
 ) {
     let mut generation = 1_u64;
     loop {
         scan_path_generation(path.as_deref(), budgets, generation, &snapshot);
         generation = generation.saturating_add(1);
         match receiver.recv_timeout(Duration::from_secs(30)) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(RefreshReason::Filesystem) => {}
+            Ok(RefreshReason::Environment) | Err(mpsc::RecvTimeoutError::Timeout) => {
+                path = std::env::var_os("PATH");
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
-        path = std::env::var_os("PATH");
     }
 }
 
@@ -893,6 +938,45 @@ mod tests {
             effective_path_directory(PathBuf::from("/bin"), Some(current)),
             Some(PathBuf::from("/bin"))
         );
+    }
+
+    #[test]
+    fn native_path_notification_coalesces_a_background_refresh() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = std::env::join_paths([directory.path()]).unwrap();
+        let index = ExecutableIndex::start(
+            Some(path),
+            ScanBudgets {
+                max_elapsed: Duration::from_secs(1),
+                ..ScanBudgets::default()
+            },
+        );
+        let initial_deadline = Instant::now() + Duration::from_secs(2);
+        while !index.progress().complete {
+            assert!(
+                Instant::now() < initial_deadline,
+                "initial scan did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let initial_generation = index.progress().generation;
+        executable(&directory.path().join("notified-tool"), b"#!/bin/sh\n");
+        let refresh_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let progress = index.progress();
+            if progress.generation > initial_generation
+                && progress.complete
+                && index.classify("notified-tool").is_some()
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < refresh_deadline,
+                "filesystem notification did not publish a refreshed generation"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(index.progress().refresh_queue_capacity, 1);
     }
 
     #[test]

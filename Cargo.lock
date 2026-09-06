@@ -2708,6 +2708,7 @@ dependencies = [
  "nickel-session-protocol",
  "nickel-ui",
  "nickel-ui-testkit",
+ "notify",
  "nucleo-matcher",
  "pipewire-native",
  "pipewire-native-spa",
