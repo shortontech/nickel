@@ -48,6 +48,7 @@ pub enum VisibilityReason {
     ExplicitGraphicalMetadata,
     ExplicitTerminalMetadata,
     AttributedApplicationWindow,
+    ChildExited,
     ClassificationDeadline,
     AttributionUnavailable,
     SpawnFailure,
@@ -78,11 +79,8 @@ pub struct DeferredLaunchTimeline {
     generation: LaunchGeneration,
     class: LaunchClass,
     deadline: Duration,
-    observations: Vec<WindowObservation>,
-    child_exit: Option<(Duration, Option<i32>)>,
-    terminal_failure: Option<(Duration, VisibilityReason)>,
-    cancellation: Option<(Duration, bool)>,
-    attribution_unavailable: bool,
+    earliest: Option<(Duration, u64, VisibilityDecision)>,
+    event_order: u64,
     decision: Option<VisibilityDecision>,
 }
 
@@ -119,11 +117,8 @@ impl DeferredLaunchTimeline {
             generation,
             class,
             deadline: delay,
-            observations: Vec::new(),
-            child_exit: None,
-            terminal_failure: None,
-            cancellation: None,
-            attribution_unavailable: false,
+            earliest: None,
+            event_order: 0,
             decision,
         })
     }
@@ -132,7 +127,7 @@ impl DeferredLaunchTimeline {
         if self.decision.is_some() {
             return Ok(());
         }
-        match event {
+        let candidate = match event {
             LaunchEvent::Window(observation) => {
                 if observation.generation != self.generation {
                     return Err(TimelineError::WrongGeneration);
@@ -141,20 +136,46 @@ impl DeferredLaunchTimeline {
                     && observation.attributed
                     && observation.class.qualifies()
                 {
-                    self.observations.push(observation);
+                    Some((
+                        observation.at,
+                        VisibilityDecision::Suppress(VisibilityReason::AttributedApplicationWindow),
+                    ))
+                } else {
+                    None
                 }
             }
-            LaunchEvent::ChildExited { at, code } => self.child_exit = Some((at, code)),
-            LaunchEvent::SpawnFailed { at } => {
-                self.terminal_failure = Some((at, VisibilityReason::SpawnFailure));
+            LaunchEvent::ChildExited { at, .. } if at <= self.deadline => {
+                Some((at, VisibilityDecision::Show(VisibilityReason::ChildExited)))
             }
-            LaunchEvent::SessionFailed { at } => {
-                self.terminal_failure = Some((at, VisibilityReason::SessionFailure));
+            LaunchEvent::SpawnFailed { at } if at <= self.deadline => {
+                Some((at, VisibilityDecision::Show(VisibilityReason::SpawnFailure)))
             }
-            LaunchEvent::Cancelled { at, child_spawned } => {
-                self.cancellation = Some((at, child_spawned));
+            LaunchEvent::SessionFailed { at } if at <= self.deadline => Some((
+                at,
+                VisibilityDecision::Show(VisibilityReason::SessionFailure),
+            )),
+            LaunchEvent::Cancelled { at, child_spawned } if at <= self.deadline => Some((
+                at,
+                VisibilityDecision::Cancel(if child_spawned {
+                    VisibilityReason::CancelledAfterSpawn
+                } else {
+                    VisibilityReason::CancelledBeforeSpawn
+                }),
+            )),
+            LaunchEvent::AttributionUnavailable { at } if at <= self.deadline => Some((
+                at,
+                VisibilityDecision::Show(VisibilityReason::AttributionUnavailable),
+            )),
+            _ => None,
+        };
+        if let Some((at, decision)) = candidate {
+            let order = self.event_order;
+            self.event_order = self.event_order.saturating_add(1);
+            if self.earliest.is_none_or(|(current_at, current_order, _)| {
+                (at, order) < (current_at, current_order)
+            }) {
+                self.earliest = Some((at, order, decision));
             }
-            LaunchEvent::AttributionUnavailable { .. } => self.attribution_unavailable = true,
         }
         Ok(())
     }
@@ -169,31 +190,10 @@ impl DeferredLaunchTimeline {
         if self.class != LaunchClass::Observe || observed_through < self.deadline {
             return None;
         }
-        let earliest = self
-            .observations
-            .iter()
-            .min_by_key(|observation| observation.at)
-            .copied();
-        let decision = if self.cancellation.is_some_and(|(at, _)| at <= self.deadline) {
-            let child_spawned = self.cancellation.unwrap().1;
-            VisibilityDecision::Cancel(if child_spawned {
-                VisibilityReason::CancelledAfterSpawn
-            } else {
-                VisibilityReason::CancelledBeforeSpawn
-            })
-        } else if let Some((at, reason)) = self.terminal_failure
-            && at <= self.deadline
-        {
-            VisibilityDecision::Show(reason)
-        } else if earliest.is_some() {
-            VisibilityDecision::Suppress(VisibilityReason::AttributedApplicationWindow)
-        } else if self.attribution_unavailable {
-            VisibilityDecision::Show(VisibilityReason::AttributionUnavailable)
-        } else {
-            // Child exit never discards already captured output and therefore does not suppress UI.
-            let _ = self.child_exit;
-            VisibilityDecision::Show(VisibilityReason::ClassificationDeadline)
-        };
+        let decision = self.earliest.map_or(
+            VisibilityDecision::Show(VisibilityReason::ClassificationDeadline),
+            |(_, _, decision)| decision,
+        );
         self.decision = Some(decision);
         Some(decision)
     }
@@ -301,7 +301,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             exited.settle(DEFAULT_CLASSIFICATION_DELAY),
-            Some(VisibilityDecision::Show(_))
+            Some(VisibilityDecision::Show(VisibilityReason::ChildExited))
         ));
 
         let mut failed = observed();
@@ -325,6 +325,67 @@ mod tests {
             Some(VisibilityDecision::Cancel(
                 VisibilityReason::CancelledAfterSpawn
             ))
+        );
+    }
+
+    #[test]
+    fn earliest_timestamp_wins_without_retaining_observation_history() {
+        let window = |at| {
+            LaunchEvent::Window(WindowObservation {
+                generation: LaunchGeneration(7),
+                at,
+                class: WindowClass::Application,
+                attributed: true,
+                descendant: false,
+            })
+        };
+
+        let mut exited_first = observed();
+        exited_first
+            .record(LaunchEvent::ChildExited {
+                at: Duration::from_millis(5),
+                code: Some(0),
+            })
+            .unwrap();
+        for millisecond in 6..10_006 {
+            exited_first
+                .record(window(Duration::from_millis(millisecond)))
+                .unwrap();
+        }
+        assert_eq!(exited_first.event_order, 96);
+        assert_eq!(
+            exited_first.settle(DEFAULT_CLASSIFICATION_DELAY),
+            Some(VisibilityDecision::Show(VisibilityReason::ChildExited))
+        );
+
+        let mut window_first = observed();
+        window_first
+            .record(window(Duration::from_millis(5)))
+            .unwrap();
+        window_first
+            .record(LaunchEvent::SessionFailed {
+                at: Duration::from_millis(6),
+            })
+            .unwrap();
+        assert_eq!(
+            window_first.settle(DEFAULT_CLASSIFICATION_DELAY),
+            Some(VisibilityDecision::Suppress(
+                VisibilityReason::AttributedApplicationWindow
+            ))
+        );
+
+        let mut failure_first = observed();
+        failure_first
+            .record(LaunchEvent::SpawnFailed {
+                at: Duration::from_millis(4),
+            })
+            .unwrap();
+        failure_first
+            .record(window(Duration::from_millis(5)))
+            .unwrap();
+        assert_eq!(
+            failure_first.settle(DEFAULT_CLASSIFICATION_DELAY),
+            Some(VisibilityDecision::Show(VisibilityReason::SpawnFailure))
         );
     }
 
