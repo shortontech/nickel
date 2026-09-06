@@ -1077,14 +1077,9 @@ fn render_all(shell: &mut WinitShell, state: &mut LiveShell) -> Result<(), Strin
         if role == SurfaceRole::Panel {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
-            && let Some(display) = shell.surface_display_geometry(id)
+            && let Some((origin, scale)) = state.desktop_output_projection(&output)
         {
-            state.set_desktop_output(
-                output,
-                display.x as f32 / display.scale,
-                display.y as f32 / display.scale,
-                display.scale,
-            );
+            state.set_desktop_output(output, origin.x, origin.y, scale);
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -1125,14 +1120,9 @@ fn render_role(
         if role == SurfaceRole::Panel {
             state.set_panel_output(output);
         } else if role == SurfaceRole::Desktop
-            && let Some(display) = shell.surface_display_geometry(id)
+            && let Some((origin, scale)) = state.desktop_output_projection(&output)
         {
-            state.set_desktop_output(
-                output,
-                display.x as f32 / display.scale,
-                display.y as f32 / display.scale,
-                display.scale,
-            );
+            state.set_desktop_output(output, origin.x, origin.y, scale);
         }
         let commands = state.scene(role, logical_width, logical_height);
         if let Some(token) = state.scene_change_token(role) {
@@ -1151,20 +1141,115 @@ fn sync_desktop_outputs(shell: &WinitShell, state: &mut LiveShell) {
         .filter(|surface| surface.role() == SurfaceRole::Desktop)
         .filter_map(|surface| {
             let geometry = shell.surface_display_geometry(surface.id())?;
-            Some(nickel_file::desktop::DesktopOutput {
-                id: surface.output_name().to_owned(),
-                primary: configured_primary.as_deref() == Some(surface.output_name()),
+            Some((surface.output_name().to_owned(), geometry))
+        })
+        .collect();
+    let outputs = desktop_logical_outputs(outputs, configured_primary.as_deref());
+    state.set_desktop_outputs(outputs);
+}
+
+fn desktop_logical_outputs(
+    mut facts: Vec<(String, winit_shell::DisplayGeometry)>,
+    configured_primary: Option<&str>,
+) -> Vec<nickel_file::desktop::DesktopOutput> {
+    facts.sort_by(|left, right| left.0.cmp(&right.0));
+    facts.dedup_by(|left, right| left.0 == right.0);
+    if facts.is_empty() {
+        return Vec::new();
+    }
+    let primary = configured_primary
+        .and_then(|wanted| facts.iter().position(|(name, _)| name == wanted))
+        .unwrap_or(0);
+    let mut origins = vec![None; facts.len()];
+    let anchor = facts[primary].1;
+    origins[primary] = Some((
+        anchor.x as f32 / anchor.scale,
+        anchor.y as f32 / anchor.scale,
+    ));
+
+    let overlaps = |a0: i64, a1: i64, b0: i64, b1: i64| a0 < b1 && b0 < a1;
+    loop {
+        let mut advanced = false;
+        for placed in 0..facts.len() {
+            let Some((logical_x, logical_y)) = origins[placed] else {
+                continue;
+            };
+            let a = facts[placed].1;
+            let ax = i64::from(a.x);
+            let ay = i64::from(a.y);
+            let ar = ax + i64::from(a.width);
+            let ab = ay + i64::from(a.height);
+            for candidate in 0..facts.len() {
+                if origins[candidate].is_some() {
+                    continue;
+                }
+                let b = facts[candidate].1;
+                let bx = i64::from(b.x);
+                let by = i64::from(b.y);
+                let br = bx + i64::from(b.width);
+                let bb = by + i64::from(b.height);
+                let adjacent = if a.x == b.x && a.y == b.y {
+                    Some((logical_x, logical_y))
+                } else if ar.abs_diff(bx) <= 1 && overlaps(ay, ab, by, bb) {
+                    Some((
+                        logical_x + a.width as f32 / a.scale,
+                        logical_y + (by - ay) as f32 / a.scale,
+                    ))
+                } else if br.abs_diff(ax) <= 1 && overlaps(ay, ab, by, bb) {
+                    Some((
+                        logical_x - b.width as f32 / b.scale,
+                        logical_y + (by - ay) as f32 / a.scale,
+                    ))
+                } else if ab.abs_diff(by) <= 1 && overlaps(ax, ar, bx, br) {
+                    Some((
+                        logical_x + (bx - ax) as f32 / a.scale,
+                        logical_y + a.height as f32 / a.scale,
+                    ))
+                } else if bb.abs_diff(ay) <= 1 && overlaps(ax, ar, bx, br) {
+                    Some((
+                        logical_x + (bx - ax) as f32 / a.scale,
+                        logical_y - b.height as f32 / b.scale,
+                    ))
+                } else {
+                    None
+                };
+                if let Some(origin) = adjacent {
+                    origins[candidate] = Some(origin);
+                    advanced = true;
+                }
+            }
+        }
+        if !advanced {
+            break;
+        }
+    }
+
+    let anchor_origin = origins[primary].expect("primary origin is initialized");
+    facts
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, geometry))| {
+            let (x, y) = origins[index].unwrap_or_else(|| {
+                (
+                    anchor_origin.0
+                        + (i64::from(geometry.x) - i64::from(anchor.x)) as f32 / anchor.scale,
+                    anchor_origin.1
+                        + (i64::from(geometry.y) - i64::from(anchor.y)) as f32 / anchor.scale,
+                )
+            });
+            nickel_file::desktop::DesktopOutput {
+                id,
+                primary: index == primary,
                 work_area: nickel_file::desktop::Rect {
-                    x: geometry.x as f32 / geometry.scale,
-                    y: geometry.y as f32 / geometry.scale,
+                    x,
+                    y,
                     width: geometry.width as f32 / geometry.scale,
                     height: (geometry.height as f32 / geometry.scale - 56.0).max(1.0),
                 },
                 scale: geometry.scale,
-            })
+            }
         })
-        .collect();
-    state.set_desktop_outputs(outputs);
+        .collect()
 }
 
 fn prewarm_role(
@@ -2760,6 +2845,45 @@ mod tests {
     };
     use nickel_ui::ControllerAction;
     use std::time::{Duration, Instant};
+
+    #[test]
+    fn mixed_scale_desktop_origins_preserve_physical_adjacency() {
+        let geometry = |x, y, width, height, scale| crate::winit_shell::DisplayGeometry {
+            x,
+            y,
+            width,
+            height,
+            scale,
+        };
+        let outputs = super::desktop_logical_outputs(
+            vec![
+                ("right".into(), geometry(2560, 0, 1920, 1080, 1.0)),
+                ("primary".into(), geometry(0, 0, 2560, 1440, 2.0)),
+                ("below".into(), geometry(0, 1440, 1920, 1080, 1.0)),
+            ],
+            Some("primary"),
+        );
+        let output = |id| outputs.iter().find(|output| output.id == id).unwrap();
+
+        assert_eq!(output("primary").work_area.x, 0.0);
+        assert_eq!(output("primary").work_area.width, 1280.0);
+        assert_eq!(output("right").work_area.x, 1280.0);
+        assert_eq!(output("below").work_area.y, 720.0);
+        assert_eq!(outputs.iter().filter(|output| output.primary).count(), 1);
+
+        let reversed = super::desktop_logical_outputs(
+            vec![
+                ("below".into(), geometry(0, 1440, 1920, 1080, 1.0)),
+                ("primary".into(), geometry(0, 0, 2560, 1440, 2.0)),
+                ("right".into(), geometry(2560, 0, 1920, 1080, 1.0)),
+            ],
+            Some("primary"),
+        );
+        assert_eq!(
+            outputs, reversed,
+            "enumeration order must not alter topology"
+        );
+    }
 
     fn embedded_chat() -> EmbeddedUiSurface<ChatApplication> {
         let backend = ReplayBackend::from_json(r#"{"name":"embedded-shell-host","events":[]}"#)

@@ -1258,6 +1258,23 @@ impl LiveShell {
         self.desktop_host.application_mut().set_outputs(outputs);
     }
 
+    pub fn desktop_output_projection(&self, output: &str) -> Option<(DesktopPoint, f32)> {
+        self.desktop_host
+            .application()
+            .outputs
+            .iter()
+            .find(|candidate| candidate.id == output)
+            .map(|candidate| {
+                (
+                    DesktopPoint {
+                        x: candidate.work_area.x,
+                        y: candidate.work_area.y,
+                    },
+                    candidate.scale,
+                )
+            })
+    }
+
     pub fn set_desktop_output(&mut self, output: String, x: f32, y: f32, scale: f32) {
         let origin = DesktopPoint { x, y };
         let application = self.desktop_host.application_mut();
