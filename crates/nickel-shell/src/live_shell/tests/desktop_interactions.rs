@@ -496,6 +496,7 @@
         ]);
         shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        let left_generation = shell.desktop_change_token.frame_generation;
         assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
             nickel_input::PointerEvent::Button {
                 device: nickel_input::DeviceId(1),
@@ -518,6 +519,11 @@
         // Simulate the shell's all-surface redraw ending on the other output.
         shell.set_desktop_output("right".into(), 0.0, 0.0, 1.0);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        let right_generation = shell.desktop_change_token.frame_generation;
+        assert!(
+            right_generation > left_generation,
+            "changing output viewport must rebuild the output-scoped tree"
+        );
         assert!(
             shell
                 .desktop_host
@@ -542,6 +548,10 @@
 
         shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
         let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(
+            shell.desktop_change_token.frame_generation > right_generation,
+            "reversing render order must rebuild the original output projection"
+        );
         assert!(
             shell
                 .desktop_host

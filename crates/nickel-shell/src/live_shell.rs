@@ -1259,9 +1259,13 @@ impl LiveShell {
     }
 
     pub fn set_desktop_output(&mut self, output: String, x: f32, y: f32, scale: f32) {
-        self.desktop_host
-            .application_mut()
-            .set_active_output(output, DesktopPoint { x, y }, scale);
+        let origin = DesktopPoint { x, y };
+        let application = self.desktop_host.application_mut();
+        let viewport_changed = application.active_output != output
+            || application.output_origin != origin
+            || application.active_scale != scale.max(1.0);
+        application.set_active_output(output, origin, scale);
+        self.desktop_application_dirty |= viewport_changed;
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
