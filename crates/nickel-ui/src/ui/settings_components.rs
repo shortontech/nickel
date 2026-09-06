@@ -970,6 +970,17 @@ impl<Message> SettingsRow<Message> {
         self
     }
 
+    /// Uses the single-line settings-row rhythm when no persistent supporting copy is needed.
+    pub fn compact(mut self) -> Self {
+        self.0 = self.0.min_height(44.0).padding(Insets {
+            top: 4.0,
+            right: 12.0,
+            bottom: 4.0,
+            left: 12.0,
+        });
+        self
+    }
+
     /// Stack the descriptive and control regions when a setting needs the
     /// control's full intrinsic width at compact viewport sizes.
     pub fn stacked(mut self) -> Self {

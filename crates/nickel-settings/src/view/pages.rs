@@ -792,14 +792,13 @@ impl SettingsApp {
                 .and_then(|snapshot| snapshot.effective.as_ref())
                 .map(|handler| handler.name.clone())
                 .unwrap_or_else(|| "No default".into());
-            let detail = row
-                .status
-                .clone()
-                .or_else(|| row.snapshot.as_ref().map(|snapshot| snapshot.detail.clone()))
-                .unwrap_or_else(|| "Loading applications…".into());
+            // The handler name already communicates the ordinary state. Reserve the
+            // supporting line for actionable outcomes and failures instead of repeating
+            // operating-system ownership beneath every compact row.
+            let detail = row.status.clone().unwrap_or_default();
             ui! {
                 <Container background={palette.surface} padding={Insets { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }}>
-                    {SettingsRow::new(theme, row.label.clone(), detail).trailing(
+                    {SettingsRow::new(theme, row.label.clone(), detail).compact().trailing(
                         Button::semantic(
                             theme,
                             SettingsMessage::ToggleDefaultAppSelect(index),
@@ -887,12 +886,9 @@ impl SettingsApp {
             "File types and links",
             self.default_app_target_status
                 .as_deref()
-                .unwrap_or(if self.default_apps_loading {
-                    "Refreshing associations…"
-                } else {
-                    "All associations reported by the operating system"
-                }),
+                .unwrap_or_default(),
         )
+        .compact()
         .trailing(
             SettingsSearchField::new(
                 theme,

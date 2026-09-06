@@ -3223,6 +3223,17 @@ mod tests {
             .into_iter()
             .next()
             .expect("default association row has one chooser");
+        let next = tree
+            .semantic_targets_for_message(&SettingsMessage::ToggleDefaultAppSelect(1))
+            .into_iter()
+            .next()
+            .expect("the next compact association row has one chooser");
+        assert!(
+            next.bounds.origin.y - anchor.bounds.origin.y <= 52.0,
+            "ordinary default-app rows must keep a compact single-line rhythm: {:?} -> {:?}",
+            anchor.bounds,
+            next.bounds,
+        );
         let mut host = UiHost::new(app, 850, 900);
         let opened = host.perform_semantic_action(
             anchor.id,
