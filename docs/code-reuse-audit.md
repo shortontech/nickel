@@ -1,16 +1,20 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04; refreshed after the backlog integration wave on 2026-09-05. Scope: every
-checked-in Rust source under `crates/` (217 files after the consolidation below). The exact per-crate
-inventory is checked in at `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever
-a source or crate appears or disappears without an audit refresh. Candidates were grouped by
-behavior, then traced through callers and tests; same-named trait implementations and platform
-translations were not treated as duplication.
+Audit date: 2026-09-04; implementation dispositions refreshed through 2026-09-06. Scope: every
+checked-in Rust source under `crates/`. The per-crate snapshot in
+`assets/code-reuse-source-inventory.tsv` intentionally remains at the pre-refactor baseline while
+parallel coordinator splits are in flight; final source counts must be regenerated only after those
+splits are integrated. At this refresh the known differences are the new `nickel-build-support` and
+`nickel-storage` crates plus additional sources in `nickel-session`, `nickel-session-protocol`,
+`nickel-shell`, and `nickel-ui`. Consequently the source-inventory test is expected to remain red
+until the integration refresh, while the behavioral authority assertions remain applicable.
+Candidates were grouped by behavior, then traced through callers and tests; same-named trait
+implementations and platform translations were not treated as duplication.
 
 | Candidate locations | Shared behavior | Intended authority | Disposition | Migration order / evidence | Tests | Status |
 |---|---|---|---|---|---|---|
-| `nickel-core::{shell_settings,wallpaper_settings,launcher_preferences,optional_features,dpi}` | Resolve Nickel's per-user configuration directory | `nickel-core::persistence::config_path` | consolidate | Introduce authority, migrate all five callers, and prohibit new environment/path copies. The refreshed audit added DPI persistence to the enforcement inventory. | `reuse_authority`, each settings round trip | complete |
-| Same five modules | Create parents and replace a complete small settings file | `nickel-core::persistence::atomic_write` | consolidate | Introduce atomic primitive, migrate seven preference/runtime writers, remove direct non-atomic writes, and enumerate every consumer in the authority guard. | atomic replacement plus existing round trips | complete |
+| `nickel-core::{shell_settings,wallpaper_settings,launcher_preferences,optional_features,dpi}` | Resolve Nickel's per-user configuration directory | `nickel-storage::config_path` | consolidate | The storage authority now lives below core, so portable domain state delegates environment and filesystem mechanics without creating a platform dependency cycle. All five consumers are guarded against restoring local path logic. | `reuse_authority`, storage and settings round trips | complete |
+| Same five modules | Create parents and replace a complete small settings file | `nickel-storage::atomic_write` | consolidate | Seven preference/runtime writers delegate complete-file replacement to the lower-level storage crate. Core retains schemas and validation, while Windows replacement and directory mechanics stay outside the platform-neutral domain crate. | atomic replacement plus existing round trips | complete |
 | `nickel-ui::{input,text_editor,text_context_menu,ui::tree}` and application text fields | Editing shortcuts and context actions | `nickel-ui::TextEditCommand` and retained editor | consolidate | Spec 0178 supplies the shared command authority and universal `TextField` adoption; retaining app-owned validation mappers is intentional. | editor/menu parity and secure-field suites | complete (0178) |
 | `nickel-ui::{overlay,state,ui::tree,runtime}` and shell/file consumers | Menu focus, dismissal, placement, event containment | `nickel-ui::OverlayMenu` lifecycle | consolidate | Consumers declare menus; UI owns stack, focus return, collision, and accessibility. Direct native menu ownership has no production caller. | overlay matrix and semantic scenario suites | complete |
 | `nickel-input::{lib,winit,windows,global}`; session and UI consumers | Native input normalization and shortcut suppression | `nickel-input` normalized events; `nickel-ui::FocusedInputDispatcher` for widget policy | adapter-only | Native scan codes/COM details remain in adapters. Moving widget focus policy down would create a dependency inversion. | adapter traces and correlated-text tests | complete |
@@ -19,6 +23,8 @@ translations were not treated as duplication.
 | `nickel-core::dpi`, `nickel-session::shell_layout`, `nickel-shell::platform::linux` | Signed logical-rectangle intersection area | `nickel-core::geometry::LogicalRect` | share-primitive | The refreshed audit found three byte-for-byte-equivalent overlap algorithms. Domain-specific placement and capture policy remain separate, while arithmetic and hostile-coordinate handling now have one portable authority. | core extreme-coordinate tests plus existing DPI, placement, and capture selection tests | complete |
 | `nickel-core::{display_projection,dpi}`, Nickel Settings, and session-protocol translations | Fractional display scale representation | `nickel-core::dpi::Scale120`; raw `u32` only at native/wire translations | share-primitive | Projection and Settings presentation policy now store the validated scale type instead of parallel raw-number representations. Session protocol and monitor snapshots retain integer fields as translation boundaries and validate them before policy or compositor application. | projection plan/rollback, Settings scale/apply, scale conversion, session layout validation | complete |
 | `nickel-session` DRM/udev backends | Connector discovery | session backend contract | adapter-only | DRM object enumeration and udev lifecycle are native mechanics; portable state consumes typed output facts. | scanner/udev contract tests | complete |
+| Nickel Settings and Shell Linux adapters | NetworkManager saved-connection discovery | `nickel-platform::network_manager_saved_wifi_connections` | consolidate | The shared platform layer now performs D-Bus profile discovery once; Settings and Shell retain product-specific presentation and activation policy. | Settings/Shell network suites | complete |
+| `nickel-platform::linux` and `nickel-shell::desktop_entries` | Bounded desktop-entry loading and application-type admission | `nickel-platform::{desktop_entry_from_path,desktop_entry_is_application}` | consolidate | The platform crate owns file-type/size limits, parsing, and application-type recognition. Shell applies launcher-specific visibility, executable, desktop, localization, and ranking policy to the admitted record instead of reopening native input. | malformed/oversized desktop-entry tests and launcher discovery tests | complete |
 | `nickel-shell::platform::{linux,windows,unsupported}` | Launch, enumerate apps, tray/audio/control effects | shell platform trait | adapter-only | Repeated method names are required trait translations. Policy is in launcher/model/live-shell; adapters contain only OS effects. | synthetic platform and native contract tests | complete |
 | `nickel-shell::{launcher,model,places,desktop_entries}` | Application discovery, ranking, places | launcher model | share-primitive | Desktop-entry parsing is Linux-specific input; ranking and presentation consume canonical application records. Places are locations, not applications, so merging indexes would erase semantics. | launcher ranking/discovery tests | complete |
 | `nickel-platform::default_apps`, Nickel Settings, File Properties | Default association discovery/change | process-wide `AssociationService` | consolidate | Both UIs consume one generation-bearing service; platform backends remain typed adapters. | re-query/change verification and consumer tests | complete (0167) |
@@ -30,28 +36,31 @@ translations were not treated as duplication.
 | `nickel-ui::{theme,components,settings_components,start_menu_components}` | Semantic color/focus presentation | `SemanticTheme` token roles | share-primitive | Components retain different structure but resolve shared tokens. One universal component would generalize incidental layout similarity. | theme sweeps and component state sheets | complete |
 | `nickel-ui::{gpu,ui::tree,layout}` and shell presenters | Geometry/render helpers | Declarative UI tree and bounded paint commands | consolidate | Production applications declare components; renderer traversal/hit/display-list ownership remains in UI. Existing authority tests prohibit parallel consumer display lists. | `declarative_authority`, custom-paint bounds | complete |
 | `nickel-ui-testkit`, per-product fixtures, workbench inventory | Fixture execution and visual acceptance | testkit contracts; product-owned fixture data | keep-distinct | Metadata implementations repeat trait shape, not behavior. Centralizing product fixtures would reverse dependencies and hide product state coverage. | fixture registry and manifest tests | verified distinct |
+| Nickel File application and workbench fixtures | Synthetic fixture state and `nickel-ui-testkit` dependency | `workbench-fixtures` feature boundary | adapter-only | Fixture fields, constructors, and the testkit dependency are compiled only for tests or the explicit workbench feature; normal Nickel File builds no longer ship workbench infrastructure. Product-owned fixture data remains intentionally local. | Nickel File default/all-feature builds and workbench consumer inventory | complete |
 | Per-application `Application::{view,update,poll_interval}` | Runtime integration | `nickel-ui::Application` trait | keep-distinct | These are required domain implementations. Their message types, polling sources, and views are intentionally application-owned. | host/application contract suites | verified distinct |
+| `nickel-ui` controller/runtime and session-aware applications | Session controller fencing and on-screen-keyboard requests | application `HostAdapter` implementations | adapter-only | Generic UI now exposes controller-fence intent and scheduling only. Nickel File, Settings, and the recipient example perform session protocol I/O at their host boundary, eliminating blocking compositor IPC and the session-protocol dependency from `nickel-ui`. | controller schedule/fence tests and application host-adapter tests | complete |
+| Nickel Shell binary and feature-gated library | Shell module ownership and entry point | `nickel-shell` library root | consolidate | The binary is a thin call to `nickel_shell::run`; production and workbench builds now share one module/type graph instead of compiling the same source through parallel roots. | Shell default/all-feature builds and workbench fixtures | complete |
+| Nickel Shell, Settings, and File build scripts | Windows icon resource generation | `nickel-build-support::embed_windows_icon` | consolidate | Each build script supplies only its icon path and output name; image conversion, resource compilation, and rerun directives have one build-time authority. | workspace default/all-feature builds | complete |
+| `nickel-ui::ui::tree` scrollbar layout/hit helpers | Scrollbar geometry | `nickel-ui::ui::tree::scrollbar` | split-seam | Pure thumb/track geometry and drag mapping moved behind a focused private module while `UiFrame` retains interaction and tree ownership. This reduces coordinator density without introducing a second hit-test authority. | scrollbar unit tests and UI tree interaction suites | complete |
 | `nickel-i18n` and `nickel-i18n-lint` | Runtime lookup versus source enforcement | Separate runtime and build-time crates sharing catalog conventions | keep-distinct | The lint performs source analysis and must not enter shipped runtime dependencies; runtime localization must not depend on repository source. | catalog and localization-lint suites | verified distinct |
 | `nickel-session-protocol` and session state | Wire types versus compositor ownership | protocol crate for wire schema; session for live state | keep-distinct | Mirroring protocol facts into live handles is translation, not duplicated authority; the protocol crate cannot depend on Smithay. | serialization and session state tests | verified distinct |
 | `nickel-gaze::{contract,grid,camera}` | Gaze samples, calibration grid, camera frames | Separate typed stages | keep-distinct | Coordinate conversion is shared through contract types; acquisition and calibration have different timing/lifetime constraints. | contract/grid/camera tests | verified distinct |
 
 ## Result
 
-The audit eliminated four platform-directory implementations and five direct small-settings writers,
-replacing them with two narrow primitives. The consolidation removes 140 production lines and adds
-121 (including the cross-platform authority and its Windows atomic-replace implementation), a net
-reduction of 19 production lines. Its more important effect is one configuration-root authority,
-atomic replacement for every migrated public preference file and removal of prior path duplication
-disagreement. The enforcement test makes both authorities non-regressive.
+The audit now has lower-level authorities for configuration storage and Windows icon embedding;
+shared Linux authorities for NetworkManager discovery and desktop-entry admission; a single Nickel
+Shell module graph; an explicit feature boundary around Nickel File fixtures; and application host
+adapters as the boundary for session-specific input fencing. Scrollbar extraction establishes the
+first focused seam in the oversized UI tree without duplicating ownership. Earlier geometry and
+validated-scale consolidations remain in force.
 
-The refresh consolidates three overlap algorithms and two logical-rectangle definitions into one
-primitive, and replaces the projection policy's two raw scale fields with the existing validated
-scale type. The portable overflow-safe primitive makes the executable implementation nine lines
-larger after removing the copies; its focused inline tests add another 37 lines. Combined with the
-original slice, the audit's executable production-code impact remains a net reduction of ten lines.
-
-No compatibility shims or deferred consolidation candidates remain. Native adapter implementations
-and product fixtures remain intentionally distinct for the evidence stated above.
+Final line deltas and per-crate source counts are deliberately deferred until the parallel
+`LiveShell`, session-state, UI-tree/selection, file-app, grab-forwarding, and surface-output work is
+integrated. The final inventory pass must review every newly split source, regenerate
+`assets/code-reuse-source-inventory.tsv`, update the scope count above, run the full
+`reuse_authority` suite, and replace this paragraph with the final measured result. Until then, a
+green behavioral disposition test does not imply that the source inventory is current.
 
 ## Authority exception baselines
 
