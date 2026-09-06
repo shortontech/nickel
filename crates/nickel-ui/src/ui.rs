@@ -116,6 +116,17 @@ impl ImagePresentation {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum TextUnderlineStyle {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 /// One non-overlapping byte range in a styled text stream.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct StyledTextSpan {
@@ -126,7 +137,7 @@ pub struct StyledTextSpan {
     /// Optional explicit font family. The renderer resolves it through the shared font system.
     pub font_family: Option<Arc<str>>,
     pub strikethrough: bool,
-    pub underline: bool,
+    pub underline: TextUnderlineStyle,
     pub color: Option<Color>,
     pub background: Option<Color>,
 }

@@ -119,6 +119,17 @@ pub enum TerminalColor {
     Rgb(u8, u8, u8),
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TerminalUnderline {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TerminalCell {
     pub character: char,
@@ -128,7 +139,7 @@ pub struct TerminalCell {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
-    pub underline: bool,
+    pub underline: TerminalUnderline,
     pub inverse: bool,
     pub concealed: bool,
     pub wide: bool,
@@ -649,7 +660,19 @@ fn snapshot(
                     .intersects(Flags::BOLD | Flags::BOLD_ITALIC | Flags::DIM_BOLD),
                 dim: cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD),
                 italic: cell.flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
-                underline: cell.flags.intersects(Flags::ALL_UNDERLINES),
+                underline: if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
+                    TerminalUnderline::Double
+                } else if cell.flags.contains(Flags::UNDERCURL) {
+                    TerminalUnderline::Curly
+                } else if cell.flags.contains(Flags::DOTTED_UNDERLINE) {
+                    TerminalUnderline::Dotted
+                } else if cell.flags.contains(Flags::DASHED_UNDERLINE) {
+                    TerminalUnderline::Dashed
+                } else if cell.flags.contains(Flags::UNDERLINE) {
+                    TerminalUnderline::Single
+                } else {
+                    TerminalUnderline::None
+                },
                 inverse: cell.flags.contains(Flags::INVERSE),
                 concealed: cell.flags.contains(Flags::HIDDEN),
                 wide: cell.flags.contains(Flags::WIDE_CHAR),
@@ -738,9 +761,33 @@ mod tests {
             .iter()
             .find(|cell| cell.character == 'r')
             .unwrap();
-        assert!(red.bold && red.italic && red.underline);
+        assert!(red.bold && red.italic);
+        assert_eq!(red.underline, TerminalUnderline::Single);
         assert!(snapshot.bracketed_paste);
         assert!(snapshot.mouse_reporting);
+    }
+
+    #[test]
+    fn underline_styles_remain_typed_across_the_engine_boundary() {
+        let mut engine = TerminalEngine::new(dimensions(8, 1), 0).unwrap();
+        engine.process(b"\x1b[4m1\x1b[4:2m2\x1b[4:3m3\x1b[4:4m4\x1b[4:5m5");
+        let snapshot = engine.snapshot();
+        let styles = snapshot
+            .cells
+            .iter()
+            .take(5)
+            .map(|cell| cell.underline)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            styles,
+            [
+                TerminalUnderline::Single,
+                TerminalUnderline::Double,
+                TerminalUnderline::Curly,
+                TerminalUnderline::Dotted,
+                TerminalUnderline::Dashed,
+            ]
+        );
     }
 
     #[test]

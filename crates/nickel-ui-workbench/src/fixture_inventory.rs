@@ -253,7 +253,7 @@ impl InventoryApp {
                             monospace: false,
                             font_family: None,
                             strikethrough: false,
-                            underline: false,
+                            underline: nickel_ui::TextUnderlineStyle::None,
                             color: Some(palette.text.primary),
                             background: None,
                         }],

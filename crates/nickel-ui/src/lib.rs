@@ -91,8 +91,8 @@ pub use ui::{
     SettingsStatusKind, ShortcutRow, ShortcutState, ShoulderHints, Sidebar, SidebarFolder,
     SidebarItem, SidebarSection, Slider, SliderField, SourceLocation, Spacer, StartMenuNarrowPane,
     StartMenuShell, StyledText, StyledTextSpan, Surface, SurfaceRole, Switch, SwitchState, TabList,
-    Text, TextAlign, TextField, TextMeasureCacheMode, Tone, UiEvent, UiFrame, VerticalScroll,
-    VirtualColumn, VirtualWindow, search_settings, with_text_measure_cache_mode,
+    Text, TextAlign, TextField, TextMeasureCacheMode, TextUnderlineStyle, Tone, UiEvent, UiFrame,
+    VerticalScroll, VirtualColumn, VirtualWindow, search_settings, with_text_measure_cache_mode,
 };
 pub use ui_declarative_macros::{component, id, ui};
 

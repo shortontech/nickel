@@ -84,7 +84,9 @@ pub(crate) fn record_image_fingerprint(bytes: usize, elapsed: std::time::Duratio
     image_profile::fingerprint(bytes, elapsed);
 }
 
-use crate::{Color, GradientAxis, PaintCommand, Rect, StyledTextSpan, TextAlign};
+use crate::{
+    Color, GradientAxis, PaintCommand, Rect, StyledTextSpan, TextAlign, TextUnderlineStyle,
+};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Pixel {
@@ -976,14 +978,50 @@ fn styled_strikes(
                 );
                 strikes.push((rect, span.color.unwrap_or(default_color)));
             }
-            if span.underline {
-                let rect = Rect::new(
-                    bounds.origin.x + glyph.x,
-                    bounds.origin.y + run.line_top + run.line_height * 0.88,
-                    glyph.w.max(1.0),
-                    (font_size / 14.0).max(1.0),
-                );
-                strikes.push((rect, span.color.unwrap_or(default_color)));
+            let thickness = (font_size / 14.0).max(1.0);
+            let x = bounds.origin.x + glyph.x;
+            let y = bounds.origin.y + run.line_top;
+            let width = glyph.w.max(1.0);
+            let color = span.color.unwrap_or(default_color);
+            let mut patterned = |segment: f32, gap: f32, alternating: bool| {
+                let mut offset = 0.0;
+                let mut raised = false;
+                while offset < width {
+                    let segment_width = segment.min(width - offset);
+                    strikes.push((
+                        Rect::new(
+                            x + offset,
+                            y + run.line_height * if raised { 0.82 } else { 0.9 },
+                            segment_width,
+                            thickness,
+                        ),
+                        color,
+                    ));
+                    offset += segment + gap;
+                    if alternating {
+                        raised = !raised;
+                    }
+                }
+            };
+            match span.underline {
+                TextUnderlineStyle::None => {}
+                TextUnderlineStyle::Single => strikes.push((
+                    Rect::new(x, y + run.line_height * 0.88, width, thickness),
+                    color,
+                )),
+                TextUnderlineStyle::Double => {
+                    strikes.push((
+                        Rect::new(x, y + run.line_height * 0.8, width, thickness),
+                        color,
+                    ));
+                    strikes.push((
+                        Rect::new(x, y + run.line_height * 0.92, width, thickness),
+                        color,
+                    ));
+                }
+                TextUnderlineStyle::Curly => patterned(thickness * 1.5, thickness, true),
+                TextUnderlineStyle::Dotted => patterned(thickness, thickness, false),
+                TextUnderlineStyle::Dashed => patterned(thickness * 3.0, thickness * 1.5, false),
             }
         }
     }

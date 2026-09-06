@@ -1047,7 +1047,7 @@ fn push_styled_text(
             monospace: style.monospace,
             font_family: None,
             strikethrough: style.strikethrough,
-            underline: false,
+            underline: nickel_ui::TextUnderlineStyle::None,
             color: style.color,
             background: style.background,
         });

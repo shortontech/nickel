@@ -6,7 +6,7 @@ use nickel_input::{
 };
 use nickel_terminal::{
     TerminalCell, TerminalColor, TerminalPoint, TerminalScroll, TerminalSelectionKind,
-    TerminalSnapshot,
+    TerminalSnapshot, TerminalUnderline,
 };
 use nickel_ui::{
     Component, Container, Grid, SemanticRole, StyledText, StyledTextSpan, Track, View,
@@ -559,10 +559,21 @@ impl<'a> TerminalViewport<'a> {
                 monospace: true,
                 font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
                 strikethrough: false,
-                underline: cell.underline
-                    || (cursor
-                        && self.palette.cursor_style
-                            == nickel_core::terminal_settings::TerminalCursorStyle::Underline),
+                underline: if cursor
+                    && self.palette.cursor_style
+                        == nickel_core::terminal_settings::TerminalCursorStyle::Underline
+                {
+                    nickel_ui::TextUnderlineStyle::Single
+                } else {
+                    match cell.underline {
+                        TerminalUnderline::None => nickel_ui::TextUnderlineStyle::None,
+                        TerminalUnderline::Single => nickel_ui::TextUnderlineStyle::Single,
+                        TerminalUnderline::Double => nickel_ui::TextUnderlineStyle::Double,
+                        TerminalUnderline::Curly => nickel_ui::TextUnderlineStyle::Curly,
+                        TerminalUnderline::Dotted => nickel_ui::TextUnderlineStyle::Dotted,
+                        TerminalUnderline::Dashed => nickel_ui::TextUnderlineStyle::Dashed,
+                    }
+                },
                 color: Some(foreground),
                 background: None,
             }],
@@ -708,7 +719,7 @@ mod tests {
         let commands = format!("{:?}", frame.commands());
         assert!(commands.contains("bold: true"));
         assert!(commands.contains("italic: true"));
-        assert!(commands.contains("underline: true"));
+        assert!(commands.contains("underline: Single"));
         assert!(commands.contains("Nickel Fixture Mono"));
         assert!(
             frame.commands().len() <= 100,
