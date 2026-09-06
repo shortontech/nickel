@@ -333,9 +333,15 @@ impl NickelSession {
             SessionCommand::ObservePendingLaunch {
                 generation,
                 root_pid,
+                root_start_time,
                 deadline_ms,
             } => {
-                if root_pid == 0 || deadline_ms == 0 || deadline_ms > 2_000 {
+                if root_pid == 0
+                    || root_start_time == 0
+                    || linux_process_start_time(root_pid) != Some(root_start_time)
+                    || deadline_ms == 0
+                    || deadline_ms > 2_000
+                {
                     return protocol_error(
                         ErrorCode::InvalidRequest,
                         "invalid pending-launch observation",
@@ -363,6 +369,7 @@ impl NickelSession {
                     .push(PendingLaunchObservation {
                         generation,
                         root_pid,
+                        root_start_time,
                         registered_at: Instant::now(),
                         deadline: Duration::from_millis(u64::from(deadline_ms)),
                     });

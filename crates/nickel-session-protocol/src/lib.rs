@@ -81,6 +81,7 @@ pub enum Command {
     ObservePendingLaunch {
         generation: u64,
         root_pid: u32,
+        root_start_time: u64,
         deadline_ms: u16,
     },
     CancelPendingLaunch {
@@ -1965,6 +1966,7 @@ mod tests {
             request: Request::Command(Command::ObservePendingLaunch {
                 generation: 27,
                 root_pid: 4_242,
+                root_start_time: 91_337,
                 deadline_ms: 100,
             }),
         };

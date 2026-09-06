@@ -2001,6 +2001,16 @@ fn deliver_pending_launch_observation(generation: u64, observed_after_ms: u16, d
     }
 }
 
+fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
 fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::LaunchError> {
     use std::io::Write;
 
@@ -2011,6 +2021,13 @@ fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::
     thread::Builder::new()
         .name("nickel-run-window-observer".into())
         .spawn(move || {
+            let Some(root_start_time) = process_start_time(root_pid) else {
+                if let Some(input) = decision_input.as_mut() {
+                    let _ = input.write_all(b"start\n");
+                    let _ = input.flush();
+                }
+                return;
+            };
             let (sender, receiver) = mpsc::sync_channel(1);
             if let Ok(mut relays) = PENDING_LAUNCH_RELAYS
                 .get_or_init(|| Mutex::new(HashMap::new()))
@@ -2035,6 +2052,7 @@ fn launch_observed_deferred_terminal(arguments: &[String]) -> Result<(), super::
                 SessionCommand::ObservePendingLaunch {
                     generation,
                     root_pid,
+                    root_start_time,
                     deadline_ms: 100,
                 },
             ))

@@ -229,6 +229,7 @@ fn same_session_user(pid: u32) -> bool {
 struct PendingLaunchObservation {
     generation: u64,
     root_pid: u32,
+    root_start_time: u64,
     registered_at: Instant,
     deadline: Duration,
 }
@@ -243,10 +244,20 @@ fn linux_process_parent(pid: u32) -> Option<u32> {
         .ok()
 }
 
-fn process_descends_from(mut pid: u32, root_pid: u32) -> bool {
+fn linux_process_start_time(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .nth(19)?
+        .parse()
+        .ok()
+}
+
+fn process_descends_from(mut pid: u32, root_pid: u32, root_start_time: u64) -> bool {
     for _ in 0..64 {
         if pid == root_pid {
-            return true;
+            return linux_process_start_time(pid) == Some(root_start_time);
         }
         let Some(parent) = linux_process_parent(pid) else {
             return false;
@@ -2039,7 +2050,8 @@ impl NickelSession {
             if elapsed > pending.deadline {
                 return false;
             }
-            let attributed = process_descends_from(client_pid, pending.root_pid);
+            let attributed =
+                process_descends_from(client_pid, pending.root_pid, pending.root_start_time);
             if attributed {
                 observations.push((
                     pending.generation,
@@ -6056,6 +6068,7 @@ mod protocol_tests {
             Command::ObservePendingLaunch {
                 generation: 7,
                 root_pid: 42,
+                root_start_time: 99,
                 deadline_ms: 100,
             },
             Command::CancelPendingLaunch { generation: 7 },
@@ -6078,18 +6091,30 @@ mod protocol_tests {
 
     #[test]
     fn process_lineage_accepts_self_and_a_live_descendant_only() {
+        let start = super::linux_process_start_time(std::process::id()).unwrap();
         assert!(super::process_descends_from(
             std::process::id(),
-            std::process::id()
+            std::process::id(),
+            start,
         ));
         let mut child = std::process::Command::new("/bin/sh")
             .args(["-c", "sleep 2"])
             .spawn()
             .expect("spawn lineage fixture");
-        assert!(super::process_descends_from(child.id(), std::process::id()));
+        assert!(super::process_descends_from(
+            child.id(),
+            std::process::id(),
+            start,
+        ));
+        assert!(!super::process_descends_from(
+            child.id(),
+            std::process::id(),
+            start.wrapping_add(1),
+        ));
         assert!(!super::process_descends_from(
             std::process::id(),
-            child.id()
+            child.id(),
+            super::linux_process_start_time(child.id()).unwrap(),
         ));
         let _ = child.kill();
         let _ = child.wait();
