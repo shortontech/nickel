@@ -15,6 +15,9 @@ use std::{
 use alacritty_terminal::{
     event::{Event, EventListener, WindowSize},
     event_loop::{EventLoop, EventLoopSender, Msg},
+    grid::Scroll,
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     sync::FairMutex,
     term::{Config, Term, TermMode, cell::Flags, test::TermSize},
     tty::{self, Shell},
@@ -128,6 +131,35 @@ pub struct TerminalCursor {
     pub line: usize,
     pub column: usize,
     pub visible: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalSelectionKind {
+    Simple,
+    Block,
+    Semantic,
+    Lines,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalPoint {
+    pub line: i32,
+    pub column: usize,
+}
+
+impl TerminalPoint {
+    fn upstream(self) -> Point {
+        Point::new(Line(self.line), Column(self.column))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalScroll {
+    Lines(i32),
+    PageUp,
+    PageDown,
+    Top,
+    Bottom,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -275,6 +307,37 @@ impl TerminalEngine {
         )
     }
 
+    pub fn scroll(&mut self, scroll: TerminalScroll) {
+        self.terminal.scroll_display(upstream_scroll(scroll));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn begin_selection(&mut self, kind: TerminalSelectionKind, point: TerminalPoint) {
+        self.terminal.selection = Some(Selection::new(
+            selection_kind(kind),
+            point.upstream(),
+            Side::Left,
+        ));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn update_selection(&mut self, point: TerminalPoint) {
+        if let Some(selection) = &mut self.terminal.selection {
+            selection.update(point.upstream(), Side::Right);
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        if self.terminal.selection.take().is_some() {
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.terminal.selection_to_string()
+    }
+
     pub fn try_event(&self) -> Option<TerminalEvent> {
         match self.events.try_recv() {
             Ok(event) => {
@@ -378,6 +441,38 @@ impl TerminalSession {
             self.generation.load(Ordering::Acquire),
             self.dimensions,
         )
+    }
+
+    pub fn scroll(&mut self, scroll: TerminalScroll) {
+        self.terminal.lock().scroll_display(upstream_scroll(scroll));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn begin_selection(&mut self, kind: TerminalSelectionKind, point: TerminalPoint) {
+        self.terminal.lock().selection = Some(Selection::new(
+            selection_kind(kind),
+            point.upstream(),
+            Side::Left,
+        ));
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn update_selection(&mut self, point: TerminalPoint) {
+        let mut terminal = self.terminal.lock();
+        if let Some(selection) = &mut terminal.selection {
+            selection.update(point.upstream(), Side::Right);
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        if self.terminal.lock().selection.take().is_some() {
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn selected_text(&self) -> Option<String> {
+        self.terminal.lock().selection_to_string()
     }
 
     pub fn try_event(&mut self) -> Option<TerminalEvent> {
@@ -489,6 +584,25 @@ fn color(color: ansi::Color) -> TerminalColor {
     }
 }
 
+fn selection_kind(kind: TerminalSelectionKind) -> SelectionType {
+    match kind {
+        TerminalSelectionKind::Simple => SelectionType::Simple,
+        TerminalSelectionKind::Block => SelectionType::Block,
+        TerminalSelectionKind::Semantic => SelectionType::Semantic,
+        TerminalSelectionKind::Lines => SelectionType::Lines,
+    }
+}
+
+fn upstream_scroll(scroll: TerminalScroll) -> Scroll {
+    match scroll {
+        TerminalScroll::Lines(lines) => Scroll::Delta(lines),
+        TerminalScroll::PageUp => Scroll::PageUp,
+        TerminalScroll::PageDown => Scroll::PageDown,
+        TerminalScroll::Top => Scroll::Top,
+        TerminalScroll::Bottom => Scroll::Bottom,
+    }
+}
+
 fn truncate_utf8(mut value: String, maximum: usize) -> String {
     if value.len() <= maximum {
         return value;
@@ -553,6 +667,31 @@ mod tests {
             (engine.snapshot().columns, engine.snapshot().lines),
             (20, 4)
         );
+    }
+
+    #[test]
+    fn selection_and_scrollback_are_projected_without_upstream_types() {
+        let mut engine = TerminalEngine::new(dimensions(8, 2), 10).unwrap();
+        engine.process(b"one\r\ntwo\r\nthree");
+        engine.scroll(TerminalScroll::Top);
+        engine.begin_selection(
+            TerminalSelectionKind::Lines,
+            TerminalPoint {
+                line: -1,
+                column: 0,
+            },
+        );
+        engine.update_selection(TerminalPoint {
+            line: -1,
+            column: 2,
+        });
+        assert!(
+            engine
+                .selected_text()
+                .is_some_and(|text| text.contains("one"))
+        );
+        engine.clear_selection();
+        assert!(engine.selected_text().is_none());
     }
 
     #[test]
