@@ -48821,7 +48821,7 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#1/#1/settings-content-pane/#0@root",
               "1:controller_Adjust(1):root/#0/#0/#1/#1/settings-content-pane/#0",
-              "2:controller:Increment:root/#0/#0/#1/#1/settings-content-pane/#0:0->231.7388916015625"
+              "2:controller:Increment:root/#0/#0/#1/#1/settings-content-pane/#0:0->225.44586181640625"
             ],
             "reached": true
           },
@@ -49290,7 +49290,7 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#1/#1/settings-content-pane/#0@root",
               "1:controller_Adjust(1):root/#0/#0/#1/#1/settings-content-pane/#0",
-              "2:controller:Increment:root/#0/#0/#1/#1/settings-content-pane/#0:0->490.089599609375"
+              "2:controller:Increment:root/#0/#0/#1/#1/settings-content-pane/#0:0->469.50299072265625"
             ],
             "reached": true
           },
@@ -51108,7 +51108,7 @@
       "variant": "dark",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:872888bce1c54848",
+        "semantic_digest": "fnv1a64:04fc24a1f08dd4b4",
         "paths": [
           {
             "target": "root/#0/#0/#0/#1",
@@ -51877,7 +51877,7 @@
       "variant": "compact",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:872888bce1c54848",
+        "semantic_digest": "fnv1a64:04fc24a1f08dd4b4",
         "paths": [
           {
             "target": "root/#0/#0/#0/#1",
@@ -57682,7 +57682,7 @@
       "variant": "populated-wide-ltr-dark-1x-pointer",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:21098ec914e30314",
+        "semantic_digest": "fnv1a64:bbdd84c0302725ce",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -60664,7 +60664,7 @@
       "variant": "empty-query",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:c9a8de47a0ce25dd",
+        "semantic_digest": "fnv1a64:5a52667f272565d3",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -61760,7 +61760,7 @@
       "variant": "results",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:69281047a55ae402",
+        "semantic_digest": "fnv1a64:1a37d21b9ae32673",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#0",
@@ -62170,7 +62170,7 @@
       "variant": "scroll",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:edc3c2383745a021",
+        "semantic_digest": "fnv1a64:2aeee030cd8a2dfe",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#0",
