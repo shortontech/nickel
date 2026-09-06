@@ -16,8 +16,9 @@ use nickel_terminal_ui::{
     TerminalViewport, confirm_paste, prepare_paste, translate_input_with_application_cursor,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, Column, Container, HostAdapter, HostServices, SemanticRole, Text,
-    UiHost, View, ViewContext,
+    AdapterOutcome, Application, Column, Container, FrameOverlay, HostAdapter, HostServices,
+    OverlayAnchor, OverlayMenu, OverlayMenuItem, SemanticRole, Text, UiHost, UiId, View,
+    ViewContext,
 };
 use winit::event::WindowEvent;
 
@@ -41,6 +42,11 @@ struct TerminalApp {
 enum Message {
     ConfirmPaste,
     CancelPaste,
+    OpenContextMenu,
+    Copy,
+    Paste,
+    SelectAll,
+    ClearScrollback,
 }
 
 impl TerminalApp {
@@ -183,6 +189,19 @@ impl Application for TerminalApp {
                 }
             }
             Message::CancelPaste => self.paste_confirmation = None,
+            Message::OpenContextMenu => {}
+            Message::Copy => {
+                self.apply_input(TerminalInputCommand::Copy);
+            }
+            Message::Paste => {
+                self.apply_input(TerminalInputCommand::PasteRequested);
+            }
+            Message::SelectAll => {
+                self.apply_input(TerminalInputCommand::SelectAll);
+            }
+            Message::ClearScrollback => {
+                self.apply_input(TerminalInputCommand::ClearScrollback);
+            }
         }
     }
 
@@ -205,7 +224,12 @@ impl Application for TerminalApp {
                     TerminalExit::Running => unreachable!(),
                 }),
             });
-        let mut root = Column::new().gap(0.0).child(viewport);
+        let mut root = Column::new().gap(0.0).child(
+            Container::new()
+                .id("terminal-interaction")
+                .context_message(Message::OpenContextMenu)
+                .child(viewport),
+        );
         if let Some(status) = status {
             root = root.child(
                 Container::new()
@@ -225,6 +249,36 @@ impl Application for TerminalApp {
                 .child(nickel_ui::Button::new(Message::CancelPaste, "Cancel"));
         }
         root
+    }
+
+    fn frame_overlays(&self, _: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+        let copy = if self.session.selected_text().is_some() {
+            OverlayMenuItem::action("copy", "Copy", Message::Copy).shortcut("Ctrl+Shift+C")
+        } else {
+            OverlayMenuItem::disabled_with_reason("copy", "Copy", "No text is selected")
+        };
+        let mut menu = OverlayMenu::new(
+            "terminal-context-menu",
+            OverlayAnchor::InvocationTarget(UiId::new("terminal-interaction")),
+        )
+        .item(copy)
+        .item(OverlayMenuItem::action("paste", "Paste", Message::Paste).shortcut("Ctrl+Shift+V"))
+        .item(
+            OverlayMenuItem::action("select-all", "Select All", Message::SelectAll)
+                .shortcut("Ctrl+Shift+A")
+                .separator_before(true),
+        )
+        .item(OverlayMenuItem::action(
+            "clear-scrollback",
+            "Clear Scrollback",
+            Message::ClearScrollback,
+        ));
+        menu.background = self.palette.background;
+        menu.border = self.palette.foreground;
+        menu.foreground = self.palette.foreground;
+        menu.item_hover = Some(self.palette.selection);
+        menu.item_selected = Some(self.palette.selection);
+        vec![FrameOverlay::Menu(menu)]
     }
 
     fn poll(&mut self) -> bool {
@@ -373,4 +427,45 @@ fn main() -> Result<(), Box<dyn Error>> {
         std::thread::sleep(deferred_window);
     }
     nickel_ui::run_with_adapter(app, TerminalAdapter::default())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_menu_exposes_only_implemented_terminal_actions() {
+        let app = TerminalApp::new(
+            Some(TerminalProgram {
+                executable: "/bin/sh".into(),
+                arguments: vec!["-c".into(), "exit 0".into()],
+            }),
+            None,
+        )
+        .expect("fixture PTY");
+        let mut host = UiHost::new(app, 900, 600);
+        let target = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/terminal-interaction"))
+            .expect("terminal context target");
+        let opened = host.perform_semantic_action(
+            target.id,
+            nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::ContextMenu),
+        );
+        assert!(opened.changed);
+        let names = host
+            .semantic_nodes()
+            .into_iter()
+            .filter_map(|node| node.name)
+            .collect::<Vec<_>>();
+
+        for expected in ["Copy", "Paste", "Select All", "Clear Scrollback"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}: {names:?}"
+            );
+        }
+        assert!(!names.iter().any(|name| name == "Cut" || name == "Delete"));
+    }
 }
