@@ -1998,6 +1998,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -2068,6 +2078,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -2134,6 +2154,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -4098,6 +4128,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -4168,6 +4208,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -4234,6 +4284,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -6744,6 +6804,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -6814,6 +6884,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -6880,6 +6960,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -9390,6 +9480,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -9460,6 +9560,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -9526,6 +9636,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -11490,6 +11610,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -11560,6 +11690,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -11626,6 +11766,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -13590,6 +13740,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -13660,6 +13820,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -13726,6 +13896,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -16236,6 +16416,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -16306,6 +16496,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -16372,6 +16572,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -18882,6 +19092,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -18952,6 +19172,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -19018,6 +19248,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -19958,6 +20198,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -20028,6 +20278,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -20094,6 +20354,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -21034,6 +21304,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -21104,6 +21384,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -21170,6 +21460,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -22544,6 +22844,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -22614,6 +22924,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -22680,6 +23000,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -24054,6 +24384,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -24124,6 +24464,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -24190,6 +24540,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -25130,6 +25490,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -25200,6 +25570,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -25266,6 +25646,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -26640,6 +27030,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -26710,6 +27110,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -26776,6 +27186,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -28710,6 +29130,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-752066e25938a860/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Quarterly planning notes with a deliberately long wrapped name.md/file-entry-0",
+              "accessibility:Activate:file-entry-context-752066e25938a860/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-752066e25938a860/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -28810,6 +29240,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-f3566861f477eef6/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/写真と音楽 🎵/file-entry-1",
+              "accessibility:Activate:file-entry-context-f3566861f477eef6/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-f3566861f477eef6/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -28876,6 +29316,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/مرحبا.txt/file-entry-2",
               "accessibility:Activate:file-entry-context-c60f4ddb4f35e17f/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-c60f4ddb4f35e17f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/مرحبا.txt/file-entry-2",
+              "accessibility:Activate:file-entry-context-c60f4ddb4f35e17f/open-terminal"
             ],
             "reached": true
           },
@@ -30840,6 +31290,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-1113d13a8c91393e/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/.nickel-cache/file-entry-0",
+              "accessibility:Activate:file-entry-context-1113d13a8c91393e/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-1113d13a8c91393e/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -30910,6 +31370,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -30976,6 +31446,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -41587,6 +42067,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -41657,6 +42147,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -41723,6 +42223,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -44233,6 +44743,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -44303,6 +44823,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -44369,6 +44899,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-details/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -46333,6 +46873,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-2513faf65b7cd02f/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/Documents/file-entry-0",
+              "accessibility:Activate:file-entry-context-2513faf65b7cd02f/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-2513faf65b7cd02f/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -46403,6 +46953,16 @@
             "reached": true
           },
           {
+            "target": "file-entry-context-29399aea3f8a4329/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/report.txt/file-entry-1",
+              "accessibility:Activate:file-entry-context-29399aea3f8a4329/open-terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "file-entry-context-29399aea3f8a4329/properties",
             "action": "Activate",
             "modality": "accessibility",
@@ -46469,6 +47029,16 @@
             "steps": [
               "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
               "accessibility:Activate:file-entry-context-b237a4ce4694e766/copy-path"
+            ],
+            "reached": true
+          },
+          {
+            "target": "file-entry-context-b237a4ce4694e766/open-terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/file-layout/#0/files-pane/#0/file-list/#0/file-grid/#1//fixture/notes.md/file-entry-2",
+              "accessibility:Activate:file-entry-context-b237a4ce4694e766/open-terminal"
             ],
             "reached": true
           },
@@ -57682,7 +58252,7 @@
       "variant": "populated-wide-ltr-dark-1x-pointer",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:bbdd84c0302725ce",
+        "semantic_digest": "fnv1a64:4aefb1c0b7f0e15a",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -58048,7 +58618,7 @@
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
@@ -58060,13 +58630,13 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "9:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "9:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "controller",
             "steps": [
@@ -58074,22 +58644,22 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "0:accessibility:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
@@ -58101,13 +58671,13 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "9:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "9:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
@@ -58115,17 +58685,17 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
@@ -58142,7 +58712,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -58157,7 +58727,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -58185,7 +58755,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -58200,7 +58770,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -58228,7 +58798,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -58244,7 +58814,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -58273,7 +58843,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -58289,7 +58859,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -58318,7 +58888,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58335,7 +58905,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58365,7 +58935,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58382,7 +58952,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58412,7 +58982,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58430,7 +59000,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58461,7 +59031,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58479,7 +59049,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58510,7 +59080,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58529,7 +59099,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58561,7 +59131,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58580,7 +59150,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -58612,7 +59182,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58657,7 +59227,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -58742,22 +59312,22 @@
             "reached": true
           },
           {
-            "target": "application-menu-konsole/launch",
+            "target": "application-menu-nickel terminal/launch",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "accessibility:Activate:application-menu-konsole/launch"
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/launch"
             ],
             "reached": true
           },
           {
-            "target": "application-menu-konsole/toggle-pin",
+            "target": "application-menu-nickel terminal/toggle-pin",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "accessibility:Activate:application-menu-konsole/toggle-pin"
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/toggle-pin"
             ],
             "reached": true
           },
@@ -60664,7 +61234,7 @@
       "variant": "empty-query",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:5a52667f272565d3",
+        "semantic_digest": "fnv1a64:e4335dc0c0589337",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
@@ -61030,7 +61600,7 @@
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "keyboard",
             "steps": [
@@ -61042,13 +61612,13 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "9:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "9:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "controller",
             "steps": [
@@ -61056,22 +61626,22 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "0:accessibility:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "keyboard",
             "steps": [
@@ -61083,13 +61653,13 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "9:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "9:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "controller",
             "steps": [
@@ -61097,17 +61667,17 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
           {
-            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
             "action": "ContextMenu",
             "modality": "accessibility",
             "steps": [
-              "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole"
+              "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal"
             ],
             "reached": true
           },
@@ -61124,7 +61694,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -61139,7 +61709,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -61167,7 +61737,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -61182,7 +61752,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings"
             ],
@@ -61210,7 +61780,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -61226,7 +61796,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -61255,7 +61825,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -61271,7 +61841,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code"
@@ -61300,7 +61870,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61317,7 +61887,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61347,7 +61917,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61364,7 +61934,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61394,7 +61964,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61412,7 +61982,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61443,7 +62013,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61461,7 +62031,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61492,7 +62062,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61511,7 +62081,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61543,7 +62113,7 @@
               "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
               "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox",
               "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files",
-              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
+              "8:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
               "9:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings",
               "10:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code",
               "11:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator",
@@ -61562,7 +62132,7 @@
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications@root",
               "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/firefox@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/files@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/system settings@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "6:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
               "7:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications",
@@ -61632,22 +62202,22 @@
             "reached": true
           },
           {
-            "target": "application-menu-konsole/launch",
+            "target": "application-menu-nickel terminal/launch",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "accessibility:Activate:application-menu-konsole/launch"
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/launch"
             ],
             "reached": true
           },
           {
-            "target": "application-menu-konsole/toggle-pin",
+            "target": "application-menu-nickel terminal/toggle-pin",
             "action": "Activate",
             "modality": "accessibility",
             "steps": [
-              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/konsole",
-              "accessibility:Activate:application-menu-konsole/toggle-pin"
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-applications/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/toggle-pin"
             ],
             "reached": true
           },
@@ -62170,7 +62740,7 @@
       "variant": "scroll",
       "report": {
         "schema": 1,
-        "semantic_digest": "fnv1a64:2aeee030cd8a2dfe",
+        "semantic_digest": "fnv1a64:cceb516c78f97aad",
         "paths": [
           {
             "target": "root/#0/#0/#0/start-menu-primary-pane/#0/#0/#0",
@@ -62275,6 +62845,76 @@
             "reached": true
           },
           {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "Activate",
+            "modality": "keyboard",
+            "steps": [
+              "0:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#0",
+              "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
+              "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
+              "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "Activate",
+            "modality": "controller",
+            "steps": [
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
+              "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
+              "2:controller_Action(Confirm):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "0:accessibility:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "ContextMenu",
+            "modality": "keyboard",
+            "steps": [
+              "0:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#0",
+              "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
+              "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
+              "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "ContextMenu",
+            "modality": "controller",
+            "steps": [
+              "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
+              "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
+              "2:controller_Action(Confirm):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
+            "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+            "action": "ContextMenu",
+            "modality": "accessibility",
+            "steps": [
+              "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal"
+            ],
+            "reached": true
+          },
+          {
             "target": "root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
             "action": "Activate",
             "modality": "keyboard",
@@ -62283,8 +62923,9 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
             ],
             "reached": true
           },
@@ -62295,8 +62936,9 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Confirm):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
             ],
             "reached": true
           },
@@ -62318,8 +62960,9 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
             ],
             "reached": true
           },
@@ -62330,8 +62973,9 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Confirm):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code"
             ],
             "reached": true
           },
@@ -62353,9 +62997,10 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
-              "6:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
+              "7:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
             ],
             "reached": true
           },
@@ -62366,9 +63011,10 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "4:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
             ],
             "reached": true
           },
@@ -62390,9 +63036,10 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
-              "6:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
+              "7:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
             ],
             "reached": true
           },
@@ -62403,9 +63050,10 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "4:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator"
             ],
             "reached": true
           },
@@ -62427,10 +63075,11 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
-              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar",
-              "7:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
+              "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar",
+              "8:keyboard:Activate:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
             ],
             "reached": true
           },
@@ -62441,10 +63090,11 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "5:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "6:controller:Confirm:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
             ],
             "reached": true
           },
@@ -62466,10 +63116,11 @@
               "1:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#1",
               "2:focus_next:root/#0/#0/#0/start-menu-primary-pane/#0/#0/#2",
               "3:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1",
-              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
-              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
-              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar",
-              "7:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
+              "4:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "5:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code",
+              "6:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator",
+              "7:focus_next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar",
+              "8:keyboard:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
             ],
             "reached": true
           },
@@ -62480,10 +63131,11 @@
             "steps": [
               "0:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/launcher-search-focus/#0/#0/#1@root",
               "1:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results@root",
-              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
-              "5:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
+              "2:controller_Action(Right):root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "3:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/visual studio code@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "4:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calculator@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "5:controller_Next:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar@root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results",
+              "6:controller:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
             ],
             "reached": true
           },
@@ -62493,6 +63145,26 @@
             "modality": "accessibility",
             "steps": [
               "0:accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/calendar"
+            ],
+            "reached": true
+          },
+          {
+            "target": "application-menu-nickel terminal/launch",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/launch"
+            ],
+            "reached": true
+          },
+          {
+            "target": "application-menu-nickel terminal/toggle-pin",
+            "action": "Activate",
+            "modality": "accessibility",
+            "steps": [
+              "accessibility:ContextMenu:root/#0/#0/#0/start-menu-detail-pane/#0/#1/launcher-search-scroll/launcher-search-results/nickel terminal",
+              "accessibility:Activate:application-menu-nickel terminal/toggle-pin"
             ],
             "reached": true
           },
@@ -64116,7 +64788,7 @@
     }
   ],
   "external_provider_count": 0,
-  "path_count": 4285,
-  "reached_count": 4285,
+  "path_count": 4350,
+  "reached_count": 4350,
   "issue_count": 0
 }

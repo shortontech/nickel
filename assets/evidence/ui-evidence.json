@@ -1,7 +1,7 @@
 {
   "schema": 1,
-  "captured_at": "2026-08-31T16:00:00-07:00",
-  "repository_revision": "e94558ccdce4c66827b5150806c8aa05a1cbaa6b",
+  "captured_at": "2026-09-06T11:00:00-07:00",
+  "repository_revision": "040ecee5e9ec69e9dfd89043b87e75c6d1ac8fed",
   "working_tree_note": "Evidence was generated from the active post-migration working tree; the content hashes and drift tests, not the base revision alone, identify the exact retained artifacts.",
   "environment": {
     "profile": "development checks plus deterministic headless raster",
@@ -12,11 +12,11 @@
   },
   "reachability": {
     "path": "assets/evidence/ui-reachability-report.json",
-    "sha256": "5599f0ec55f72937604e21dbb83fb1e058680b7cb98af62439b6f893d6a4e565",
+    "sha256": "739e2c44847f845af62c2502c082896fae2c937007be42e1edfb29e812f23e21",
     "report_schema": 2,
     "fixture_variants": 99,
-    "path_count": 4285,
-    "reached_count": 4285,
+    "path_count": 4350,
+    "reached_count": 4350,
     "issue_count": 0,
     "generator_command": "cargo run -q -p nickel-ui-workbench --all-features -- reachability-report assets/evidence/ui-reachability-report.json",
     "drift_check": "The evidence validator regenerates or reads the full report, verifies its hash and schema, and requires reached_count == path_count with issue_count == 0. Any topology, action, route, or serialized-path change changes the retained hash."
