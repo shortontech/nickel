@@ -2039,6 +2039,171 @@ impl SettingsApp {
         .child(transparency_row)
         .child(animation_row)
         .child(file_icon_provider_row);
+        let terminal_text_field =
+            |id: &'static str,
+             label: &'static str,
+             value: String,
+             placeholder: &'static str,
+             on_change: fn(String) -> SettingsMessage| {
+                Column::new()
+                    .fill_width()
+                    .gap(4.0)
+                    .child(Text::new(label).color(theme.text.primary))
+                    .child(
+                        Container::new()
+                            .fill_width()
+                            .height(42.0)
+                            .padding(Insets::all(4.0))
+                            .background(theme.surfaces.raised)
+                            .border(theme.borders.subtle, 1.0)
+                            .radius(theme.radii.control)
+                            .child(
+                                TextField::on_change_with_placeholder(
+                                    &value,
+                                    placeholder,
+                                    on_change,
+                                )
+                                .id(id)
+                                .accessibility_label(label)
+                                .color(theme.text.primary)
+                                .height(34.0),
+                            ),
+                    )
+            };
+        let terminal_cursor = RadioGroup::new([
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetTerminalCursorStyle(
+                    nickel_core::terminal_settings::TerminalCursorStyle::Block,
+                ),
+                "Block",
+                self.terminal_settings.cursor_style
+                    == nickel_core::terminal_settings::TerminalCursorStyle::Block,
+            ),
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetTerminalCursorStyle(
+                    nickel_core::terminal_settings::TerminalCursorStyle::Beam,
+                ),
+                "Beam",
+                self.terminal_settings.cursor_style
+                    == nickel_core::terminal_settings::TerminalCursorStyle::Beam,
+            ),
+            RadioOption::new(
+                theme,
+                SettingsMessage::SetTerminalCursorStyle(
+                    nickel_core::terminal_settings::TerminalCursorStyle::Underline,
+                ),
+                "Underline",
+                self.terminal_settings.cursor_style
+                    == nickel_core::terminal_settings::TerminalCursorStyle::Underline,
+            ),
+        ])
+        .id("terminal-cursor-style");
+        let mut terminal_card = SettingsCard::titled(
+            theme,
+            "Terminal",
+            "Defaults for new Nickel Terminal windows",
+        )
+        .id("appearance-terminal-card")
+        .child(terminal_text_field(
+            "terminal-shell",
+            "Shell executable",
+            self.terminal_settings
+                .default_shell
+                .clone()
+                .unwrap_or_default(),
+            "Use the platform default shell",
+            SettingsMessage::TerminalShellChanged,
+        ))
+        .child(terminal_text_field(
+            "terminal-working-directory",
+            "Initial working directory",
+            self.terminal_settings
+                .initial_working_directory
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            "Use the launching process directory",
+            SettingsMessage::TerminalWorkingDirectoryChanged,
+        ))
+        .child(terminal_text_field(
+            "terminal-font-family",
+            "Fixed-width font family",
+            self.terminal_settings.font_family.clone(),
+            "monospace",
+            SettingsMessage::TerminalFontFamilyChanged,
+        ))
+        .child(
+            SliderField::new(
+                theme,
+                "Font size",
+                "Logical pixels",
+                format!("{:.1}", self.terminal_settings.font_size()),
+                f32::from(self.terminal_settings.font_size_tenths.saturating_sub(60)) / 660.0,
+                terminal_font_size_message,
+            )
+            .id("terminal-font-size"),
+        )
+        .child(
+            SliderField::new(
+                theme,
+                "Scrollback",
+                "Maximum retained history",
+                self.terminal_settings.scrollback_lines.to_string(),
+                self.terminal_settings.scrollback_lines as f32
+                    / nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES as f32,
+                terminal_scrollback_message,
+            )
+            .id("terminal-scrollback"),
+        )
+        .child(
+            Column::new()
+                .fill_width()
+                .gap(4.0)
+                .child(Text::new("Cursor").color(theme.text.primary))
+                .child(terminal_cursor),
+        )
+        .child(terminal_text_field(
+            "terminal-foreground",
+            "Foreground color",
+            self.terminal_foreground_input.clone(),
+            "#AARRGGBB",
+            SettingsMessage::TerminalForegroundChanged,
+        ))
+        .child(terminal_text_field(
+            "terminal-background",
+            "Background color",
+            self.terminal_background_input.clone(),
+            "#AARRGGBB",
+            SettingsMessage::TerminalBackgroundChanged,
+        ))
+        .child(
+            SettingsRow::new(
+                theme,
+                "Close after successful command",
+                "Failed commands remain visible",
+            )
+            .trailing(
+                Switch::new(
+                    self.terminal_settings.close_on_successful_exit,
+                    SettingsMessage::SetTerminalCloseOnSuccess,
+                    theme,
+                )
+                .id("terminal-close-on-success"),
+            ),
+        );
+        if let Some(status) = &self.terminal_status {
+            terminal_card = terminal_card.child(SettingsStatus::<SettingsMessage>::new(
+                theme,
+                if status.starts_with("Saved") {
+                    SettingsStatusKind::Validation
+                } else {
+                    SettingsStatusKind::Error
+                },
+                status.clone(),
+            ));
+        }
         let reset = Button::semantic(
             theme,
             SettingsMessage::AppearanceReset,
@@ -2065,6 +2230,7 @@ impl SettingsApp {
             .child(accent_card)
             .child(wallpaper_card)
             .child(interface_card)
+            .child(terminal_card)
             .child(
                 nickel_ui::Row::new()
                     .justify_content(nickel_ui::Justify::End)

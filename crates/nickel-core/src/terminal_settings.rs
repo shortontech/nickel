@@ -5,7 +5,7 @@ use std::{
 };
 
 pub const MAX_TERMINAL_SCROLLBACK_LINES: usize = 100_000;
-const MAX_SETTING_TEXT: usize = 256;
+pub const MAX_TERMINAL_SETTING_TEXT: usize = 256;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TerminalCursorStyle {
@@ -138,7 +138,7 @@ fn safe_value(value: &str) -> String {
     value
         .chars()
         .filter(|character| !character.is_control())
-        .take(MAX_SETTING_TEXT)
+        .take(MAX_TERMINAL_SETTING_TEXT)
         .collect::<String>()
         .trim()
         .to_owned()
@@ -198,7 +198,7 @@ mod tests {
         )
         .unwrap();
         let settings = TerminalSettings::load(path).unwrap();
-        assert_eq!(settings.font_family.len(), MAX_SETTING_TEXT);
+        assert_eq!(settings.font_family.len(), MAX_TERMINAL_SETTING_TEXT);
         assert_eq!(settings.font_size_tenths, 60);
         assert_eq!(settings.scrollback_lines, MAX_TERMINAL_SCROLLBACK_LINES);
         assert_eq!(settings.foreground, TerminalSettings::default().foreground);

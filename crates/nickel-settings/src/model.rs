@@ -21,6 +21,10 @@ pub(super) struct SettingsApp {
     pub(super) pending_effects: Vec<SettingsEffect>,
     pub(super) active_destination: Option<SettingsPage>,
     pub(super) appearance_notice: Option<AppearanceNotice>,
+    pub(super) terminal_settings: nickel_core::terminal_settings::TerminalSettings,
+    pub(super) terminal_foreground_input: String,
+    pub(super) terminal_background_input: String,
+    pub(super) terminal_status: Option<String>,
     pub(super) persistence_enabled: bool,
     pub(super) wallpaper_position_select_expanded: bool,
     pub(super) animation_select_expanded: bool,
@@ -100,6 +104,9 @@ impl Default for SettingsApp {
         let localizer = Localizer::system();
         let status = localizer.text("settings-status-changes-not-applied");
         let wallpaper_settings = load_wallpaper_settings();
+        let terminal_settings = nickel_core::terminal_settings::TerminalSettings::load_default();
+        let terminal_foreground_input = format!("#{:08x}", terminal_settings.foreground);
+        let terminal_background_input = format!("#{:08x}", terminal_settings.background);
         let optional_features = load_optional_feature_settings();
         let optional_feature_runtime = OptionalFeatureRuntime::load_default();
         let codex_feature = codex_feature_state(&optional_features, &optional_feature_runtime);
@@ -182,6 +189,10 @@ impl Default for SettingsApp {
             pending_effects: Vec::new(),
             active_destination: Some(SettingsPage::Display),
             appearance_notice: None,
+            terminal_settings,
+            terminal_foreground_input,
+            terminal_background_input,
+            terminal_status: None,
             persistence_enabled: !cfg!(test),
             wallpaper_position_select_expanded: false,
             animation_select_expanded: false,

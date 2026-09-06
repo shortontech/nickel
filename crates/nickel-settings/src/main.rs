@@ -548,6 +548,15 @@ enum SettingsMessage {
     SetAccentHue(u16),
     SetAppearanceHue(u16),
     SetAppearanceIntensity(u8),
+    TerminalShellChanged(String),
+    TerminalWorkingDirectoryChanged(String),
+    TerminalFontFamilyChanged(String),
+    SetTerminalFontSize(u16),
+    SetTerminalScrollback(usize),
+    SetTerminalCursorStyle(nickel_core::terminal_settings::TerminalCursorStyle),
+    TerminalForegroundChanged(String),
+    TerminalBackgroundChanged(String),
+    SetTerminalCloseOnSuccess(bool),
     WallpaperChoose,
     WallpaperRemove,
     ToggleWallpaperPositionSelect,
@@ -659,6 +668,36 @@ fn appearance_hue_message(fraction: f32) -> SettingsMessage {
 
 fn appearance_intensity_message(fraction: f32) -> SettingsMessage {
     SettingsMessage::SetAppearanceIntensity((fraction.clamp(0.0, 1.0) * 100.0).round() as u8)
+}
+
+fn terminal_font_size_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::SetTerminalFontSize(60 + (fraction.clamp(0.0, 1.0) * 660.0).round() as u16)
+}
+
+fn terminal_scrollback_message(fraction: f32) -> SettingsMessage {
+    SettingsMessage::SetTerminalScrollback(
+        (fraction.clamp(0.0, 1.0)
+            * nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES as f32)
+            .round() as usize,
+    )
+}
+
+fn terminal_color(value: &str) -> Option<u32> {
+    let value = value.trim().strip_prefix('#').unwrap_or(value.trim());
+    let parsed = u32::from_str_radix(value, 16).ok()?;
+    match value.len() {
+        6 => Some(0xff00_0000 | parsed),
+        8 => Some(parsed),
+        _ => None,
+    }
+}
+
+fn bounded_terminal_text(value: String) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT)
+        .collect()
 }
 
 fn reduce_transparency_message(value: bool) -> SettingsMessage {
@@ -1388,6 +1427,56 @@ impl SettingsApp {
             SettingsMessage::SetAppearanceIntensity(intensity) => {
                 self.set_appearance_intensity(intensity);
             }
+            SettingsMessage::TerminalShellChanged(value) => {
+                let value = bounded_terminal_text(value);
+                self.terminal_settings.default_shell = (!value.trim().is_empty()).then_some(value);
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::TerminalWorkingDirectoryChanged(value) => {
+                let value = bounded_terminal_text(value);
+                self.terminal_settings.initial_working_directory =
+                    (!value.trim().is_empty()).then(|| std::path::PathBuf::from(value));
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::TerminalFontFamilyChanged(value) => {
+                self.terminal_settings.font_family = bounded_terminal_text(value);
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::SetTerminalFontSize(size) => {
+                self.terminal_settings.font_size_tenths = size.clamp(60, 720);
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::SetTerminalScrollback(lines) => {
+                self.terminal_settings.scrollback_lines =
+                    lines.min(nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES);
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::SetTerminalCursorStyle(style) => {
+                self.terminal_settings.cursor_style = style;
+                self.persist_terminal_settings();
+            }
+            SettingsMessage::TerminalForegroundChanged(value) => {
+                self.terminal_foreground_input = bounded_terminal_text(value);
+                if let Some(color) = terminal_color(&self.terminal_foreground_input) {
+                    self.terminal_settings.foreground = color;
+                    self.persist_terminal_settings();
+                } else {
+                    self.terminal_status = Some("Foreground must be #RRGGBB or #AARRGGBB.".into());
+                }
+            }
+            SettingsMessage::TerminalBackgroundChanged(value) => {
+                self.terminal_background_input = bounded_terminal_text(value);
+                if let Some(color) = terminal_color(&self.terminal_background_input) {
+                    self.terminal_settings.background = color;
+                    self.persist_terminal_settings();
+                } else {
+                    self.terminal_status = Some("Background must be #RRGGBB or #AARRGGBB.".into());
+                }
+            }
+            SettingsMessage::SetTerminalCloseOnSuccess(value) => {
+                self.terminal_settings.close_on_successful_exit = value;
+                self.persist_terminal_settings();
+            }
             SettingsMessage::WallpaperChoose => {
                 let (sender, receiver) = mpsc::channel();
                 match nickel_platform::choose_image_file(Box::new(move |outcome| {
@@ -1927,6 +2016,17 @@ impl SettingsApp {
         }
         self.shell_settings.accent_intensity = Some(intensity);
         self.appearance_save_deadline = Some(Instant::now() + Duration::from_millis(16));
+    }
+
+    fn persist_terminal_settings(&mut self) {
+        if !self.persistence_enabled {
+            self.terminal_status = None;
+            return;
+        }
+        self.terminal_status = match self.terminal_settings.save_default() {
+            Ok(()) => Some("Saved for new terminal windows.".into()),
+            Err(error) => Some(format!("Terminal settings could not be saved: {error}")),
+        };
     }
 
     fn persist_appearance(&mut self) {
@@ -3418,6 +3518,66 @@ mod tests {
                 "missing Appearance control for {message:?}"
             );
         }
+    }
+
+    #[test]
+    fn appearance_exposes_and_bounds_every_terminal_preference() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
+        let tree = app.build_ui(1000.0, 2400.0);
+        for label in [
+            "Shell executable",
+            "Initial working directory",
+            "Fixed-width font family",
+            "Foreground color",
+            "Background color",
+        ] {
+            assert!(
+                tree.accessibility_nodes()
+                    .iter()
+                    .any(|node| node.label.as_deref() == Some(label)),
+                "missing terminal preference {label}"
+            );
+        }
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::SetTerminalCursorStyle(
+                    nickel_core::terminal_settings::TerminalCursorStyle::Beam,
+                ))
+                .is_empty()
+        );
+        assert!(
+            !tree
+                .semantic_targets_for_message(&SettingsMessage::SetTerminalCloseOnSuccess(true))
+                .is_empty()
+        );
+
+        app.update(SettingsMessage::TerminalShellChanged("x".repeat(
+            nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT + 20,
+        )));
+        app.update(SettingsMessage::SetTerminalFontSize(u16::MAX));
+        app.update(SettingsMessage::SetTerminalScrollback(usize::MAX));
+        app.update(SettingsMessage::TerminalForegroundChanged("#123456".into()));
+        app.update(SettingsMessage::TerminalBackgroundChanged("invalid".into()));
+        assert_eq!(
+            app.terminal_settings.default_shell.as_ref().unwrap().len(),
+            nickel_core::terminal_settings::MAX_TERMINAL_SETTING_TEXT
+        );
+        assert_eq!(app.terminal_settings.font_size_tenths, 720);
+        assert_eq!(
+            app.terminal_settings.scrollback_lines,
+            nickel_core::terminal_settings::MAX_TERMINAL_SCROLLBACK_LINES
+        );
+        assert_eq!(app.terminal_settings.foreground, 0xff12_3456);
+        assert_eq!(
+            app.terminal_settings.background,
+            nickel_core::terminal_settings::TerminalSettings::default().background
+        );
+        assert!(
+            app.terminal_status
+                .as_deref()
+                .unwrap()
+                .contains("Background")
+        );
     }
 
     #[test]
