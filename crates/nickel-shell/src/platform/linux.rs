@@ -1968,6 +1968,11 @@ pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
             .map(|_| ())
             .map_err(|error| super::LaunchError::Platform(error.to_string()));
     }
+    // Start/consult the bounded classifier without waiting for it. Heuristic evidence remains
+    // diagnostic-only: unknown and likely classes all retain the conservative deferred terminal.
+    if let Some(program) = arguments.first() {
+        let _ = crate::executable_index::global_executable_index().classify(program);
+    }
     super::launch_deferred_terminal(&arguments)
 }
 

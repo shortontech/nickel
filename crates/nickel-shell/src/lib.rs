@@ -50,6 +50,8 @@ mod desktop {
         pub position: WallpaperPosition,
     }
 }
+#[cfg(target_os = "linux")]
+mod executable_index;
 #[allow(clippy::needless_borrow, dead_code)]
 mod icons;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
