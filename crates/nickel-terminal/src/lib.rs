@@ -259,6 +259,7 @@ pub struct TerminalEngine {
     wake_pending: Arc<AtomicBool>,
     events: Receiver<TerminalEvent>,
     dimensions: TerminalDimensions,
+    resize_generation: u64,
 }
 
 impl TerminalEngine {
@@ -281,6 +282,7 @@ impl TerminalEngine {
             wake_pending,
             events,
             dimensions,
+            resize_generation: 0,
         })
     }
 
@@ -290,12 +292,13 @@ impl TerminalEngine {
     }
 
     pub fn resize(&mut self, dimensions: TerminalDimensions, generation: u64) -> bool {
-        if generation <= self.generation.load(Ordering::Acquire) {
+        if generation <= self.resize_generation {
             return false;
         }
         self.dimensions = dimensions;
         self.terminal.resize(dimensions.term_size());
-        self.generation.store(generation, Ordering::Release);
+        self.resize_generation = generation;
+        self.generation.fetch_add(1, Ordering::Release);
         true
     }
 
@@ -359,6 +362,7 @@ pub struct TerminalSession {
     generation: Arc<AtomicU64>,
     wake_pending: Arc<AtomicBool>,
     dimensions: TerminalDimensions,
+    resize_generation: u64,
     exit: TerminalExit,
     worker: Option<JoinHandle<()>>,
 }
@@ -404,6 +408,7 @@ impl TerminalSession {
             generation,
             wake_pending,
             dimensions: options.dimensions,
+            resize_generation: 0,
             exit: TerminalExit::Running,
             worker: Some(worker),
         })
@@ -423,7 +428,7 @@ impl TerminalSession {
         dimensions: TerminalDimensions,
         generation: u64,
     ) -> Result<bool, TerminalError> {
-        if generation <= self.generation.load(Ordering::Acquire) {
+        if generation <= self.resize_generation {
             return Ok(false);
         }
         self.sender
@@ -431,7 +436,8 @@ impl TerminalSession {
             .map_err(|error| TerminalError::Send(error.to_string()))?;
         self.terminal.lock().resize(dimensions.term_size());
         self.dimensions = dimensions;
-        self.generation.store(generation, Ordering::Release);
+        self.resize_generation = generation;
+        self.generation.fetch_add(1, Ordering::Release);
         Ok(true)
     }
 
@@ -661,6 +667,7 @@ mod tests {
     #[test]
     fn resize_rejects_stale_generations() {
         let mut engine = TerminalEngine::new(dimensions(8, 2), 10).unwrap();
+        engine.process(b"output can advance the independent change token");
         assert!(engine.resize(dimensions(20, 4), 10));
         assert!(!engine.resize(dimensions(5, 1), 9));
         assert_eq!(
