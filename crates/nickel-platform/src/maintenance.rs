@@ -937,6 +937,7 @@ fn redact_detail(detail: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
     struct HostileFixture;
 
@@ -979,6 +980,72 @@ mod tests {
         }
     }
 
+    struct StatefulFixture {
+        camera_enabled: Mutex<bool>,
+    }
+
+    impl MaintenanceBackend for StatefulFixture {
+        fn inspect(&self) -> Result<MaintenanceSnapshot, MaintenanceError> {
+            let camera_enabled = *self.camera_enabled.lock().unwrap();
+            Ok(MaintenanceSnapshot {
+                provider: MaintenanceProvider::Unsupported {
+                    platform: "deterministic-fixture".into(),
+                },
+                updates: Observation {
+                    state: ObservationState::Current,
+                    value: Some(UpdateStatus {
+                        available: 3,
+                        phase: UpdatePhase::Downloading,
+                        restart_required: true,
+                        last_successful_check: Some(SystemTime::UNIX_EPOCH),
+                    }),
+                    observed_at: Some(SystemTime::UNIX_EPOCH),
+                    detail: Some("fixture progress".into()),
+                },
+                protection: ProtectionStatus {
+                    firewall: Observation {
+                        state: ObservationState::Current,
+                        value: Some(ProtectionHealth::Healthy),
+                        observed_at: Some(SystemTime::UNIX_EPOCH),
+                        detail: None,
+                    },
+                    malware_protection: Observation::unsupported("partial provider"),
+                },
+                permissions: vec![PermissionStatus {
+                    kind: PermissionKind::Camera,
+                    global_enabled: Observation {
+                        state: ObservationState::Current,
+                        value: Some(camera_enabled),
+                        observed_at: Some(SystemTime::UNIX_EPOCH),
+                        detail: None,
+                    },
+                    per_application_consent: true,
+                    mutation: PermissionMutation::Direct,
+                }],
+                secure_storage: Observation::unsupported("partial provider"),
+            })
+        }
+
+        fn request(
+            &self,
+            action: MaintenanceAction,
+        ) -> Result<MaintenanceOutcome, MaintenanceError> {
+            match action {
+                MaintenanceAction::SetPermission(PermissionKind::Camera, enabled) => {
+                    *self.camera_enabled.lock().unwrap() = enabled;
+                    Ok(MaintenanceOutcome::Accepted)
+                }
+                MaintenanceAction::InstallUpdates => Err(MaintenanceError {
+                    class: MaintenanceFailureClass::Cancelled,
+                    detail: "provider cancelled the transfer".into(),
+                }),
+                _ => Ok(MaintenanceOutcome::Unsupported {
+                    detail: "fixture unsupported action".into(),
+                }),
+            }
+        }
+    }
+
     #[test]
     fn stale_or_absent_providers_cannot_report_healthy_values() {
         let snapshot = MaintenanceService::new(Box::new(HostileFixture))
@@ -1008,6 +1075,50 @@ mod tests {
             .unwrap_err();
         assert_eq!(error.class, MaintenanceFailureClass::Authorization);
         assert_eq!(error.detail, "<redacted> permission denied");
+    }
+
+    #[test]
+    fn deterministic_adapter_preserves_progress_restart_partial_and_permission_state() {
+        let service = MaintenanceService::new(Box::new(StatefulFixture {
+            camera_enabled: Mutex::new(false),
+        }));
+        let before = service.inspect().unwrap();
+        let updates = before.updates.value.unwrap();
+        assert_eq!(updates.phase, UpdatePhase::Downloading);
+        assert_eq!(updates.available, 3);
+        assert!(updates.restart_required);
+        assert_eq!(
+            before.protection.malware_protection.state,
+            ObservationState::Unsupported
+        );
+        assert_eq!(before.permissions[0].global_enabled.value, Some(false));
+        assert_eq!(
+            service
+                .request(MaintenanceAction::SetPermission(
+                    PermissionKind::Camera,
+                    true,
+                ))
+                .unwrap(),
+            MaintenanceOutcome::Accepted
+        );
+        assert_eq!(
+            service.inspect().unwrap().permissions[0]
+                .global_enabled
+                .value,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn deterministic_adapter_keeps_cancellation_classified() {
+        let service = MaintenanceService::new(Box::new(StatefulFixture {
+            camera_enabled: Mutex::new(false),
+        }));
+        let error = service
+            .request(MaintenanceAction::InstallUpdates)
+            .unwrap_err();
+        assert_eq!(error.class, MaintenanceFailureClass::Cancelled);
+        assert_eq!(error.detail, "provider cancelled the transfer");
     }
 
     #[test]
