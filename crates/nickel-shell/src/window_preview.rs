@@ -229,6 +229,8 @@ impl ApplicationMenuTarget {
             .iter()
             .filter_map(|window| seen.insert(window.id).then_some(window.id))
             .collect::<Vec<_>>();
+        let mut windows = windows;
+        windows.sort_unstable_by_key(|window| window.0);
         let all_closeable = !windows.is_empty()
             && group
                 .windows
@@ -1439,7 +1441,14 @@ mod tests {
             ],
         };
         let target = ApplicationMenuTarget::capture(&group);
-        assert_eq!(target.windows, vec![WindowId(2), WindowId(1)]);
+        assert_eq!(target.windows, vec![WindowId(1), WindowId(2)]);
+        let mut reordered = group.clone();
+        reordered.windows.reverse();
+        assert_eq!(
+            ApplicationMenuTarget::capture(&reordered).windows,
+            target.windows,
+            "captured close order must not depend on transient group ordering"
+        );
         let entries = application_menu_entries(&target, false);
         assert_eq!(
             entries,
@@ -1450,7 +1459,7 @@ mod tests {
                 ),
                 (
                     "Close all windows".into(),
-                    ApplicationMenuAction::CloseAll(vec![WindowId(2), WindowId(1)])
+                    ApplicationMenuAction::CloseAll(vec![WindowId(1), WindowId(2)])
                 ),
             ]
         );
