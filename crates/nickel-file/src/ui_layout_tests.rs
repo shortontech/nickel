@@ -2359,6 +2359,7 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
         "New Folder",
         "Rename",
         "Copy Path",
+        "Open in Terminal",
         "Properties",
     ] {
         assert!(
@@ -2366,7 +2367,7 @@ fn context_menu_discloses_unimplemented_common_capabilities() {
             "implemented capability is disabled: {implemented}: {actionable:?}"
         );
     }
-    for unavailable in ["Add to Bookmarks", "Move to Trash", "Open in Terminal"] {
+    for unavailable in ["Add to Bookmarks", "Move to Trash"] {
         assert!(!actionable.contains(unavailable));
     }
 }

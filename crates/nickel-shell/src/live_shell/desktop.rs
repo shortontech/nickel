@@ -131,6 +131,7 @@ pub enum DesktopMessage {
     Copy(DesktopEntryId),
     Rename(DesktopEntryId),
     Properties(DesktopEntryId),
+    OpenTerminal(DesktopEntryId),
     BackgroundContext,
     Command(DesktopCommand),
 }
@@ -909,6 +910,25 @@ impl nickel_ui::Application for DesktopApplication {
                 }
                 self.dismiss_context_menu(DesktopMenuDismissReason::Action);
             }
+            DesktopMessage::OpenTerminal(id) => {
+                if let Some(path) = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.entry.path.as_path())
+                {
+                    let directory = if path.is_dir() {
+                        path
+                    } else {
+                        path.parent().unwrap_or(path)
+                    };
+                    if let Err(error) = nickel_platform::open_terminal(directory) {
+                        self.error = Some(error);
+                    }
+                }
+                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
+            }
             DesktopMessage::BackgroundContext => self.open_background_context(None),
             DesktopMessage::Command(command) => self.apply_desktop_command(command),
         }
@@ -1283,10 +1303,10 @@ impl nickel_ui::Application for DesktopApplication {
                 "Trash integration is not implemented yet",
             ))
             .item(
-                OverlayMenuItem::disabled_with_reason(
+                OverlayMenuItem::action(
                     "open-terminal",
                     "Open in Terminal",
-                    "Terminal integration is not implemented yet",
+                    DesktopMessage::OpenTerminal(id),
                 )
                 .separator_before(true),
             )

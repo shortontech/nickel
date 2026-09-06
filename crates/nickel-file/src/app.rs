@@ -102,6 +102,7 @@ pub enum FileMessage {
     ContextPasteInto,
     ContextNewFolder,
     ContextCopyPath,
+    ContextOpenTerminal,
     ContextRename,
     ContextProperties,
     ContextCurrentFolderProperties,
@@ -1926,6 +1927,21 @@ impl FileApp {
                     }
                 }
             }
+            FileMessage::ContextOpenTerminal => {
+                let target = self
+                    .context_target
+                    .as_deref()
+                    .unwrap_or_else(|| self.browser.current());
+                let directory = if target.is_dir() {
+                    target
+                } else {
+                    target.parent().unwrap_or_else(|| self.browser.current())
+                };
+                match nickel_platform::open_terminal(directory) {
+                    Ok(()) => self.status = format!("Opened terminal in {}", directory.display()),
+                    Err(error) => self.status = error,
+                }
+            }
             FileMessage::ContextProperties => {
                 let target = if let Some(path) = self.context_target.as_ref() {
                     self.browser
@@ -2852,10 +2868,10 @@ impl Application for FileApp {
                         )
                         .separator_before(true),
                     )
-                    .item(OverlayMenuItem::disabled_with_reason(
+                    .item(OverlayMenuItem::action(
                         "open-terminal",
                         "Open in Terminal",
-                        "Terminal integration is not implemented yet",
+                        FileMessage::ContextOpenTerminal,
                     ))
                     .item(OverlayMenuItem::action(
                         "properties",

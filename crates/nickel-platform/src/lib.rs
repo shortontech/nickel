@@ -160,6 +160,31 @@ pub fn open_directory(path: &std::path::Path) -> Result<(), String> {
         .map_err(|error| format!("could not start Nickel File: {error}"))
 }
 
+/// Open Nickel Terminal at a validated directory without shell interpolation.
+pub fn open_terminal(path: &std::path::Path) -> Result<(), String> {
+    let directory = path
+        .canonicalize()
+        .map_err(|error| format!("could not resolve terminal directory: {error}"))?;
+    if !directory.is_dir() {
+        return Err("terminal working directory is not a directory".into());
+    }
+    nickel_terminal_command(&directory)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("could not start Nickel Terminal: {error}"))
+}
+
+fn nickel_terminal_command(path: &std::path::Path) -> std::process::Command {
+    let executable = std::env::current_exe().unwrap_or_else(|_| "nickel".into());
+    #[cfg(target_os = "windows")]
+    let executable = executable.with_file_name("nickel-terminal.exe");
+    #[cfg(not(target_os = "windows"))]
+    let executable = executable.with_file_name("nickel-terminal");
+    let mut command = std::process::Command::new(executable);
+    command.arg("--working-directory").arg(path);
+    command
+}
+
 fn nickel_file_command(path: &std::path::Path) -> std::process::Command {
     let executable = std::env::current_exe().unwrap_or_else(|_| "nickel".into());
     #[cfg(target_os = "windows")]
@@ -223,7 +248,7 @@ pub fn open_external_url(_url: &str) -> Result<(), String> {
 mod external_url_tests {
     use std::path::Path;
 
-    use super::nickel_file_command;
+    use super::{nickel_file_command, nickel_terminal_command};
 
     #[test]
     fn directories_delegate_to_the_sibling_nickel_file() {
@@ -238,6 +263,25 @@ mod external_url_tests {
         assert_eq!(
             command.get_args().collect::<Vec<_>>(),
             [Path::new("/tmp/example folder").as_os_str()]
+        );
+    }
+
+    #[test]
+    fn terminal_directory_is_one_opaque_argument() {
+        let command = nickel_terminal_command(Path::new("/tmp/example folder/日本語"));
+        let expected_program = format!("nickel-terminal{}", std::env::consts::EXE_SUFFIX);
+        assert_eq!(
+            Path::new(command.get_program())
+                .file_name()
+                .and_then(|name| name.to_str()),
+            Some(expected_program.as_str())
+        );
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            [
+                std::ffi::OsStr::new("--working-directory"),
+                Path::new("/tmp/example folder/日本語").as_os_str(),
+            ]
         );
     }
 }
