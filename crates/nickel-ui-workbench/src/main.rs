@@ -2,7 +2,9 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     env,
     error::Error,
+    ffi::{OsStr, OsString},
     fmt, fs,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -2399,9 +2401,44 @@ impl WorkbenchApp {
     }
 }
 
+fn executable_on_path(program: &OsStr, path: Option<&OsStr>) -> Option<PathBuf> {
+    let program_path = Path::new(program);
+    if program_path.components().count() > 1 {
+        return program_path.is_file().then(|| program_path.to_owned());
+    }
+
+    path.and_then(|path| {
+        env::split_paths(path).find_map(|directory| {
+            let candidate = directory.join(program);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if env::consts::EXE_SUFFIX.is_empty() {
+                return None;
+            }
+            let candidate = directory.join(format!(
+                "{}{}",
+                program.to_string_lossy(),
+                env::consts::EXE_SUFFIX
+            ));
+            candidate.is_file().then_some(candidate)
+        })
+    })
+}
+
+fn cargo_executable(cargo: Option<OsString>, path: Option<OsString>) -> OsString {
+    let path = path.as_deref();
+    cargo
+        .as_deref()
+        .and_then(|cargo| executable_on_path(cargo, path))
+        .or_else(|| executable_on_path(OsStr::new("cargo"), path))
+        .map(PathBuf::into_os_string)
+        .unwrap_or_else(|| "cargo".into())
+}
+
 fn external_workbench_command(features: &str, args: &[&str]) -> std::process::Command {
-    let mut command =
-        std::process::Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    let cargo = cargo_executable(env::var_os("CARGO"), env::var_os("PATH"));
+    let mut command = std::process::Command::new(cargo);
     command
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .args([
@@ -4144,6 +4181,26 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recursive_provider_uses_a_valid_explicit_cargo_executable() {
+        let cargo = PathBuf::from(env!("CARGO"));
+        assert_eq!(
+            cargo_executable(Some(cargo.clone().into_os_string()), None),
+            cargo.into_os_string()
+        );
+    }
+
+    #[test]
+    fn recursive_provider_rejects_a_stale_cargo_and_resolves_path() {
+        let cargo = PathBuf::from(env!("CARGO"));
+        let path = env::join_paths([cargo.parent().expect("Cargo has a parent directory")])
+            .expect("single search path");
+        assert_eq!(
+            cargo_executable(Some("/definitely/missing/cargo".into()), Some(path)),
+            cargo.into_os_string()
+        );
+    }
 
     #[cfg(not(feature = "file-provider"))]
     #[test]
