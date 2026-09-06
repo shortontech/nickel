@@ -27,6 +27,14 @@ const INITIAL_LINES: u16 = 30;
 const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 19;
 
+fn next_poll_delay(previous: Duration, changed: bool) -> Duration {
+    if changed {
+        Duration::from_millis(16)
+    } else {
+        previous.saturating_mul(2).min(Duration::from_millis(100))
+    }
+}
+
 struct TerminalApp {
     session: TerminalSession,
     snapshot: TerminalSnapshot,
@@ -36,6 +44,7 @@ struct TerminalApp {
     status: Option<String>,
     paste_confirmation: Option<String>,
     resize_generation: u64,
+    poll_delay: Duration,
 }
 
 #[derive(Clone)]
@@ -70,10 +79,12 @@ impl TerminalApp {
             status: None,
             paste_confirmation: None,
             resize_generation: 0,
+            poll_delay: Duration::from_millis(16),
         })
     }
 
     fn apply_input(&mut self, command: TerminalInputCommand) -> bool {
+        self.poll_delay = Duration::from_millis(16);
         let result = match command {
             TerminalInputCommand::Write(bytes) => self.session.write(bytes),
             TerminalInputCommand::Scroll(scroll) => {
@@ -312,11 +323,12 @@ impl Application for TerminalApp {
             self.snapshot = snapshot;
             changed = true;
         }
+        self.poll_delay = next_poll_delay(self.poll_delay, changed);
         changed
     }
 
     fn poll_interval(&self) -> Option<Duration> {
-        Some(Duration::from_millis(16))
+        Some(self.poll_delay)
     }
 
     fn title(&self) -> &str {
@@ -467,5 +479,15 @@ mod tests {
             );
         }
         assert!(!names.iter().any(|name| name == "Cut" || name == "Delete"));
+    }
+
+    #[test]
+    fn idle_polling_backs_off_but_output_returns_to_low_latency() {
+        let mut delay = Duration::from_millis(16);
+        for _ in 0..20 {
+            delay = next_poll_delay(delay, false);
+        }
+        assert_eq!(delay, Duration::from_millis(100));
+        assert_eq!(next_poll_delay(delay, true), Duration::from_millis(16));
     }
 }
