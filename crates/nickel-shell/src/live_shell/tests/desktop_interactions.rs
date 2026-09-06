@@ -739,6 +739,45 @@
     }
 
     #[test]
+    fn desktop_application_projects_only_accepted_topology_snapshots() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        let valid = nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 800.0,
+                height: 600.0,
+            },
+            scale: 1.0,
+        };
+        desktop.set_outputs(vec![valid.clone()]);
+        let generation = desktop.topology_generation;
+
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: f32::NAN,
+                y: 0.0,
+                width: 0.0,
+                height: -1.0,
+            },
+            scale: 0.0,
+        }]);
+        assert_eq!(desktop.outputs, vec![valid.clone()]);
+        assert_eq!(desktop.layout.outputs(), &[valid]);
+        assert_eq!(desktop.topology_generation, generation);
+
+        desktop.set_outputs(Vec::new());
+        assert!(desktop.outputs.is_empty());
+        assert!(desktop.layout.outputs().is_empty());
+        assert!(desktop.topology_generation > generation);
+    }
+
+    #[test]
     fn desktop_live_host_keeps_rename_click_transaction_out_of_the_file_plane() {
         use std::{ffi::OsString, path::PathBuf};
 

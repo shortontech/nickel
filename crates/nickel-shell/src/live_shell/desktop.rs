@@ -284,6 +284,10 @@ impl DesktopApplication {
     }
 
     pub(super) fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        if !self.layout.set_outputs(outputs) {
+            return;
+        }
+        let outputs = self.layout.outputs().to_vec();
         if self.outputs == outputs {
             return;
         }
@@ -293,7 +297,6 @@ impl DesktopApplication {
             .as_ref()
             .is_none_or(|menu| outputs.iter().any(|output| output.id == menu.output));
         self.outputs.clone_from(&outputs);
-        self.layout.set_outputs(outputs);
         self.overflow_offsets
             .retain(|output, _| self.outputs.iter().any(|candidate| &candidate.id == output));
         for output in self

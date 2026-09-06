@@ -374,14 +374,14 @@ impl DesktopLayout {
     }
 
     /// Reconciles output topology without discarding affinity for disconnected displays.
-    pub fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+    pub fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) -> bool {
         let reported_outputs = !outputs.is_empty();
         let outputs = normalize_outputs(outputs);
         // A non-empty platform snapshot containing no usable geometry is a transient configure
         // failure, not authoritative evidence that every output disappeared. Preserve the last
         // valid topology until a valid or explicitly empty snapshot arrives.
         if reported_outputs && outputs.is_empty() {
-            return;
+            return false;
         }
         let previously_valid = self
             .outputs
@@ -418,6 +418,12 @@ impl DesktopLayout {
             self.constrain_all();
             self.resolve_collisions(&HashSet::new());
         }
+        true
+    }
+
+    /// The accepted, normalized output snapshot used by placement policy.
+    pub fn outputs(&self) -> &[DesktopOutput] {
+        &self.outputs
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
