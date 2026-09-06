@@ -2749,9 +2749,12 @@ dependencies = [
 name = "nickel-terminal-ui"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "nickel-input",
+ "nickel-logging",
  "nickel-terminal",
  "nickel-ui",
+ "winit 0.30.13",
 ]
 
 [[package]]

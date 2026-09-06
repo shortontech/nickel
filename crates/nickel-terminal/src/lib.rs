@@ -180,6 +180,8 @@ pub struct TerminalSnapshot {
     pub alternate_screen: bool,
     pub bracketed_paste: bool,
     pub mouse_reporting: bool,
+    pub sgr_mouse: bool,
+    pub application_cursor: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -491,6 +493,32 @@ impl TerminalSession {
         self.terminal.lock().selection_to_string()
     }
 
+    pub fn set_focus(&mut self, focused: bool) {
+        let mut terminal = self.terminal.lock();
+        if terminal.is_focused != focused {
+            terminal.is_focused = focused;
+            self.generation.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    pub fn clear_scrollback(&mut self) {
+        self.terminal.lock().grid_mut().clear_history();
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    pub fn select_visible(&mut self) {
+        let mut terminal = self.terminal.lock();
+        let start = Point::new(Line(0), Column(0));
+        let end = Point::new(
+            Line(i32::from(self.dimensions.lines) - 1),
+            Column(usize::from(self.dimensions.columns) - 1),
+        );
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        terminal.selection = Some(selection);
+        self.generation.fetch_add(1, Ordering::Release);
+    }
+
     pub fn try_event(&mut self) -> Option<TerminalEvent> {
         let event = self.events.try_recv().ok()?;
         if event == TerminalEvent::Changed {
@@ -595,6 +623,8 @@ fn snapshot(
         alternate_screen: content.mode.contains(TermMode::ALT_SCREEN),
         bracketed_paste: content.mode.contains(TermMode::BRACKETED_PASTE),
         mouse_reporting: content.mode.intersects(TermMode::MOUSE_MODE),
+        sgr_mouse: content.mode.contains(TermMode::SGR_MOUSE),
+        application_cursor: content.mode.contains(TermMode::APP_CURSOR),
     }
 }
 

@@ -58,6 +58,13 @@ fn encode_paste(text: String, bracketed: bool) -> Vec<u8> {
 /// Converts normalized input to terminal intent. Printable input is accepted only from committed
 /// text events, so key and IME streams can never insert the same text twice.
 pub fn translate_input(input: &InputEvent) -> Option<TerminalInputCommand> {
+    translate_input_with_application_cursor(input, false)
+}
+
+pub fn translate_input_with_application_cursor(
+    input: &InputEvent,
+    application_cursor: bool,
+) -> Option<TerminalInputCommand> {
     match input {
         InputEvent::Text(TextEvent::Commit { text, .. }) if !text.is_empty() => {
             Some(TerminalInputCommand::Write(text.as_bytes().to_vec()))
@@ -78,7 +85,7 @@ pub fn translate_input(input: &InputEvent) -> Option<TerminalInputCommand> {
                     KeyCode::KeyC => Some(TerminalInputCommand::Copy),
                     KeyCode::KeyV => Some(TerminalInputCommand::PasteRequested),
                     KeyCode::KeyA => Some(TerminalInputCommand::SelectAll),
-                    _ => key_bytes(code, alt).map(TerminalInputCommand::Write),
+                    _ => key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write),
                 };
             }
             if shift {
@@ -89,13 +96,13 @@ pub fn translate_input(input: &InputEvent) -> Option<TerminalInputCommand> {
                     }
                     KeyCode::Home => Some(TerminalInputCommand::Scroll(TerminalScroll::Top)),
                     KeyCode::End => Some(TerminalInputCommand::Scroll(TerminalScroll::Bottom)),
-                    _ => key_bytes(code, alt).map(TerminalInputCommand::Write),
+                    _ => key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write),
                 };
             }
             if control && let Some(byte) = control_byte(code) {
                 return Some(TerminalInputCommand::Write(vec![byte]));
             }
-            key_bytes(code, alt).map(TerminalInputCommand::Write)
+            key_bytes(code, alt, application_cursor).map(TerminalInputCommand::Write)
         }
         _ => None,
     }
@@ -134,12 +141,18 @@ fn control_byte(code: KeyCode) -> Option<u8> {
     Some(value)
 }
 
-fn key_bytes(code: KeyCode, alt: bool) -> Option<Vec<u8>> {
+fn key_bytes(code: KeyCode, alt: bool, application_cursor: bool) -> Option<Vec<u8>> {
     let sequence: &[u8] = match code {
         KeyCode::Enter | KeyCode::NumpadEnter => b"\r",
         KeyCode::Tab => b"\t",
         KeyCode::Backspace => b"\x7f",
         KeyCode::Escape => b"\x1b",
+        KeyCode::ArrowUp if application_cursor => b"\x1bOA",
+        KeyCode::ArrowDown if application_cursor => b"\x1bOB",
+        KeyCode::ArrowRight if application_cursor => b"\x1bOC",
+        KeyCode::ArrowLeft if application_cursor => b"\x1bOD",
+        KeyCode::Home if application_cursor => b"\x1bOH",
+        KeyCode::End if application_cursor => b"\x1bOF",
         KeyCode::ArrowUp => b"\x1b[A",
         KeyCode::ArrowDown => b"\x1b[B",
         KeyCode::ArrowRight => b"\x1b[C",
@@ -490,6 +503,13 @@ mod tests {
         assert_eq!(
             translate_input(&text),
             Some(TerminalInputCommand::Write("é".as_bytes().to_vec()))
+        );
+        assert_eq!(
+            translate_input_with_application_cursor(
+                &key(KeyCode::ArrowUp, ModifierState::default()),
+                true,
+            ),
+            Some(TerminalInputCommand::Write(b"\x1bOA".to_vec()))
         );
     }
 
