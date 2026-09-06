@@ -1,4 +1,49 @@
     #[test]
+    fn desktop_overflow_plane_is_scrollable_hittable_and_focus_revealable() {
+        use std::{ffi::OsString, path::PathBuf};
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            primary: true,
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width: 96.0,
+                height: 112.0,
+            },
+            scale: 1.0,
+        }]);
+        desktop.layout.reconcile(
+            (0..3)
+                .map(|index| {
+                    (
+                        nickel_file::FileIdentity(index + 1, 1),
+                        nickel_file::FileEntry {
+                            display_name_override: None,
+                            name: OsString::from(format!("item-{index}")),
+                            path: PathBuf::from(format!("/desktop/item-{index}")),
+                            is_directory: false,
+                            size: None,
+                            modified: None,
+                        },
+                    )
+                })
+                .collect(),
+        );
+        let last = desktop.layout.items()[2].id;
+        assert_ne!(desktop.hit(nickel_file::desktop::Point { x: 4.0, y: 4.0 }), Some(last));
+
+        assert!(desktop.scroll_overflow(10_000.0));
+        assert_eq!(desktop.hit(nickel_file::desktop::Point { x: 4.0, y: 4.0 }), Some(last));
+
+        desktop.scroll_overflow(-10_000.0);
+        desktop.layout.select(last, Default::default());
+        assert!(desktop.reveal_active());
+        assert_eq!(desktop.hit(nickel_file::desktop::Point { x: 4.0, y: 4.0 }), Some(last));
+    }
+
+    #[test]
     fn desktop_surface_projects_only_its_output_and_has_no_idle_tile_backgrounds() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());

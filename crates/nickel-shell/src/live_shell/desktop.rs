@@ -29,6 +29,9 @@ pub struct DesktopApplication {
     pub(super) layout: DesktopLayout,
     pub(super) active_output: String,
     pub(super) output_origin: DesktopPoint,
+    /// Horizontal projection into uniquely placed cells beyond the visible work area.
+    /// This is transient viewport state and is never persisted as item geometry.
+    pub(super) overflow_offsets: HashMap<String, f32>,
     pub(super) active_scale: f32,
     pub(super) icon_cache: HashMap<std::path::PathBuf, Arc<image::RgbaImage>>,
     pub(super) pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
@@ -155,6 +158,7 @@ impl DesktopApplication {
             layout,
             active_output: "primary".into(),
             output_origin: DesktopPoint::default(),
+            overflow_offsets: HashMap::new(),
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,
@@ -247,6 +251,16 @@ impl DesktopApplication {
             .is_none_or(|menu| outputs.iter().any(|output| output.id == menu.output));
         self.outputs.clone_from(&outputs);
         self.layout.set_outputs(outputs);
+        self.overflow_offsets
+            .retain(|output, _| self.outputs.iter().any(|candidate| &candidate.id == output));
+        for output in self
+            .outputs
+            .iter()
+            .map(|output| output.id.clone())
+            .collect::<Vec<_>>()
+        {
+            self.clamp_overflow_offset(&output);
+        }
         if menu_output_exists {
             if let Some(menu) = &mut self.context_menu {
                 menu.topology_generation = self.topology_generation;
@@ -263,6 +277,100 @@ impl DesktopApplication {
         self.active_output = id;
         self.output_origin = origin;
         self.active_scale = scale.max(1.0);
+    }
+
+    fn projection_origin(&self) -> DesktopPoint {
+        DesktopPoint {
+            x: self.output_origin.x
+                + self
+                    .overflow_offsets
+                    .get(&self.active_output)
+                    .copied()
+                    .unwrap_or(0.0),
+            y: self.output_origin.y,
+        }
+    }
+
+    fn maximum_overflow_offset(&self, output_id: &str) -> f32 {
+        let Some(output) = self.outputs.iter().find(|output| output.id == output_id) else {
+            return 0.0;
+        };
+        let (cell_width, _) = self.layout.grid();
+        (self
+            .layout
+            .items()
+            .iter()
+            .filter(|item| item.output == output_id)
+            .map(|item| item.position.x + cell_width)
+            .fold(output.work_area.x + output.work_area.width, f32::max)
+            - (output.work_area.x + output.work_area.width))
+            .max(0.0)
+    }
+
+    fn clamp_overflow_offset(&mut self, output_id: &str) {
+        let maximum = self.maximum_overflow_offset(output_id);
+        let offset = self
+            .overflow_offsets
+            .entry(output_id.to_owned())
+            .or_default();
+        *offset = offset.clamp(0.0, maximum);
+    }
+
+    pub(super) fn scroll_overflow(&mut self, delta: f32) -> bool {
+        let maximum = self.maximum_overflow_offset(&self.active_output);
+        if maximum <= 0.0 || !delta.is_finite() {
+            return false;
+        }
+        let offset = self
+            .overflow_offsets
+            .entry(self.active_output.clone())
+            .or_default();
+        let previous = *offset;
+        *offset = (*offset + delta).clamp(0.0, maximum);
+        *offset != previous
+    }
+
+    pub(super) fn reveal_active(&mut self) -> bool {
+        let Some(id) = self.layout.active() else {
+            return false;
+        };
+        let Some(item) = self.layout.items().iter().find(|item| item.id == id) else {
+            return false;
+        };
+        if item.output != self.active_output {
+            return false;
+        }
+        let Some(output) = self
+            .outputs
+            .iter()
+            .find(|output| output.id == self.active_output)
+        else {
+            return false;
+        };
+        let (cell_width, _) = self.layout.grid();
+        let current = self
+            .overflow_offsets
+            .get(&self.active_output)
+            .copied()
+            .unwrap_or(0.0);
+        let left = output.work_area.x + current;
+        let right = left + output.work_area.width;
+        let desired = if item.position.x < left {
+            item.position.x - output.work_area.x
+        } else if item.position.x + cell_width > right {
+            item.position.x + cell_width - output.work_area.x - output.work_area.width
+        } else {
+            current
+        };
+        let maximum = self.maximum_overflow_offset(&self.active_output);
+        let desired = desired.clamp(0.0, maximum);
+        if desired == current {
+            false
+        } else {
+            self.overflow_offsets
+                .insert(self.active_output.clone(), desired);
+            true
+        }
     }
 
     pub(super) fn set_workspace(&mut self, workspace: Option<u64>) {
@@ -286,9 +394,10 @@ impl DesktopApplication {
             return None;
         }
         let (cell_width, cell_height) = self.layout.grid();
+        let origin = self.projection_origin();
         let global = DesktopPoint {
-            x: local.x + self.output_origin.x,
-            y: local.y + self.output_origin.y,
+            x: local.x + origin.x,
+            y: local.y + origin.y,
         };
         self.layout
             .items()
@@ -359,8 +468,9 @@ impl DesktopApplication {
             let Some(start) = self.selection_start else {
                 return false;
             };
-            let x = start.x.min(local.x) + self.output_origin.x;
-            let y = start.y.min(local.y) + self.output_origin.y;
+            let origin = self.projection_origin();
+            let x = start.x.min(local.x) + origin.x;
+            let y = start.y.min(local.y) + origin.y;
             self.layout.select_region(
                 DesktopRect {
                     x,
@@ -856,11 +966,12 @@ impl nickel_ui::Application for DesktopApplication {
                     .find(|item| item.id == id)
                     .map(|item| item.position)
                 {
+                    let origin = self.projection_origin();
                     self.replacing_context_menu();
                     self.context_menu = Some(DesktopMenuContext {
                         anchor: Some(DesktopPoint {
-                            x: position.x - self.output_origin.x,
-                            y: position.y - self.output_origin.y,
+                            x: position.x - origin.x,
+                            y: position.y - origin.y,
                         }),
                         entry: Some(id),
                         output: self.active_output.clone(),
@@ -1349,9 +1460,10 @@ impl nickel_ui::Application for DesktopApplication {
             .filter(|item| self.layout.icons_visible() && item.output == self.active_output)
             .enumerate()
         {
+            let origin = self.projection_origin();
             let position = Point {
-                x: item.position.x - self.output_origin.x,
-                y: item.position.y - self.output_origin.y,
+                x: item.position.x - origin.x,
+                y: item.position.y - origin.y,
             };
             let selected = self.layout.selected().contains(&item.id);
             let focused = self.layout.active() == Some(item.id);
@@ -1523,6 +1635,7 @@ impl DesktopApplication {
             }]),
             active_output: "primary".into(),
             output_origin: DesktopPoint::default(),
+            overflow_offsets: HashMap::new(),
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,

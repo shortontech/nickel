@@ -1417,8 +1417,19 @@ impl LiveShell {
                 x: position.x as f32,
                 y: position.y as f32,
             }),
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis {
+                delta,
+                discrete,
+                ..
+            }) => {
+                let steps =
+                    discrete.map_or(-delta.y as f32, |(_, vertical)| -vertical as f32 * 3.0);
+                let (cell_width, _) = application.layout.grid();
+                application.scroll_overflow(steps * cell_width)
+            }
             _ => false,
         };
+        let changed = changed | application.reveal_active();
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {
@@ -1470,6 +1481,7 @@ impl LiveShell {
             | ControllerAction::PreviousPane
             | ControllerAction::NextPane => false,
         };
+        let changed = changed | application.reveal_active();
         if !changed {
             return false;
         }
