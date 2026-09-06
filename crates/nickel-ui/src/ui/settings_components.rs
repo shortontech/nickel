@@ -1072,6 +1072,7 @@ impl<Message> SelectField<Message> {
     ) -> Self {
         let label = label.into();
         let dropdown = Dropdown::new(toggle_message, selected, options)
+            .overlay(true)
             .expanded(expanded)
             .colors(
                 theme.surfaces.raised,

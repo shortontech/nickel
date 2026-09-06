@@ -17,6 +17,33 @@ pub enum AssociationTarget {
     Scheme(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum AssociationFamily {
+    Web,
+    Documents,
+    Images,
+    Audio,
+    Video,
+    Archives,
+    OtherFiles,
+    Protocols,
+}
+
+impl AssociationFamily {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Web => "Web",
+            Self::Documents => "Documents",
+            Self::Images => "Images",
+            Self::Audio => "Audio",
+            Self::Video => "Video",
+            Self::Archives => "Archives",
+            Self::OtherFiles => "Other files",
+            Self::Protocols => "Protocols",
+        }
+    }
+}
+
 impl AssociationTarget {
     pub fn extension(value: impl Into<String>) -> Self {
         Self::Extension(value.into())
@@ -35,6 +62,92 @@ impl AssociationTarget {
             Self::Extension(value) => value.clone(),
             Self::Mime(value) => value.clone(),
             Self::Scheme(value) => format!("x-scheme-handler/{value}"),
+        }
+    }
+
+    /// Stable, portable presentation grouping. The underlying association remains an exact
+    /// platform target; grouping never aliases settings that the OS may configure independently.
+    pub fn family(&self) -> AssociationFamily {
+        match self {
+            Self::Scheme(value) if matches!(value.as_str(), "http" | "https") => {
+                AssociationFamily::Web
+            }
+            Self::Scheme(_) => AssociationFamily::Protocols,
+            Self::Mime(value) if value.starts_with("image/") => AssociationFamily::Images,
+            Self::Mime(value) if value.starts_with("audio/") => AssociationFamily::Audio,
+            Self::Mime(value) if value.starts_with("video/") => AssociationFamily::Video,
+            Self::Mime(value)
+                if value.starts_with("text/")
+                    || value == "application/pdf"
+                    || value.contains("document")
+                    || value.contains("presentation")
+                    || value.contains("spreadsheet")
+                    || value.contains("epub") =>
+            {
+                AssociationFamily::Documents
+            }
+            Self::Mime(value)
+                if value.contains("zip")
+                    || value.contains("archive")
+                    || value.contains("compressed")
+                    || value.contains("tar") =>
+            {
+                AssociationFamily::Archives
+            }
+            Self::Extension(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    ".svg" | ".png" | ".jpg" | ".jpeg" | ".gif" | ".webp" | ".avif"
+                ) =>
+            {
+                AssociationFamily::Images
+            }
+            Self::Extension(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    ".mp3" | ".wav" | ".flac" | ".ogg" | ".m4a"
+                ) =>
+            {
+                AssociationFamily::Audio
+            }
+            Self::Extension(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    ".mp4" | ".mkv" | ".webm" | ".avi" | ".mov" | ".mpeg" | ".mpg"
+                ) =>
+            {
+                AssociationFamily::Video
+            }
+            Self::Extension(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    ".txt"
+                        | ".md"
+                        | ".pdf"
+                        | ".doc"
+                        | ".docx"
+                        | ".odt"
+                        | ".rtf"
+                        | ".xls"
+                        | ".xlsx"
+                        | ".ods"
+                        | ".ppt"
+                        | ".pptx"
+                        | ".odp"
+                        | ".epub"
+                ) =>
+            {
+                AssociationFamily::Documents
+            }
+            Self::Extension(value)
+                if matches!(
+                    value.to_ascii_lowercase().as_str(),
+                    ".zip" | ".tar" | ".gz" | ".bz2" | ".xz" | ".7z" | ".rar"
+                ) =>
+            {
+                AssociationFamily::Archives
+            }
+            Self::Extension(_) | Self::Mime(_) => AssociationFamily::OtherFiles,
         }
     }
 }
@@ -1068,6 +1181,24 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.handlers.len(), 250);
         assert_eq!(snapshot.handlers.last().unwrap().id, "handler-249.desktop");
+    }
+
+    #[test]
+    fn association_families_group_formats_without_merging_platform_targets() {
+        let svg = AssociationTarget::mime("image/svg+xml");
+        let png = AssociationTarget::mime("image/png");
+        let pdf = AssociationTarget::mime("application/pdf");
+        let odt = AssociationTarget::mime("application/vnd.oasis.opendocument.text");
+        let mp4 = AssociationTarget::mime("video/mp4");
+        let webm = AssociationTarget::extension(".webm");
+
+        assert_eq!(svg.family(), AssociationFamily::Images);
+        assert_eq!(png.family(), AssociationFamily::Images);
+        assert_ne!(svg, png, "grouping must preserve exact OS association keys");
+        assert_eq!(pdf.family(), AssociationFamily::Documents);
+        assert_eq!(odt.family(), AssociationFamily::Documents);
+        assert_eq!(mp4.family(), AssociationFamily::Video);
+        assert_eq!(webm.family(), AssociationFamily::Video);
     }
 
     impl AssociationBackend for Fixture {

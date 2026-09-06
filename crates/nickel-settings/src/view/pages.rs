@@ -1,7 +1,8 @@
 use super::*;
 use nickel_ui::{
-    Column, ComponentBuilderExt, Container, GridColumnSpec, RadioGroup, RadioOption, Row,
-    SettingsListCard, Text, TextField, Track,
+    Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
+    GridColumnSpec, NavigationScope, RadioGroup, RadioOption, Row, SettingsListCard, Text,
+    TextField, Track,
 };
 
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
@@ -348,7 +349,7 @@ impl SettingsApp {
                 AnyView::new(selector)
             };
             ui! {
-                <Container background={palette.surface} border={(palette.muted, 1.0)} padding={Insets::all(4.0)}>
+                <Container background={palette.surface} padding={Insets { top: 2.0, right: 4.0, bottom: 2.0, left: 4.0 }}>
                     {if mutable { chooser } else if native_consent {
                         AnyView::new(SettingsRow::new(theme, format!("{} — {}", row.label, detail), current)
                             .trailing(Button::semantic(theme, SettingsMessage::RequestDefaultAppConsent(index), "Open system settings", ButtonPresentation::Secondary).width(180.0)))
@@ -358,151 +359,131 @@ impl SettingsApp {
                 </Container>
             }
         });
-        let note = SettingsStatus::<SettingsMessage>::new(
-            theme,
-            SettingsStatusKind::Information,
-            "These are operating-system associations. Terminal and file-manager preferences are separate Nickel-owned settings.",
-        );
         let target_query = self.default_app_target_query.trim().to_lowercase();
         let matching_targets = self
             .default_app_targets
             .iter()
             .filter(|target| {
-                !target_query.is_empty()
-                    && target.platform_key().to_lowercase().contains(&target_query)
+                (target_query.is_empty()
+                    || target.platform_key().to_lowercase().contains(&target_query))
+                    && self
+                        .default_app_target_family
+                        .is_none_or(|family| target.family() == family)
                     && !self.default_apps.iter().any(|row| row.target == **target)
             })
             .cloned()
             .collect::<Vec<_>>();
-        let file_targets = matching_targets
-            .iter()
-            .filter(|target| {
-                matches!(
-                    target,
-                    nickel_platform::AssociationTarget::Extension(_)
-                        | nickel_platform::AssociationTarget::Mime(_)
-                )
-            })
-            .cloned()
-            .map(|target| {
-                let key = target.platform_key();
-                SettingsRow::new(theme, key, "File type reported by the operating system").trailing(
-                    Button::semantic(
-                        theme,
-                        SettingsMessage::BrowseDefaultAppTarget(target),
-                        "Open",
-                        ButtonPresentation::Secondary,
-                    )
-                    .width(72.0),
-                )
-            });
-        let link_targets = matching_targets
-            .iter()
-            .filter(|target| matches!(target, nickel_platform::AssociationTarget::Scheme(_)))
-            .cloned()
-            .map(|target| {
-                let key = target
-                    .platform_key()
-                    .trim_start_matches("x-scheme-handler/")
-                    .to_owned();
-                SettingsRow::new(theme, key, "Link type reported by the operating system").trailing(
-                    Button::semantic(
-                        theme,
-                        SettingsMessage::BrowseDefaultAppTarget(target),
-                        "Open",
-                        ButtonPresentation::Secondary,
-                    )
-                    .width(72.0),
-                )
-            });
-        let target_results = if target_query.is_empty() {
+        let target_results = if matching_targets.is_empty() {
             AnyView::new(
-                Text::new("Search to browse file and link types registered on this computer.")
-                    .color(palette.muted),
-            )
-        } else if matching_targets.is_empty() {
-            AnyView::new(
-                Text::new("No additional registered file or link types match.")
-                    .color(palette.muted),
+                Text::new(if self.default_app_target_status.is_some() {
+                    "The operating-system association catalog is unavailable."
+                } else {
+                    "No additional registered file or link types match."
+                })
+                .color(palette.muted),
             )
         } else {
+            let collection = Collection::try_new(
+                CollectionState::Ready(matching_targets),
+                |target| target.platform_key(),
+                move |target: nickel_platform::AssociationTarget| {
+                    let key = target.platform_key();
+                    let kind = target.family().label();
+                    SettingsRow::new(theme, key, kind).trailing(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::BrowseDefaultAppTarget(target),
+                            "Choose app",
+                            ButtonPresentation::Quiet,
+                        )
+                        .width(112.0),
+                    )
+                },
+            )
+            .expect("platform association targets are deduplicated")
+            .id("default-app-target-catalog")
+            .accessibility_label("Registered file and protocol associations")
+            .gap(2.0)
+            .navigation_scope(NavigationScope::group())
+            .presentation(CollectionPresentation::VirtualList {
+                item_height: 58.0,
+                offset: self.default_app_catalog_scroll_offset,
+                viewport_height: 300.0,
+                overscan: 116.0,
+            });
             AnyView::new(
-                Column::new()
-                    .gap(6.0)
-                    .child(Text::new("File types").bold(true).color(palette.text))
-                    .children(file_targets)
-                    .child(Text::new("Link types").bold(true).color(palette.text))
-                    .children(link_targets),
+                nickel_ui::VerticalScroll::new(
+                    SettingsMessage::DefaultAppsScroll(
+                        self.default_app_catalog_scroll_offset.to_bits(),
+                    ),
+                    self.default_app_catalog_scroll_offset,
+                )
+                .on_scroll(default_apps_scroll_message)
+                .controlled(true)
+                .height(300.0)
+                .id("default-app-target-scroll")
+                .navigation_scope(NavigationScope::group())
+                .theme(theme)
+                .child(collection),
             )
         };
         let advanced = SettingsRow::new(
             theme,
-            "Browse file and link associations",
+            "File types and links",
             self.default_app_target_status
                 .as_deref()
-                .unwrap_or("Search the complete set reported by the operating system"),
+                .unwrap_or("All associations reported by the operating system"),
         )
         .trailing(
-            Row::new()
-                .gap(6.0)
-                .child(
-                    SettingsSearchField::new(
-                        theme,
-                        "default-app-advanced-target",
-                        &self.default_app_target_query,
-                        "Search file types and link schemes",
-                        default_app_target_search_message,
-                    )
-                    .width(250.0),
-                )
-                .child(
+            SettingsSearchField::new(
+                theme,
+                "default-app-advanced-target",
+                &self.default_app_target_query,
+                "Search file types and protocols",
+                default_app_target_search_message,
+            )
+            .width(320.0),
+        );
+        let families = [
+            nickel_platform::AssociationFamily::Web,
+            nickel_platform::AssociationFamily::Documents,
+            nickel_platform::AssociationFamily::Images,
+            nickel_platform::AssociationFamily::Audio,
+            nickel_platform::AssociationFamily::Video,
+            nickel_platform::AssociationFamily::Archives,
+            nickel_platform::AssociationFamily::OtherFiles,
+            nickel_platform::AssociationFamily::Protocols,
+        ];
+        let family_buttons =
+            std::iter::once((None, format!("All ({})", self.default_app_targets.len())))
+                .chain(families.into_iter().filter_map(|family| {
+                    let count = self
+                        .default_app_targets
+                        .iter()
+                        .filter(|target| target.family() == family)
+                        .count();
+                    (count > 0).then_some((Some(family), format!("{} ({count})", family.label())))
+                }))
+                .map(|(family, label)| {
                     Button::semantic(
                         theme,
-                        SettingsMessage::AddDefaultAppTarget,
-                        "Load",
-                        ButtonPresentation::Secondary,
+                        SettingsMessage::DefaultAppTargetFamily(family),
+                        label,
+                        if self.default_app_target_family == family {
+                            ButtonPresentation::Primary
+                        } else {
+                            ButtonPresentation::Quiet
+                        },
                     )
-                    .width(72.0),
-                ),
-        );
-        let terminal = SettingsRow::new(
-            theme,
-            "Nickel terminal command",
-            "Product-owned; does not change an operating-system association",
-        )
-        .trailing(
-            TextField::on_change_with_placeholder(
-                self.shell_settings
-                    .preferred_terminal
-                    .as_deref()
-                    .unwrap_or(""),
-                "System choice",
-                SettingsMessage::SetPreferredTerminal,
-            )
-            .id("preferred-terminal")
-            .width(260.0),
-        );
-        let file_manager = SettingsRow::new(
-            theme,
-            "Nickel file-manager command",
-            "Product-owned; does not change directory or file associations",
-        )
-        .trailing(
-            TextField::on_change_with_placeholder(
-                self.shell_settings
-                    .preferred_file_manager
-                    .as_deref()
-                    .unwrap_or(""),
-                "Nickel File",
-                SettingsMessage::SetPreferredFileManager,
-            )
-            .id("preferred-file-manager")
-            .width(260.0),
-        );
+                });
+        let family_filters =
+            nickel_ui::Grid::auto_fit(Track::minmax(Track::px(110.0), Track::fr(1.0)))
+                .gap(4.0)
+                .children(family_buttons);
         ui! {
             <Column grow={1.0} padding={Insets { top: 16.0, right: 24.0, bottom: 20.0, left: 20.0 }} gap={10.0}>
-                <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsScroll} offset={0.0} theme={theme}>
-                    <Column gap={10.0}>{note}{terminal}{file_manager}{advanced}{target_results}<Column gap={8.0} children={rows} /></Column>
+                <VerticalScroll id={"default-apps-list"} on_scroll={SettingsMessage::DefaultAppsPageScroll} offset={0.0} theme={theme}>
+                    <Column gap={10.0}><Column gap={2.0} children={rows} />{advanced}{family_filters}{target_results}</Column>
                 </VerticalScroll>
             </Column>
         }

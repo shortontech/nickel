@@ -475,15 +475,14 @@ enum SettingsMessage {
     SetWifiPower(bool),
     WifiNetwork(usize),
     NetworkScroll,
-    DefaultAppsScroll,
+    DefaultAppsPageScroll,
+    DefaultAppsScroll(u32),
     DefaultAppTargetChanged(String),
+    DefaultAppTargetFamily(Option<nickel_platform::AssociationFamily>),
     DefaultAppHandlerSearchChanged(String),
     BrowseDefaultAppTarget(nickel_platform::AssociationTarget),
-    AddDefaultAppTarget,
     ToggleDefaultAppSelect(usize),
     RequestDefaultAppConsent(usize),
-    SetPreferredTerminal(String),
-    SetPreferredFileManager(String),
     SetDefaultApp {
         row: usize,
         handler_id: String,
@@ -641,6 +640,10 @@ fn default_app_target_search_message(value: String) -> SettingsMessage {
 
 fn default_app_handler_search_message(value: String) -> SettingsMessage {
     SettingsMessage::DefaultAppHandlerSearchChanged(value)
+}
+
+fn default_apps_scroll_message(value: f32) -> SettingsMessage {
+    SettingsMessage::DefaultAppsScroll(value.max(0.0).to_bits())
 }
 
 fn default_app_categories() -> Vec<DefaultAppRow> {
@@ -810,7 +813,9 @@ impl SettingsApp {
         let service = nickel_platform::association_service();
         if self.default_app_targets.is_empty() {
             match service.available_targets() {
-                Ok(targets) => {
+                Ok(mut targets) => {
+                    targets.sort_by_key(|target| (target.family(), target.platform_key()));
+                    targets.dedup();
                     self.default_app_targets = targets;
                     self.default_app_target_status = None;
                 }
@@ -1248,46 +1253,24 @@ impl SettingsApp {
             SettingsMessage::DisplayScroll
             | SettingsMessage::BluetoothScroll
             | SettingsMessage::NetworkScroll
-            | SettingsMessage::DefaultAppsScroll
+            | SettingsMessage::DefaultAppsPageScroll
             | SettingsMessage::AppearanceScroll => {}
+            SettingsMessage::DefaultAppsScroll(offset) => {
+                self.default_app_catalog_scroll_offset = f32::from_bits(offset).max(0.0);
+            }
             SettingsMessage::DefaultAppTargetChanged(value) => {
                 self.default_app_target_query = value;
+                self.default_app_catalog_scroll_offset = 0.0;
+            }
+            SettingsMessage::DefaultAppTargetFamily(family) => {
+                self.default_app_target_family = family;
+                self.default_app_catalog_scroll_offset = 0.0;
             }
             SettingsMessage::DefaultAppHandlerSearchChanged(value) => {
                 self.default_app_handler_query = value;
             }
             SettingsMessage::BrowseDefaultAppTarget(target) => {
                 self.add_default_app_target(target);
-            }
-            SettingsMessage::AddDefaultAppTarget => {
-                let query = self.default_app_target_query.trim();
-                let target = query
-                    .strip_prefix('.')
-                    .filter(|value| !value.is_empty())
-                    .map(|value| nickel_platform::AssociationTarget::extension(format!(".{value}")))
-                    .or_else(|| {
-                        query
-                            .strip_prefix("scheme:")
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
-                            .map(nickel_platform::AssociationTarget::scheme)
-                    })
-                    .or_else(|| {
-                        query
-                            .strip_prefix("x-scheme-handler/")
-                            .filter(|value| !value.is_empty())
-                            .map(nickel_platform::AssociationTarget::scheme)
-                    })
-                    .or_else(|| {
-                        query
-                            .contains('/')
-                            .then(|| nickel_platform::AssociationTarget::mime(query))
-                    });
-                if let Some(target) = target {
-                    self.add_default_app_target(target);
-                } else {
-                    self.status = "Enter a MIME type such as text/markdown or scheme:https".into();
-                }
             }
             SettingsMessage::ToggleDefaultAppSelect(index) => {
                 self.default_app_handler_query.clear();
@@ -1300,18 +1283,6 @@ impl SettingsApp {
             }
             SettingsMessage::RequestDefaultAppConsent(row) => {
                 self.change_default_app(row, "");
-            }
-            SettingsMessage::SetPreferredTerminal(value) => {
-                let previous = self.shell_settings.clone();
-                self.shell_settings.preferred_terminal =
-                    (!value.trim().is_empty()).then(|| value.trim().to_owned());
-                self.persist_shell_behavior(previous);
-            }
-            SettingsMessage::SetPreferredFileManager(value) => {
-                let previous = self.shell_settings.clone();
-                self.shell_settings.preferred_file_manager =
-                    (!value.trim().is_empty()).then(|| value.trim().to_owned());
-                self.persist_shell_behavior(previous);
             }
         }
         self.request_redraw();
@@ -2730,7 +2701,7 @@ mod tests {
     }
 
     #[test]
-    fn default_apps_page_exposes_confirmed_os_handlers_without_conflating_nickel_preferences() {
+    fn default_apps_page_exposes_confirmed_os_handlers_and_virtualized_targets() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::DefaultApps);
         app.default_apps[0].snapshot = Some(nickel_platform::AssociationSnapshot {
             target: nickel_platform::AssociationTarget::scheme("https"),
@@ -2798,12 +2769,26 @@ mod tests {
             "a handler search must filter unrelated choices"
         );
 
-        let uncommon = nickel_platform::AssociationTarget::mime("application/x-nickel-fixture");
-        app.default_app_targets = vec![
-            uncommon.clone(),
-            nickel_platform::AssociationTarget::scheme("nickel-fixture"),
-        ];
-        app.update(SettingsMessage::DefaultAppTargetChanged("x-nickel".into()));
+        app.default_app_targets = (0..250)
+            .map(|index| {
+                nickel_platform::AssociationTarget::mime(format!(
+                    "application/x-nickel-fixture-{index:03}"
+                ))
+            })
+            .collect();
+        let uncommon = nickel_platform::AssociationTarget::mime("application/x-nickel-fixture-249");
+        let initial_catalog = app.build_ui(850.0, 900.0);
+        assert!(
+            initial_catalog
+                .semantic_targets_for_message(&SettingsMessage::BrowseDefaultAppTarget(
+                    uncommon.clone(),
+                ))
+                .is_empty(),
+            "the catalog must not eagerly construct an off-screen final row"
+        );
+        app.update(SettingsMessage::DefaultAppTargetChanged(
+            "x-nickel-fixture-249".into(),
+        ));
         let associations = app.build_ui(850.0, 900.0);
         assert!(
             !associations
@@ -2814,14 +2799,6 @@ mod tests {
         assert!(!app.default_apps.iter().any(|row| {
             matches!(row.target, nickel_platform::AssociationTarget::Mime(ref mime) if mime == "inode/directory")
         }));
-        app.update(SettingsMessage::DefaultAppTargetChanged(
-            "text/markdown".into(),
-        ));
-        app.update(SettingsMessage::AddDefaultAppTarget);
-        assert!(app.default_apps.iter().any(|row| {
-            row.target == nickel_platform::AssociationTarget::mime("text/markdown")
-        }));
-
         app.default_app_select_expanded = None;
         app.default_apps[0].snapshot.as_mut().unwrap().capability =
             nickel_platform::AssociationCapability::NativeConsent;
