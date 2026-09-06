@@ -4274,7 +4274,9 @@ mod tests {
         assert_eq!(entry.metadata.source.crate_name, "nickel-file");
         assert_eq!(entry.external_provider, Some(FILE_PROVIDER));
         let manifest = include_str!("../Cargo.toml");
-        assert!(manifest.contains("nickel-file = { path = \"../nickel-file\", optional = true }"));
+        assert!(manifest.contains(
+            "nickel-file = { path = \"../nickel-file\", optional = true, features = [\"workbench-fixtures\"] }"
+        ));
         assert!(manifest.contains("file-provider = [\"dep:nickel-file\"]"));
     }
 
