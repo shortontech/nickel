@@ -730,6 +730,28 @@
     }
 
     #[test]
+    fn successful_window_command_consumes_and_dismisses_the_preview_menu() {
+        let mut shell = LiveShell::new().unwrap();
+        let window = OpenWindow {
+            id: WindowId(73),
+            application_id: Some(ApplicationId::new("org.example.Editor")),
+            active: true,
+            title: "Document".into(),
+            state: crate::model::WindowState::default(),
+        };
+        shell.windows = vec![window.clone()];
+        shell.preview_group = Some(0);
+        shell.window_menu = Some(window.id);
+        shell.window_menu_snapshot = Some(window.clone());
+
+        shell.apply_window_menu_action(crate::window_preview::MenuAction::Close(window.id));
+
+        assert!(shell.window_menu.is_none());
+        assert!(shell.window_menu_snapshot.is_none());
+        assert!(shell.preview_group.is_none());
+    }
+
+    #[test]
     fn panel_popover_anchor_is_semantic_and_scoped_to_the_invoking_output() {
         let mut shell = LiveShell::new().unwrap();
         let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);

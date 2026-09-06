@@ -2751,36 +2751,42 @@ impl LiveShell {
                 return;
             }
         }
-        match action {
-            MenuAction::Dismiss => self.dismiss_window_menu(),
-            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => {}
-            MenuAction::Activate(window) => self.send_window_action(window, WindowAction::Activate),
-            MenuAction::Close(window) => self.send_window_action(window, WindowAction::Close),
-            MenuAction::MaximizeRestore(window) => {
-                self.send_window_action(window, WindowAction::Maximize)
+        let dispatched = match action {
+            MenuAction::Dismiss => {
+                self.dismiss_window_menu();
+                return;
             }
-            MenuAction::Minimize(window) => self.send_window_action(window, WindowAction::Minimize),
+            MenuAction::ShowWorkspaces | MenuAction::ShowDisplays | MenuAction::Back => return,
+            MenuAction::Activate(window) => {
+                self.try_send_window_action(window, WindowAction::Activate)
+            }
+            MenuAction::Close(window) => self.try_send_window_action(window, WindowAction::Close),
+            MenuAction::MaximizeRestore(window) => {
+                self.try_send_window_action(window, WindowAction::Maximize)
+            }
+            MenuAction::Minimize(window) => {
+                self.try_send_window_action(window, WindowAction::Minimize)
+            }
             MenuAction::FullscreenRestore(window) => {
-                self.send_window_action(window, WindowAction::Fullscreen)
+                self.try_send_window_action(window, WindowAction::Fullscreen)
             }
             MenuAction::SnapLeading(window) => {
-                self.send_window_action(window, WindowAction::SnapLeading)
+                self.try_send_window_action(window, WindowAction::SnapLeading)
             }
             MenuAction::SnapTrailing(window) => {
-                self.send_window_action(window, WindowAction::SnapTrailing)
+                self.try_send_window_action(window, WindowAction::SnapTrailing)
             }
-            MenuAction::MoveToWorkspace(window, workspace) => {
-                let _ = send_session_command(
-                    "move-window-to-workspace",
-                    ShellCommand::MoveWindowToWorkspace { window, workspace },
-                );
-            }
-            MenuAction::MoveToDisplay(window, output) => {
-                let _ = send_session_command(
-                    "move-window-to-display",
-                    ShellCommand::MoveWindowToDisplay { window, output },
-                );
-            }
+            MenuAction::MoveToWorkspace(window, workspace) => send_session_command(
+                "move-window-to-workspace",
+                ShellCommand::MoveWindowToWorkspace { window, workspace },
+            ),
+            MenuAction::MoveToDisplay(window, output) => send_session_command(
+                "move-window-to-display",
+                ShellCommand::MoveWindowToDisplay { window, output },
+            ),
+        };
+        if dispatched {
+            self.dismiss_window_menu();
         }
     }
 
