@@ -126,7 +126,9 @@ fn spawn_deferred_terminal(arguments: &[String]) -> Result<std::process::Child, 
     let mut command = std::process::Command::new(executable);
     command
         .arg("--defer-window-for-child-ms")
-        .arg("100")
+        // The platform authority decides at 100 ms. This larger bound is only a fail-safe for
+        // transporting its timestamped window or expiry watermark to the terminal process.
+        .arg("250")
         .arg("--")
         .arg(program)
         .args(rest)

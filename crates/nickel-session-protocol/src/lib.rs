@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 23;
+pub const PROTOCOL_VERSION: u16 = 24;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -723,6 +723,9 @@ pub enum Event {
         generation: u64,
         observed_after_ms: u16,
         descendant: bool,
+    },
+    PendingLaunchExpired {
+        generation: u64,
     },
     ShellSettingsChanged,
     ShellBehaviorChanged(ShellBehaviorSnapshot),
@@ -1985,6 +1988,14 @@ mod tests {
         assert_eq!(
             decode::<ServerEnvelope>(&encode(&event).unwrap()).unwrap(),
             event
+        );
+        let expired = ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(Event::PendingLaunchExpired { generation: 27 }),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&expired).unwrap()).unwrap(),
+            expired
         );
     }
 }

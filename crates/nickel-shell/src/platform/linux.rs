@@ -1901,6 +1901,10 @@ fn subscription_shortcut(
             deliver_pending_launch_observation(generation, observed_after_ms, descendant);
             None
         }
+        ServerMessage::Event(SessionEvent::PendingLaunchExpired { generation }) => {
+            deliver_pending_launch_expiry(generation);
+            None
+        }
         ServerMessage::Event(
             SessionEvent::ShellSettingsChanged | SessionEvent::ShellBehaviorChanged(_),
         ) => Some(GlobalShortcut::ReloadShellSettings),
@@ -1987,7 +1991,14 @@ pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
 }
 
 static PENDING_LAUNCH_GENERATION: AtomicU64 = AtomicU64::new(1);
-type PendingLaunchSignal = (u16, bool);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingLaunchSignal {
+    Window {
+        observed_after_ms: u16,
+        descendant: bool,
+    },
+    Expired,
+}
 type PendingLaunchRelays = HashMap<u64, mpsc::SyncSender<PendingLaunchSignal>>;
 static PENDING_LAUNCH_RELAYS: OnceLock<Mutex<PendingLaunchRelays>> = OnceLock::new();
 
@@ -1997,7 +2008,20 @@ fn deliver_pending_launch_observation(generation: u64, observed_after_ms: u16, d
         .lock()
         && let Some(sender) = relays.get(&generation)
     {
-        let _ = sender.try_send((observed_after_ms, descendant));
+        let _ = sender.try_send(PendingLaunchSignal::Window {
+            observed_after_ms,
+            descendant,
+        });
+    }
+}
+
+fn deliver_pending_launch_expiry(generation: u64) {
+    if let Ok(relays) = PENDING_LAUNCH_RELAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        && let Some(sender) = relays.get(&generation)
+    {
+        let _ = sender.try_send(PendingLaunchSignal::Expired);
     }
 }
 
@@ -2064,13 +2088,17 @@ fn launch_observed_deferred_terminal(
                 let _ = input.write_all(b"start\n");
                 let _ = input.flush();
             }
-            let observation = registered
-                .then(|| receiver.recv_timeout(Duration::from_millis(100)).ok())
+            let signal = registered
+                .then(|| receiver.recv_timeout(Duration::from_millis(250)).ok())
                 .flatten();
-            crate::executable_index::record_prediction_observation(
-                evidence.as_ref(),
-                observation.map(|(_, descendant)| descendant),
-            );
+            let observation = match signal {
+                Some(PendingLaunchSignal::Window {
+                    observed_after_ms,
+                    descendant,
+                }) if observed_after_ms <= 100 => Some(descendant),
+                _ => None,
+            };
+            crate::executable_index::record_prediction_observation(evidence.as_ref(), observation);
             if observation.is_some()
                 && let Some(input) = decision_input.as_mut()
             {
@@ -2164,9 +2192,10 @@ mod tests {
     };
 
     use super::{
-        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, SubscriptionState,
-        bounded_notification_text, capture_active_window, capture_active_window_to_file,
-        command_response, crop_output_geometry, deliver_pending_launch_observation, logical_rect,
+        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, PendingLaunchSignal,
+        SubscriptionState, bounded_notification_text, capture_active_window,
+        capture_active_window_to_file, command_response, crop_output_geometry,
+        deliver_pending_launch_expiry, deliver_pending_launch_observation, logical_rect,
         notification_actions, notification_name_owned, owning_output, parse_window, pixmap_to_rgba,
         resolve_application_id, response_for_request, response_message, secure_storage_response,
         secure_storage_retry_response, session_receive_error, shell_command_payload,
@@ -2605,7 +2634,15 @@ mod tests {
             ),
             None
         );
-        assert_eq!(receiver.try_recv(), Ok((9, true)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(PendingLaunchSignal::Window {
+                observed_after_ms: 9,
+                descendant: true
+            })
+        ));
+        deliver_pending_launch_expiry(generation);
+        assert_eq!(receiver.try_recv(), Ok(PendingLaunchSignal::Expired));
         PENDING_LAUNCH_RELAYS
             .get()
             .unwrap()

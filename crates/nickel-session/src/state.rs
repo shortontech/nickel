@@ -2083,6 +2083,20 @@ impl NickelSession {
         }
     }
 
+    fn notify_pending_launch_expired(&mut self, generation: u64) {
+        let Ok(event) = encode(&ServerEnvelope {
+            request_id: 0,
+            message: ServerMessage::Event(SessionEvent::PendingLaunchExpired { generation }),
+        }) else {
+            return;
+        };
+        let Ok(socket) = UnixDatagram::unbound() else {
+            return;
+        };
+        self.launcher_subscribers
+            .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
     fn notify_workspace_state(&mut self) {
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,

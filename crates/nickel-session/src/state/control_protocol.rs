@@ -377,8 +377,15 @@ impl NickelSession {
                 if self
                     .event_loop_handle
                     .insert_source(timer, move |_, _, data| {
+                        let was_active = data
+                            .pending_launch_observations
+                            .iter()
+                            .any(|pending| pending.generation == generation);
                         data.pending_launch_observations
                             .retain(|pending| pending.generation != generation);
+                        if was_active {
+                            data.notify_pending_launch_expired(generation);
+                        }
                         TimeoutAction::Drop
                     })
                     .is_err()
