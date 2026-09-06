@@ -433,6 +433,10 @@ impl TerminalEngine {
         )
     }
 
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     pub fn diagnostics(&self) -> TerminalDiagnostics {
         diagnostics(
             &self.terminal,
@@ -626,6 +630,11 @@ impl TerminalSession {
             self.scrollback_limit,
             self.sender.pending_bytes(),
         )
+    }
+
+    /// Current content/event generation without locking or copying the terminal grid.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
     }
 
     /// Native process identity of the PTY child for compositor/window attribution.
@@ -1026,7 +1035,9 @@ mod tests {
     #[test]
     fn resize_rejects_stale_generations() {
         let mut engine = TerminalEngine::new(dimensions(8, 2), 10).unwrap();
+        assert_eq!(engine.generation(), engine.snapshot().generation);
         engine.process(b"output can advance the independent change token");
+        assert_eq!(engine.generation(), engine.snapshot().generation);
         assert!(engine.resize(dimensions(20, 4), 10));
         assert!(!engine.resize(dimensions(5, 1), 9));
         assert_eq!(

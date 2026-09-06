@@ -394,9 +394,8 @@ impl Application for TerminalApp {
             }
             changed = true;
         }
-        let snapshot = self.session.snapshot();
-        if snapshot.generation != self.snapshot.generation {
-            self.snapshot = snapshot;
+        if self.session.generation() != self.snapshot.generation {
+            self.snapshot = self.session.snapshot();
             changed = true;
         }
         self.poll_delay = next_poll_delay(self.poll_delay, changed);
