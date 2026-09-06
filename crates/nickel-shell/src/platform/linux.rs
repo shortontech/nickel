@@ -1962,6 +1962,12 @@ pub fn handle_focused_shortcut(_: nickel_core::hotkeys::KeyCode, _: nickel_core:
 
 pub fn execute_run_command(command: &str) -> Result<(), super::LaunchError> {
     let arguments = shlex::split(command).ok_or(super::LaunchError::InvalidQuotes)?;
+    if let Some(application) = desktop_entries::classify_run_application(&arguments) {
+        return application
+            .launch()
+            .map(|_| ())
+            .map_err(|error| super::LaunchError::Platform(error.to_string()));
+    }
     super::launch_deferred_terminal(&arguments)
 }
 

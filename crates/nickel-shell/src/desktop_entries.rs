@@ -1,6 +1,10 @@
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
+    sync::{
+        Arc, OnceLock, RwLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use freedesktop_desktop_entry::{
@@ -15,6 +19,98 @@ use crate::{
     },
 };
 
+const RUN_SIGNATURE_ENTRY_LIMIT: usize = 4_096;
+const RUN_SIGNATURE_BYTE_LIMIT: usize = 4 * 1024 * 1024;
+static RUN_SIGNATURE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RunSignatureDiagnostics {
+    pub generation: u64,
+    pub entries: usize,
+    pub retained_bytes: usize,
+    pub skipped: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+struct RunSignatureIndex {
+    applications: Vec<Application>,
+    diagnostics: RunSignatureDiagnostics,
+}
+
+impl RunSignatureIndex {
+    fn build(applications: &[Application], generation: u64) -> Self {
+        let mut indexed = Vec::new();
+        let mut retained_bytes = 0_usize;
+        let mut skipped = 0_usize;
+        for application in applications {
+            let Some(command) = application.launch_command() else {
+                continue;
+            };
+            let bytes = application.id().len()
+                + application.name().len()
+                + command.iter().map(String::len).sum::<usize>()
+                + application
+                    .working_directory()
+                    .map_or(0, |path| path.as_os_str().len());
+            if indexed.len() >= RUN_SIGNATURE_ENTRY_LIMIT
+                || retained_bytes.saturating_add(bytes) > RUN_SIGNATURE_BYTE_LIMIT
+            {
+                skipped += 1;
+                continue;
+            }
+            retained_bytes += bytes;
+            indexed.push(application.clone());
+        }
+        Self {
+            diagnostics: RunSignatureDiagnostics {
+                generation,
+                entries: indexed.len(),
+                retained_bytes,
+                skipped,
+            },
+            applications: indexed,
+        }
+    }
+
+    fn exact(&self, arguments: &[String]) -> Option<Application> {
+        let mut matches = self
+            .applications
+            .iter()
+            .filter(|application| application.launch_command() == Some(arguments));
+        let application = matches.next()?.clone();
+        // A shared signature does not identify which desktop entry's cwd, startup identity, or
+        // terminal policy was intended. Ambiguity therefore retains deferred observation.
+        matches.next().is_none().then_some(application)
+    }
+}
+
+fn run_signature_authority() -> &'static RwLock<Arc<RunSignatureIndex>> {
+    static AUTHORITY: OnceLock<RwLock<Arc<RunSignatureIndex>>> = OnceLock::new();
+    AUTHORITY.get_or_init(|| RwLock::new(Arc::new(RunSignatureIndex::default())))
+}
+
+fn publish_run_signatures(applications: &[Application]) {
+    let generation = RUN_SIGNATURE_GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    let snapshot = Arc::new(RunSignatureIndex::build(applications, generation));
+    *run_signature_authority()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = snapshot;
+}
+
+pub fn classify_run_application(arguments: &[String]) -> Option<Application> {
+    run_signature_authority()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .exact(arguments)
+}
+
+pub fn run_signature_diagnostics() -> RunSignatureDiagnostics {
+    run_signature_authority()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .diagnostics
+}
+
 pub fn load_applications() -> ApplicationDiscovery {
     let locales = get_languages_from_env();
     let desktops = current_desktop().unwrap_or_default();
@@ -26,6 +122,7 @@ pub fn load_applications() -> ApplicationDiscovery {
         &desktops,
         &icon_theme,
     );
+    publish_run_signatures(discovery.applications());
     tracing::info!(
         scanned = discovery.report().scanned(),
         accepted = discovery.report().accepted(),
@@ -205,8 +302,13 @@ mod tests {
 
     use freedesktop_desktop_entry::DesktopEntry;
 
-    use super::{application_from_entry, application_from_entry_result, discover_entries};
-    use crate::model::{ApplicationDiscoveryStatus, ApplicationSkipReason};
+    use super::{
+        RUN_SIGNATURE_ENTRY_LIMIT, RunSignatureIndex, application_from_entry,
+        application_from_entry_result, discover_entries,
+    };
+    use crate::model::{
+        Application, ApplicationDiscoveryStatus, ApplicationLaunchClass, ApplicationSkipReason,
+    };
 
     fn parse(contents: &str) -> DesktopEntry {
         DesktopEntry::from_str(
@@ -324,5 +426,76 @@ mod tests {
 
         let empty = discover_entries(Vec::<Result<DesktopEntry, ()>>::new(), &[], &[], "hicolor");
         assert_eq!(empty.status(), ApplicationDiscoveryStatus::ReadyEmpty);
+    }
+
+    fn indexed_application(
+        id: &str,
+        command: &[&str],
+        class: ApplicationLaunchClass,
+    ) -> Application {
+        Application::new(
+            id.to_owned(),
+            id.to_owned(),
+            None,
+            None,
+            Some(
+                command
+                    .iter()
+                    .map(|argument| (*argument).to_owned())
+                    .collect(),
+            ),
+        )
+        .with_launch_policy(class, None)
+    }
+
+    #[test]
+    fn run_signature_index_matches_only_one_exact_canonical_launch() {
+        let graphical = indexed_application(
+            "org.example.Editor.desktop",
+            &["editor", "--new-window"],
+            ApplicationLaunchClass::Graphical,
+        );
+        let terminal = indexed_application(
+            "org.example.Tool.desktop",
+            &["tool", "--interactive"],
+            ApplicationLaunchClass::Terminal,
+        );
+        let index = RunSignatureIndex::build(&[graphical, terminal], 7);
+
+        let matched = index
+            .exact(&["editor".into(), "--new-window".into()])
+            .expect("exact desktop launch signature");
+        assert_eq!(matched.launch_class(), ApplicationLaunchClass::Graphical);
+        assert!(
+            index
+                .exact(&["editor".into(), "--version".into()])
+                .is_none()
+        );
+        assert_eq!(index.diagnostics.generation, 7);
+    }
+
+    #[test]
+    fn ambiguous_and_over_budget_signatures_remain_conservative() {
+        let one = indexed_application(
+            "one.desktop",
+            &["shared"],
+            ApplicationLaunchClass::Graphical,
+        );
+        let two = indexed_application("two.desktop", &["shared"], ApplicationLaunchClass::Terminal);
+        let ambiguous = RunSignatureIndex::build(&[one, two], 1);
+        assert!(ambiguous.exact(&["shared".into()]).is_none());
+
+        let applications = (0..RUN_SIGNATURE_ENTRY_LIMIT + 3)
+            .map(|index| {
+                indexed_application(
+                    &format!("app-{index}.desktop"),
+                    &[&format!("app-{index}")],
+                    ApplicationLaunchClass::Graphical,
+                )
+            })
+            .collect::<Vec<_>>();
+        let bounded = RunSignatureIndex::build(&applications, 2);
+        assert_eq!(bounded.diagnostics.entries, RUN_SIGNATURE_ENTRY_LIMIT);
+        assert_eq!(bounded.diagnostics.skipped, 3);
     }
 }
