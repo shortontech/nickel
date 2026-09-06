@@ -1473,6 +1473,7 @@ fn handle_shell_input(
         let coalesce_motion = matches!(&event, InputEvent::Pointer(PointerEvent::Motion { .. }));
         if let Some(entry) = shell.surface(surface) {
             let output = entry.output_name().to_owned();
+            let (width, height) = entry.window().size();
             if let Some(display) = shell.surface_display_geometry(surface) {
                 state.set_desktop_output(
                     output,
@@ -1480,6 +1481,10 @@ fn handle_shell_input(
                     display.y as f32 / display.scale,
                     display.scale,
                 );
+                // Rendering another output may have left the shared host with
+                // that output's tree. Rebuild the invoking surface projection
+                // before hit testing or overlay dispatch.
+                let _ = state.scene(SurfaceRole::Desktop, width, height);
             }
         }
         if state.desktop_input(event) {

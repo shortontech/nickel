@@ -43,6 +43,7 @@ pub struct DesktopApplication {
     pub(super) last_click: Option<(DesktopEntryId, Instant)>,
     pub(super) modifiers: SelectionModifiers,
     pub(super) context_menu: Option<DesktopMenuContext>,
+    pub(super) last_menu_dismissal: Option<DesktopMenuDismissal>,
     pub(super) topology_generation: u64,
     pub(super) directory_generation: u64,
     pub(super) outputs: Vec<DesktopOutput>,
@@ -65,6 +66,25 @@ pub(super) struct DesktopMenuContext {
     pub(super) workspace: Option<u64>,
     pub(super) paste_available: bool,
     pub(super) desktop_writable: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DesktopMenuDismissReason {
+    Action,
+    OutsidePress,
+    Cancel,
+    Replacement,
+    TargetInvalidated,
+    OutputRemoved,
+    FocusDeparted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct DesktopMenuDismissal {
+    pub(super) output: String,
+    pub(super) topology_generation: u64,
+    pub(super) directory_generation: u64,
+    pub(super) reason: DesktopMenuDismissReason,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -145,6 +165,7 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            last_menu_dismissal: None,
             topology_generation: 0,
             directory_generation: 0,
             outputs: Vec::new(),
@@ -189,12 +210,15 @@ impl DesktopApplication {
                     .collect::<HashMap<_, _>>();
                 self.layout.reconcile(snapshot);
                 self.directory_generation = self.directory_generation.wrapping_add(1);
-                if self
-                    .context_menu
-                    .as_ref()
-                    .is_some_and(|menu| menu.directory_generation != self.directory_generation)
-                {
-                    self.context_menu = None;
+                if let Some(menu) = &mut self.context_menu {
+                    let target_survives = menu
+                        .entry
+                        .is_none_or(|id| self.layout.items().iter().any(|item| item.id == id));
+                    if target_survives {
+                        menu.directory_generation = self.directory_generation;
+                    } else {
+                        self.dismiss_context_menu(DesktopMenuDismissReason::TargetInvalidated);
+                    }
                 }
                 retain_unchanged_desktop_icons(
                     &mut self.icon_cache,
@@ -222,21 +246,19 @@ impl DesktopApplication {
             .is_none_or(|menu| outputs.iter().any(|output| output.id == menu.output));
         self.outputs.clone_from(&outputs);
         self.layout.set_outputs(outputs);
-        if self.context_menu.as_ref().is_some_and(|menu| {
-            menu.topology_generation != self.topology_generation || !menu_output_exists
-        }) {
-            self.context_menu = None;
+        if menu_output_exists {
+            if let Some(menu) = &mut self.context_menu {
+                menu.topology_generation = self.topology_generation;
+            }
+        } else {
+            self.dismiss_context_menu(DesktopMenuDismissReason::OutputRemoved);
         }
     }
 
     pub(super) fn set_active_output(&mut self, id: String, origin: DesktopPoint, scale: f32) {
-        if self
-            .context_menu
-            .as_ref()
-            .is_some_and(|menu| menu.output != id)
-        {
-            self.context_menu = None;
-        }
+        // This is a viewport projection used while rendering or dispatching an
+        // event for one native desktop surface. It is not a user interaction
+        // and must never change the lifetime of a menu owned by another output.
         self.active_output = id;
         self.output_origin = origin;
         self.active_scale = scale.max(1.0);
@@ -245,7 +267,7 @@ impl DesktopApplication {
     pub(super) fn set_workspace(&mut self, workspace: Option<u64>) {
         if self.workspace != workspace {
             self.workspace = workspace;
-            self.context_menu = None;
+            self.dismiss_context_menu(DesktopMenuDismissReason::TargetInvalidated);
         }
     }
 
@@ -291,6 +313,7 @@ impl DesktopApplication {
         self.pointer_seen = true;
         let hit = self.hit(local);
         if secondary {
+            self.replacing_context_menu();
             if let Some(id) = hit
                 && !self.layout.selected().contains(&id)
             {
@@ -310,7 +333,7 @@ impl DesktopApplication {
             });
             return true;
         }
-        self.context_menu = None;
+        self.dismiss_context_menu(DesktopMenuDismissReason::OutsidePress);
         if let Some(id) = hit {
             self.layout.select(id, modifiers);
             self.pointer_down = Some((id, local));
@@ -426,6 +449,7 @@ impl DesktopApplication {
     }
 
     pub(super) fn open_background_context(&mut self, anchor: Option<DesktopPoint>) {
+        self.replacing_context_menu();
         self.context_menu = Some(DesktopMenuContext {
             anchor,
             entry: None,
@@ -440,6 +464,7 @@ impl DesktopApplication {
     }
 
     pub(super) fn open_keyboard_context(&mut self) {
+        self.replacing_context_menu();
         if let Some(id) = self.layout.active()
             && self.layout.items().iter().any(|item| item.id == id)
         {
@@ -458,7 +483,20 @@ impl DesktopApplication {
                 desktop_writable: false,
             });
         } else {
-            self.open_background_context(None);
+            // Replacement was already recorded above.
+            self.context_menu = Some(DesktopMenuContext {
+                anchor: None,
+                entry: None,
+                output: self.active_output.clone(),
+                topology_generation: self.topology_generation,
+                directory_generation: self.directory_generation,
+                selection: self.layout.selected().clone(),
+                workspace: self.workspace,
+                paste_available: nickel_file::native_file_clipboard_available(),
+                desktop_writable: nickel_file::directory_is_writable(
+                    &nickel_file::desktop_directory(),
+                ),
+            });
         }
     }
 
@@ -472,7 +510,7 @@ impl DesktopApplication {
             || context.selection != *self.layout.selected()
             || context.workspace != self.workspace
         {
-            self.context_menu = None;
+            self.dismiss_context_menu(DesktopMenuDismissReason::TargetInvalidated);
             return;
         }
         match command {
@@ -533,7 +571,7 @@ impl DesktopApplication {
         ) {
             self.save_layout();
         }
-        self.context_menu = None;
+        self.dismiss_context_menu(DesktopMenuDismissReason::Action);
     }
 
     fn launch_settings(&mut self, destination: SettingsDestination) {
@@ -657,7 +695,7 @@ impl DesktopApplication {
                 }
             }
             KeyCode::Escape => {
-                self.context_menu = None;
+                self.dismiss_context_menu(DesktopMenuDismissReason::Cancel);
                 self.layout.clear_selection();
             }
             _ => return false,
@@ -810,11 +848,18 @@ impl nickel_ui::Application for DesktopApplication {
         match message {
             DesktopMessage::Activate(id) => self.activate(id),
             DesktopMessage::Context(id) => {
-                if let Some(item) = self.layout.items().iter().find(|item| item.id == id) {
+                if let Some(position) = self
+                    .layout
+                    .items()
+                    .iter()
+                    .find(|item| item.id == id)
+                    .map(|item| item.position)
+                {
+                    self.replacing_context_menu();
                     self.context_menu = Some(DesktopMenuContext {
                         anchor: Some(DesktopPoint {
-                            x: item.position.x - self.output_origin.x,
-                            y: item.position.y - self.output_origin.y,
+                            x: position.x - self.output_origin.x,
+                            y: position.y - self.output_origin.y,
                         }),
                         entry: Some(id),
                         output: self.active_output.clone(),
@@ -842,7 +887,7 @@ impl nickel_ui::Application for DesktopApplication {
                 if let Err(error) = nickel_file::publish_file_clipboard(&paths, cut) {
                     self.error = Some(format!("Could not update file clipboard: {error}"));
                 }
-                self.context_menu = None;
+                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
             }
             DesktopMessage::Rename(id) | DesktopMessage::Properties(id) => {
                 let rename = matches!(message, DesktopMessage::Rename(_));
@@ -862,7 +907,7 @@ impl nickel_ui::Application for DesktopApplication {
                         self.error = Some(error);
                     }
                 }
-                self.context_menu = None;
+                self.dismiss_context_menu(DesktopMenuDismissReason::Action);
             }
             DesktopMessage::BackgroundContext => self.open_background_context(None),
             DesktopMessage::Command(command) => self.apply_desktop_command(command),
@@ -890,6 +935,9 @@ impl nickel_ui::Application for DesktopApplication {
         let Some(context) = &self.context_menu else {
             return selection_marquee.into_iter().collect();
         };
+        if context.output != self.active_output {
+            return selection_marquee.into_iter().collect();
+        }
         if context.entry.is_none() {
             let anchor = context.anchor.map_or_else(
                 || OverlayAnchor::InvocationTargetCenter(UiId::new("desktop")),
@@ -1413,6 +1461,25 @@ impl nickel_ui::Application for DesktopApplication {
         Some(Duration::from_millis(250))
     }
 }
+impl DesktopApplication {
+    pub(super) fn dismiss_context_menu(&mut self, reason: DesktopMenuDismissReason) -> bool {
+        let Some(menu) = self.context_menu.take() else {
+            return false;
+        };
+        self.last_menu_dismissal = Some(DesktopMenuDismissal {
+            output: menu.output,
+            topology_generation: menu.topology_generation,
+            directory_generation: menu.directory_generation,
+            reason,
+        });
+        true
+    }
+
+    fn replacing_context_menu(&mut self) {
+        self.dismiss_context_menu(DesktopMenuDismissReason::Replacement);
+    }
+}
+
 #[cfg(any(test, feature = "workbench-fixtures"))]
 impl DesktopApplication {
     #[allow(dead_code)] // Binary and fixture library compile this shared module separately.
@@ -1446,6 +1513,7 @@ impl DesktopApplication {
             last_click: None,
             modifiers: SelectionModifiers::default(),
             context_menu: None,
+            last_menu_dismissal: None,
             topology_generation: 0,
             directory_generation: 0,
             outputs: Vec::new(),

@@ -1124,6 +1124,47 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+        let menu_belongs_to_active_output = self
+            .desktop_host
+            .application()
+            .context_menu
+            .as_ref()
+            .is_none_or(|menu| menu.output == self.desktop_host.application().active_output);
+        if !menu_belongs_to_active_output {
+            let focus_departed = matches!(&event, nickel_input::InputEvent::FocusLost { .. });
+            let outside_press = matches!(
+                &event,
+                nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                    edge: nickel_input::KeyEdge::Pressed,
+                    ..
+                }) | nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started { .. })
+            );
+            if outside_press || focus_departed {
+                let reason = if focus_departed {
+                    desktop::DesktopMenuDismissReason::FocusDeparted
+                } else {
+                    desktop::DesktopMenuDismissReason::OutsidePress
+                };
+                self.desktop_host
+                    .application_mut()
+                    .dismiss_context_menu(reason);
+                self.desktop_host
+                    .application_mut()
+                    .cancel_pointer_transaction();
+                self.desktop_overlay_pointer_capture = None;
+                let outcome = self.desktop_host.step(HostBatch {
+                    events: vec![HostEvent::Ui(UiEvent::Dismiss)],
+                    application_changed: true,
+                    ..HostBatch::default()
+                });
+                self.desktop_change_token = outcome.change_token;
+                self.desktop_deadline = outcome.next_deadline;
+                return true;
+            }
+            // Motion and passive events on another desktop surface do not
+            // belong to the open menu's coordinate or focus scope.
+            return false;
+        }
         let pointer_cancelled = matches!(
             event,
             nickel_input::InputEvent::FocusLost { .. }
@@ -1132,7 +1173,7 @@ impl LiveShell {
         if pointer_cancelled {
             let application = self.desktop_host.application_mut();
             if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
-                application.context_menu = None;
+                application.dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
@@ -1293,7 +1334,7 @@ impl LiveShell {
                 true
             }
             ControllerAction::Cancel => {
-                application.context_menu = None;
+                application.dismiss_context_menu(desktop::DesktopMenuDismissReason::Cancel);
                 application.layout.clear_selection();
                 true
             }
@@ -2737,7 +2778,9 @@ impl LiveShell {
                 application.password.zeroize();
                 application.status = None;
                 if locked {
-                    self.desktop_host.application_mut().context_menu = None;
+                    self.desktop_host
+                        .application_mut()
+                        .dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
                     self.launcher_visible = false;
                     self.control_visible = false;
                     self.codex_project_menu_visible = false;

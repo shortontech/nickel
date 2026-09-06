@@ -419,6 +419,161 @@
     }
 
     #[test]
+    fn desktop_menu_owner_survives_two_output_render_and_foreign_pointer_motion() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_desktop_outputs(vec![
+            nickel_file::desktop::DesktopOutput {
+                id: "left".into(),
+                work_area: nickel_file::desktop::Rect {
+                    x: -800.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                scale: 1.25,
+            },
+            nickel_file::desktop::DesktopOutput {
+                id: "right".into(),
+                work_area: nickel_file::desktop::Rect {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 800.0,
+                    height: 600.0,
+                },
+                scale: 1.0,
+            },
+        ]);
+        shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                button: nickel_input::PointerButton::Secondary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(nickel_input::Point { x: 200.0, y: 200.0 }),
+            },
+        )));
+        assert_eq!(
+            shell
+                .desktop_host
+                .application()
+                .context_menu
+                .as_ref()
+                .map(|menu| menu.output.as_str()),
+            Some("left")
+        );
+
+        // Simulate the shell's all-surface redraw ending on the other output.
+        shell.set_desktop_output("right".into(), 0.0, 0.0, 1.0);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(
+            shell
+                .desktop_host
+                .application()
+                .frame_overlays(ViewContext::new(
+                    Rect::new(0.0, 0.0, 800.0, 600.0),
+                    InputModality::Pointer,
+                ))
+                .iter()
+                .all(|overlay| !matches!(overlay, FrameOverlay::Menu(_)))
+        );
+        assert!(!shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+                position: nickel_input::Point { x: 250.0, y: 220.0 },
+                delta: Some(nickel_input::Vector { x: 50.0, y: 20.0 }),
+            },
+        )));
+        assert!(shell.desktop_host.application().context_menu.is_some());
+        assert!(shell.desktop_host.inspect().open_overlay.is_some());
+
+        shell.set_desktop_output("left".into(), -800.0, 0.0, 1.25);
+        let _ = shell.scene(SurfaceRole::Desktop, 800, 600);
+        assert!(
+            shell
+                .desktop_host
+                .application()
+                .frame_overlays(ViewContext::new(
+                    Rect::new(0.0, 0.0, 800.0, 600.0),
+                    InputModality::Pointer,
+                ))
+                .iter()
+                .any(|overlay| matches!(overlay, FrameOverlay::Menu(_)))
+        );
+        let _ = shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Motion {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(3),
+                position: nickel_input::Point { x: 210.0, y: 210.0 },
+                delta: Some(nickel_input::Vector { x: 10.0, y: 10.0 }),
+            },
+        ));
+        assert!(shell.desktop_host.application().context_menu.is_some());
+
+        // A press on the foreign surface is an explicit outside press: it
+        // dismisses once and is consumed instead of reaching that desktop.
+        shell.set_desktop_output("right".into(), 0.0, 0.0, 1.0);
+        assert!(shell.desktop_input(nickel_input::InputEvent::Pointer(
+            nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(4),
+                button: nickel_input::PointerButton::Primary,
+                edge: nickel_input::KeyEdge::Pressed,
+                position: Some(nickel_input::Point { x: 50.0, y: 50.0 }),
+            },
+        )));
+        assert!(shell.desktop_host.application().context_menu.is_none());
+        assert!(shell.desktop_host.inspect().open_overlay.is_none());
+        let dismissal = shell
+            .desktop_host
+            .application()
+            .last_menu_dismissal
+            .as_ref()
+            .expect("outside press records a bounded dismissal");
+        assert_eq!(dismissal.output, "left");
+        assert_eq!(
+            dismissal.reason,
+            super::desktop::DesktopMenuDismissReason::OutsidePress
+        );
+    }
+
+    #[test]
+    fn desktop_menu_survives_owner_topology_change_and_closes_on_owner_removal() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        let output = |width| nickel_file::desktop::DesktopOutput {
+            id: "primary".into(),
+            work_area: nickel_file::desktop::Rect {
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 600.0,
+            },
+            scale: 1.0,
+        };
+        desktop.set_outputs(vec![output(800.0)]);
+        desktop.open_background_context(Some(nickel_file::desktop::Point {
+            x: 760.0,
+            y: 200.0,
+        }));
+        let original_generation = desktop
+            .context_menu
+            .as_ref()
+            .expect("menu is open")
+            .topology_generation;
+
+        desktop.set_outputs(vec![output(640.0)]);
+        let menu = desktop.context_menu.as_ref().expect("owner survives resize");
+        assert!(menu.topology_generation > original_generation);
+        assert_eq!(menu.output, "primary");
+
+        desktop.set_outputs(Vec::new());
+        assert!(desktop.context_menu.is_none());
+    }
+
+    #[test]
     fn desktop_live_host_keeps_rename_click_transaction_out_of_the_file_plane() {
         use std::{ffi::OsString, path::PathBuf};
 
@@ -931,7 +1086,7 @@
     }
 
     #[test]
-    fn desktop_menu_rejects_selection_workspace_and_output_staleness() {
+    fn desktop_menu_rejects_selection_and_workspace_staleness_but_survives_projection() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
@@ -961,7 +1116,10 @@
 
         desktop.open_background_context(None);
         desktop.set_active_output("other".into(), nickel_file::desktop::Point::default(), 1.0);
-        assert!(desktop.context_menu.is_none());
+        assert_eq!(
+            desktop.context_menu.as_ref().map(|menu| menu.output.as_str()),
+            Some("primary")
+        );
     }
 
     #[test]
