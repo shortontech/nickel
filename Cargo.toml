@@ -51,6 +51,7 @@ rust-version = "1.94"
 alacritty_terminal = { version = "0.26.0", default-features = false }
 polling = "3.11.0"
 libloading = "0.8.9"
+libc = "0.2.183"
 zeroize = "1.9.0"
 base64 = "0.22.1"
 bytemuck = { version = "1.25.0", features = ["derive"] }

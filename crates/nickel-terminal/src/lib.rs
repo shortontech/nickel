@@ -520,9 +520,10 @@ impl TerminalEngine {
     }
 }
 
-#[derive(Clone, Copy)]
 struct ForceHandle {
     pid: u32,
+    #[cfg(target_os = "linux")]
+    pidfd: Option<std::os::fd::OwnedFd>,
     #[cfg(target_os = "windows")]
     process: usize,
 }
@@ -531,8 +532,11 @@ impl ForceHandle {
     fn from_pty(pty: &tty::Pty) -> Self {
         #[cfg(unix)]
         {
+            let pid = pty.child().id();
             Self {
-                pid: pty.child().id(),
+                pid,
+                #[cfg(target_os = "linux")]
+                pidfd: linux_pidfd_open(pid),
             }
         }
         #[cfg(target_os = "windows")]
@@ -547,7 +551,25 @@ impl ForceHandle {
         }
     }
 
-    fn terminate(self) {
+    fn terminate(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(pidfd) = &self.pidfd {
+            use std::os::fd::AsRawFd;
+
+            // SAFETY: `pidfd` is an owned descriptor referring to the original child process.
+            // A process exit or concurrent reap makes the call fail with ESRCH; it cannot retarget
+            // a subsequently reused numeric PID.
+            unsafe {
+                let _ = libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    pidfd.as_raw_fd(),
+                    libc::SIGKILL,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+            return;
+        }
         #[cfg(unix)]
         unsafe {
             unsafe extern "C" {
@@ -567,6 +589,17 @@ impl ForceHandle {
             let _ = TerminateProcess(self.process as *mut std::ffi::c_void, 1);
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_pidfd_open(pid: u32) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    // SAFETY: `pidfd_open` returns a new owned descriptor on success. Passing flags zero is the
+    // documented, forward-compatible form; unsupported kernels return an error and use the bounded
+    // numeric-PID fallback above.
+    let descriptor = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) } as libc::c_int;
+    (descriptor >= 0).then(|| unsafe { std::os::fd::OwnedFd::from_raw_fd(descriptor) })
 }
 
 /// Owns one child process, PTY event loop, and terminal model.
