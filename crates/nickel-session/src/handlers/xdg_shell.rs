@@ -87,7 +87,15 @@ fn unauthenticated_reserved_shell_role(
     authenticated: bool,
 ) -> Option<ShellRole> {
     (!authenticated)
-        .then(|| app_id.and_then(ShellRole::from_application_id))
+        .then(|| {
+            app_id.and_then(|app_id| {
+                ShellRole::from_application_id(app_id).or_else(|| {
+                    app_id
+                        .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
+                        .then_some(ShellRole::Recovery)
+                })
+            })
+        })
         .flatten()
 }
 
@@ -767,6 +775,16 @@ impl NickelSession {
             .and_then(|client| client.get_credentials(&self.display_handle).ok())
             .and_then(|credentials| u32::try_from(credentials.pid).ok());
         let authenticated = client_pid.is_some_and(|pid| self.is_authenticated_shell_pid(pid));
+        let claims_surface_identity = app_id.as_deref().is_some_and(|app_id| {
+            app_id.starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
+        });
+        let identity = authenticated
+            .then(|| self.registered_shell_identity(app_id.as_deref()))
+            .flatten();
+        let app_id = identity
+            .as_ref()
+            .map(|identity| identity.role.application_id().to_owned())
+            .or(app_id);
         let registry_id = self
             .surface_windows
             .get(&surface.wl_surface().id())
@@ -804,9 +822,13 @@ impl NickelSession {
         );
         if let Some(id) = registry_id {
             self.clear_changed_shell_surface_role(&surface.wl_surface().id(), shell_role);
-            if let Some(role) =
+            let rejected_role =
                 unauthenticated_reserved_shell_role(self.windows.app_id(id), authenticated)
-            {
+                    .or_else(|| {
+                        (authenticated && claims_surface_identity && identity.is_none())
+                            .then_some(ShellRole::Recovery)
+                    });
+            if let Some(role) = rejected_role {
                 self.workspaces.remove_window(&id);
                 self.shell_owned_windows.remove(&id);
                 let window = self
@@ -866,7 +888,13 @@ impl NickelSession {
         if let Some(role) = shell_role {
             let window = self.xdg_toplevel_window(surface.wl_surface());
             if let Some(window) = window {
-                self.record_shell_role_registration(&window, role);
+                self.record_shell_role_registration(
+                    &window,
+                    role,
+                    identity
+                        .as_ref()
+                        .and_then(|identity| identity.output.clone()),
+                );
             }
         }
         if !self
@@ -1183,6 +1211,14 @@ mod tests {
         );
         assert_eq!(
             unauthenticated_reserved_shell_role(Some(ShellRole::Panel.application_id()), true),
+            None
+        );
+        assert_eq!(
+            unauthenticated_reserved_shell_role(Some("io.nickel.shell.surface.1234.8"), false),
+            Some(ShellRole::Recovery)
+        );
+        assert_eq!(
+            unauthenticated_reserved_shell_role(Some("io.nickel.shell.surface.1234.8"), true),
             None
         );
         assert_eq!(

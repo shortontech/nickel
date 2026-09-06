@@ -6,6 +6,8 @@
 
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(target_os = "windows")]
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -60,6 +62,8 @@ const RUNTIME_SAMPLE_CAPACITY: usize = 64;
 const OUTPUT_RETIREMENT_SETTLE: Duration = Duration::from_millis(500);
 const OUTPUT_CREATION_RETRY_MIN: Duration = Duration::from_millis(50);
 const OUTPUT_CREATION_RETRY_MAX: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+static NEXT_SHELL_SURFACE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PanelEdge {
@@ -1212,7 +1216,7 @@ impl WinitShell {
             .ok_or_else(|| "cannot recreate a shell surface without an output".to_owned())?;
         let (base_title, x, y, width, height, _) =
             surface_geometry(surface.role, geometry, self.options.panel_edge);
-        let title = shell_surface_title(surface.role, base_title, &surface.output_name);
+        let title = base_title;
         let attributes = Window::default_attributes()
             .with_title(title)
             .with_position(LogicalPosition::new(x, y))
@@ -1470,21 +1474,46 @@ impl WinitShell {
     ) -> Result<(), String> {
         let (base_title, x, y, width, height, hidden) =
             surface_geometry(role, geometry, self.options.panel_edge);
-        let title = shell_surface_title(role, base_title, output_name);
-        let application_id = match role {
-            SurfaceRole::Desktop => SessionShellRole::Desktop.application_id(),
-            SurfaceRole::Panel => SessionShellRole::Panel.application_id(),
-            SurfaceRole::Launcher => SessionShellRole::Launcher.application_id(),
-            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter.application_id(),
-            SurfaceRole::Notification => SessionShellRole::Notification.application_id(),
-            SurfaceRole::VolumeOsd => SessionShellRole::VolumeOsd.application_id(),
-            SurfaceRole::WindowPreview => SessionShellRole::Preview.application_id(),
-            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu.application_id(),
-            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu.application_id(),
-            SurfaceRole::Lock => SessionShellRole::Lock.application_id(),
-            SurfaceRole::Screenshot => SessionShellRole::Screenshot.application_id(),
-            SurfaceRole::OnScreenKeyboard => SessionShellRole::OnScreenKeyboard.application_id(),
+        let title = base_title;
+        let session_role = match role {
+            SurfaceRole::Desktop => SessionShellRole::Desktop,
+            SurfaceRole::Panel => SessionShellRole::Panel,
+            SurfaceRole::Launcher => SessionShellRole::Launcher,
+            SurfaceRole::ControlCenter => SessionShellRole::ControlCenter,
+            SurfaceRole::Notification => SessionShellRole::Notification,
+            SurfaceRole::VolumeOsd => SessionShellRole::VolumeOsd,
+            SurfaceRole::WindowPreview => SessionShellRole::Preview,
+            SurfaceRole::WindowContextMenu => SessionShellRole::ContextMenu,
+            SurfaceRole::CodexProjectMenu => SessionShellRole::ProjectMenu,
+            SurfaceRole::Lock => SessionShellRole::Lock,
+            SurfaceRole::Screenshot => SessionShellRole::Screenshot,
+            SurfaceRole::OnScreenKeyboard => SessionShellRole::OnScreenKeyboard,
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
+        };
+        #[cfg(not(target_os = "linux"))]
+        let application_id = session_role.application_id().to_owned();
+        #[cfg(target_os = "linux")]
+        let application_id = {
+            let application_id = format!(
+                "{}{}.{}",
+                nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX,
+                std::process::id(),
+                NEXT_SHELL_SURFACE_ID.fetch_add(1, Ordering::Relaxed)
+            );
+            let output = matches!(
+                role,
+                SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
+            )
+            .then(|| output_name.to_owned());
+            crate::platform::register_shell_surface(
+                nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: application_id.clone(),
+                    role: session_role,
+                    output,
+                },
+            )
+            .map_err(|error| format!("failed to register shell surface: {error}"))?;
+            application_id
         };
         let attributes = Window::default_attributes()
             .with_title(title)
@@ -1500,7 +1529,7 @@ impl WinitShell {
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
         #[cfg(target_os = "linux")]
-        let attributes = attributes.with_name(application_id, application_id);
+        let attributes = attributes.with_name(application_id.clone(), application_id.clone());
         #[allow(deprecated)]
         let window = self
             .events
@@ -1568,7 +1597,7 @@ impl WinitShell {
         self.surfaces.push(ShellSurface {
             id,
             role,
-            application_id: application_id.to_owned(),
+            application_id,
             display_index,
             output_name: output_name.to_owned(),
             display_connected: true,
@@ -1685,20 +1714,6 @@ fn translate_window_event(
         }),
         _ => None,
     }
-}
-
-fn shell_surface_title(role: SurfaceRole, title: &str, output_name: &str) -> String {
-    if matches!(
-        role,
-        SurfaceRole::Desktop | SurfaceRole::Panel | SurfaceRole::Lock
-    ) {
-        let output_name = output_name
-            .chars()
-            .filter(|character| !character.is_control() && *character != ']')
-            .collect::<String>();
-        return format!("{title} [output={output_name}]");
-    }
-    title.to_owned()
 }
 
 fn surface_geometry(
@@ -1885,12 +1900,11 @@ mod tests {
     #[cfg(target_os = "linux")]
     use super::surface_is_ephemeral;
     use super::{
-        DESKTOP_TITLE, DisplayGeometry, LAUNCHER_TITLE, OUTPUT_CREATION_RETRY_MAX,
-        OUTPUT_CREATION_RETRY_MIN, OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry,
-        OutputRetirementTracker, PANEL_TITLE, PanelEdge, ShellEvent, SurfaceRole,
-        desired_output_surfaces, durable_presenter_peak, output_name_at, output_role_is_retired,
-        panel_outputs, parse_proc_status_rss, preferred_output_index, queue_shell_input,
-        record_pump_status, require_displays, shell_surface_title, surface_geometry,
+        DisplayGeometry, OUTPUT_CREATION_RETRY_MAX, OUTPUT_CREATION_RETRY_MIN,
+        OUTPUT_RETIREMENT_SETTLE, OutputCreationRetry, OutputRetirementTracker, PanelEdge,
+        ShellEvent, SurfaceRole, desired_output_surfaces, durable_presenter_peak, output_name_at,
+        output_role_is_retired, panel_outputs, parse_proc_status_rss, preferred_output_index,
+        queue_shell_input, record_pump_status, require_displays, surface_geometry,
         surface_is_borderless,
     };
 
@@ -2270,22 +2284,6 @@ mod tests {
         assert_eq!(
             surface_geometry(SurfaceRole::Panel, display, PanelEdge::Top),
             ("Nickel Panel", 40, 20, 1920, 56, false)
-        );
-    }
-
-    #[test]
-    fn per_output_shell_titles_carry_sanitized_output_identity() {
-        assert_eq!(
-            shell_surface_title(SurfaceRole::Desktop, DESKTOP_TITLE, "DP-1"),
-            "Nickel Desktop [output=DP-1]"
-        );
-        assert_eq!(
-            shell_surface_title(SurfaceRole::Panel, PANEL_TITLE, "HDMI A/1"),
-            "Nickel Panel [output=HDMI A/1]"
-        );
-        assert_eq!(
-            shell_surface_title(SurfaceRole::Launcher, LAUNCHER_TITLE, "DP-1"),
-            LAUNCHER_TITLE
         );
     }
 

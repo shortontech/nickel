@@ -30,9 +30,10 @@ use nickel_session_protocol::{
     Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview,
     Query, Request, SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
     ShellBehaviorSetting, ShellBehaviorSnapshot, ShellBehaviorTransaction, ShellBehaviorValue,
-    ShellPopoverAnchor, ShellRole, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
-    WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
-    WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
+    ShellPopoverAnchor, ShellRole, ShellSurfaceIdentity, ShellSurfaceSnapshot,
+    Snapshot as SessionSnapshot, TestOutput, WindowAction as ProtocolWindowAction,
+    WindowId as ProtocolWindowId, WindowSnapshot, WorkspaceId as ProtocolWorkspaceId,
+    WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType, find_popup_root_surface},
@@ -261,6 +262,7 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
             | SessionCommand::RestoreApplicationFocus
             | SessionCommand::ConfigureOnScreenKeyboard { .. }
             | SessionCommand::OnScreenKeyboardInput { .. }
+            | SessionCommand::RegisterShellSurface { .. }
     )
 }
 
@@ -272,20 +274,6 @@ fn test_control_may_invoke(command: &SessionCommand) -> bool {
                 action: nickel_session_protocol::SessionAction::Lock
             }
     )
-}
-
-const SHELL_OUTPUT_METADATA_MARKER: &str = "[output=";
-
-fn shell_surface_output_from_title(title: &str) -> Option<String> {
-    let output = title
-        .strip_suffix(']')?
-        .rsplit_once(SHELL_OUTPUT_METADATA_MARKER)?
-        .1;
-    (!output.is_empty()
-        && output
-            .chars()
-            .all(|character| !character.is_control() && character != ']'))
-    .then_some(output.to_owned())
 }
 
 fn output_index_for_shell_surface(output_name: &str, output_names: &[String]) -> Option<usize> {
@@ -415,6 +403,7 @@ pub struct NickelSession {
     launcher_subscribers: Vec<PathBuf>,
     protocol_token: String,
     authenticated_shell_pids: HashSet<u32>,
+    shell_surface_identities: HashMap<String, ShellSurfaceIdentity>,
     registered_shell_role_slots: Vec<RegisteredShellRole>,
     last_logged_shell_readiness: Option<nickel_session_protocol::ShellReadinessSnapshot>,
     test_control_enabled: bool,
@@ -1453,6 +1442,7 @@ impl NickelSession {
             launcher_subscribers: Vec::new(),
             protocol_token,
             authenticated_shell_pids: HashSet::new(),
+            shell_surface_identities: HashMap::new(),
             registered_shell_role_slots: Vec::new(),
             last_logged_shell_readiness: None,
             test_control_enabled,
@@ -1737,6 +1727,7 @@ impl NickelSession {
                 }
                 self.authenticated_shell_pids.clear();
                 self.authenticated_shell_pids.insert(pid);
+                self.shell_surface_identities.clear();
                 ServerMessage::Snapshot(self.protocol_snapshot())
             }
             Request::Subscribe => {
@@ -1932,6 +1923,40 @@ impl NickelSession {
         request_id: u64,
     ) -> ServerMessage {
         match command {
+            SessionCommand::RegisterShellSurface { mut identity } => {
+                let output_scoped = matches!(
+                    identity.role,
+                    ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
+                );
+                if !identity
+                    .application_id
+                    .starts_with(nickel_session_protocol::SHELL_SURFACE_APPLICATION_ID_PREFIX)
+                    || identity.application_id.len()
+                        > nickel_session_protocol::MAX_WINDOW_APP_ID_BYTES
+                    || identity.output.is_some() != output_scoped
+                {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "invalid shell surface identity",
+                    );
+                }
+                if let Some(output) = identity.output.as_deref() {
+                    let outputs = self.space.outputs().map(Output::name).collect::<Vec<_>>();
+                    let Some(index) = output_index_for_shell_surface(output, &outputs) else {
+                        return protocol_error(ErrorCode::InvalidRequest, "unknown shell output");
+                    };
+                    identity.output = Some(outputs[index].clone());
+                }
+                if self.shell_surface_identities.len() >= nickel_session_protocol::MAX_WINDOWS
+                    && !self
+                        .shell_surface_identities
+                        .contains_key(&identity.application_id)
+                {
+                    return protocol_error(ErrorCode::ResourceLimit, "shell surface limit reached");
+                }
+                self.shell_surface_identities
+                    .insert(identity.application_id.clone(), identity);
+            }
             SessionCommand::RequestOnScreenKeyboard => self.request_on_screen_keyboard(),
             SessionCommand::ConfigureOnScreenKeyboard {
                 height,
@@ -4203,18 +4228,12 @@ impl NickelSession {
                 .all(|displaced| self.windows.contains(displaced.id))
     }
 
-    pub(crate) fn record_shell_role_registration(&mut self, window: &Window, role: ShellRole) {
-        let output = matches!(
-            role,
-            ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
-        )
-        .then(|| self.shell_surface_output_name(window))
-        .flatten()
-        .and_then(|name| {
-            let output_names = self.space.outputs().map(Output::name).collect::<Vec<_>>();
-            output_index_for_shell_surface(&name, &output_names)
-                .map(|index| output_names[index].clone())
-        });
+    pub(crate) fn record_shell_role_registration(
+        &mut self,
+        window: &Window,
+        role: ShellRole,
+        output: Option<String>,
+    ) {
         if matches!(
             role,
             ShellRole::Desktop | ShellRole::Panel | ShellRole::Lock
@@ -4267,6 +4286,13 @@ impl NickelSession {
         {
             self.registered_shell_role_slots.push(registration);
         }
+    }
+
+    pub(crate) fn registered_shell_identity(
+        &self,
+        application_id: Option<&str>,
+    ) -> Option<ShellSurfaceIdentity> {
+        self.shell_surface_identities.get(application_id?).cloned()
     }
 
     pub fn register_panel(&mut self, window: Window) {
@@ -5285,17 +5311,12 @@ impl NickelSession {
     }
 
     fn shell_surface_output_name(&self, window: &Window) -> Option<String> {
-        let id = window
-            .wl_surface()
-            .and_then(|surface| self.surface_windows.get(&surface.id()))?;
-        let title = self
-            .windows
-            .snapshot()
-            .into_iter()
-            .find(|entry| entry.id == *id)?
-            .title
-            .clone();
-        shell_surface_output_from_title(&title)
+        let surface = window.wl_surface()?;
+        self.registered_shell_role_slots
+            .iter()
+            .find(|registration| registration.surface == surface.id())?
+            .output
+            .clone()
     }
 
     pub fn relayout_shell_surfaces(&mut self) {
@@ -6568,7 +6589,7 @@ mod protocol_tests {
         retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
-        shell_surface_output_from_title, test_control_may_invoke,
+        test_control_may_invoke,
     };
     use crate::output_retirement::{
         BIND_SETTLE_GRACE as OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
@@ -7687,33 +7708,23 @@ mod protocol_tests {
     }
 
     #[test]
+    fn surface_identity_registration_requires_the_authenticated_shell() {
+        assert!(command_requires_shell_identity(
+            &Command::RegisterShellSurface {
+                identity: nickel_session_protocol::ShellSurfaceIdentity {
+                    application_id: "io.nickel.shell.surface.42.1".into(),
+                    role: ShellRole::Desktop,
+                    output: Some("DP-1".into()),
+                },
+            }
+        ));
+    }
+
+    #[test]
     fn disconnected_surfaces_stop_inhibiting_idle_policy() {
         let mut inhibitors = HashMap::from([("alive", 2), ("disconnected", 1)]);
         retain_live_idle_inhibitors(&mut inhibitors, |surface| *surface == "alive");
         assert_eq!(inhibitors, HashMap::from([("alive", 2)]));
-    }
-
-    #[test]
-    fn shell_surface_output_identity_survives_reversed_registration_order() {
-        let outputs = vec!["DP-2".into(), "DP-1".into()];
-        let registered_surfaces = [
-            "Nickel Panel [output=DP-1]",
-            "Nickel Desktop [output=DP-1]",
-            "Nickel Panel [output=DP-2]",
-            "Nickel Desktop [output=DP-2]",
-        ];
-        let names = registered_surfaces
-            .iter()
-            .map(|title| shell_surface_output_from_title(title).unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            names
-                .iter()
-                .map(|name| output_index_for_shell_surface(name, &outputs))
-                .collect::<Vec<_>>(),
-            [Some(1), Some(1), Some(0), Some(0)]
-        );
     }
 
     #[test]
@@ -7742,23 +7753,6 @@ mod protocol_tests {
                 &["DP-1".into(), "Display - DP-1".into()]
             ),
             None
-        );
-    }
-
-    #[test]
-    fn shell_surface_output_metadata_rejects_ambiguous_titles() {
-        assert_eq!(shell_surface_output_from_title("Nickel Panel"), None);
-        assert_eq!(
-            shell_surface_output_from_title("Nickel Panel [output=]"),
-            None
-        );
-        assert_eq!(
-            shell_surface_output_from_title("Nickel Panel [output=DP-1]extra"),
-            None
-        );
-        assert_eq!(
-            shell_surface_output_from_title("Nickel Panel [output=DP-1]"),
-            Some("DP-1".into())
         );
     }
 

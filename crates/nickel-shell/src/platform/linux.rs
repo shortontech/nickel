@@ -1118,6 +1118,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionQuery::ShellRuntimeDiagnostics => "query-shell-runtime-diagnostics",
         },
         SessionRequest::Command(command) => match command {
+            SessionCommand::RegisterShellSurface { .. } => "register-shell-surface",
             SessionCommand::RequestOnScreenKeyboard => "request-on-screen-keyboard",
             SessionCommand::ConfigureOnScreenKeyboard { .. } => "configure-on-screen-keyboard",
             SessionCommand::OnScreenKeyboardInput { .. } => "on-screen-keyboard-input",
@@ -1164,6 +1165,14 @@ pub fn register_session_shell() -> Result<(), SessionRequestError> {
             expected: "registration snapshot",
         }),
     }
+}
+
+pub fn register_shell_surface(
+    identity: nickel_session_protocol::ShellSurfaceIdentity,
+) -> Result<(), SessionRequestError> {
+    command_response(one_shot_session_request(SessionRequest::Command(
+        SessionCommand::RegisterShellSurface { identity },
+    ))?)
 }
 
 pub fn configured_primary_output() -> Option<String> {

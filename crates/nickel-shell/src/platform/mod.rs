@@ -433,7 +433,7 @@ pub use linux::{
     handle_focused_shortcut, launch_application, launch_session_application,
     launcher_has_foreground_focus, launcher_hotkey_receiver, launcher_visibility_applied,
     network_status, on_screen_keyboard_snapshot, prepare_audio_environment, projection_outputs,
-    register_session_shell, release_pointer, request_secure_storage_retry,
+    register_session_shell, register_shell_surface, release_pointer, request_secure_storage_retry,
     respond_runtime_diagnostics, respond_semantic_action, respond_semantic_target,
     secure_storage_state, select_audio_device, semantic_target_receiver, send_shell_command,
     set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,

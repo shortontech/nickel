@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 21;
+pub const PROTOCOL_VERSION: u16 = 22;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -14,6 +14,7 @@ pub const MAX_WINDOW_APP_ID_BYTES: usize = 96;
 pub const MAX_OUTPUTS: usize = 32;
 pub const MAX_WORKSPACES: usize = 32;
 pub const MAX_RUNTIME_PERFORMANCE_SAMPLES: usize = 64;
+pub const SHELL_SURFACE_APPLICATION_ID_PREFIX: &str = "io.nickel.shell.surface.";
 
 const MAGIC: [u8; 4] = *b"NIKL";
 pub const FRAME_HEADER_BYTES: usize = 10;
@@ -74,6 +75,12 @@ pub enum Query {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "command", rename_all = "snake_case")]
 pub enum Command {
+    /// Bind an opaque XDG application identity to an authenticated shell
+    /// role. Output-scoped roles carry the monitor identity separately from
+    /// presentation metadata such as the window title.
+    RegisterShellSurface {
+        identity: ShellSurfaceIdentity,
+    },
     RequestOnScreenKeyboard,
     ConfigureOnScreenKeyboard {
         height: u32,
@@ -164,6 +171,13 @@ pub enum Command {
     TestOutput {
         output: TestOutput,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellSurfaceIdentity {
+    pub application_id: String,
+    pub role: ShellRole,
+    pub output: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1222,6 +1236,25 @@ mod tests {
             }
             .validate(),
             Err(FrameError::LengthMismatch)
+        );
+    }
+
+    #[test]
+    fn typed_shell_surface_identity_round_trips_with_output() {
+        let request = ClientEnvelope {
+            token: "capability".into(),
+            request_id: 41,
+            request: Request::Command(Command::RegisterShellSurface {
+                identity: ShellSurfaceIdentity {
+                    application_id: format!("{SHELL_SURFACE_APPLICATION_ID_PREFIX}42.7"),
+                    role: ShellRole::Panel,
+                    output: Some("Unknown - Display - DP-2".into()),
+                },
+            }),
+        };
+        assert_eq!(
+            decode::<ClientEnvelope>(&encode(&request).unwrap()).unwrap(),
+            request
         );
     }
 
