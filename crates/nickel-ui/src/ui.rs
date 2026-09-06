@@ -1674,7 +1674,9 @@ fn measure_text(
 
 fn styled_attrs(span: Option<&StyledTextSpan>) -> Attrs<'_> {
     let family = span
-        .and_then(|span| span.font_family.as_deref().map(Family::Name))
+        .and_then(|span| span.font_family.as_deref())
+        .filter(|family| !family.eq_ignore_ascii_case("monospace"))
+        .map(Family::Name)
         .unwrap_or_else(|| {
             if span.is_some_and(|span| span.monospace) {
                 Family::Monospace

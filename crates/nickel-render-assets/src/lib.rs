@@ -54,6 +54,23 @@ impl ProcessFontSystem {
     }
 }
 
+/// Resolve a configured terminal family only when the installed face declares fixed-width metrics.
+/// Empty, generic, missing, and proportional requests use the renderer's generic monospace family.
+pub fn resolve_monospace_family(requested: &str) -> Arc<str> {
+    let requested = requested.trim();
+    if requested.is_empty() || requested.eq_ignore_ascii_case("monospace") {
+        return Arc::from("monospace");
+    }
+    let font_system = ProcessFontSystem::new().lock();
+    font_system
+        .db()
+        .faces()
+        .filter(|face| face.monospaced)
+        .flat_map(|face| face.families.iter().map(|(name, _)| name))
+        .find(|name| name.eq_ignore_ascii_case(requested))
+        .map_or_else(|| Arc::from("monospace"), |name| Arc::from(name.as_str()))
+}
+
 /// Immutable, tightly packed, straight-alpha RGBA pixels.
 #[derive(Clone, Debug)]
 pub struct RgbaAsset {
@@ -689,6 +706,55 @@ fn source_over(destination: [u8; 4], source: [u8; 4]) -> [u8; 4] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_family_resolution_falls_back_and_accepts_installed_fixed_width_faces() {
+        assert_eq!(resolve_monospace_family("monospace").as_ref(), "monospace");
+        assert_eq!(
+            resolve_monospace_family("__nickel_missing_font_family__").as_ref(),
+            "monospace"
+        );
+        let installed = {
+            let font_system = ProcessFontSystem::new().lock();
+            font_system
+                .db()
+                .faces()
+                .find(|face| face.monospaced)
+                .and_then(|face| face.families.first())
+                .map(|(name, _)| name.clone())
+        };
+        if let Some(installed) = installed {
+            assert!(
+                resolve_monospace_family(&installed)
+                    .as_ref()
+                    .eq_ignore_ascii_case(&installed)
+            );
+        }
+        let proportional = {
+            let font_system = ProcessFontSystem::new().lock();
+            let faces = font_system.db().faces().collect::<Vec<_>>();
+            faces
+                .iter()
+                .filter(|face| !face.monospaced)
+                .flat_map(|face| face.families.iter().map(|(name, _)| name))
+                .find(|candidate| {
+                    !faces.iter().any(|face| {
+                        face.monospaced
+                            && face
+                                .families
+                                .iter()
+                                .any(|(name, _)| name.eq_ignore_ascii_case(candidate))
+                    })
+                })
+                .cloned()
+        };
+        if let Some(proportional) = proportional {
+            assert_eq!(
+                resolve_monospace_family(&proportional).as_ref(),
+                "monospace"
+            );
+        }
+    }
 
     #[test]
     fn public_cache_churn_cannot_increase_process_font_system_cardinality() {

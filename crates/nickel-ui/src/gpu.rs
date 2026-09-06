@@ -902,7 +902,9 @@ fn cosmic_align(align: TextAlign) -> Align {
 
 fn rich_attrs(color: Color, span: Option<&StyledTextSpan>, metadata: usize) -> Attrs<'_> {
     let family = span
-        .and_then(|span| span.font_family.as_deref().map(Family::Name))
+        .and_then(|span| span.font_family.as_deref())
+        .filter(|family| !family.eq_ignore_ascii_case("monospace"))
+        .map(Family::Name)
         .unwrap_or_else(|| {
             if span.is_some_and(|span| span.monospace) {
                 Family::Monospace

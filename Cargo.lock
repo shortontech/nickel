@@ -2755,6 +2755,7 @@ dependencies = [
  "nickel-core",
  "nickel-input",
  "nickel-logging",
+ "nickel-render-assets",
  "nickel-terminal",
  "nickel-ui",
  "winit 0.30.13",

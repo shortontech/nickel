@@ -16,5 +16,6 @@ nickel-core = { path = "../nickel-core" }
 nickel-terminal = { path = "../nickel-terminal" }
 nickel-ui = { path = "../nickel-ui" }
 nickel-logging = { path = "../nickel-logging" }
+nickel-render-assets = { path = "../nickel-render-assets" }
 winit.workspace = true
 arboard = { version = "3.6.1", default-features = false, features = ["wayland-data-control"] }

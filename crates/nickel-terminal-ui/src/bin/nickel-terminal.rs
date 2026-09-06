@@ -130,11 +130,15 @@ impl TerminalApp {
             scrollback_lines: settings.scrollback_lines,
         })?;
         let snapshot = session.snapshot();
+        let resolved_font = nickel_render_assets::resolve_monospace_family(&settings.font_family);
+        let font_fallback = !settings.font_family.eq_ignore_ascii_case("monospace")
+            && !settings.font_family.trim().is_empty()
+            && resolved_font.as_ref() == "monospace";
         let palette = TerminalPalette {
             foreground: settings.foreground,
             background: settings.background,
             cursor_style: settings.cursor_style,
-            font_family: std::sync::Arc::from(settings.font_family.as_str()),
+            font_family: resolved_font,
             ..TerminalPalette::default()
         };
         Ok(Self {
@@ -143,7 +147,10 @@ impl TerminalApp {
             palette,
             metrics: CellMetrics::integral(settings.font_size(), 1.0),
             title: "Nickel Terminal".into(),
-            status: None,
+            status: font_fallback.then(|| {
+                "Configured terminal font is unavailable or not fixed-width; using system monospace"
+                    .into()
+            }),
             paste_confirmation: None,
             resize_generation: 0,
             poll_delay: Duration::from_millis(16),
