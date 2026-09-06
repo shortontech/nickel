@@ -469,6 +469,8 @@ impl DesktopLayout {
             } else if let Some(value) = line.strip_prefix("grid=") {
                 if let Some((width, height)) = value.split_once(':')
                     && let (Ok(width), Ok(height)) = (width.parse(), height.parse())
+                    && valid_grid_dimension(width)
+                    && valid_grid_dimension(height)
                 {
                     self.cell = (width, height);
                 }
@@ -483,9 +485,11 @@ impl DesktopLayout {
                         fields[0].parse(),
                         fields[1].parse(),
                         unhex(fields[2]),
-                        fields[3].parse(),
-                        fields[4].parse(),
+                        fields[3].parse::<f32>(),
+                        fields[4].parse::<f32>(),
                     )
+                    && x.is_finite()
+                    && y.is_finite()
                 {
                     placements.insert(
                         DesktopEntryId(FileIdentity(device, file)),
@@ -674,6 +678,10 @@ fn normalize_outputs(outputs: Vec<DesktopOutput>) -> Vec<DesktopOutput> {
         output.primary = Some(index) == effective;
     }
     outputs
+}
+
+fn valid_grid_dimension(value: f32) -> bool {
+    value.is_finite() && value >= 48.0
 }
 
 fn output_geometry_key(output: &DesktopOutput) -> [u32; 5] {
@@ -1263,5 +1271,23 @@ mod tests {
         layout.set_outputs(vec![output("dock", 400.0), primary_output("primary", 0.0)]);
         assert_eq!(layout.items()[0].output, "dock");
         assert_eq!(layout.items()[0].position, saved);
+    }
+
+    #[test]
+    fn restore_rejects_non_finite_and_subminimum_geometry() {
+        let mut layout = DesktopLayout::new(vec![primary_output("main", 0.0)]);
+        layout.reconcile(vec![entry(1, "stable", false, 1)]);
+        let before = layout.items()[0].position;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("desktop-layout");
+
+        fs::write(&path, "v1\ngrid=NaN:1\nitem=7:1:6d61696e:inf:NaN\n").unwrap();
+        layout.restore(&path).unwrap();
+
+        assert_eq!(layout.grid(), (96.0, 112.0));
+        assert_eq!(layout.items()[0].output, "main");
+        assert_eq!(layout.items()[0].position, before);
+        assert!(layout.items()[0].position.x.is_finite());
+        assert!(layout.items()[0].position.y.is_finite());
     }
 }
