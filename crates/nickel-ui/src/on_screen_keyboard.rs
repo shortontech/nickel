@@ -14,6 +14,7 @@ use crate::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyboardMessage {
     Key(KeyboardKey),
+    ResizeBy(i32),
     PersistentModifiers,
     ToggleDock,
     Hide,
@@ -21,6 +22,7 @@ pub enum KeyboardMessage {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeyboardEffect {
+    ResizeBy(i32),
     ToggleDock,
     Input {
         key: KeyboardKey,
@@ -115,6 +117,7 @@ impl Application for KeyboardApp {
                 self.effects.clear();
                 self.effects.push(KeyboardEffect::Hide);
             }
+            KeyboardMessage::ResizeBy(delta) => self.effects.push(KeyboardEffect::ResizeBy(delta)),
             KeyboardMessage::PersistentModifiers => {
                 self.persistent_modifiers = !self.persistent_modifiers
             }
@@ -150,23 +153,33 @@ impl Application for KeyboardApp {
     }
 
     fn initial_size(&self) -> (u32, u32) {
-        (1056, 420)
+        (1056, nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT)
     }
 
     fn view(&self, context: ViewContext) -> impl crate::View<Self::Message> {
         let theme = self.theme();
         let available = (context.viewport.size.width - 32.0).max(0.0);
-        let compact =
-            available < KeyboardMetrics::MINIMUM_WIDTH || context.viewport.size.height < 400.0;
+        let side_controls = available >= 900.0;
+        let available = available - if side_controls { 216.0 } else { 0.0 };
+        let compact = available < KeyboardMetrics::MINIMUM_WIDTH
+            || context.viewport.size.height < if side_controls { 248.0 } else { 296.0 };
         let rows = if compact {
             compact_us_keyboard_rows(self.panel)
         } else {
             us_keyboard_rows(self.panel)
         };
         let metrics = if compact {
-            KeyboardMetrics::compact(available, context.viewport.size.height - 80.0, rows.len())
+            KeyboardMetrics::compact(
+                available,
+                context.viewport.size.height - if side_controls { 32.0 } else { 80.0 },
+                rows.len(),
+            )
         } else {
-            KeyboardMetrics::full(available)
+            KeyboardMetrics::full_in(
+                available,
+                context.viewport.size.height - if side_controls { 32.0 } else { 80.0 },
+                rows.len(),
+            )
         };
         let width = metrics.map_or(available, |m| m.width);
         let button = |message, label: String, selected| {
@@ -234,7 +247,10 @@ impl Application for KeyboardApp {
                 .id("osk-dock"),
             )
             .child(button(KeyboardMessage::Hide, "Hide".into(), false).id("osk-hide"));
-        let mut content = Column::new().width(width).gap(4.0).child(header);
+        let mut content = Column::new().width(width).gap(4.0);
+        if !side_controls {
+            content = content.child(header);
+        }
         if let Some(metrics) = metrics {
             for row in rows {
                 let mut key_row = Row::new()
@@ -270,15 +286,113 @@ impl Application for KeyboardApp {
         } else {
             content = content.child(Text::new("Not enough space for usable keys. Increase the available window area or reduce display scaling."));
         }
+        let mut keyboard = Row::new().gap(8.0);
+        if side_controls {
+            keyboard = keyboard.child(
+                Column::new()
+                    .width(100.0)
+                    .gap(8.0)
+                    .child(Text::new("English (US)"))
+                    .child(
+                        button(
+                            KeyboardMessage::PersistentModifiers,
+                            "Hold".into(),
+                            self.persistent_modifiers,
+                        )
+                        .width(100.0)
+                        .id("osk-hold-modifiers"),
+                    )
+                    .child(
+                        button(KeyboardMessage::ResizeBy(32), "Larger".into(), false)
+                            .width(100.0)
+                            .id("osk-larger"),
+                    )
+                    .child(
+                        button(KeyboardMessage::ResizeBy(-32), "Smaller".into(), false)
+                            .width(100.0)
+                            .id("osk-smaller"),
+                    ),
+            );
+        }
+        keyboard = keyboard.child(content);
+        if side_controls {
+            keyboard = keyboard.child(
+                Column::new()
+                    .width(100.0)
+                    .gap(8.0)
+                    .child(
+                        button(
+                            KeyboardMessage::Key(KeyboardKey::Panel(
+                                if self.panel == KeyboardPanel::Navigation {
+                                    KeyboardPanel::Letters
+                                } else {
+                                    KeyboardPanel::Navigation
+                                },
+                            )),
+                            if self.panel == KeyboardPanel::Navigation {
+                                "ABC"
+                            } else {
+                                "Navigation"
+                            }
+                            .into(),
+                            false,
+                        )
+                        .width(100.0)
+                        .id("osk-panel"),
+                    )
+                    .child(
+                        button(
+                            KeyboardMessage::ToggleDock,
+                            if self.top_docked {
+                                "Move down"
+                            } else {
+                                "Move up"
+                            }
+                            .into(),
+                            false,
+                        )
+                        .width(100.0)
+                        .id("osk-dock"),
+                    )
+                    .child(
+                        button(KeyboardMessage::Hide, "Hide".into(), false)
+                            .width(100.0)
+                            .id("osk-hide"),
+                    ),
+            );
+        }
+        let body = Row::new()
+            .height((context.viewport.size.height - 32.0).max(0.0))
+            .child(Spacer::flex())
+            .child(keyboard)
+            .child(Spacer::flex());
+        // The facing edge is the resize hit area; keep it clear of key targets.
+        let grip = Row::new()
+            .height(8.0)
+            .min_height(8.0)
+            .align_items(Align::Center)
+            .child(Spacer::flex())
+            .child(
+                Container::new()
+                    .width(64.0)
+                    .height(4.0)
+                    .background(self.palette.text),
+            )
+            .child(Spacer::flex());
+        let content = if self.top_docked {
+            Column::new().child(body).child(grip)
+        } else {
+            Column::new().child(grip).child(body)
+        };
         Container::new()
             .background(self.palette.panel)
-            .padding(Insets::all(16.0))
-            .child(
-                Row::new()
-                    .child(Spacer::flex())
-                    .child(content)
-                    .child(Spacer::flex()),
-            )
+            .padding(Insets {
+                left: 16.0,
+                right: 16.0,
+                top: 12.0,
+                bottom: 12.0,
+            })
+            .child(content)
     }
 }
 
@@ -340,38 +454,42 @@ mod tests {
     }
 
     #[test]
-    fn keyboard_keys_fit_below_the_header_without_overlapping_at_1280_width() {
-        let mut app = KeyboardApp::new(ThemePalette::from_appearance(Default::default()));
-        app.recipient_changed(true);
-        let host = UiHost::new(app, 1280, 420);
-        let keys = host
-            .semantic_nodes()
-            .into_iter()
-            .filter(|node| {
-                node.role == Some(crate::SemanticRole::Button) && node.bounds.origin.y >= 60.0
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            keys.len(),
-            us_keyboard_rows(KeyboardPanel::Letters)
-                .iter()
-                .map(Vec::len)
-                .sum::<usize>()
-        );
-        for (index, key) in keys.iter().enumerate() {
-            assert!(key.bounds.origin.x >= 0.0);
-            assert!(key.bounds.origin.y + key.bounds.size.height <= 420.0);
-            assert!(key.bounds.origin.x + key.bounds.size.width <= 1280.0);
-            assert!(key.bounds.size.height >= 40.0);
-            for other in keys.iter().skip(index + 1) {
-                let a = key.bounds;
-                let b = other.bounds;
-                assert!(
-                    a.origin.x + a.size.width <= b.origin.x
-                        || b.origin.x + b.size.width <= a.origin.x
-                        || a.origin.y + a.size.height <= b.origin.y
-                        || b.origin.y + b.size.height <= a.origin.y
+    fn keyboard_keys_and_side_controls_fit_without_overlap_at_resizable_heights() {
+        for height in [248, 316, 368, 480] {
+            for top in [false, true] {
+                let mut app = KeyboardApp::new(ThemePalette::from_appearance(Default::default()));
+                app.recipient_changed(true);
+                app.set_top_docked(top);
+                let host = UiHost::new(app, 1280, height);
+                let keys = host
+                    .semantic_nodes()
+                    .into_iter()
+                    .filter(|node| node.role == Some(crate::SemanticRole::Button))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    keys.len(),
+                    us_keyboard_rows(KeyboardPanel::Letters)
+                        .iter()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                        + 6
                 );
+                for (index, key) in keys.iter().enumerate() {
+                    assert!(key.bounds.origin.x >= 0.0);
+                    assert!(key.bounds.origin.y + key.bounds.size.height <= height as f32);
+                    assert!(key.bounds.origin.x + key.bounds.size.width <= 1280.0);
+                    assert!(key.bounds.size.height >= 40.0);
+                    for other in keys.iter().skip(index + 1) {
+                        let a = key.bounds;
+                        let b = other.bounds;
+                        assert!(
+                            a.origin.x + a.size.width <= b.origin.x
+                                || b.origin.x + b.size.width <= a.origin.x
+                                || a.origin.y + a.size.height <= b.origin.y
+                                || b.origin.y + b.size.height <= a.origin.y
+                        );
+                    }
+                }
             }
         }
     }

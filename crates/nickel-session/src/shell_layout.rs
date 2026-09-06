@@ -101,6 +101,49 @@ pub fn work_area(output: Geometry) -> Geometry {
     }
 }
 
+/// The keyboard replaces the panel reservation on its output, including the panel's pixels.
+pub fn keyboard_area(output: Geometry, top: bool, requested_height: u32) -> Geometry {
+    let height = (requested_height.clamp(248, 640) as i32).min((output.height - 1).max(0));
+    Geometry {
+        x: output.x,
+        y: if top {
+            output.y
+        } else {
+            output.y + output.height - height
+        },
+        width: output.width.max(0),
+        height,
+    }
+}
+
+pub fn keyboard_work_area(output: Geometry, top: bool, requested_height: u32) -> Geometry {
+    let keyboard = keyboard_area(output, top, requested_height);
+    Geometry {
+        x: output.x,
+        y: if top {
+            output.y + keyboard.height
+        } else {
+            output.y
+        },
+        width: output.width.max(0),
+        height: (output.height - keyboard.height).max(1),
+    }
+}
+
+pub fn fit_keyboard_recipient(content: Geometry, area: Geometry, decorated: bool) -> Geometry {
+    if !decorated {
+        return constrain_to_area(content, area);
+    }
+    let outer = crate::window_frame::outer_geometry(content);
+    let fitted = constrain_to_area(outer, area);
+    Geometry {
+        x: fitted.x + content.x - outer.x,
+        y: fitted.y + content.y - outer.y,
+        width: (fitted.width - (outer.width - content.width)).max(1),
+        height: (fitted.height - (outer.height - content.height)).max(1),
+    }
+}
+
 pub fn output_for_window(window: Geometry, outputs: &[Geometry]) -> Option<Geometry> {
     outputs
         .iter()
@@ -238,6 +281,62 @@ pub fn space_location_for_bounds(target: Geometry, surface_geometry: Geometry) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyboard_replaces_panel_and_partitions_720p_output_at_either_edge() {
+        let output = super::Geometry {
+            x: -1280,
+            y: 80,
+            width: 1280,
+            height: 720,
+        };
+        for top in [false, true] {
+            let keyboard = super::keyboard_area(output, top, 368);
+            let area = super::keyboard_work_area(output, top, 368);
+            assert_eq!(keyboard.height, 368);
+            assert_eq!(area.height, 352);
+            assert_eq!(keyboard.intersection_area(area), 0);
+            assert_eq!(keyboard.height + area.height, output.height);
+            assert_eq!(keyboard.x, output.x);
+            assert_eq!(
+                if top { area.y } else { keyboard.y },
+                if top { 448 } else { 432 }
+            );
+        }
+        assert_eq!(super::work_area(output).height, 664);
+    }
+
+    #[test]
+    fn overlapping_recipient_moves_before_shrinking_and_keeps_its_frame_inside() {
+        let area = super::Geometry {
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 300,
+        };
+        let small = super::Geometry {
+            x: 300,
+            y: 550,
+            width: 200,
+            height: 100,
+        };
+        let moved = super::fit_keyboard_recipient(small, area, true);
+        assert_eq!((moved.width, moved.height), (200, 100));
+        let large = super::Geometry {
+            x: 200,
+            y: 200,
+            width: 960,
+            height: 498,
+        };
+        for content in [small, large] {
+            let fitted = super::fit_keyboard_recipient(content, area, true);
+            let outer = crate::window_frame::outer_geometry(fitted);
+            assert!(outer.y >= area.y);
+            assert!(outer.y + outer.height <= area.y + area.height);
+            assert!(outer.x + outer.width <= area.x + area.width);
+        }
+        assert_eq!(super::fit_keyboard_recipient(area, area, false), area);
+    }
+
     use super::{
         Geometry, PlacementOutput, PlacementReason, anchored_popover, bottom_left_in, centered_in,
         constrain_to_area, initial_window, initial_window_sized, is_reachable, output_for_window,

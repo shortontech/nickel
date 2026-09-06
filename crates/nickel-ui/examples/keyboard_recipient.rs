@@ -59,5 +59,32 @@ impl Application for Recipient {
     }
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(target_os = "linux")]
+    if std::env::args().nth(1).as_deref() == Some("--bootstrap-two-outputs") {
+        use nickel_session_protocol::{
+            Command, OutputTransform, Request, ServerMessage, TestOutput,
+        };
+        use std::os::unix::process::CommandExt;
+        let shell = std::env::args_os()
+            .nth(2)
+            .ok_or("expected shell executable")?;
+        let result = nickel_session_protocol::client::request_from_environment(
+            Request::Command(Command::TestOutput {
+                output: TestOutput::Connect {
+                    name: "osk-secondary".into(),
+                    logical_width: 1280,
+                    logical_height: 720,
+                    scale_120: 120,
+                    transform: OutputTransform::Normal,
+                },
+            }),
+            std::time::Duration::from_secs(2),
+        )?;
+        if !matches!(result, Some(ServerMessage::Ack)) {
+            return Err("two-output bootstrap requires an isolated test-control session".into());
+        }
+        // Preserve the PID expected by the compositor's shell authentication.
+        return Err(std::process::Command::new(shell).exec().into());
+    }
     nickel_ui::run(Recipient::default())
 }

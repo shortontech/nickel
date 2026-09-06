@@ -2,6 +2,8 @@
 
 pub const ENVIRONMENT_VARIABLE: &str = "NICKEL_ON_SCREEN_KEYBOARD";
 
+pub const KEYBOARD_HEIGHT: u32 = 368;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum KeyboardPanel {
     Letters,
@@ -348,6 +350,21 @@ impl KeyboardMetrics {
             gap,
             width: 15.0 * key + 14.0 * gap,
         })
+    }
+
+    pub fn full_in(available_width: f32, available_height: f32, rows: usize) -> Option<Self> {
+        let mut metrics = Self::full(available_width)?;
+        if !available_height.is_finite() || rows == 0 {
+            return None;
+        }
+        metrics.key = metrics
+            .key
+            .min((available_height - (rows - 1) as f32 * metrics.gap) / rows as f32);
+        if metrics.key < 40.0 {
+            return None;
+        }
+        metrics.width = 15.0 * metrics.key + 14.0 * metrics.gap;
+        Some(metrics)
     }
 
     pub fn compact(available_width: f32, available_height: f32, rows: usize) -> Option<Self> {

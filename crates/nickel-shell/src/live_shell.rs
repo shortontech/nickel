@@ -2162,6 +2162,8 @@ pub struct LiveShell {
     keyboard_visible: bool,
     keyboard_enabled: bool,
     keyboard_dock_top: bool,
+    keyboard_height: u32,
+    keyboard_resize: Option<(nickel_input::DeviceId, Option<nickel_input::TouchId>, f64)>,
     #[cfg(target_os = "linux")]
     keyboard_override: nickel_core::on_screen_keyboard::KeyboardOverride,
     keyboard_deadline: Instant,
@@ -2522,11 +2524,13 @@ impl LiveShell {
             keyboard_host: nickel_ui::UiHost::new(
                 nickel_ui::on_screen_keyboard::KeyboardApp::new(palette),
                 1280,
-                420,
+                nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             ),
             keyboard_visible: false,
             keyboard_enabled: false,
             keyboard_dock_top: false,
+            keyboard_height: nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
+            keyboard_resize: None,
             keyboard_deadline: Instant::now(),
             keyboard_gesture_leases: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -3634,6 +3638,10 @@ impl LiveShell {
                 use nickel_ui::on_screen_keyboard::KeyboardMessage;
                 let message = if key == "osk-hide" {
                     KeyboardMessage::Hide
+                } else if key == "osk-larger" {
+                    KeyboardMessage::ResizeBy(32)
+                } else if key == "osk-smaller" {
+                    KeyboardMessage::ResizeBy(-32)
                 } else if key == "osk-dock" {
                     KeyboardMessage::ToggleDock
                 } else if key == "osk-persistent-modifiers" {

@@ -105,6 +105,7 @@ impl CompositorHandler for NickelSession {
             if let Some(window) = committed_window {
                 window.on_commit();
                 self.relayout_committed_shell_window(&window);
+                self.fit_window_above_keyboard(&window);
             }
         };
 

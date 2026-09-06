@@ -744,7 +744,12 @@ impl NickelSession {
         {
             return false;
         }
-        self.space.map_element(window, location, activate);
+        if self.panel_hidden_by_keyboard(&window) {
+            self.space.unmap_elem(&window);
+            return false;
+        }
+        self.space.map_element(window.clone(), location, activate);
+        self.fit_window_above_keyboard(&window);
         true
     }
 
@@ -2018,6 +2023,7 @@ impl NickelSession {
         match command {
             SessionCommand::RequestOnScreenKeyboard => self.request_on_screen_keyboard(),
             SessionCommand::ConfigureOnScreenKeyboard {
+                height,
                 dock_top,
                 enabled,
                 visible,
@@ -2030,6 +2036,7 @@ impl NickelSession {
                     generation,
                     environment_override,
                     dock_top,
+                    height,
                 );
             }
             SessionCommand::OnScreenKeyboardInput { epoch, input } => {
@@ -2540,7 +2547,7 @@ impl NickelSession {
                         height: geometry.size.h,
                     },
                     work_area: {
-                        let area = shell_layout::work_area(Geometry {
+                        let area = self.work_area_for_output(Geometry {
                             x: geometry.loc.x,
                             y: geometry.loc.y,
                             width: geometry.size.w,
@@ -4923,25 +4930,19 @@ impl NickelSession {
 
     fn place_on_screen_keyboard_surface(&mut self, window: &Window) {
         let Some(output) = self
-            .preferred_interaction_output_name()
+            .on_screen_keyboard
+            .output_name
             .as_deref()
             .and_then(|name| self.output_geometry_named(name))
             .or_else(|| self.output_geometry_for_shell())
         else {
             return;
         };
-        let area = self.work_area_for_output(output);
-        let height = 420.min(area.height);
-        let target = Geometry {
-            x: area.x,
-            y: if self.on_screen_keyboard.dock_top {
-                area.y
-            } else {
-                area.y + area.height - height
-            },
-            width: area.width,
-            height,
-        };
+        let target = shell_layout::keyboard_area(
+            output,
+            self.on_screen_keyboard.dock_top,
+            self.on_screen_keyboard.height,
+        );
         Self::configure_window(window, target);
         let location = Self::shell_surface_location(window, target);
         self.map_buffered_window(window.clone(), location, false);
@@ -5375,6 +5376,16 @@ impl NickelSession {
     }
 
     pub fn relayout_shell_surfaces(&mut self) {
+        if self.on_screen_keyboard.visible
+            && self
+                .on_screen_keyboard
+                .output_name
+                .as_deref()
+                .is_some_and(|name| self.output_geometry_named(name).is_none())
+        {
+            self.on_screen_keyboard.visible = false;
+            self.set_shell_role_visible(ShellRole::OnScreenKeyboard, false);
+        }
         if self.output_geometry().is_none() {
             return;
         }
@@ -5420,6 +5431,10 @@ impl NickelSession {
                 width: output.size.w,
                 height: output.size.h,
             };
+            if self.keyboard_reserves_output(output) {
+                self.space.unmap_elem(&panel);
+                continue;
+            }
             let geometry = shell_layout::panel(output);
             Self::configure_window(&panel, geometry);
             let location = Self::shell_surface_location(&panel, geometry);
@@ -5453,7 +5468,54 @@ impl NickelSession {
         for utility in screenshot_utilities {
             self.place_screenshot_surface(&utility);
         }
+        let hidden = !self.on_screen_keyboard.visible || self.locked;
+        let displaced = if hidden {
+            std::mem::take(&mut self.on_screen_keyboard.displaced)
+        } else {
+            self.on_screen_keyboard.displaced.clone()
+        };
+        for (window, original) in displaced {
+            if !window.alive()
+                || self.space.element_location(&window).is_none()
+                || self.is_fullscreen_window(&window)
+                || self.is_maximized_window(&window)
+            {
+                continue;
+            }
+            let Some(output) = self.output_geometry_for_window(&window) else {
+                continue;
+            };
+            let geometry = if hidden {
+                original
+            } else {
+                if !self.keyboard_reserves_output(output) {
+                    continue;
+                }
+                shell_layout::fit_keyboard_recipient(
+                    original,
+                    self.work_area_for_output(output),
+                    self.is_server_decorated(&window),
+                )
+            };
+            self.apply_keyboard_window_geometry(&window, geometry);
+        }
         self.relayout_maximized_windows();
+        self.relayout_fullscreen_windows();
+        let windows = self.space.elements().cloned().collect::<Vec<_>>();
+        for window in windows {
+            self.fit_window_above_keyboard(&window);
+        }
+        let keyboard = self
+            .utility_windows
+            .iter()
+            .find(|window| self.is_on_screen_keyboard_window(window))
+            .cloned();
+        if self.on_screen_keyboard.visible
+            && !self.locked
+            && let Some(window) = keyboard
+        {
+            self.place_on_screen_keyboard_surface(&window);
+        }
         self.relayout_lock_surfaces();
     }
 
@@ -5563,6 +5625,11 @@ impl NickelSession {
                 width: size.w.max(1),
                 height: size.h.max(1),
             });
+        let output = if self.keyboard_reserves_output(output) {
+            self.work_area_for_output(output)
+        } else {
+            output
+        };
         surface.with_pending_state(|state| {
             state
                 .states
@@ -5610,6 +5677,21 @@ impl NickelSession {
         self.x11_fullscreen_restore
             .entry(surface.window_id())
             .or_insert_with(|| surface.geometry());
+        let bounds = Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        };
+        let bounds = if self.keyboard_reserves_output(bounds) {
+            self.work_area_for_output(bounds)
+        } else {
+            bounds
+        };
+        let geometry = smithay::utils::Rectangle::new(
+            (bounds.x, bounds.y).into(),
+            (bounds.width, bounds.height).into(),
+        );
         let _ = surface.set_fullscreen(true);
         let _ = surface.configure(geometry);
         window.override_z_index(45);
@@ -5831,6 +5913,11 @@ impl NickelSession {
         for window in fullscreen {
             let Some(output) = self.output_geometry_for_window(&window) else {
                 continue;
+            };
+            let output = if self.keyboard_reserves_output(output) {
+                self.work_area_for_output(output)
+            } else {
+                output
             };
             if let Some(surface) = window.toplevel() {
                 Self::configure_window(&window, output);
@@ -6165,8 +6252,91 @@ impl NickelSession {
         shell_layout::output_for_window(window_geometry, &outputs)
     }
 
+    fn keyboard_reserves_output(&self, output: Geometry) -> bool {
+        self.on_screen_keyboard.visible
+            && !self.locked
+            && self
+                .on_screen_keyboard
+                .output_name
+                .as_deref()
+                .and_then(|name| self.output_geometry_named(name))
+                == Some(output)
+    }
+
+    fn panel_hidden_by_keyboard(&self, window: &Window) -> bool {
+        self.panel_windows.contains(window)
+            && self
+                .shell_surface_output_name(window)
+                .as_deref()
+                .and_then(|name| self.output_geometry_named(name))
+                .is_some_and(|output| self.keyboard_reserves_output(output))
+    }
+
     fn work_area_for_output(&self, output: Geometry) -> Geometry {
-        shell_layout::work_area(output)
+        if self.keyboard_reserves_output(output) {
+            shell_layout::keyboard_work_area(
+                output,
+                self.on_screen_keyboard.dock_top,
+                self.on_screen_keyboard.height,
+            )
+        } else {
+            shell_layout::work_area(output)
+        }
+    }
+
+    fn apply_keyboard_window_geometry(&mut self, window: &Window, geometry: Geometry) {
+        Self::configure_window(window, geometry);
+        if let Some(surface) = window.x11_surface() {
+            let _ = surface.configure(smithay::utils::Rectangle::new(
+                (geometry.x, geometry.y).into(),
+                (geometry.width, geometry.height).into(),
+            ));
+        }
+        self.space
+            .map_element(window.clone(), (geometry.x, geometry.y), false);
+    }
+
+    pub(crate) fn fit_window_above_keyboard(&mut self, window: &Window) {
+        if self.is_shell_owned_window(window)
+            || self.is_fullscreen_window(window)
+            || self.is_maximized_window(window)
+        {
+            return;
+        }
+        let Some(output) = self.output_geometry_for_window(window) else {
+            return;
+        };
+        if !self.keyboard_reserves_output(output) {
+            return;
+        }
+        let Some(location) = self.space.element_location(window) else {
+            return;
+        };
+        let size = window.geometry().size;
+        let content = Geometry {
+            x: location.x,
+            y: location.y,
+            width: size.w,
+            height: size.h,
+        };
+        let target = shell_layout::fit_keyboard_recipient(
+            content,
+            self.work_area_for_output(output),
+            self.is_server_decorated(window),
+        );
+        if target != content {
+            if !self
+                .on_screen_keyboard
+                .displaced
+                .iter()
+                .any(|(saved, _)| saved == window)
+            {
+                self.on_screen_keyboard
+                    .displaced
+                    .push((window.clone(), content));
+            }
+            self.apply_keyboard_window_geometry(window, target);
+        }
     }
 
     pub(crate) fn output_geometry_for_shell(&self) -> Option<Geometry> {
@@ -6778,6 +6948,54 @@ mod protocol_tests {
         assert_eq!((disconnected.outputs, disconnected.desktops), (0, 0));
         assert_eq!((disconnected.panels, disconnected.locks), (0, 0));
         assert!(session.registered_shell_role_slots.len() == 3);
+    }
+
+    #[test]
+    fn keyboard_reservation_resize_and_close_change_only_the_owner_output() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        for name in ["keyboard-owner", "unaffected"] {
+            session
+                .apply_test_output(TestOutput::Connect {
+                    name: name.into(),
+                    logical_width: 1280,
+                    logical_height: 720,
+                    scale_120: 120,
+                    transform: OutputTransform::Normal,
+                })
+                .unwrap();
+        }
+        session.configure_on_screen_keyboard(true, true, 0, false, false, 368);
+        let outputs = session.protocol_outputs();
+        let owner = session.on_screen_keyboard.output_name.clone().unwrap();
+        for output in &outputs {
+            assert_eq!(
+                output.work_area.height,
+                if output.name == owner { 352 } else { 664 }
+            );
+        }
+        session.configure_on_screen_keyboard(true, true, 0, false, true, 280);
+        assert_eq!(
+            session.on_screen_keyboard.output_name.as_deref(),
+            Some(owner.as_str())
+        );
+        for output in session.protocol_outputs() {
+            assert_eq!(
+                output.work_area.height,
+                if output.name == owner { 440 } else { 664 }
+            );
+            assert_eq!(
+                output.work_area.y,
+                if output.name == owner { 280 } else { 0 }
+            );
+        }
+        session.configure_on_screen_keyboard(true, false, 0, false, true, 280);
+        assert!(
+            session
+                .protocol_outputs()
+                .iter()
+                .all(|output| output.work_area.height == 664)
+        );
     }
 
     #[test]

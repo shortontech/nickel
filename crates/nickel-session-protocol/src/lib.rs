@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 20;
+pub const PROTOCOL_VERSION: u16 = 21;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -76,6 +76,7 @@ pub enum Query {
 pub enum Command {
     RequestOnScreenKeyboard,
     ConfigureOnScreenKeyboard {
+        height: u32,
         dock_top: bool,
         enabled: bool,
         visible: bool,
@@ -803,6 +804,7 @@ pub struct WindowId(pub u64);
 /// No surrounding text or typed content is included in recipient diagnostics.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OnScreenKeyboardSnapshot {
+    pub height: u32,
     /// Discard controller events produced at or before the last keyboard ownership transition.
     pub controller_barrier_unix_ms: u64,
     pub dock_top: bool,

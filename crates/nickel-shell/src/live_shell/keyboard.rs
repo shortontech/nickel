@@ -39,6 +39,7 @@ impl LiveShell {
                     settings.on_screen_keyboard_generation,
                     overridden,
                     self.keyboard_dock_top,
+                    self.keyboard_height,
                 )
                 .is_err()
                 {
@@ -55,6 +56,7 @@ impl LiveShell {
             }
             self.keyboard_visible = snapshot.visible;
             self.keyboard_dock_top = snapshot.dock_top;
+            self.keyboard_height = snapshot.height;
             self.keyboard_host
                 .application_mut()
                 .set_top_docked(snapshot.dock_top);
@@ -82,6 +84,7 @@ impl LiveShell {
 
     pub fn set_keyboard_visible(&mut self, visible: bool) -> bool {
         let visible = visible && self.keyboard_enabled && !self.locked;
+        let visibility_changed = self.keyboard_visible != visible;
         #[cfg(target_os = "linux")]
         if platform::configure_on_screen_keyboard(
             self.keyboard_enabled,
@@ -91,17 +94,23 @@ impl LiveShell {
                 .map_or(0, |snapshot| snapshot.generation),
             self.keyboard_override != nickel_core::on_screen_keyboard::KeyboardOverride::None,
             self.keyboard_dock_top,
+            self.keyboard_height,
         )
         .is_err()
         {
             return false;
         }
         self.keyboard_visible = visible;
-        self.keyboard_gesture_leases.clear();
-        self.keyboard_host
-            .application_mut()
-            .recipient_changed(false);
-        self.keyboard_recipient = None;
+        if !visible {
+            self.keyboard_resize = None;
+        }
+        if visibility_changed {
+            self.keyboard_gesture_leases.clear();
+            self.keyboard_host
+                .application_mut()
+                .recipient_changed(false);
+            self.keyboard_recipient = None;
+        }
         self.refresh_keyboard();
         true
     }
@@ -113,6 +122,81 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
+        // The clear strip at the edge facing the app is a resize grip. Consume the
+        // whole gesture so its release cannot type a key after the surface moves.
+        let resize_event = match &input {
+            InputEvent::Pointer(PointerEvent::Button {
+                device,
+                button: nickel_input::PointerButton::Primary,
+                edge,
+                position: Some(position),
+                ..
+            }) => Some((
+                *device,
+                None,
+                position.y,
+                if *edge == KeyEdge::Pressed { 0 } else { 2 },
+            )),
+            InputEvent::Pointer(PointerEvent::Motion {
+                device, position, ..
+            }) => Some((*device, None, position.y, 1)),
+            InputEvent::Touch(TouchEvent::Started {
+                device,
+                contact,
+                position,
+                ..
+            }) => Some((*device, Some(*contact), position.y, 0)),
+            InputEvent::Touch(TouchEvent::Moved {
+                device,
+                contact,
+                position,
+                ..
+            }) => Some((*device, Some(*contact), position.y, 1)),
+            InputEvent::Touch(TouchEvent::Ended {
+                device,
+                contact,
+                position,
+                ..
+            }) => Some((*device, Some(*contact), position.y, 2)),
+            InputEvent::Touch(TouchEvent::Cancelled { .. })
+            | InputEvent::FocusLost { .. }
+            | InputEvent::DeviceRemoved { .. } => {
+                self.keyboard_resize = None;
+                None
+            }
+            _ => None,
+        };
+        if let Some((device, contact, y, phase)) = resize_event {
+            let edge_distance = if self.keyboard_dock_top {
+                f64::from(height) - y
+            } else {
+                y
+            };
+            if phase == 0 && self.keyboard_resize.is_none() && (0.0..20.0).contains(&edge_distance)
+            {
+                self.keyboard_resize = Some((device, contact, edge_distance));
+                return true;
+            }
+            if let Some((owner, finger, offset)) = self.keyboard_resize
+                && owner == device
+                && finger == contact
+            {
+                if phase == 2 {
+                    self.keyboard_resize = None;
+                } else if phase == 1 {
+                    let requested = if self.keyboard_dock_top {
+                        y + offset
+                    } else {
+                        f64::from(height) - y + offset
+                    };
+                    if requested.is_finite() {
+                        self.keyboard_height = (requested.round() as u32).clamp(248, 640);
+                        self.set_keyboard_visible(true);
+                    }
+                }
+                return true;
+            }
+        }
         let current = self
             .keyboard_recipient
             .as_ref()
@@ -195,6 +279,13 @@ impl LiveShell {
         let outcome = self.keyboard_host.step(batch);
         for effect in self.keyboard_host.application_mut().take_effects() {
             match effect {
+                KeyboardEffect::ResizeBy(delta) => {
+                    self.keyboard_height = self
+                        .keyboard_height
+                        .saturating_add_signed(delta)
+                        .clamp(248, 640);
+                    self.set_keyboard_visible(true);
+                }
                 KeyboardEffect::ToggleDock => {
                     self.keyboard_dock_top = !self.keyboard_dock_top;
                     self.set_keyboard_visible(true);

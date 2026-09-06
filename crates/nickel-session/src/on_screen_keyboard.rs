@@ -13,7 +13,10 @@ use smithay::{
 use crate::state::NickelSession;
 
 pub(crate) struct OnScreenKeyboardState {
+    pub(crate) height: u32,
     pub(crate) dock_top: bool,
+    pub(crate) output_name: Option<String>,
+    pub(crate) displaced: Vec<(Window, crate::shell_layout::Geometry)>,
     pub(crate) auto_show_requested: bool,
     pub(crate) touchscreens: std::collections::HashSet<String>,
     controller_barrier_unix_ms: u64,
@@ -21,14 +24,17 @@ pub(crate) struct OnScreenKeyboardState {
     environment_override: bool,
     epoch: u64,
     enabled: bool,
-    visible: bool,
+    pub(crate) visible: bool,
     source: KeyboardSource,
 }
 
 impl Default for OnScreenKeyboardState {
     fn default() -> Self {
         Self {
+            height: nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             dock_top: false,
+            output_name: None,
+            displaced: Vec::new(),
             auto_show_requested: false,
             controller_barrier_unix_ms: controller_barrier_now(),
             generation: 0,
@@ -88,6 +94,7 @@ impl NickelSession {
             .text_input()
             .with_active_text_input(|_, _| text_input_active = true);
         OnScreenKeyboardSnapshot {
+            height: self.on_screen_keyboard.height,
             controller_barrier_unix_ms: self.on_screen_keyboard.controller_barrier_unix_ms,
             dock_top: self.on_screen_keyboard.dock_top,
             auto_show_requested: self.on_screen_keyboard.auto_show_requested
@@ -111,7 +118,16 @@ impl NickelSession {
         generation: u64,
         environment_override: bool,
         dock_top: bool,
+        height: u32,
     ) {
+        let height = height.clamp(248, 640);
+        let layout_changed = self.on_screen_keyboard.height != height
+            || self.on_screen_keyboard.dock_top != dock_top
+            || self.on_screen_keyboard.visible != (enabled && visible && !self.locked);
+        if enabled && visible && !self.locked && !self.on_screen_keyboard.visible {
+            self.on_screen_keyboard.output_name = self.preferred_interaction_output_name();
+        }
+        self.on_screen_keyboard.height = height;
         self.on_screen_keyboard.dock_top = dock_top;
         self.on_screen_keyboard.generation = generation;
         self.on_screen_keyboard.environment_override = environment_override;
@@ -129,6 +145,11 @@ impl NickelSession {
         self.on_screen_keyboard.visible = visible;
         self.seat.text_input().set_compositor_input_method(enabled);
         self.set_shell_role_visible(ShellRole::OnScreenKeyboard, visible);
+        if layout_changed {
+            self.relayout_shell_surfaces();
+            self.notify_protocol_snapshot();
+            self.request_output_redraw();
+        }
     }
 
     pub(crate) fn deliver_on_screen_keyboard_input(

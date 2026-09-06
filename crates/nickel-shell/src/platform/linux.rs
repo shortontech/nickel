@@ -1240,9 +1240,11 @@ pub fn configure_on_screen_keyboard(
     generation: u64,
     environment_override: bool,
     dock_top: bool,
+    height: u32,
 ) -> Result<(), SessionRequestError> {
     command_response(one_shot_session_request(SessionRequest::Command(
         SessionCommand::ConfigureOnScreenKeyboard {
+            height,
             dock_top,
             enabled,
             visible,

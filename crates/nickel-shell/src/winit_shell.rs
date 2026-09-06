@@ -726,6 +726,10 @@ impl WinitShell {
             if !surface.display_connected {
                 continue;
             }
+            #[cfg(target_os = "linux")]
+            if surface.role == SurfaceRole::OnScreenKeyboard {
+                continue;
+            }
             if matches!(
                 surface.role,
                 SurfaceRole::CodexChat
@@ -817,6 +821,12 @@ impl WinitShell {
             return;
         };
         let role = self.surfaces[index].role;
+        // Linux compositor owns the keyboard's display, dock edge and live resize.
+        // Reapplying the startup size here would fight every configure and clip keys.
+        #[cfg(target_os = "linux")]
+        if role == SurfaceRole::OnScreenKeyboard {
+            return;
+        }
         if !matches!(role, SurfaceRole::Launcher | SurfaceRole::OnScreenKeyboard) {
             return;
         }
@@ -1213,6 +1223,7 @@ impl WinitShell {
                 SurfaceRole::WindowPreview
                     | SurfaceRole::WindowContextMenu
                     | SurfaceRole::Screenshot
+                    | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(true)
             .with_name(&surface.application_id, &surface.application_id);
@@ -1485,6 +1496,7 @@ impl WinitShell {
                 SurfaceRole::WindowPreview
                     | SurfaceRole::WindowContextMenu
                     | SurfaceRole::Screenshot
+                    | SurfaceRole::OnScreenKeyboard
             ))
             .with_visible(!hidden || cfg!(target_os = "linux"));
         #[cfg(target_os = "linux")]
@@ -1790,19 +1802,12 @@ fn surface_geometry(
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
         SurfaceRole::OnScreenKeyboard => {
-            let height = 420.min(geometry.height.saturating_sub(PANEL_HEIGHT));
+            let height = nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT
+                .min(geometry.height.saturating_sub(1));
             (
                 "On-screen keyboard — Nickel",
                 geometry.x,
-                geometry.y
-                    + geometry.height.saturating_sub(
-                        height
-                            + if panel_edge == PanelEdge::Bottom {
-                                PANEL_HEIGHT
-                            } else {
-                                0
-                            },
-                    ) as i32,
+                geometry.y + geometry.height.saturating_sub(height) as i32,
                 geometry.width,
                 height,
                 true,
