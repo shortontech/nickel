@@ -494,32 +494,76 @@ impl LinuxMaintenance {
 
     fn secure_storage(&self) -> Observation<SecureStorageReadiness> {
         let observed_at = SystemTime::now();
-        let result = (|| {
-            let connection = zbus::blocking::Connection::session().ok()?;
-            let proxy = zbus::blocking::fdo::DBusProxy::new(&connection).ok()?;
-            let name = zbus::names::BusName::try_from("org.freedesktop.secrets").ok()?;
-            proxy.name_has_owner(name).ok()
-        })();
-        match result {
-            Some(true) => Observation {
+        match linux_secure_storage_readiness() {
+            Ok(Some(readiness)) => Observation {
                 state: ObservationState::Current,
-                value: Some(SecureStorageReadiness::Ready),
+                detail: Some(linux_secure_storage_detail(&readiness).into()),
+                value: Some(readiness),
                 observed_at: Some(observed_at),
-                detail: Some("Secret Service is available for this session".into()),
             },
-            Some(false) => Observation {
+            Ok(None) => Observation {
                 state: ObservationState::Current,
                 value: Some(SecureStorageReadiness::Unavailable),
                 observed_at: Some(observed_at),
                 detail: Some("Secret Service has no session owner".into()),
             },
-            None => Observation {
+            Err(error) => Observation {
                 state: ObservationState::Failed,
                 value: None,
                 observed_at: Some(observed_at),
-                detail: Some("Secret Service readiness could not be queried".into()),
+                detail: Some(format!(
+                    "Secret Service readiness could not be queried: {error}"
+                )),
             },
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_secure_storage_readiness()
+-> Result<Option<SecureStorageReadiness>, Box<dyn std::error::Error>> {
+    const SERVICE: &str = "org.freedesktop.secrets";
+    const SERVICE_PATH: &str = "/org/freedesktop/secrets";
+    const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
+    const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
+
+    let connection = zbus::blocking::Connection::session()?;
+    let dbus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
+    let name = zbus::names::BusName::try_from(SERVICE)?;
+    if !dbus.name_has_owner(name)? {
+        return Ok(None);
+    }
+
+    let service =
+        zbus::blocking::Proxy::new(&connection, SERVICE, SERVICE_PATH, SERVICE_INTERFACE)?;
+    let collection: zbus::zvariant::OwnedObjectPath = service.call("ReadAlias", &("default",))?;
+    if collection.as_str() == "/" {
+        return Ok(Some(SecureStorageReadiness::RecoveryRequired));
+    }
+
+    let collection = zbus::blocking::Proxy::new(
+        &connection,
+        SERVICE,
+        collection.as_str(),
+        COLLECTION_INTERFACE,
+    )?;
+    let locked: bool = collection.get_property("Locked")?;
+    Ok(Some(if locked {
+        SecureStorageReadiness::Locked
+    } else {
+        SecureStorageReadiness::Ready
+    }))
+}
+
+#[cfg(target_os = "linux")]
+const fn linux_secure_storage_detail(readiness: &SecureStorageReadiness) -> &'static str {
+    match readiness {
+        SecureStorageReadiness::Ready => "Secret Service default collection is ready",
+        SecureStorageReadiness::Locked => "Secret Service default collection is locked",
+        SecureStorageReadiness::RecoveryRequired => {
+            "Secret Service has no default collection; provider recovery is required"
+        }
+        SecureStorageReadiness::Unavailable => "Secret Service is unavailable",
     }
 }
 
