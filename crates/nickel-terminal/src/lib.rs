@@ -20,7 +20,7 @@ use alacritty_terminal::{
     index::{Column, Line, Point, Side},
     selection::{Selection, SelectionType},
     sync::FairMutex,
-    term::{Config, Term, TermMode, cell::Flags, test::TermSize},
+    term::{Config, Term, TermDamage as UpstreamDamage, TermMode, cell::Flags, test::TermSize},
     tty::{self, Shell},
     vte::ansi,
 };
@@ -272,6 +272,20 @@ pub struct TerminalSnapshot {
     pub application_keypad: bool,
 }
 
+/// Bounded viewport damage since the previous `take_damage` call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TerminalDamage {
+    Full,
+    Partial(Vec<TerminalDamageLine>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalDamageLine {
+    pub line: usize,
+    pub first_column: usize,
+    pub last_column: usize,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TerminalEvent {
     Changed,
@@ -434,6 +448,10 @@ impl TerminalEngine {
             self.generation.load(Ordering::Acquire),
             self.dimensions,
         )
+    }
+
+    pub fn take_damage(&mut self) -> TerminalDamage {
+        take_damage(&mut self.terminal)
     }
 
     pub fn generation(&self) -> u64 {
@@ -680,6 +698,10 @@ impl TerminalSession {
         )
     }
 
+    pub fn take_damage(&mut self) -> TerminalDamage {
+        take_damage(&mut self.terminal.lock())
+    }
+
     pub fn scroll(&mut self, scroll: TerminalScroll) {
         self.terminal.lock().scroll_display(upstream_scroll(scroll));
         self.generation.fetch_add(1, Ordering::Release);
@@ -851,6 +873,23 @@ fn proxy() -> ProxyParts {
         wake_pending,
         input_sender,
     }
+}
+
+fn take_damage(terminal: &mut Term<Proxy>) -> TerminalDamage {
+    let damage = match terminal.damage() {
+        UpstreamDamage::Full => TerminalDamage::Full,
+        UpstreamDamage::Partial(lines) => TerminalDamage::Partial(
+            lines
+                .map(|line| TerminalDamageLine {
+                    line: line.line,
+                    first_column: line.left,
+                    last_column: line.right,
+                })
+                .collect(),
+        ),
+    };
+    terminal.reset_damage();
+    damage
 }
 
 fn snapshot(
@@ -1076,6 +1115,27 @@ mod tests {
             (engine.snapshot().columns, engine.snapshot().lines),
             (20, 4)
         );
+    }
+
+    #[test]
+    fn damage_projection_is_bounded_and_resets_after_consumption() {
+        let mut engine = TerminalEngine::new(dimensions(8, 2), 10).unwrap();
+        assert_eq!(engine.take_damage(), TerminalDamage::Full);
+        engine.process(b"abc");
+        let TerminalDamage::Partial(lines) = engine.take_damage() else {
+            panic!("small terminal output should produce partial damage");
+        };
+        assert!(!lines.is_empty());
+        assert!(lines.len() <= 2);
+        assert!(lines.iter().all(|line| {
+            line.line < 2 && line.first_column <= line.last_column && line.last_column < 8
+        }));
+        let TerminalDamage::Partial(lines) = engine.take_damage() else {
+            panic!("consumed damage should remain partial");
+        };
+        assert!(lines.len() <= 1, "only cursor damage may remain");
+        assert!(engine.resize(dimensions(10, 3), 1));
+        assert_eq!(engine.take_damage(), TerminalDamage::Full);
     }
 
     #[test]
