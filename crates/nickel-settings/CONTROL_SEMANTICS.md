@@ -30,7 +30,6 @@ consumer so reviews can distinguish deliberate composites from accidental reimpl
 | Bluetooth | Device | connect/disconnect command with status | semantic device card | custom composite retained for pairing/battery/connection status |
 | Default Apps | Association category | observed effective handler plus platform capability | searchable `SettingsRow` plus `SelectField` or native-consent button | retained; failed and rejected requests preserve the effective handler |
 | Default Apps | Association target browser | platform-reported MIME or URI scheme search results | `SettingsSearchField` plus semantic result buttons | retained |
-| Default Apps | Preferred terminal/file manager | persistent Nickel preference text | `TextField` | retained; intentionally separate from operating-system associations |
 | Optional Features | Codex enabled | policy- and capability-resolved persistent binary state | `SettingsRow` plus `Switch` | retained; unavailable, policy-blocked, pending, rejected, and restart-required states are explicit |
 | Optional Features | Codex source | symbolic backend selection | `SelectField` | retained |
 | Optional Features | Executable path | validated absolute path | `TextField` plus semantic button | retained; invalid input reports rejection without changing effective state |
