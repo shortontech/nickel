@@ -659,11 +659,14 @@ impl<'a> TerminalViewport<'a> {
 
     pub fn view<Message: Clone>(&self) -> impl View<Message> + use<Message> {
         let visible = visible_text(self.snapshot);
+        let selection = selected_visible_text(self.snapshot)
+            .map(|selection| format!("; selection: {selection}"))
+            .unwrap_or_default();
         CustomPaint::commands(self.paint_commands())
             .id("terminal-viewport")
             .semantic_role(SemanticRole::GraphicalCustomControl)
             .accessibility_label(format!(
-                "Terminal {title}; cursor row {}, column {}; {visible}",
+                "Terminal {title}; cursor row {}, column {}; visible: {visible}{selection}",
                 self.snapshot.cursor.line + 1,
                 self.snapshot.cursor.column + 1,
                 title = self.title,
@@ -795,13 +798,40 @@ fn visible_text(snapshot: &TerminalSnapshot) -> String {
         .map(|line| {
             line.iter()
                 .filter(|cell| !cell.wide_spacer)
-                .map(|cell| cell.character)
+                .map(accessible_cell_text)
                 .collect::<String>()
                 .trim_end()
                 .to_owned()
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn selected_visible_text(snapshot: &TerminalSnapshot) -> Option<String> {
+    let selected = snapshot
+        .cells
+        .chunks(snapshot.columns.max(1))
+        .filter_map(|line| {
+            let text = line
+                .iter()
+                .filter(|cell| cell.selected && !cell.wide_spacer)
+                .map(accessible_cell_text)
+                .collect::<String>();
+            (!text.is_empty()).then_some(text)
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    (!selected.is_empty()).then_some(selected)
+}
+
+fn accessible_cell_text(cell: &TerminalCell) -> String {
+    if cell.concealed {
+        return " ".into();
+    }
+    let mut text = String::with_capacity(1 + cell.combining.len());
+    text.push(cell.character);
+    text.extend(&cell.combining);
+    text
 }
 
 fn resolve_color(color: &TerminalColor, palette: &TerminalPalette, foreground: bool) -> u32 {
@@ -889,8 +919,11 @@ mod tests {
 
     #[test]
     fn viewport_uses_bounded_shared_declarative_primitives() {
-        let snapshot =
-            snapshot(b"plain \x1b[1;2;3;4;31mred\x1b[0m \x1b[8mhidden\x1b[0m \xe7\x95\x8c");
+        let mut snapshot = snapshot(
+            b"plain e\xcc\x81 \x1b[1;2;3;4;31mred\x1b[0m \x1b[8mhidden\x1b[0m \xe7\x95\x8c",
+        );
+        snapshot.cells[0].selected = true;
+        snapshot.cells[1].selected = true;
         let palette = TerminalPalette {
             font_family: std::sync::Arc::from("Nickel Fixture Mono"),
             ..TerminalPalette::default()
@@ -911,7 +944,10 @@ mod tests {
             .find(|target| target.role == Some(SemanticRole::GraphicalCustomControl))
             .unwrap();
         assert_eq!(viewport.role, Some(SemanticRole::GraphicalCustomControl));
-        assert!(viewport.name.as_deref().unwrap().contains("plain red"));
+        let accessible = viewport.name.as_deref().unwrap();
+        assert!(accessible.contains("e\u{301}"));
+        assert!(accessible.contains("selection: pl"));
+        assert!(!accessible.contains("hidden"));
         let commands = format!("{:?}", frame.commands());
         assert!(commands.contains("bold: true"));
         assert!(commands.contains("italic: true"));
