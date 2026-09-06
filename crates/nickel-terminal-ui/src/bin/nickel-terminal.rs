@@ -389,6 +389,14 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
         let changed = match event {
             WindowEvent::Resized(size) => host.application_mut().resize(size.width, size.height),
+            WindowEvent::CloseRequested => {
+                if let Err(error) = host.application_mut().session.request_close() {
+                    host.application_mut().status = Some(error.to_string());
+                }
+                // Let the shared runtime finish closing the native window after the graceful PTY
+                // shutdown request has crossed the session boundary.
+                true
+            }
             _ => false,
         };
         Ok(AdapterOutcome {
