@@ -21,8 +21,9 @@ use nickel_session_protocol::{
 use nickel_ui::Rect;
 use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
-    Column, Container, ControllerAction, HostBatch, HostChangeToken, HostEvent, Insets, Layer,
-    Point, SemanticRole, Shortcut, Size, Spacer, Text, TextAlign, TextField, UiEvent, ViewContext,
+    Application as UiApplication, Button, Column, Container, ControllerAction, HostBatch,
+    HostChangeToken, HostEvent, Insets, Layer, Point, SemanticRole, Shortcut, Size, Spacer, Text,
+    TextAlign, TextField, UiEvent, ViewContext,
 };
 
 use crate::{
@@ -50,6 +51,112 @@ use crate::{
 };
 use nickel_input::KeyCode;
 use zeroize::{Zeroize, Zeroizing};
+
+const RUN_COMMAND_LIMIT: usize = 4096;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RunAction {
+    SetCommand(String),
+    Submit,
+    Dismiss,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RunEffect {
+    Submit(String),
+    Dismiss,
+}
+
+struct RunApplication {
+    command: String,
+    status: Option<String>,
+    palette: ThemePalette,
+    effects: Vec<RunEffect>,
+    dirty: bool,
+}
+
+impl RunApplication {
+    fn new(palette: ThemePalette) -> Self {
+        Self {
+            command: String::new(),
+            status: None,
+            palette,
+            effects: Vec::new(),
+            dirty: false,
+        }
+    }
+
+    fn take_effects(&mut self) -> Vec<RunEffect> {
+        std::mem::take(&mut self.effects)
+    }
+}
+
+impl UiApplication for RunApplication {
+    type Message = RunAction;
+
+    fn update(&mut self, message: Self::Message) {
+        match message {
+            RunAction::SetCommand(command) => {
+                self.command = command.chars().take(RUN_COMMAND_LIMIT).collect();
+                self.status = None;
+                self.dirty = true;
+            }
+            RunAction::Submit if !self.command.trim().is_empty() => {
+                self.effects
+                    .push(RunEffect::Submit(self.command.trim().to_owned()));
+            }
+            RunAction::Submit => {}
+            RunAction::Dismiss => self.effects.push(RunEffect::Dismiss),
+        }
+    }
+
+    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+        match shortcut {
+            Shortcut::Submit => self.update(RunAction::Submit),
+            Shortcut::Escape => self.update(RunAction::Dismiss),
+            _ => return false,
+        }
+        true
+    }
+
+    fn poll(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
+    }
+
+    fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let mut content = Column::new()
+            .gap(10.0)
+            .child(
+                Text::new("Run")
+                    .scale(22.0)
+                    .color(self.palette.text)
+                    .bold(true),
+            )
+            .child(
+                TextField::on_change_with_placeholder(
+                    &self.command,
+                    "Enter a command",
+                    RunAction::SetCommand,
+                )
+                .id("run-command")
+                .accessibility_label("Command")
+                .color(self.palette.text),
+            )
+            .child(Button::new(RunAction::Submit, "Run").id("run-submit"));
+        if let Some(status) = &self.status {
+            content = content.child(Text::new(status).color(self.palette.complement));
+        }
+        Container::new()
+            .id("run-dialog")
+            .semantic_role(SemanticRole::Dialog)
+            .accessibility_label("Run command")
+            .width(context.viewport.size.width)
+            .height(context.viewport.size.height)
+            .padding(Insets::all(18.0))
+            .background(self.palette.panel)
+            .child(content)
+    }
+}
 
 fn launcher_controller_host_event(action: ControllerAction, overlay_open: bool) -> HostEvent {
     if action == ControllerAction::Cancel && !overlay_open {
@@ -375,6 +482,8 @@ pub struct LiveShell {
     volume_osd_until: Option<Instant>,
     volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
     launcher_visible: bool,
+    run_visible: bool,
+    run_host: nickel_ui::UiHost<RunApplication>,
     locked: bool,
     lock_host: nickel_ui::UiHost<LockApplication>,
     lock_change_token: HostChangeToken,
@@ -680,6 +789,7 @@ impl LiveShell {
             920,
             680,
         );
+        let run_host = nickel_ui::UiHost::new(RunApplication::new(palette), 620, 150);
         let (clock, date) = panel_clock_text();
         let panel_host = nickel_ui::UiHost::new(
             PanelApplication {
@@ -740,6 +850,8 @@ impl LiveShell {
             volume_osd_until: None,
             volume_osd_host,
             launcher_visible: false,
+            run_visible: false,
+            run_host,
             locked: false,
             lock_host,
             lock_change_token: HostChangeToken::default(),
@@ -1099,6 +1211,7 @@ impl LiveShell {
         match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
             SurfaceRole::Panel => self.panel_scene(width, height),
+            SurfaceRole::Launcher if self.run_visible => self.run_scene(width, height),
             SurfaceRole::Launcher => self.launcher_scene(width, height),
             SurfaceRole::ControlCenter => {
                 self.sync_control_host(width, height);
@@ -1469,6 +1582,7 @@ impl LiveShell {
             SurfaceRole::Desktop => Some(self.desktop_change_token),
             SurfaceRole::Panel => Some(self.panel_change_token),
             SurfaceRole::Lock => Some(self.lock_change_token),
+            SurfaceRole::Launcher if self.run_visible => Some(host_token(self.run_host.inspect())),
             SurfaceRole::Launcher => Some(host_token(self.launcher_host.inspect())),
             SurfaceRole::ControlCenter => Some(self.control_change_token),
             SurfaceRole::Notification => Some(host_token(self.notification_host.inspect())),
@@ -1498,6 +1612,19 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
+        if self.run_visible {
+            let outcome = self.run_host.step(HostBatch {
+                surface_size: Some((width, height)),
+                events: vec![HostEvent::Normalized {
+                    input,
+                    clipboard_text,
+                }],
+                ..HostBatch::default()
+            });
+            self.apply_run_effects();
+            self.host_runtime_samples.record(outcome.telemetry);
+            return outcome;
+        }
         let status = self.launcher_status_text();
         self.launcher_host
             .application_mut()
@@ -1523,6 +1650,25 @@ impl LiveShell {
         action: ControllerAction,
         family: nickel_ui::ControllerFamily,
     ) -> bool {
+        if self.run_visible {
+            let event = launcher_controller_host_event(
+                action,
+                self.run_host.inspect().open_overlay.is_some(),
+            );
+            let outcome = self.run_host.step(HostBatch {
+                events: vec![event],
+                ..HostBatch::default()
+            });
+            if action == ControllerAction::Confirm
+                && outcome.text_input_active
+                && self.run_host.controller_targets_text_input()
+            {
+                self.set_keyboard_visible(true);
+            }
+            self.apply_run_effects();
+            self.host_runtime_samples.record(outcome.telemetry);
+            return outcome.changed;
+        }
         let status = self.launcher_status_text();
         self.launcher_host
             .application_mut()
@@ -2862,10 +3008,7 @@ impl LiveShell {
                 }
                 true
             }
-            platform::GlobalShortcut::ShowRun => {
-                tracing::warn!("Nickel Run is not implemented in the shell yet");
-                false
-            }
+            platform::GlobalShortcut::ShowRun => self.set_run_visible(true),
             platform::GlobalShortcut::OpenFiles => self.launch_named_application("Nickel File"),
             platform::GlobalShortcut::OpenSettings => {
                 self.launch_named_application("Nickel Settings")
@@ -3168,8 +3311,33 @@ impl LiveShell {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
             return;
         }
+        self.run_visible = false;
         self.apply_session_launcher_visibility(visible);
         platform::launcher_visibility_applied(visible);
+    }
+
+    fn set_run_visible(&mut self, visible: bool) -> bool {
+        self.set_launcher_visible(visible);
+        if self.launcher_visible != visible {
+            return false;
+        }
+        self.run_visible = visible;
+        if visible {
+            self.run_host.application_mut().status = None;
+            self.run_host.step(HostBatch {
+                application_changed: true,
+                ..HostBatch::default()
+            });
+            if let Ok(field) =
+                self.run_host
+                    .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
+                        "run-command",
+                    )))
+            {
+                let _ = self.run_host.request_focus(field.id);
+            }
+        }
+        true
     }
 
     fn set_control_visible(&mut self, visible: bool) {
@@ -3204,6 +3372,7 @@ impl LiveShell {
             self.control_visible = false;
             self.focus_launcher_search();
         } else {
+            self.run_visible = false;
             self.launcher.clear();
         }
     }
@@ -3811,6 +3980,39 @@ impl LiveShell {
             self.apply_launcher_action(action);
         }
         self.launcher_host.commands().to_vec()
+    }
+
+    fn run_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
+        self.run_host.application_mut().palette = self.palette;
+        self.run_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        self.apply_run_effects();
+        self.run_host.commands().to_vec()
+    }
+
+    fn apply_run_effects(&mut self) {
+        for effect in self.run_host.application_mut().take_effects() {
+            match effect {
+                RunEffect::Submit(command) => match platform::execute_run_command(&command) {
+                    Ok(()) => {
+                        self.run_host.application_mut().command.clear();
+                        self.set_launcher_visible(false);
+                    }
+                    Err(error) => {
+                        let app = self.run_host.application_mut();
+                        app.status = Some(format!(
+                            "Could not run command: {}",
+                            launch_error_summary(&error)
+                        ));
+                        app.dirty = true;
+                    }
+                },
+                RunEffect::Dismiss => self.set_launcher_visible(false),
+            }
+        }
     }
 
     fn launcher_status_text(&self) -> Option<String> {
@@ -4592,6 +4794,43 @@ fn retain_preview_generation(
             .take(PREVIEW_CACHE_CAPACITY)
             .any(|candidate| candidate.id == *window)
     });
+}
+
+#[cfg(test)]
+mod run_application_tests {
+    use super::*;
+
+    fn application() -> RunApplication {
+        RunApplication::new(ThemePalette::from_appearance(Appearance::default()))
+    }
+
+    #[test]
+    fn command_input_is_unicode_safe_and_bounded() {
+        let mut app = application();
+        app.update(RunAction::SetCommand("🦀".repeat(RUN_COMMAND_LIMIT + 2)));
+
+        assert_eq!(app.command.chars().count(), RUN_COMMAND_LIMIT);
+        assert!(app.poll());
+    }
+
+    #[test]
+    fn submit_and_escape_emit_typed_boundary_effects() {
+        let mut app = application();
+        app.update(RunAction::SetCommand("  cargo test  ".into()));
+
+        assert!(app.shortcut(Shortcut::Submit));
+        assert_eq!(app.take_effects(), [RunEffect::Submit("cargo test".into())]);
+        assert!(app.shortcut(Shortcut::Escape));
+        assert_eq!(app.take_effects(), [RunEffect::Dismiss]);
+    }
+
+    #[test]
+    fn empty_command_does_not_cross_the_launch_boundary() {
+        let mut app = application();
+        app.update(RunAction::SetCommand("   ".into()));
+        assert!(app.shortcut(Shortcut::Submit));
+        assert!(app.take_effects().is_empty());
+    }
 }
 
 #[cfg(test)]
