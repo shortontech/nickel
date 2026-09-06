@@ -850,6 +850,7 @@ fn truncate_utf8(mut value: String, maximum: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     fn dimensions(columns: u16, lines: u16) -> TerminalDimensions {
