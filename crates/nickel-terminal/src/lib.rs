@@ -862,9 +862,14 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.input_sender.take();
         let _ = self.sender.shutdown();
+        if self.workers.iter().any(|worker| !worker.is_finished()) {
+            // Drop cannot wait through the interactive close grace period. Ensure a child which
+            // ignores PTY hangup cannot keep the detached worker blocked forever in Pty::drop.
+            self.force_handle.terminate();
+        }
         // Joining a stuck platform PTY would block the UI/drop path. An observed close uses the
-        // bounded grace/force path; an unobserved application drop still lets the PTY destructor
-        // close its child while these worker handles detach.
+        // bounded grace/force path; an unobserved application drop force-terminates above and lets
+        // the detached worker reap asynchronously.
         self.workers.clear();
     }
 }
@@ -1526,6 +1531,61 @@ mod tests {
                 "ignored graceful shutdown was not force-terminated"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn dropping_session_reaps_a_child_that_ignores_hangup() {
+        let mut environment = HashMap::new();
+        environment.insert("NICKEL_TERMINAL_FORCE_FIXTURE".into(), "1".into());
+        let mut session = TerminalSession::spawn(TerminalOptions {
+            program: Some(TerminalProgram {
+                executable: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                arguments: vec![
+                    "--ignored".into(),
+                    "--exact".into(),
+                    "tests::forced_shutdown_child_fixture".into(),
+                    "--nocapture".into(),
+                ],
+            }),
+            working_directory: None,
+            environment,
+            dimensions: dimensions(80, 10),
+            scrollback_lines: 100,
+        })
+        .unwrap();
+        let pid = session.child_process_id().unwrap();
+        let ready_deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            while session.try_event().is_some() {}
+            let visible = session
+                .snapshot()
+                .cells
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            if visible.contains("nickel-force-fixture-ready") {
+                break;
+            }
+            assert!(
+                Instant::now() < ready_deadline,
+                "child fixture did not become ready"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        drop(session);
+        let reaped_deadline = Instant::now() + Duration::from_secs(1);
+        while PathBuf::from(format!("/proc/{pid}")).exists() {
+            assert!(
+                Instant::now() < reaped_deadline,
+                "dropped PTY child {pid} was not reaped"
+            );
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
