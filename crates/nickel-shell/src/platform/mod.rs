@@ -451,8 +451,8 @@ mod tests {
             "Signal"
         )));
         assert!(!super::application_requires_secure_storage(&application(
-            "org.kde.konsole.desktop",
-            "Konsole"
+            "org.nickel.Terminal.desktop",
+            "Nickel Terminal"
         )));
     }
 }

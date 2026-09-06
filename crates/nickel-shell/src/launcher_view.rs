@@ -1522,13 +1522,13 @@ mod tests {
     #[test]
     fn submit_shortcut_activates_the_selected_search_result() {
         let mut launcher = Launcher::new(vec![Application::new(
-            "org.kde.konsole".into(),
-            "Konsole".into(),
+            "org.nickel.Terminal".into(),
+            "Nickel Terminal".into(),
             None,
             None,
             None,
         )]);
-        launcher.set_query("konsole");
+        launcher.set_query("terminal");
         let mut host = UiHost::new(
             LauncherApplication::new(
                 launcher,

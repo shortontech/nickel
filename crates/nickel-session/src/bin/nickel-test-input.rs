@@ -1166,7 +1166,7 @@ mod tests {
             parse([
                 "semantic".into(),
                 "panel-app".into(),
-                "org.kde.konsole".into(),
+                "org.nickel.Terminal".into(),
                 "hover".into(),
                 "DP-1".into(),
             ]),
@@ -1174,7 +1174,7 @@ mod tests {
                 application_id,
                 output: Some(output),
                 interaction: PointerInteraction::Hover,
-            })) if application_id == "org.kde.konsole" && output == "DP-1"
+            })) if application_id == "org.nickel.Terminal" && output == "DP-1"
         ));
         assert!(matches!(
             parse([
@@ -1214,10 +1214,10 @@ mod tests {
             parse([
                 "scenario".into(),
                 "grouped-windows".into(),
-                "org.kde.konsole".into(),
+                "org.nickel.Terminal".into(),
             ]),
             Ok(Parsed::GroupedWindowsScenario(application_id))
-                if application_id == "org.kde.konsole"
+                if application_id == "org.nickel.Terminal"
         ));
         assert!(matches!(
             parse([

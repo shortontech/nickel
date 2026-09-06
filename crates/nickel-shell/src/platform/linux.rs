@@ -2460,15 +2460,16 @@ mod tests {
     #[test]
     fn wayland_app_id_resolution_stays_in_linux_adapter() {
         let launcher = Launcher::new(vec![Application::new(
-            "org.kde.konsole.desktop".into(),
-            "Konsole".into(),
+            "org.nickel.Terminal.desktop".into(),
+            "Nickel Terminal".into(),
             None,
             None,
             None,
         )]);
         assert_eq!(
-            resolve_application_id("org.kde.konsole", &launcher).map(|id| id.as_str().to_owned()),
-            Some("org.kde.konsole.desktop".into())
+            resolve_application_id("org.nickel.Terminal", &launcher)
+                .map(|id| id.as_str().to_owned()),
+            Some("org.nickel.Terminal.desktop".into())
         );
     }
 
@@ -2500,13 +2501,13 @@ mod tests {
     #[test]
     fn window_snapshot_keeps_title() {
         let launcher = Launcher::new(vec![Application::new(
-            "org.kde.konsole.desktop".into(),
-            "Konsole".into(),
+            "org.nickel.Terminal.desktop".into(),
+            "Nickel Terminal".into(),
             None,
             None,
             None,
         )]);
-        let window = parse_window("7\t1\torg.kde.konsole\tProject shell", &launcher)
+        let window = parse_window("7\t1\torg.nickel.Terminal\tProject shell", &launcher)
             .expect("valid window snapshot");
         assert_eq!(window.title, "Project shell");
         assert!(window.active);

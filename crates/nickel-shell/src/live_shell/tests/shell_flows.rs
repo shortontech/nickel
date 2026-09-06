@@ -489,7 +489,7 @@
         shell
             .launcher
             .set_preferences(LauncherPreferences::default());
-        let application_id = ApplicationId::new("org.kde.konsole");
+        let application_id = ApplicationId::new("org.nickel.Terminal");
         shell.windows = vec![
             OpenWindow {
                 id: WindowId(4),
@@ -509,7 +509,7 @@
         let _ = shell.scene(SurfaceRole::Panel, 1280, 56);
         let panel = shell
             .resolve_semantic_target(&ShellSemanticTarget::PanelApplication {
-                application_id: "org.kde.konsole".into(),
+                application_id: "org.nickel.Terminal".into(),
                 output: Some("DP-1".into()),
                 interaction: PointerInteraction::Hover,
             })
