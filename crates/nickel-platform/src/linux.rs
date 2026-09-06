@@ -300,7 +300,8 @@ pub fn path_display_name(path: &Path) -> Option<String> {
     desktop_entry_display_name_with(path, &locales)
 }
 
-fn desktop_entry_display_name_with<L: AsRef<str>>(path: &Path, locales: &[L]) -> Option<String> {
+/// Loads a desktop entry after applying Nickel's file type and size limits.
+pub fn desktop_entry_from_path(path: &Path, locales: Option<&[String]>) -> Option<DesktopEntry> {
     if !path
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
@@ -308,9 +309,62 @@ fn desktop_entry_display_name_with<L: AsRef<str>>(path: &Path, locales: &[L]) ->
     {
         return None;
     }
-    let contents = fs::read_to_string(path).ok()?;
-    let entry = DesktopEntry::from_str(path.to_path_buf(), &contents, None::<&[&str]>).ok()?;
-    if entry.type_() != Some("Application") {
+    DesktopEntry::from_path(path, locales).ok()
+}
+
+pub fn desktop_entry_is_application(entry: &DesktopEntry) -> bool {
+    entry.type_() == Some("Application")
+}
+
+/// Discovers saved NetworkManager Wi-Fi profiles keyed by their raw SSID.
+pub fn network_manager_saved_wifi_connections(
+    connection: &zbus::blocking::Connection,
+) -> HashMap<Vec<u8>, zbus::zvariant::OwnedObjectPath> {
+    use zbus::{
+        blocking::Proxy,
+        zvariant::{OwnedObjectPath, OwnedValue},
+    };
+
+    const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
+    type Properties = HashMap<String, OwnedValue>;
+
+    let Ok(settings) = Proxy::new(
+        connection,
+        NETWORK_MANAGER,
+        "/org/freedesktop/NetworkManager/Settings",
+        "org.freedesktop.NetworkManager.Settings",
+    ) else {
+        return HashMap::new();
+    };
+    settings
+        .call::<_, _, Vec<OwnedObjectPath>>("ListConnections", &())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|path| {
+            let proxy = Proxy::new(
+                connection,
+                NETWORK_MANAGER,
+                path.as_str(),
+                "org.freedesktop.NetworkManager.Settings.Connection",
+            )
+            .ok()?;
+            let values = proxy
+                .call::<_, _, HashMap<String, Properties>>("GetSettings", &())
+                .ok()?;
+            let ssid = values
+                .get("802-11-wireless")?
+                .get("ssid")?
+                .try_clone()
+                .ok()
+                .and_then(|value| Vec::<u8>::try_from(value).ok())?;
+            Some((ssid, path.clone()))
+        })
+        .collect()
+}
+
+fn desktop_entry_display_name_with<L: AsRef<str>>(path: &Path, locales: &[L]) -> Option<String> {
+    let entry = desktop_entry_from_path(path, None)?;
+    if !desktop_entry_is_application(&entry) {
         return None;
     }
     entry
@@ -324,16 +378,8 @@ fn desktop_entry_icon_with<T>(
     mut absolute: impl FnMut(&Path) -> Option<T>,
     mut themed: impl FnMut(&str) -> Option<T>,
 ) -> Option<T> {
-    if !path
-        .extension()
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
-        || fs::metadata(path).ok()?.len() > MAX_DESKTOP_ENTRY_BYTES
-    {
-        return None;
-    }
-    let contents = fs::read_to_string(path).ok()?;
-    let entry = DesktopEntry::from_str(path.to_path_buf(), &contents, None::<&[&str]>).ok()?;
-    if entry.type_() != Some("Application") {
+    let entry = desktop_entry_from_path(path, None)?;
+    if !desktop_entry_is_application(&entry) {
         return None;
     }
     if let Some(icon) = entry.icon().map(str::trim).filter(|icon| !icon.is_empty()) {

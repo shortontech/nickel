@@ -19,7 +19,7 @@ pub fn load_applications() -> ApplicationDiscovery {
     let icon_theme = icon_theme();
     let discovery = discover_entries(
         Iter::new(default_paths())
-            .map(|path| DesktopEntry::from_path(path, Some(&locales)).map_err(|_| ())),
+            .map(|path| nickel_platform::desktop_entry_from_path(&path, Some(&locales)).ok_or(())),
         &locales,
         &desktops,
         &icon_theme,
@@ -94,7 +94,7 @@ fn application_from_entry_result(
     desktops: &[String],
     icon_theme: &str,
 ) -> Result<Application, ApplicationSkipReason> {
-    if entry.type_() != Some("Application") {
+    if !nickel_platform::desktop_entry_is_application(entry) {
         return Err(ApplicationSkipReason::UnsupportedType);
     }
     if entry.hidden() {

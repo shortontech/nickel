@@ -34,6 +34,7 @@ nickel-ui-testkit = { path = "../nickel-ui-testkit", optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+nickel-platform = { path = "../nickel-platform" }
 freedesktop-desktop-entry.workspace = true
 freedesktop-icons.workspace = true
 shlex.workspace = true

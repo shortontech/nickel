@@ -138,41 +138,6 @@ pub(super) fn toggle_bluetooth_device(device: &BluetoothDevice) -> Result<(), St
 }
 
 #[cfg(target_os = "linux")]
-fn saved_wifi_connections(connection: &Connection) -> HashMap<Vec<u8>, OwnedObjectPath> {
-    let Ok(settings) = Proxy::new(
-        connection,
-        NETWORK_MANAGER,
-        "/org/freedesktop/NetworkManager/Settings",
-        "org.freedesktop.NetworkManager.Settings",
-    ) else {
-        return HashMap::new();
-    };
-    settings
-        .call::<_, _, Vec<OwnedObjectPath>>("ListConnections", &())
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|path| {
-            let proxy = Proxy::new(
-                connection,
-                NETWORK_MANAGER,
-                path.as_str(),
-                "org.freedesktop.NetworkManager.Settings.Connection",
-            )
-            .ok()?;
-            let values = proxy
-                .call::<_, _, HashMap<String, BluezProperties>>("GetSettings", &())
-                .ok()?;
-            let ssid = values
-                .get("802-11-wireless")?
-                .get("ssid")?
-                .try_clone()
-                .ok()
-                .and_then(|value| Vec::<u8>::try_from(value).ok())?;
-            Some((ssid, path.clone()))
-        })
-        .collect()
-}
-
 #[cfg(target_os = "linux")]
 pub(super) fn read_linux_network() -> Result<(bool, Vec<WifiNetwork>, Vec<NetworkAdapter>), String>
 {
@@ -190,7 +155,7 @@ pub(super) fn read_linux_network() -> Result<(bool, Vec<WifiNetwork>, Vec<Networ
     let devices = manager
         .call::<_, _, Vec<OwnedObjectPath>>("GetDevices", &())
         .map_err(|error| error.to_string())?;
-    let saved = saved_wifi_connections(&connection);
+    let saved = nickel_platform::network_manager_saved_wifi_connections(&connection);
     let mut networks = Vec::new();
     let mut adapters = Vec::new();
 
@@ -349,7 +314,7 @@ pub(super) fn activate_linux_wifi(network: &WifiNetwork) -> Result<(), String> {
     let ssid = access_point
         .get_property::<Vec<u8>>("Ssid")
         .map_err(|error| error.to_string())?;
-    let saved = saved_wifi_connections(&connection);
+    let saved = nickel_platform::network_manager_saved_wifi_connections(&connection);
     let connection_path = saved
         .get(&ssid)
         .ok_or_else(|| "network has no saved connection profile".to_owned())?;
