@@ -1,14 +1,19 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::{collections::HashMap, error::Error, path::PathBuf, time::Duration};
+use std::{
+    collections::HashMap,
+    error::Error,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
     TerminalSession, TerminalSnapshot,
 };
 use nickel_terminal_ui::{
-    CellMetrics, PasteDecision, TerminalInputCommand, TerminalPalette, TerminalViewport,
-    confirm_paste, prepare_paste, translate_input_with_application_cursor,
+    CellMetrics, PasteDecision, TerminalInputCommand, TerminalPalette, TerminalPointerTranslator,
+    TerminalViewport, confirm_paste, prepare_paste, translate_input_with_application_cursor,
 };
 use nickel_ui::{
     AdapterOutcome, Application, Column, Container, HostAdapter, HostServices, SemanticRole, Text,
@@ -111,6 +116,18 @@ impl TerminalApp {
             }
             TerminalInputCommand::ClearScrollback => {
                 self.session.clear_scrollback();
+                return true;
+            }
+            TerminalInputCommand::BeginSelection(kind, point) => {
+                self.session.begin_selection(kind, point);
+                return true;
+            }
+            TerminalInputCommand::UpdateSelection(point) => {
+                self.session.update_selection(point);
+                return true;
+            }
+            TerminalInputCommand::ClearSelection => {
+                self.session.clear_selection();
                 return true;
             }
             TerminalInputCommand::Focus(focused) => {
@@ -257,8 +274,19 @@ impl Application for TerminalApp {
     }
 }
 
-#[derive(Default)]
-struct TerminalAdapter;
+struct TerminalAdapter {
+    pointer: TerminalPointerTranslator,
+    started: Instant,
+}
+
+impl Default for TerminalAdapter {
+    fn default() -> Self {
+        Self {
+            pointer: TerminalPointerTranslator::default(),
+            started: Instant::now(),
+        }
+    }
+}
 
 impl HostAdapter<TerminalApp> for TerminalAdapter {
     fn normalized_input(
@@ -267,8 +295,15 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         input: &nickel_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        let pointer_command = self.pointer.translate(
+            input,
+            &host.application().snapshot,
+            host.application().metrics,
+            self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+        );
         let application_cursor = host.application().snapshot.application_cursor;
-        let Some(command) = translate_input_with_application_cursor(input, application_cursor)
+        let Some(command) = pointer_command
+            .or_else(|| translate_input_with_application_cursor(input, application_cursor))
         else {
             return Ok(AdapterOutcome::default());
         };
@@ -337,5 +372,5 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !deferred_window.is_zero() {
         std::thread::sleep(deferred_window);
     }
-    nickel_ui::run_with_adapter(app, TerminalAdapter)
+    nickel_ui::run_with_adapter(app, TerminalAdapter::default())
 }

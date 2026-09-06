@@ -1,7 +1,13 @@
 //! Declarative Nickel UI projection and normalized input policy for one terminal viewport.
 
-use nickel_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, TextEvent};
-use nickel_terminal::{TerminalCell, TerminalColor, TerminalScroll, TerminalSnapshot};
+use nickel_input::{
+    AggregateModifier, InputEvent, KeyCode, KeyEdge, ModifierState, PhysicalKey, PointerButton,
+    PointerEvent, TextEvent,
+};
+use nickel_terminal::{
+    TerminalCell, TerminalColor, TerminalPoint, TerminalScroll, TerminalSelectionKind,
+    TerminalSnapshot,
+};
 use nickel_ui::{
     Component, Container, Grid, SemanticRole, StyledText, StyledTextSpan, Track, View,
 };
@@ -16,7 +22,198 @@ pub enum TerminalInputCommand {
     PasteRequested,
     SelectAll,
     ClearScrollback,
+    BeginSelection(TerminalSelectionKind, TerminalPoint),
+    UpdateSelection(TerminalPoint),
+    ClearSelection,
     Focus(bool),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TerminalPointerTranslator {
+    modifiers: ModifierState,
+    selecting: bool,
+    pressed_button: Option<PointerButton>,
+    last_click: Option<(TerminalPoint, u64)>,
+    click_count: u8,
+}
+
+impl TerminalPointerTranslator {
+    pub fn translate(
+        &mut self,
+        input: &InputEvent,
+        snapshot: &TerminalSnapshot,
+        metrics: CellMetrics,
+        now_millis: u64,
+    ) -> Option<TerminalInputCommand> {
+        if let InputEvent::Key(key) = input {
+            self.modifiers = key.modifiers.clone();
+            return None;
+        }
+        let selection_override = self.modifiers.aggregate(AggregateModifier::Shift);
+        let mouse_reporting = snapshot.mouse_reporting && !selection_override;
+        match input {
+            InputEvent::Pointer(PointerEvent::Button {
+                button,
+                edge,
+                position: Some(position),
+                ..
+            }) => {
+                let point = terminal_point(position.x, position.y, snapshot, metrics);
+                if mouse_reporting {
+                    if *edge == KeyEdge::Pressed {
+                        self.pressed_button = Some(button.clone());
+                    } else {
+                        self.pressed_button = None;
+                    }
+                    return mouse_button_bytes(button, *edge, point, snapshot.sgr_mouse)
+                        .map(TerminalInputCommand::Write);
+                }
+                if *button != PointerButton::Primary {
+                    return None;
+                }
+                if *edge == KeyEdge::Released {
+                    self.selecting = false;
+                    return None;
+                }
+                self.selecting = true;
+                if self
+                    .last_click
+                    .is_some_and(|(last, at)| last == point && now_millis.saturating_sub(at) <= 500)
+                {
+                    self.click_count = self.click_count.saturating_add(1).min(3);
+                } else {
+                    self.click_count = 1;
+                }
+                self.last_click = Some((point, now_millis));
+                let kind = match self.click_count {
+                    2 => TerminalSelectionKind::Semantic,
+                    3 => TerminalSelectionKind::Lines,
+                    _ => TerminalSelectionKind::Simple,
+                };
+                Some(TerminalInputCommand::BeginSelection(kind, point))
+            }
+            InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
+                let point = terminal_point(position.x, position.y, snapshot, metrics);
+                if mouse_reporting {
+                    let button = self.pressed_button.as_ref()?;
+                    mouse_motion_bytes(button, point, snapshot.sgr_mouse)
+                        .map(TerminalInputCommand::Write)
+                } else if self.selecting {
+                    Some(TerminalInputCommand::UpdateSelection(point))
+                } else {
+                    None
+                }
+            }
+            InputEvent::Pointer(PointerEvent::Axis {
+                delta, discrete, ..
+            }) => {
+                let lines = discrete.map_or_else(
+                    || if delta.y > 0.0 { -3 } else { 3 },
+                    |(_, vertical)| -vertical,
+                );
+                if lines == 0 {
+                    return None;
+                }
+                if mouse_reporting {
+                    let point = TerminalPoint { line: 0, column: 0 };
+                    mouse_wheel_bytes(lines, point, snapshot.sgr_mouse)
+                        .map(TerminalInputCommand::Write)
+                } else {
+                    Some(TerminalInputCommand::Scroll(TerminalScroll::Lines(lines)))
+                }
+            }
+            InputEvent::FocusLost { .. } => {
+                self.selecting = false;
+                self.pressed_button = None;
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+fn terminal_point(
+    x: f64,
+    y: f64,
+    snapshot: &TerminalSnapshot,
+    metrics: CellMetrics,
+) -> TerminalPoint {
+    TerminalPoint {
+        line: (y.max(0.0) / f64::from(metrics.height))
+            .floor()
+            .min(snapshot.lines.saturating_sub(1) as f64) as i32,
+        column: (x.max(0.0) / f64::from(metrics.width))
+            .floor()
+            .min(snapshot.columns.saturating_sub(1) as f64) as usize,
+    }
+}
+
+fn mouse_button_code(button: &PointerButton) -> Option<u8> {
+    match button {
+        PointerButton::Primary => Some(0),
+        PointerButton::Middle => Some(1),
+        PointerButton::Secondary => Some(2),
+        _ => None,
+    }
+}
+
+fn sgr_mouse(code: u8, point: TerminalPoint, release: bool) -> Vec<u8> {
+    format!(
+        "\x1b[<{code};{};{}{}",
+        point.column + 1,
+        point.line + 1,
+        if release { 'm' } else { 'M' }
+    )
+    .into_bytes()
+}
+
+fn legacy_mouse(code: u8, point: TerminalPoint) -> Option<Vec<u8>> {
+    let column = u8::try_from(point.column + 33).ok()?;
+    let line = u8::try_from(point.line + 33).ok()?;
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        code.saturating_add(32),
+        column,
+        line,
+    ])
+}
+
+fn mouse_button_bytes(
+    button: &PointerButton,
+    edge: KeyEdge,
+    point: TerminalPoint,
+    sgr: bool,
+) -> Option<Vec<u8>> {
+    let code = if edge == KeyEdge::Released {
+        3
+    } else {
+        mouse_button_code(button)?
+    };
+    Some(if sgr {
+        sgr_mouse(code, point, edge == KeyEdge::Released)
+    } else {
+        legacy_mouse(code, point)?
+    })
+}
+
+fn mouse_motion_bytes(button: &PointerButton, point: TerminalPoint, sgr: bool) -> Option<Vec<u8>> {
+    let code = mouse_button_code(button)?.saturating_add(32);
+    Some(if sgr {
+        sgr_mouse(code, point, false)
+    } else {
+        legacy_mouse(code, point)?
+    })
+}
+
+fn mouse_wheel_bytes(lines: i32, point: TerminalPoint, sgr: bool) -> Option<Vec<u8>> {
+    let code = if lines > 0 { 64 } else { 65 };
+    Some(if sgr {
+        sgr_mouse(code, point, false)
+    } else {
+        legacy_mouse(code, point)?
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -422,7 +619,9 @@ fn blend(foreground: u32, background: u32, amount: f32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_input::{DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, ModifierState};
+    use nickel_input::{
+        DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, ModifierState, Point as InputPoint,
+    };
     use nickel_terminal::{TerminalDimensions, TerminalEngine};
     use nickel_ui::{Rect, UiFrame};
 
@@ -526,6 +725,101 @@ mod tests {
         assert_eq!(
             prepare_paste("x".repeat(MAX_PASTE_BYTES + 1), false),
             PasteDecision::RejectedTooLarge
+        );
+    }
+
+    fn pointer_button(edge: KeyEdge, x: f64, y: f64) -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            button: PointerButton::Primary,
+            edge,
+            position: Some(InputPoint { x, y }),
+        })
+    }
+
+    #[test]
+    fn pointer_selection_supports_drag_word_line_and_shift_override() {
+        let selection_snapshot = snapshot(b"one two");
+        let metrics = CellMetrics {
+            width: 10.0,
+            height: 20.0,
+            text_scale: 1.0,
+        };
+        let mut pointer = TerminalPointerTranslator::default();
+        let press = pointer_button(KeyEdge::Pressed, 25.0, 5.0);
+        assert_eq!(
+            pointer.translate(&press, &selection_snapshot, metrics, 10),
+            Some(TerminalInputCommand::BeginSelection(
+                TerminalSelectionKind::Simple,
+                TerminalPoint { line: 0, column: 2 }
+            ))
+        );
+        assert_eq!(
+            pointer.translate(&press, &selection_snapshot, metrics, 200),
+            Some(TerminalInputCommand::BeginSelection(
+                TerminalSelectionKind::Semantic,
+                TerminalPoint { line: 0, column: 2 }
+            ))
+        );
+        assert_eq!(
+            pointer.translate(&press, &selection_snapshot, metrics, 300),
+            Some(TerminalInputCommand::BeginSelection(
+                TerminalSelectionKind::Lines,
+                TerminalPoint { line: 0, column: 2 }
+            ))
+        );
+        let motion = InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(1),
+            order: EventOrder(2),
+            position: InputPoint { x: 55.0, y: 25.0 },
+            delta: None,
+        });
+        assert_eq!(
+            pointer.translate(&motion, &selection_snapshot, metrics, 310),
+            Some(TerminalInputCommand::UpdateSelection(TerminalPoint {
+                line: 1,
+                column: 5,
+            }))
+        );
+
+        let reporting = snapshot(b"\x1b[?1000h\x1b[?1006h");
+        let shift = ModifierState::from_sides_and_unsided([], [AggregateModifier::Shift]);
+        pointer.translate(&key(KeyCode::ShiftLeft, shift), &reporting, metrics, 400);
+        assert!(matches!(
+            pointer.translate(&press, &reporting, metrics, 900),
+            Some(TerminalInputCommand::BeginSelection(..))
+        ));
+    }
+
+    #[test]
+    fn terminal_mouse_reporting_uses_mode_aware_sgr_coordinates() {
+        let reporting = snapshot(b"\x1b[?1000h\x1b[?1006h");
+        assert!(reporting.mouse_reporting);
+        assert!(reporting.sgr_mouse);
+        let metrics = CellMetrics {
+            width: 10.0,
+            height: 20.0,
+            text_scale: 1.0,
+        };
+        let mut pointer = TerminalPointerTranslator::default();
+        assert_eq!(
+            pointer.translate(
+                &pointer_button(KeyEdge::Pressed, 25.0, 25.0),
+                &reporting,
+                metrics,
+                0,
+            ),
+            Some(TerminalInputCommand::Write(b"\x1b[<0;3;2M".to_vec()))
+        );
+        assert_eq!(
+            pointer.translate(
+                &pointer_button(KeyEdge::Released, 25.0, 25.0),
+                &reporting,
+                metrics,
+                1,
+            ),
+            Some(TerminalInputCommand::Write(b"\x1b[<3;3;2m".to_vec()))
         );
     }
 
