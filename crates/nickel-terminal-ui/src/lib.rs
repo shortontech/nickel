@@ -767,7 +767,7 @@ mod tests {
         DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, ModifierState, Point as InputPoint,
     };
     use nickel_terminal::{TerminalDimensions, TerminalEngine};
-    use nickel_ui::{Rect, UiFrame};
+    use nickel_ui::{Rect, SoftwareRenderer, UiFrame};
 
     fn snapshot(bytes: &[u8]) -> TerminalSnapshot {
         let dimensions = TerminalDimensions::new(10, 3, 8, 16).unwrap();
@@ -844,9 +844,25 @@ mod tests {
         );
         assert!(allocation_calls <= 50_000, "{allocation_calls}");
         assert!(allocation_bytes <= 8 * 1024 * 1024, "{allocation_bytes}");
+        let mut renderer = SoftwareRenderer::new_pixel_buffer(1600, 1140, 1.0);
+        let cold_render_started = std::time::Instant::now();
+        renderer.render(frame.commands());
+        let cold_render_elapsed = cold_render_started.elapsed();
+        assert!(
+            cold_render_elapsed <= std::time::Duration::from_millis(500),
+            "{cold_render_elapsed:?}"
+        );
+        let warm_render_started = std::time::Instant::now();
+        renderer.render(frame.commands());
+        let warm_render_elapsed = warm_render_started.elapsed();
+        assert!(
+            warm_render_elapsed <= std::time::Duration::from_millis(10),
+            "{warm_render_elapsed:?}"
+        );
         eprintln!(
             "terminal full-frame probe: elapsed={elapsed:?}, allocations={allocation_calls}, \
-             allocated_bytes={allocation_bytes}, commands={}",
+             allocated_bytes={allocation_bytes}, commands={}, cold_render={cold_render_elapsed:?}, \
+             warm_render={warm_render_elapsed:?}",
             frame.commands().len()
         );
     }
