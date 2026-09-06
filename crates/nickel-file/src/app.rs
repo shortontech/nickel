@@ -2659,12 +2659,12 @@ impl Application for FileApp {
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         #[cfg(any(test, feature = "workbench-fixtures"))]
-        let fixture_appearance = self.fixture_appearance;
-        #[cfg(not(any(test, feature = "workbench-fixtures")))]
-        let fixture_appearance = None;
-        let appearance = fixture_appearance.unwrap_or_else(|| {
+        let appearance = self.fixture_appearance.unwrap_or_else(|| {
             ShellSettings::load_default().resolve_appearance(nickel_platform::appearance())
         });
+        #[cfg(not(any(test, feature = "workbench-fixtures")))]
+        let appearance =
+            ShellSettings::load_default().resolve_appearance(nickel_platform::appearance());
         self.build_view(
             context.viewport.size.width,
             context.viewport.size.height,
