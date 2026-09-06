@@ -375,6 +375,14 @@ impl DesktopLayout {
 
     /// Reconciles output topology without discarding affinity for disconnected displays.
     pub fn set_outputs(&mut self, outputs: Vec<DesktopOutput>) {
+        let reported_outputs = !outputs.is_empty();
+        let outputs = normalize_outputs(outputs);
+        // A non-empty platform snapshot containing no usable geometry is a transient configure
+        // failure, not authoritative evidence that every output disappeared. Preserve the last
+        // valid topology until a valid or explicitly empty snapshot arrives.
+        if reported_outputs && outputs.is_empty() {
+            return;
+        }
         let previously_valid = self
             .outputs
             .iter()
@@ -387,7 +395,7 @@ impl DesktopLayout {
                     .or_insert_with(|| item.output.clone());
             }
         }
-        self.outputs = normalize_outputs(outputs);
+        self.outputs = outputs;
         let fallback = self.effective_primary().map(|output| output.id.clone());
         if let Some(fallback) = fallback {
             let valid = self
@@ -1197,6 +1205,10 @@ mod tests {
             },
             scale: 0.0,
         }]);
+        assert_eq!(layout.effective_primary().unwrap().id, "main");
+        assert_eq!(layout.items()[0].output, "main");
+
+        layout.set_outputs(Vec::new());
         assert!(layout.effective_primary().is_none());
         layout.set_outputs(vec![primary_output("main", 0.0)]);
         assert_eq!(layout.items()[0].output, "main");
