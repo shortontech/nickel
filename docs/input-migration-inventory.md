@@ -31,5 +31,5 @@ focused consumers. Re-run the following boundary audit when adding a consumer:
 ```sh
 rg -n 'winit::keyboard::|gilrs::|KBDLLHOOKSTRUCT|RegisterHotKey|Keysym' \
   crates/nickel-shell crates/nickel-settings crates/nickel-codex-ui crates/nickel-ui \
-  crates/nickel-file crates/nickel-gaze crates/nickel-shapes-test crates/nickel-session
+  crates/nickel-file crates/nickel-gaze crates/nickel-session
 ```

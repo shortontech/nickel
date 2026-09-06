@@ -23,7 +23,6 @@ members = [
     "crates/nickel-render-assets",
     "crates/nickel-session",
     "crates/nickel-session-protocol",
-    "crates/nickel-shapes-test",
     "crates/nickel-settings",
 ]
 default-members = ["crates/nickel-shell"]
