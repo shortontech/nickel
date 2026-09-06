@@ -342,5 +342,7 @@ Include behavior tests where practical and record the platforms tested.
 
 ## License
 
+Copyright 2026 Steven Horton.
+
 Nickel is dual-licensed under the [MIT License](LICENSE-MIT) or the
 [Apache License, Version 2.0](LICENSE-APACHE), at your option.
