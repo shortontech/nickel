@@ -2436,11 +2436,18 @@ fn cargo_executable(cargo: Option<OsString>, path: Option<OsString>) -> OsString
         .unwrap_or_else(|| "cargo".into())
 }
 
+fn workspace_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("workbench crate is nested beneath the workspace root")
+}
+
 fn external_workbench_command(features: &str, args: &[&str]) -> std::process::Command {
     let cargo = cargo_executable(env::var_os("CARGO"), env::var_os("PATH"));
     let mut command = std::process::Command::new(cargo);
     command
-        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .current_dir(workspace_root())
         .args([
             "run",
             "-p",
@@ -4242,6 +4249,20 @@ mod tests {
         assert_eq!(
             provider_features_for_launch(Vec::new(), &["shell-provider"]),
             None
+        );
+    }
+
+    #[test]
+    fn recursive_provider_preserves_workspace_relative_arguments() {
+        let command = external_workbench_command(
+            "file-provider",
+            &["reachability-report", "assets/evidence/report.json"],
+        );
+        assert_eq!(command.get_current_dir(), Some(workspace_root()));
+        assert!(
+            command
+                .get_args()
+                .any(|argument| argument == "assets/evidence/report.json")
         );
     }
 
