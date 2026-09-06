@@ -182,11 +182,324 @@ pub fn peripheral_service() -> Arc<PeripheralService> {
     Arc::clone(SERVICE.get_or_init(|| Arc::new(PeripheralService::new(peripheral_backend()))))
 }
 
+#[cfg(target_os = "linux")]
+pub fn peripheral_backend() -> Box<dyn PeripheralBackend> {
+    Box::new(LinuxPeripherals)
+}
+
+#[cfg(not(target_os = "linux"))]
 pub fn peripheral_backend() -> Box<dyn PeripheralBackend> {
     Box::new(UnsupportedPeripherals)
 }
 
+#[cfg(target_os = "linux")]
+struct LinuxPeripherals;
+
+#[cfg(target_os = "linux")]
+impl PeripheralBackend for LinuxPeripherals {
+    fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
+        let cups_available =
+            command_output("lpstat", &["-r"]).is_ok_and(|output| output.status.success());
+        let udisks2_available =
+            command_output("udisksctl", &["status"]).is_ok_and(|output| output.status.success());
+        Ok(PeripheralSnapshot {
+            provider: PeripheralProvider::LinuxCupsAndUDisks2 {
+                cups_available,
+                udisks2_available,
+            },
+            printers: discover_linux_printers(),
+            volumes: discover_linux_volumes(),
+            filesystems: discover_linux_filesystems(),
+            omitted_printers: 0,
+            omitted_jobs: 0,
+            omitted_volumes: 0,
+            omitted_filesystems: 0,
+        })
+    }
+
+    fn request(&self, action: PeripheralAction) -> Result<PeripheralOutcome, PeripheralError> {
+        match action {
+            PeripheralAction::SetDefaultPrinter(id) => run_linux_action("lpoptions", &["-d", &id]),
+            PeripheralAction::AddPrinter { address } => {
+                use std::hash::{DefaultHasher, Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                address.hash(&mut hasher);
+                let id = format!("nickel-{:016x}", hasher.finish());
+                run_linux_action("lpadmin", &["-p", &id, "-E", "-v", &address])
+            }
+            PeripheralAction::RemovePrinter(id) => run_linux_action("lpadmin", &["-x", &id]),
+            PeripheralAction::CancelPrintJob { job_id, .. } => {
+                run_linux_action("cancel", &[&job_id])
+            }
+            PeripheralAction::PrintTestPage(id) => {
+                const TEST_PAGE: &str = "/usr/share/cups/data/testprint";
+                if PathBuf::from(TEST_PAGE).is_file() {
+                    run_linux_action("lp", &["-d", &id, TEST_PAGE])
+                } else {
+                    Ok(PeripheralOutcome::Unsupported {
+                        detail: "The CUPS test-page fixture is not installed".into(),
+                    })
+                }
+            }
+            PeripheralAction::MountVolume(id) => {
+                run_linux_action("udisksctl", &["mount", "-b", &id])
+            }
+            PeripheralAction::UnmountVolume(id) => {
+                run_linux_action("udisksctl", &["unmount", "-b", &id])
+            }
+            PeripheralAction::EjectVolume(id) => {
+                run_linux_action("udisksctl", &["power-off", "-b", &id])
+            }
+            PeripheralAction::OpenCleanupLocation(path) => crate::open_directory(&path)
+                .map(|()| PeripheralOutcome::Accepted)
+                .map_err(|detail| PeripheralError {
+                    class: PeripheralFailureClass::ProviderUnavailable,
+                    detail,
+                }),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn command_output(program: &str, arguments: &[&str]) -> std::io::Result<std::process::Output> {
+    std::process::Command::new(program).args(arguments).output()
+}
+
+#[cfg(target_os = "linux")]
+fn output_text(program: &str, arguments: &[&str]) -> Result<String, String> {
+    let output = command_output(program, arguments)
+        .map_err(|error| format!("{program} is unavailable: {error}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(if detail.is_empty() {
+            format!("{program} exited with {}", output.status)
+        } else {
+            detail
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn run_linux_action(
+    program: &str,
+    arguments: &[&str],
+) -> Result<PeripheralOutcome, PeripheralError> {
+    let output = command_output(program, arguments).map_err(|error| PeripheralError {
+        class: PeripheralFailureClass::ProviderUnavailable,
+        detail: format!("{program} is unavailable: {error}"),
+    })?;
+    if output.status.success() {
+        return Ok(PeripheralOutcome::Accepted);
+    }
+    let detail = clean_text(String::from_utf8_lossy(&output.stderr).trim());
+    let lowercase = detail.to_lowercase();
+    Ok(
+        if lowercase.contains("busy") || lowercase.contains("in use") {
+            PeripheralOutcome::Busy { detail }
+        } else if lowercase.contains("not authorized")
+            || lowercase.contains("permission")
+            || lowercase.contains("authentication")
+        {
+            PeripheralOutcome::AuthorizationRequired { detail }
+        } else {
+            PeripheralOutcome::Rejected { detail }
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn discover_linux_printers() -> Result<Vec<Printer>, String> {
+    let listing = output_text("lpstat", &["-p"])?;
+    let default = output_text("lpstat", &["-d"])
+        .ok()
+        .and_then(|line| line.split_once(':').map(|(_, id)| id.trim().to_owned()));
+    let jobs = output_text("lpstat", &["-W", "not-completed", "-o"]).unwrap_or_default();
+    let mut printers = listing
+        .lines()
+        .filter_map(|line| parse_lpstat_printer(line, default.as_deref()))
+        .collect::<Vec<_>>();
+    for job in jobs.lines().filter_map(parse_lpstat_job) {
+        if let Some(printer) = printers.iter_mut().find(|printer| {
+            job.id
+                .strip_prefix(&printer.id)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+        }) {
+            printer.jobs.push(job);
+        }
+    }
+    Ok(printers)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_lpstat_printer(line: &str, default: Option<&str>) -> Option<Printer> {
+    let remainder = line.strip_prefix("printer ")?;
+    let id = remainder.split_whitespace().next()?.to_owned();
+    let lowercase = remainder.to_lowercase();
+    let state = if lowercase.contains("fault") || lowercase.contains("error") {
+        PrinterState::Error
+    } else if lowercase.contains("disabled") || lowercase.contains("offline") {
+        PrinterState::Offline
+    } else if lowercase.contains("printing") || lowercase.contains("processing") {
+        PrinterState::Busy
+    } else {
+        PrinterState::Ready
+    };
+    Some(Printer {
+        name: id.clone(),
+        is_default: default == Some(id.as_str()),
+        id,
+        state,
+        jobs: Vec::new(),
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_lpstat_job(line: &str) -> Option<PrintJob> {
+    let id = line.split_whitespace().next()?.to_owned();
+    Some(PrintJob {
+        name: id.clone(),
+        id,
+        state: PrintJobState::Pending,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn discover_linux_volumes() -> Result<Vec<RemovableVolume>, String> {
+    let listing = output_text(
+        "lsblk",
+        &[
+            "-P",
+            "-b",
+            "-o",
+            "PATH,LABEL,SIZE,FSAVAIL,MOUNTPOINT,RM,HOTPLUG,TYPE",
+        ],
+    )?;
+    Ok(listing.lines().filter_map(parse_lsblk_volume).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_lsblk_volume(line: &str) -> Option<RemovableVolume> {
+    let fields = parse_key_value_fields(line);
+    let id = fields.get("PATH")?.clone();
+    let removable = fields.get("RM").is_some_and(|value| value == "1")
+        || fields.get("HOTPLUG").is_some_and(|value| value == "1");
+    let kind = fields.get("TYPE").map(String::as_str).unwrap_or_default();
+    if !removable || matches!(kind, "loop" | "rom") {
+        return None;
+    }
+    let mount = fields
+        .get("MOUNTPOINT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    Some(RemovableVolume {
+        name: fields
+            .get("LABEL")
+            .filter(|value| !value.is_empty())
+            .cloned()
+            .unwrap_or_else(|| id.clone()),
+        capacity_bytes: fields.get("SIZE").and_then(|value| value.parse().ok()),
+        available_bytes: fields.get("FSAVAIL").and_then(|value| value.parse().ok()),
+        state: if mount.is_some() {
+            VolumeState::Mounted
+        } else {
+            VolumeState::Unmounted
+        },
+        mount_path: mount,
+        ejectable: true,
+        detail: None,
+        id,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_key_value_fields(line: &str) -> std::collections::HashMap<String, String> {
+    let mut fields = std::collections::HashMap::new();
+    let bytes = line.as_bytes();
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let key_start = cursor;
+        while bytes.get(cursor).is_some_and(|byte| *byte != b'=') {
+            cursor += 1;
+        }
+        if cursor >= bytes.len() {
+            break;
+        }
+        let key = &line[key_start..cursor];
+        cursor += 1;
+        if bytes.get(cursor) != Some(&b'"') {
+            break;
+        }
+        cursor += 1;
+        let value_start = cursor;
+        while bytes.get(cursor) != Some(&b'"') && cursor < bytes.len() {
+            cursor += 1;
+        }
+        fields.insert(
+            key.to_owned(),
+            decode_lsblk_value(&line[value_start..cursor]),
+        );
+        cursor = cursor.saturating_add(1);
+    }
+    fields
+}
+
+#[cfg(target_os = "linux")]
+fn decode_lsblk_value(value: &str) -> String {
+    let mut decoded = String::new();
+    let mut chars = value.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\' && chars.peek() == Some(&'x') {
+            chars.next();
+            let digits = chars.by_ref().take(2).collect::<String>();
+            if let Ok(byte) = u8::from_str_radix(&digits, 16) {
+                decoded.push(char::from(byte));
+                continue;
+            }
+            decoded.push_str("\\x");
+            decoded.push_str(&digits);
+        } else {
+            decoded.push(character);
+        }
+    }
+    decoded
+}
+
+#[cfg(target_os = "linux")]
+fn discover_linux_filesystems() -> Result<Vec<FilesystemUsage>, String> {
+    let listing = output_text("df", &["--output=source,size,avail,target", "-B1"])?;
+    Ok(listing
+        .lines()
+        .skip(1)
+        .filter_map(parse_df_filesystem)
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_df_filesystem(line: &str) -> Option<FilesystemUsage> {
+    let fields = line.split_whitespace().collect::<Vec<_>>();
+    if fields.len() < 4 {
+        return None;
+    }
+    let id = fields[0].to_owned();
+    let capacity_bytes = fields[1].parse().ok()?;
+    let available_bytes = fields[2].parse().ok()?;
+    let mount_path = PathBuf::from(fields[3..].join(" "));
+    Some(FilesystemUsage {
+        name: mount_path.display().to_string(),
+        mount_path,
+        capacity_bytes,
+        available_bytes,
+        id,
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
 struct UnsupportedPeripherals;
+#[cfg(not(target_os = "linux"))]
 impl PeripheralBackend for UnsupportedPeripherals {
     fn inspect(&self) -> Result<PeripheralSnapshot, PeripheralError> {
         #[cfg(target_os = "linux")]
@@ -392,6 +705,30 @@ mod tests {
                         volumes.retain(|volume| volume.id != id);
                     }
                 }
+                PeripheralAction::MountVolume(id) => {
+                    if let Ok(volumes) = &mut snapshot.volumes
+                        && let Some(volume) = volumes.iter_mut().find(|volume| volume.id == id)
+                    {
+                        volume.state = VolumeState::Mounted;
+                        volume.mount_path = Some("/media/fixture".into());
+                    }
+                }
+                PeripheralAction::UnmountVolume(id) => {
+                    if let Ok(volumes) = &mut snapshot.volumes
+                        && let Some(volume) = volumes.iter_mut().find(|volume| volume.id == id)
+                    {
+                        volume.state = VolumeState::Unmounted;
+                        volume.mount_path = None;
+                    }
+                }
+                PeripheralAction::CancelPrintJob { printer_id, job_id } => {
+                    if let Ok(printers) = &mut snapshot.printers
+                        && let Some(printer) =
+                            printers.iter_mut().find(|printer| printer.id == printer_id)
+                    {
+                        printer.jobs.retain(|job| job.id != job_id);
+                    }
+                }
                 _ => {}
             }
             Ok(PeripheralOutcome::Accepted)
@@ -491,6 +828,40 @@ mod tests {
     }
 
     #[test]
+    fn queue_and_mount_transitions_are_refreshed() {
+        let mut initial = snapshot();
+        initial.printers.as_mut().unwrap()[0].jobs.push(PrintJob {
+            id: "printer-42".into(),
+            name: "Document".into(),
+            state: PrintJobState::Pending,
+        });
+        let service = PeripheralService::new(Box::new(Fixture {
+            snapshot: Mutex::new(initial),
+        }));
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::CancelPrintJob {
+                printer_id: "printer".into(),
+                job_id: "printer-42".into(),
+            })
+            .unwrap();
+        assert!(changed.printers.unwrap()[0].jobs.is_empty());
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::UnmountVolume("usb".into()))
+            .unwrap();
+        assert_eq!(
+            changed.volumes.as_ref().unwrap()[0].state,
+            VolumeState::Unmounted
+        );
+        let (_, changed) = service
+            .request_and_refresh(PeripheralAction::MountVolume("usb".into()))
+            .unwrap();
+        assert_eq!(
+            changed.volumes.as_ref().unwrap()[0].state,
+            VolumeState::Mounted
+        );
+    }
+
+    #[test]
     fn cleanup_contract_has_no_delete_action_and_rejects_relative_paths() {
         let service = PeripheralService::new(Box::new(Fixture {
             snapshot: Mutex::new(snapshot()),
@@ -499,5 +870,31 @@ mod tests {
             .request_and_refresh(PeripheralAction::OpenCleanupLocation("relative".into()))
             .unwrap_err();
         assert_eq!(error.class, PeripheralFailureClass::InvalidTarget);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_service_output_parsers_preserve_stable_identities() {
+        let printer = parse_lpstat_printer(
+            "printer office is idle. enabled since Monday",
+            Some("office"),
+        )
+        .unwrap();
+        assert_eq!(printer.id, "office");
+        assert!(printer.is_default);
+
+        let volume = parse_lsblk_volume(
+            r#"PATH="/dev/sdb1" LABEL="Backup\x20Disk" SIZE="4096" FSAVAIL="2048" MOUNTPOINT="/media/Backup\x20Disk" RM="1" HOTPLUG="1" TYPE="part""#,
+        )
+        .unwrap();
+        assert_eq!(volume.id, "/dev/sdb1");
+        assert_eq!(volume.name, "Backup Disk");
+        assert_eq!(volume.state, VolumeState::Mounted);
+
+        let filesystem =
+            parse_df_filesystem("/dev/root      1000       250 /media/My Drive").unwrap();
+        assert_eq!(filesystem.capacity_bytes, 1000);
+        assert_eq!(filesystem.available_bytes, 250);
+        assert_eq!(filesystem.mount_path, PathBuf::from("/media/My Drive"));
     }
 }
