@@ -654,6 +654,10 @@
         for event in [
             HostEvent::Ui(UiEvent::KeyboardContextMenu),
             HostEvent::Controller(ControllerAction::ContextMenu),
+            HostEvent::Ui(UiEvent::TouchLongPress(Point {
+                x: center,
+                y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+            })),
         ] {
             shell.close_window_preview();
             shell.panel_host.step(HostBatch {
