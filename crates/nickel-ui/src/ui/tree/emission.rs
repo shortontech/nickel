@@ -365,6 +365,7 @@ pub(super) fn emit_element<Message: Clone>(
                 text: value.clone(),
                 spans: spans.clone(),
                 scale: *scale,
+                font_size: None,
                 color: foreground.unwrap_or(0x00ff_ffff),
                 align: element.style.text_align,
             });

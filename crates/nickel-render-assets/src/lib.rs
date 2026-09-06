@@ -71,6 +71,34 @@ pub fn resolve_monospace_family(requested: &str) -> Arc<str> {
         .map_or_else(|| Arc::from("monospace"), |name| Arc::from(name.as_str()))
 }
 
+/// Integral logical cell geometry for one resolved monospaced face at a physical scale.
+pub fn monospace_cell_geometry(family: &str, font_size: f32, scale: f32) -> (f32, f32) {
+    let scale = scale.max(0.25);
+    let physical_size = font_size.max(6.0) * scale;
+    let physical_height = (physical_size * 1.3).ceil().max(1.0);
+    let mut font_system = ProcessFontSystem::new().lock();
+    let mut buffer = Buffer::new(
+        &mut font_system,
+        Metrics::new(physical_size, physical_height),
+    );
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, Some(physical_height));
+    let family = if family.eq_ignore_ascii_case("monospace") {
+        Family::Monospace
+    } else {
+        Family::Name(family)
+    };
+    buffer.set_text("M", &Attrs::new().family(family), Shaping::Advanced, None);
+    buffer.shape_until_scroll(&mut font_system, false);
+    let physical_width = buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
+        .ceil()
+        .max(1.0);
+    (physical_width / scale, physical_height / scale)
+}
+
 /// Immutable, tightly packed, straight-alpha RGBA pixels.
 #[derive(Clone, Debug)]
 pub struct RgbaAsset {
@@ -753,6 +781,12 @@ mod tests {
                 resolve_monospace_family(&proportional).as_ref(),
                 "monospace"
             );
+        }
+        for scale in [1.0, 1.25, 2.0] {
+            let (width, height) = monospace_cell_geometry("monospace", 13.0, scale);
+            assert_eq!((width * scale).fract(), 0.0);
+            assert_eq!((height * scale).fract(), 0.0);
+            assert!(width > 0.0 && height >= 13.0);
         }
     }
 

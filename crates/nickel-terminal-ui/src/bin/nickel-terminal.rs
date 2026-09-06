@@ -141,11 +141,12 @@ impl TerminalApp {
             font_family: resolved_font,
             ..TerminalPalette::default()
         };
+        let metrics = CellMetrics::resolved(&palette.font_family, settings.font_size(), 1.0);
         Ok(Self {
             session,
             snapshot,
             palette,
-            metrics: CellMetrics::integral(settings.font_size(), 1.0),
+            metrics,
             title: "Nickel Terminal".into(),
             status: font_fallback.then(|| {
                 "Configured terminal font is unavailable or not fixed-width; using system monospace"

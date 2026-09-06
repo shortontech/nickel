@@ -799,6 +799,8 @@ pub enum PaintCommand {
         text: String,
         spans: Vec<StyledTextSpan>,
         scale: f32,
+        /// Exact logical font size for bounded graphical consumers such as terminal cells.
+        font_size: Option<f32>,
         color: Color,
         align: TextAlign,
     },

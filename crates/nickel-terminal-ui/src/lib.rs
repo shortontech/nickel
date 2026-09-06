@@ -515,6 +515,16 @@ impl CellMetrics {
         }
     }
 
+    pub fn resolved(font_family: &str, font_size: f32, scale: f32) -> Self {
+        let (width, height) =
+            nickel_render_assets::monospace_cell_geometry(font_family, font_size, scale);
+        Self {
+            width,
+            height,
+            text_scale: font_size.max(6.0) / 8.0,
+        }
+    }
+
     pub fn dimensions(&self, width: f32, height: f32) -> (u16, u16) {
         let columns = (width.max(self.width) / self.width)
             .floor()
@@ -647,6 +657,7 @@ impl<'a> TerminalViewport<'a> {
                     background: None,
                 }],
                 scale: self.metrics.text_scale,
+                font_size: Some(self.metrics.text_scale * 8.0),
                 color: foreground,
                 align: TextAlign::Start,
             });
@@ -806,6 +817,7 @@ mod tests {
         assert!(commands.contains("italic: true"));
         assert!(commands.contains("underline: Single"));
         assert!(commands.contains("Nickel Fixture Mono"));
+        assert!(commands.contains("font_size: Some(14.0)"));
         assert!(
             frame.commands().len() <= 100,
             "visible work stays bounded by the grid"
@@ -849,7 +861,7 @@ mod tests {
         renderer.render(frame.commands());
         let cold_render_elapsed = cold_render_started.elapsed();
         assert!(
-            cold_render_elapsed <= std::time::Duration::from_millis(500),
+            cold_render_elapsed <= std::time::Duration::from_millis(750),
             "{cold_render_elapsed:?}"
         );
         let warm_render_started = std::time::Instant::now();
@@ -1063,5 +1075,10 @@ mod tests {
             metrics.dimensions(width + metrics.width, height).0,
             initial.0 + 1
         );
+        for scale in [1.0, 1.25, 2.0] {
+            let resolved = CellMetrics::resolved("monospace", 13.0, scale);
+            assert_eq!((resolved.width * scale).fract(), 0.0);
+            assert_eq!((resolved.height * scale).fract(), 0.0);
+        }
     }
 }

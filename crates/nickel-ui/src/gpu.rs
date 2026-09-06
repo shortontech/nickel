@@ -696,6 +696,7 @@ impl SoftwareRenderer {
             text,
             spans,
             scale,
+            font_size,
             color,
             align,
         } = command
@@ -708,7 +709,7 @@ impl SoftwareRenderer {
             self.text_rasters[index] = Some(cached);
             return;
         }
-        let font_size = text_size(*scale) * self.scale;
+        let font_size = font_size.unwrap_or_else(|| text_size(*scale)) * self.scale;
         let physical = physical_rect(*bounds, self.scale);
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_size, font_size * 1.3));
         buffer.set_wrap(Wrap::WordOrGlyph);
