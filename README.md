@@ -165,13 +165,13 @@ Renderer-owned shell targets can be exercised without copying panel or overlay c
 
 ```bash
 cargo run -p nickel-session --bin nickel-test-input -- \
-  semantic panel-app org.kde.konsole hover
+  semantic panel-app org.nickel.Terminal hover
 cargo run -p nickel-session --bin nickel-test-input -- \
   semantic preview 10 menu
 cargo run -p nickel-session --bin nickel-test-input -- \
   semantic menu 10 minimize
 cargo run -p nickel-session --bin nickel-test-input -- \
-  scenario grouped-windows org.kde.konsole
+  scenario grouped-windows org.nickel.Terminal
 ```
 
 The shell resolves these names from its live grouping and preview/menu frame records. The compositor
