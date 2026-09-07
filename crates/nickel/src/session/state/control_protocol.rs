@@ -248,6 +248,11 @@ impl NickelSession {
                 let titlebar = crate::session::window_frame::titlebar_cache_diagnostics();
                 let recovery = self.recovery_ui.raster_diagnostics();
                 let internal_ui = self.internal_ui.aggregate_renderer_diagnostics();
+                let shell_images = self
+                    .internal_shell
+                    .as_ref()
+                    .map(crate::internal_shell::InternalShellCoordinator::image_cache_diagnostics)
+                    .unwrap_or_default();
                 #[cfg(feature = "backend-udev")]
                 let identify = self
                     .native
@@ -268,6 +273,9 @@ impl NickelSession {
                     internal_ui_text_cache_bytes: internal_ui.text_cache_bytes as u64,
                     internal_ui_texture_import_failures: internal_ui.texture_import_failures,
                     internal_ui_fallback_import_failures: internal_ui.fallback_import_failures,
+                    internal_shell_wallpaper_entries: u16::try_from(shell_images.wallpaper_entries)
+                        .unwrap_or(u16::MAX),
+                    internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
                     preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
                     preview_bytes: self.preview_bytes() as u64,

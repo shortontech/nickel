@@ -104,6 +104,10 @@ impl InternalShellCoordinator {
         self.shell.semantic_theme()
     }
 
+    pub fn image_cache_diagnostics(&self) -> crate::live_shell::ShellImageCacheDiagnostics {
+        self.shell.image_cache_diagnostics()
+    }
+
     pub fn codex_project_menu_visible(&self) -> bool {
         self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
     }

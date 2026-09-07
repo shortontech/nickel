@@ -506,6 +506,10 @@ pub struct CacheDiagnostics {
     pub internal_ui_texture_import_failures: u64,
     #[serde(default)]
     pub internal_ui_fallback_import_failures: u64,
+    #[serde(default)]
+    pub internal_shell_wallpaper_entries: u16,
+    #[serde(default)]
+    pub internal_shell_wallpaper_bytes: u64,
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
