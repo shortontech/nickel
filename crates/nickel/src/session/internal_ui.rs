@@ -3127,6 +3127,57 @@ mod tests {
     }
 
     #[test]
+    fn mixed_dpi_image_owners_share_selected_sources() {
+        use std::sync::Arc;
+        let caches = SharedTextureCaches::default();
+        let commands = [PaintCommand::Image {
+            bounds: nickel_ui::Rect::new(1.25, 2.5, 4.0, 4.0),
+            id: 7,
+            generation: 1,
+            image: Arc::new(image::RgbaImage::from_pixel(
+                4,
+                4,
+                image::Rgba([255, 0, 0, 255]),
+            )),
+            high_density: Some(Arc::new(image::RgbaImage::from_pixel(
+                8,
+                8,
+                image::Rgba([0, 255, 0, 255]),
+            ))),
+        }];
+        for scale in [1.0, 1.25, 2.0, 2.5] {
+            let mut owner =
+                SmithayFrameRenderer::with_caches(scale, InternalUiRendererMode::Gpu, &caches);
+            owner
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (20, 20),
+                    scale_factor: scale,
+                    generation: 1,
+                })
+                .unwrap();
+            let GpuPrimitive::Texture { buffer, source, .. } = &mut owner.primitives[0] else {
+                panic!("expected image texture")
+            };
+            let (dimension, pixel) = if scale < 1.5 {
+                (4.0, [255, 0, 0, 255])
+            } else {
+                (8.0, [0, 255, 0, 255])
+            };
+            assert_eq!(source.size, (dimension, dimension).into());
+            buffer
+                .render()
+                .draw(|bytes| {
+                    assert!(bytes.chunks_exact(4).all(|actual| actual == pixel));
+                    Ok::<_, std::convert::Infallible>(Vec::new())
+                })
+                .unwrap();
+        }
+        assert_eq!(caches.images.borrow().entries.len(), 2);
+        assert_eq!(caches.images.borrow().bytes, (4 * 4 + 8 * 8) * 4);
+    }
+
+    #[test]
     fn fallback_damage_clips_and_rounds_disjoint_regions_outward() {
         let damage = DamageRegion {
             rects: [
@@ -3213,6 +3264,35 @@ mod tests {
             assert!(!peer.primitives.is_empty());
         }
         assert_eq!(peer.diagnostics().text_uploads, 0);
+    }
+
+    #[test]
+    fn unusually_large_text_scratch_is_retired_while_visible() {
+        let mut renderer = SmithayFrameRenderer::new(2048, 1025, 1.0, InternalUiRendererMode::Gpu);
+        let commands = [PaintCommand::Text {
+            bounds: nickel_ui::Rect::new(0.0, 0.0, 2048.0, 1025.0),
+            text: "One unusually large label".into(),
+            scale: 1.0,
+            color: 0xffffffff,
+            align: nickel_ui::TextAlign::Start,
+            bold: false,
+            wrap: false,
+        }];
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (2048, 1025),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+        assert_eq!(renderer.diagnostics().text_scratch_bytes, 4);
+        assert_eq!(renderer.diagnostics().text_private_cache_bytes, 0);
+        assert_eq!(
+            renderer.primitives.len(),
+            1,
+            "uploaded texture survives scratch retirement"
+        );
     }
 
     #[test]
