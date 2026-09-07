@@ -43,7 +43,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Condvar, Mutex, atomic::AtomicU64};
 
 pub use authority::{SessionAuthority, SessionAuthorityRequest};
-pub use internal_ui::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
+pub use internal_ui::{
+    InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime, TouchPhase,
+};
 use smithay::reexports::{
     calloop::{
         EventLoop,

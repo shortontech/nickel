@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use nickel_ui::{
-    Application, HostBatch, InternalSurfaceId, InternalSurfaceSet, SoftwareRenderer, Text, View,
-    ViewContext, backend::PaintCommand,
+    Application, HostBatch, HostEvent, InternalSurfaceId, InternalSurfaceSet, Point as UiPoint,
+    SoftwareRenderer, Text, UiEvent, View, ViewContext, backend::PaintCommand,
 };
 use smithay::{
     backend::{
@@ -65,6 +65,9 @@ fn output_local_location(
 pub struct InternalUiRuntime {
     surfaces: InternalSurfaceSet,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
+    focused: Option<InternalSurfaceId>,
+    hovered: Option<InternalSurfaceId>,
+    touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
 }
 
 impl InternalUiRuntime {
@@ -106,6 +109,13 @@ impl InternalUiRuntime {
     pub fn remove(&mut self, id: InternalSurfaceId) -> bool {
         let removed = self.surfaces.remove(id).is_some();
         self.presentation.remove(&id);
+        if self.focused == Some(id) {
+            self.focused = None;
+        }
+        if self.hovered == Some(id) {
+            self.hovered = None;
+        }
+        self.touches.retain(|_, (target, _)| *target != id);
         removed
     }
 
@@ -132,6 +142,201 @@ impl InternalUiRuntime {
 
     pub fn has_damage(&self) -> bool {
         self.presentation.values().any(|surface| surface.dirty)
+    }
+
+    pub fn focused(&self) -> Option<InternalSurfaceId> {
+        self.focused
+    }
+
+    fn role_order(role: InternalSurfaceRole) -> u8 {
+        match role {
+            InternalSurfaceRole::Desktop => 0,
+            InternalSurfaceRole::Application => 1,
+            InternalSurfaceRole::Panel => 2,
+            InternalSurfaceRole::Overlay => 3,
+        }
+    }
+
+    pub fn surface_at(&self, point: (f64, f64)) -> Option<(InternalSurfaceId, UiPoint)> {
+        self.presentation
+            .iter()
+            .filter_map(|(id, surface)| {
+                let (x, y, width, height) = surface.placement.geometry;
+                (point.0 >= f64::from(x)
+                    && point.1 >= f64::from(y)
+                    && point.0 < f64::from(x) + f64::from(width)
+                    && point.1 < f64::from(y) + f64::from(height))
+                .then_some((
+                    Self::role_order(surface.placement.role),
+                    *id,
+                    UiPoint {
+                        x: (point.0 - f64::from(x)) as f32,
+                        y: (point.1 - f64::from(y)) as f32,
+                    },
+                ))
+            })
+            .max_by_key(|(role, id, _)| (*role, *id))
+            .map(|(_, id, local)| (id, local))
+    }
+
+    fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {
+        self.step(
+            id,
+            HostBatch {
+                events: vec![HostEvent::Ui(event)],
+                ..Default::default()
+            },
+        )
+    }
+
+    pub fn pointer_motion(&mut self, point: (f64, f64)) -> bool {
+        let target = self.surface_at(point);
+        if self.hovered != target.map(|(id, _)| id) {
+            if let Some(previous) = self.hovered {
+                self.dispatch_ui(previous, UiEvent::PointerCancelled);
+            }
+            self.hovered = target.map(|(id, _)| id);
+        }
+        if let Some((id, local)) = target {
+            self.dispatch_ui(id, UiEvent::PointerMoved(local));
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn pointer_button(&mut self, point: (f64, f64), pressed: bool) -> bool {
+        let Some((id, local)) = self.surface_at(point) else {
+            if pressed && let Some(previous) = self.focused.take() {
+                self.step(
+                    previous,
+                    HostBatch {
+                        window_focused: Some(false),
+                        ..Default::default()
+                    },
+                );
+            }
+            return false;
+        };
+        if pressed {
+            if self.focused != Some(id) {
+                if let Some(previous) = self.focused {
+                    self.step(
+                        previous,
+                        HostBatch {
+                            window_focused: Some(false),
+                            ..Default::default()
+                        },
+                    );
+                }
+                self.focused = Some(id);
+                self.step(
+                    id,
+                    HostBatch {
+                        window_focused: Some(true),
+                        ..Default::default()
+                    },
+                );
+            }
+            self.dispatch_ui(id, UiEvent::PointerPressed(local));
+        } else {
+            self.dispatch_ui(id, UiEvent::PointerReleased(local));
+        }
+        true
+    }
+
+    pub fn scroll(&mut self, point: (f64, f64), horizontal: f32, vertical: f32) -> bool {
+        let Some((id, local)) = self.surface_at(point) else {
+            return false;
+        };
+        if horizontal != 0.0 {
+            self.dispatch_ui(
+                id,
+                UiEvent::ScrollHorizontal {
+                    point: local,
+                    delta_x: horizontal,
+                },
+            );
+        }
+        if vertical != 0.0 {
+            self.dispatch_ui(
+                id,
+                UiEvent::Scroll {
+                    point: local,
+                    delta_y: vertical,
+                },
+            );
+        }
+        true
+    }
+
+    pub fn touch(&mut self, contact: u64, point: (f64, f64), phase: TouchPhase) -> bool {
+        match phase {
+            TouchPhase::Started => {
+                let Some((id, local)) = self.surface_at(point) else {
+                    return false;
+                };
+                self.touches.insert(contact, (id, local));
+                if self.focused != Some(id) {
+                    if let Some(previous) = self.focused {
+                        self.step(
+                            previous,
+                            HostBatch {
+                                window_focused: Some(false),
+                                ..Default::default()
+                            },
+                        );
+                    }
+                    self.focused = Some(id);
+                    self.step(
+                        id,
+                        HostBatch {
+                            window_focused: Some(true),
+                            ..Default::default()
+                        },
+                    );
+                }
+                self.dispatch_ui(id, UiEvent::PointerPressed(local));
+                true
+            }
+            TouchPhase::Moved => self.touches.get(&contact).copied().is_some_and(|(id, _)| {
+                let Some(surface) = self.presentation.get(&id) else {
+                    return false;
+                };
+                let (x, y, _, _) = surface.placement.geometry;
+                let local = UiPoint {
+                    x: (point.0 - f64::from(x)) as f32,
+                    y: (point.1 - f64::from(y)) as f32,
+                };
+                self.touches.insert(contact, (id, local));
+                self.dispatch_ui(id, UiEvent::PointerMoved(local));
+                true
+            }),
+            TouchPhase::Ended => self.touches.remove(&contact).is_some_and(|(id, local)| {
+                self.dispatch_ui(id, UiEvent::PointerReleased(local));
+                true
+            }),
+            TouchPhase::Cancelled => self
+                .touches
+                .remove(&contact)
+                .is_some_and(|(id, _)| self.dispatch_ui(id, UiEvent::PointerCancelled)),
+        }
+    }
+
+    pub fn keyboard(&mut self, event: UiEvent) -> bool {
+        self.focused.is_some_and(|id| {
+            self.dispatch_ui(id, event);
+            true
+        })
+    }
+
+    pub fn cancel_touches(&mut self) -> bool {
+        let targets = std::mem::take(&mut self.touches);
+        let mut handled = false;
+        for (_, (id, _)) in targets {
+            handled |= self.dispatch_ui(id, UiEvent::PointerCancelled);
+        }
+        handled
     }
 
     pub fn ids_for_output<'a>(
@@ -216,10 +421,18 @@ impl InternalUiRuntime {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TouchPhase {
+    Started,
+    Moved,
+    Ended,
+    Cancelled,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_ui::{Text, View, ViewContext};
+    use nickel_ui::{Button, Text, View, ViewContext};
 
     struct Label;
     impl Application for Label {
@@ -269,6 +482,70 @@ mod tests {
         );
     }
 
+    struct Counter(usize);
+    impl Application for Counter {
+        type Message = ();
+        fn update(&mut self, (): ()) {
+            self.0 += 1;
+        }
+        fn view(&self, _: ViewContext) -> impl View<Self::Message> {
+            Button::new((), "count")
+        }
+    }
+
+    #[test]
+    fn hit_testing_respects_system_role_stack_and_focus_routes_keyboard() {
+        let mut runtime = InternalUiRuntime::default();
+        let application = runtime.insert(
+            Counter(0),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (0, 0, 100, 100),
+                output: None,
+            },
+            1.0,
+        );
+        let panel = runtime.insert(
+            Counter(0),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (0, 0, 100, 40),
+                output: None,
+            },
+            1.0,
+        );
+
+        assert_eq!(
+            runtime.surface_at((10.0, 10.0)).map(|hit| hit.0),
+            Some(panel)
+        );
+        assert!(runtime.pointer_button((10.0, 60.0), true));
+        assert_eq!(runtime.focused(), Some(application));
+        assert!(runtime.keyboard(UiEvent::KeyboardActivate));
+        assert_eq!(
+            runtime
+                .surfaces
+                .get(application)
+                .unwrap()
+                .application()
+                .downcast_ref::<Counter>()
+                .unwrap()
+                .0,
+            1
+        );
+        assert_eq!(
+            runtime
+                .surfaces
+                .get(panel)
+                .unwrap()
+                .application()
+                .downcast_ref::<Counter>()
+                .unwrap()
+                .0,
+            0
+        );
+    }
+
     #[test]
     fn renderer_neutral_scene_uses_the_same_presentation_lifecycle() {
         let mut runtime = InternalUiRuntime::default();
@@ -276,5 +553,14 @@ mod tests {
         assert!(runtime.has_damage());
         assert!(runtime.render_buffer(id).is_some());
         assert!(!runtime.has_damage());
+    }
+
+    #[test]
+    fn input_outside_internal_surfaces_is_left_for_wayland_clients() {
+        let mut runtime = InternalUiRuntime::default();
+        runtime.insert(Label, placement(Some("DP-1")), 1.0);
+        assert!(!runtime.pointer_motion((500.0, 500.0)));
+        assert!(!runtime.pointer_button((500.0, 500.0), true));
+        assert!(!runtime.scroll((500.0, 500.0), 0.0, 1.0));
     }
 }

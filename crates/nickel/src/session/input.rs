@@ -27,7 +27,49 @@ use crate::session::{
     window_frame::{self, FramePart},
 };
 
+fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::UiEvent> {
+    if state != KeyState::Pressed {
+        return None;
+    }
+    Some(match sym.raw() {
+        keysyms::KEY_Tab => nickel_ui::UiEvent::FocusNext,
+        keysyms::KEY_ISO_Left_Tab => nickel_ui::UiEvent::FocusPrevious,
+        keysyms::KEY_Up => nickel_ui::UiEvent::KeyboardNavigateUp,
+        keysyms::KEY_Down => nickel_ui::UiEvent::KeyboardNavigateDown,
+        keysyms::KEY_Left => nickel_ui::UiEvent::KeyboardNavigateLeft,
+        keysyms::KEY_Right => nickel_ui::UiEvent::KeyboardNavigateRight,
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter | keysyms::KEY_space => {
+            nickel_ui::UiEvent::KeyboardActivate
+        }
+        keysyms::KEY_Escape => nickel_ui::UiEvent::KeyboardNavigateBack,
+        keysyms::KEY_BackSpace => nickel_ui::UiEvent::TextBackspace,
+        keysyms::KEY_Delete => nickel_ui::UiEvent::TextDelete,
+        keysyms::KEY_Home => nickel_ui::UiEvent::KeyboardNavigateStart,
+        keysyms::KEY_End => nickel_ui::UiEvent::KeyboardNavigateEnd,
+        keysyms::KEY_Page_Up => nickel_ui::UiEvent::KeyboardNavigatePageUp,
+        keysyms::KEY_Page_Down => nickel_ui::UiEvent::KeyboardNavigatePageDown,
+        _ => {
+            let character = sym.key_char()?;
+            if character.is_control() {
+                return None;
+            }
+            nickel_ui::UiEvent::TextInput(character.to_string())
+        }
+    })
+}
+
 impl NickelSession {
+    fn route_internal_pointer_motion(
+        &mut self,
+        position: smithay::utils::Point<f64, Logical>,
+    ) -> bool {
+        let handled = self.internal_ui.pointer_motion((position.x, position.y));
+        if handled {
+            self.request_output_redraw();
+        }
+        handled
+    }
+
     fn recovery_pointer_action(
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
@@ -455,6 +497,13 @@ impl NickelSession {
                             if outcome.suppress {
                                 return FilterResult::Intercept(None);
                             }
+                            if session.internal_ui.focused().is_some() {
+                                if let Some(event) = internal_keyboard_event(sym, state) {
+                                    session.internal_ui.keyboard(event);
+                                }
+                                session.request_output_redraw();
+                                return FilterResult::Intercept(None);
+                            }
                             FilterResult::Forward
                         },
                     )
@@ -518,9 +567,14 @@ impl NickelSession {
                             self.constrained_pointer_position(&surface, origin, current, proposed);
                         (position, active.then_some((focus, origin)))
                     });
+                let internal =
+                    constraint_focus.is_none() && self.route_internal_pointer_motion(position);
                 self.update_frame_cursor(position);
-                let motion_focus =
-                    constraint_focus.or_else(|| self.pointer_surface_under(position));
+                let motion_focus = constraint_focus.or_else(|| {
+                    (!internal)
+                        .then(|| self.pointer_surface_under(position))
+                        .flatten()
+                });
                 pointer.motion(
                     self,
                     motion_focus,
@@ -567,7 +621,10 @@ impl NickelSession {
 
                 let serial = SERIAL_COUNTER.next_serial();
 
+                let internal =
+                    constraint_focus.is_none() && self.route_internal_pointer_motion(pos);
                 let under = constraint_focus.or_else(|| self.pointer_surface_under(pos));
+                let under = (!internal).then_some(under).flatten();
 
                 pointer.motion(
                     self,
@@ -590,6 +647,14 @@ impl NickelSession {
                 let button = event.button_code();
 
                 let button_state = event.state();
+
+                if self.internal_ui.pointer_button(
+                    (pointer.current_location().x, pointer.current_location().y),
+                    button_state == ButtonState::Pressed,
+                ) {
+                    self.request_output_redraw();
+                    return None;
+                }
 
                 if button_state == ButtonState::Pressed {
                     self.record_interaction_output(pointer.current_location());
@@ -1027,6 +1092,16 @@ impl NickelSession {
                 let vertical_amount =
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
+                let location = pointer.current_location();
+                if self.internal_ui.scroll(
+                    (location.x, location.y),
+                    horizontal_amount as f32,
+                    vertical_amount as f32,
+                ) {
+                    self.request_output_redraw();
+                    return None;
+                }
+
                 let mut frame = AxisFrame::new(event.time()).source(source);
                 if horizontal_amount != 0.0 {
                     frame = frame.value(Axis::Horizontal, horizontal_amount);
@@ -1057,6 +1132,14 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                if self.internal_ui.touch(
+                    i32::from(event.slot()) as u64,
+                    (location.x, location.y),
+                    crate::session::TouchPhase::Started,
+                ) {
+                    self.request_output_redraw();
+                    return None;
+                }
                 if let Some(window) = self
                     .space
                     .element_under(location)
@@ -1090,6 +1173,14 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
+                if self.internal_ui.touch(
+                    i32::from(event.slot()) as u64,
+                    (location.x, location.y),
+                    crate::session::TouchPhase::Moved,
+                ) {
+                    self.request_output_redraw();
+                    return None;
+                }
                 self.record_interaction_output(location);
                 let touch = self.seat.get_touch().unwrap();
                 touch.motion(
@@ -1103,6 +1194,14 @@ impl NickelSession {
                 );
             }
             InputEvent::TouchUp { event, .. } => {
+                if self.internal_ui.touch(
+                    i32::from(event.slot()) as u64,
+                    (0.0, 0.0),
+                    crate::session::TouchPhase::Ended,
+                ) {
+                    self.request_output_redraw();
+                    return None;
+                }
                 self.active_touch_slots.remove(&event.slot());
                 let touch = self.seat.get_touch().unwrap();
                 touch.up(
@@ -1116,6 +1215,9 @@ impl NickelSession {
             }
             InputEvent::TouchFrame { .. } => self.seat.get_touch().unwrap().frame(self),
             InputEvent::TouchCancel { .. } => {
+                if self.internal_ui.cancel_touches() {
+                    self.request_output_redraw();
+                }
                 self.active_touch_slots.clear();
                 self.seat.get_touch().unwrap().cancel(self);
             }
