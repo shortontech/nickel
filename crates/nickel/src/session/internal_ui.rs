@@ -2011,14 +2011,7 @@ mod tests {
     fn hiding_fallback_surface_releases_frame_sized_storage_until_shown() {
         let mut runtime = InternalUiRuntime::default();
         runtime.set_renderer_mode(InternalUiRendererMode::Software);
-        let id = runtime.insert_scene(
-            vec![PaintCommand::Fill {
-                rect: nickel_ui::Rect::new(0.0, 0.0, 120.0, 32.0),
-                color: 0xff336699,
-            }],
-            placement(Some("DP-1")),
-            1.0,
-        );
+        let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
 
         assert!(runtime.render_buffer(id).is_some());
         let live = runtime.renderer_diagnostics(id).unwrap();
