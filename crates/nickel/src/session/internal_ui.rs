@@ -52,6 +52,8 @@ pub enum InternalSurfaceRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalSurfaceLayer {
     Background,
+    /// Application windows, composed in the ordinary client scene boundary.
+    Application,
     Overlay,
 }
 
@@ -1400,9 +1402,10 @@ impl InternalUiRuntime {
     fn role_layer(role: InternalSurfaceRole) -> InternalSurfaceLayer {
         match role {
             InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
-            InternalSurfaceRole::Application
-            | InternalSurfaceRole::Panel
-            | InternalSurfaceRole::Overlay => InternalSurfaceLayer::Overlay,
+            InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
+            InternalSurfaceRole::Panel | InternalSurfaceRole::Overlay => {
+                InternalSurfaceLayer::Overlay
+            }
         }
     }
 
@@ -1421,7 +1424,11 @@ impl InternalUiRuntime {
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
                 (surface.visible
-                    && !(client_present && surface.placement.role == InternalSurfaceRole::Desktop)
+                    && !(client_present
+                        && matches!(
+                            surface.placement.role,
+                            InternalSurfaceRole::Desktop | InternalSurfaceRole::Application
+                        ))
                     && point.0 >= f64::from(x)
                     && point.1 >= f64::from(y)
                     && point.0 < f64::from(x) + f64::from(width)
@@ -1437,6 +1444,34 @@ impl InternalUiRuntime {
             })
             .max_by_key(|(role, id, _)| (*role, *id))
             .map(|(_, id, local)| (id, local))
+    }
+
+    /// Return an application surface irrespective of the external client scene.
+    ///
+    /// This is used only to begin compositor gestures such as Super+drag; normal
+    /// pointer routing continues to respect the client scene above it.
+    pub fn application_surface_at(
+        &self,
+        point: (f64, f64),
+    ) -> Option<(InternalSurfaceId, UiPoint)> {
+        self.presentation
+            .iter()
+            .filter(|(_, surface)| surface.placement.role == InternalSurfaceRole::Application)
+            .filter_map(|(id, surface)| {
+                let (x, y, width, height) = surface.placement.geometry;
+                (point.0 >= f64::from(x)
+                    && point.1 >= f64::from(y)
+                    && point.0 < f64::from(x) + f64::from(width)
+                    && point.1 < f64::from(y) + f64::from(height))
+                .then_some((
+                    *id,
+                    UiPoint {
+                        x: (point.0 - f64::from(x)) as f32,
+                        y: (point.1 - f64::from(y)) as f32,
+                    },
+                ))
+            })
+            .max_by_key(|(id, _)| *id)
     }
 
     fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {

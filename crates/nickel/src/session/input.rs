@@ -22,7 +22,7 @@ use smithay::{
 };
 
 use crate::session::{
-    grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
+    grabs::{MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     state::NickelSession,
     window_frame::{self, FramePart},
 };
@@ -656,6 +656,34 @@ impl NickelSession {
 
                 let location = pointer.current_location();
                 let client_present = self.client_scene_under(location);
+                if event.button() == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
+                    && keyboard.modifier_state().logo
+                    && !pointer.is_grabbed()
+                    && let Some((surface, _)) = self
+                        .internal_ui
+                        .application_surface_at((location.x, location.y))
+                    && let Some(placement) = self.internal_ui.placement(surface).cloned()
+                {
+                    self.hotkeys.begin_pointer_chord();
+                    self.internal_ui.focus_surface(surface);
+                    let start_data = GrabStartData {
+                        focus: None,
+                        button,
+                        location,
+                    };
+                    pointer.set_grab(
+                        self,
+                        MoveInternalSurfaceGrab {
+                            start_data,
+                            surface,
+                            initial_location: (placement.geometry.0, placement.geometry.1).into(),
+                        },
+                        serial,
+                        Focus::Clear,
+                    );
+                    return None;
+                }
                 if self.internal_ui.pointer_button_with_client(
                     (location.x, location.y),
                     button_state == ButtonState::Pressed,

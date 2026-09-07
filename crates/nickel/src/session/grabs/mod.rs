@@ -153,5 +153,8 @@ macro_rules! forward_pointer_grab_events {
 pub mod move_grab;
 pub use move_grab::MoveSurfaceGrab;
 
+pub mod move_internal_grab;
+pub use move_internal_grab::MoveInternalSurfaceGrab;
+
 pub mod resize_grab;
 pub use resize_grab::{ResizeEdge, ResizeSurfaceGrab};

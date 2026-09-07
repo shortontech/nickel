@@ -238,6 +238,18 @@ pub fn init_winit(
                             .into_iter()
                             .map(WinitBaseElement::from)
                             .collect::<Vec<_>>();
+                        base_elements.extend(
+                            state
+                                .internal_ui
+                                .render_elements_for_layer(
+                                    renderer,
+                                    &output.name(),
+                                    (0, 0).into(),
+                                    Some(crate::session::InternalSurfaceLayer::Application),
+                                )
+                                .into_iter()
+                                .map(WinitBaseElement::from),
+                        );
                         base_elements.extend(background_elements.map(WinitBaseElement::from));
                         damage_tracker
                             .render_output(
