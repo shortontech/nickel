@@ -146,7 +146,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if arguments.shell_process == backend::ShellProcessMode::Disabled {
+    if arguments.shell_process == backend::ShellProcessMode::Internal {
         state.enable_internal_shell(Arc::new(in_process_session_host.clone()))?;
         tracing::info!(
             surfaces = state.internal_ui.len(),
@@ -197,9 +197,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?)
     } else {
-        tracing::info!(
-            "transitional shell process disabled; compositor-owned UI host must provide shell surfaces"
-        );
+        tracing::info!("compositor-owned shell active; no shell child process started");
         None
     };
 

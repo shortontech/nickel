@@ -24,14 +24,13 @@ pub enum BackendKind {
 
 /// Selects whether the compositor starts the transitional out-of-process shell.
 ///
-/// `Disabled` is the migration seam used by the compositor-owned UI host. It
-/// deliberately leaves the external control protocol available for probes and
-/// acceptance tests; it only removes shell child lifecycle ownership.
+/// `Internal` hosts shell UI in the compositor. `Supervised` retains the
+/// transitional child process as an explicit rollback path.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ShellProcessMode {
-    #[default]
     Supervised,
-    Disabled,
+    #[default]
+    Internal,
 }
 
 impl BackendKind {
@@ -81,7 +80,8 @@ impl SessionArguments {
         };
         let mut test_control = false;
         let mut command = None;
-        let mut shell_process = ShellProcessMode::Supervised;
+        let mut shell_process = ShellProcessMode::Internal;
+        let mut shell_process_explicit = false;
 
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -102,18 +102,19 @@ impl SessionArguments {
                 }
                 Some("--shell-process") => {
                     let value = args.next().ok_or_else(|| {
-                        "--shell-process requires supervised or disabled".to_owned()
+                        "--shell-process requires internal or supervised".to_owned()
                     })?;
                     shell_process = match value.to_str() {
                         Some("supervised") => ShellProcessMode::Supervised,
-                        Some("disabled") => ShellProcessMode::Disabled,
-                        _ => return Err("--shell-process expects supervised or disabled".into()),
+                        Some("internal" | "disabled") => ShellProcessMode::Internal,
+                        _ => return Err("--shell-process expects internal or supervised".into()),
                     };
+                    shell_process_explicit = true;
                 }
                 Some("--test-control") => test_control = true,
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--shell-process supervised|disabled] [--command PROGRAM [ARG ...]]",
+                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--shell-process internal|supervised] [--command PROGRAM [ARG ...]]",
                         argument.to_string_lossy()
                     )
                     .into());
@@ -125,8 +126,11 @@ impl SessionArguments {
             return Err("--test-control is available only with the nested backend".into());
         }
 
-        if shell_process == ShellProcessMode::Disabled && command.is_some() {
-            return Err("--command cannot be combined with --shell-process disabled".into());
+        if command.is_some() {
+            if shell_process_explicit && shell_process == ShellProcessMode::Internal {
+                return Err("--command cannot be combined with --shell-process internal".into());
+            }
+            shell_process = ShellProcessMode::Supervised;
         }
 
         if !backend.available() {
@@ -184,36 +188,42 @@ mod tests {
             SessionArguments::parse([])
                 .expect("default arguments should parse")
                 .shell_process,
-            ShellProcessMode::Supervised
+            ShellProcessMode::Internal
         );
     }
 
     #[cfg(feature = "backend-winit")]
     #[test]
-    fn shell_process_can_be_disabled_without_disabling_test_control() {
+    fn internal_shell_is_default_and_keeps_test_control_available() {
         let arguments = SessionArguments::parse([
             OsString::from("--backend"),
             OsString::from("nested"),
             OsString::from("--test-control"),
-            OsString::from("--shell-process"),
-            OsString::from("disabled"),
         ])
         .expect("external test control is independent of shell supervision");
         assert!(arguments.test_control);
-        assert_eq!(arguments.shell_process, ShellProcessMode::Disabled);
+        assert_eq!(arguments.shell_process, ShellProcessMode::Internal);
         assert!(arguments.command.is_none());
     }
 
     #[test]
-    fn disabled_shell_process_rejects_a_child_command() {
+    fn explicit_internal_shell_rejects_a_child_command() {
         let error = SessionArguments::parse([
             OsString::from("--shell-process"),
-            OsString::from("disabled"),
+            OsString::from("internal"),
             OsString::from("--command"),
             OsString::from("nickel"),
         ])
         .expect_err("disabled supervision cannot accept a child command");
         assert!(error.to_string().contains("cannot be combined"));
+    }
+
+    #[test]
+    fn command_is_an_explicit_supervised_shell_rollback() {
+        let arguments =
+            SessionArguments::parse([OsString::from("--command"), OsString::from("nickel")])
+                .expect("an explicit child command selects supervised mode");
+        assert_eq!(arguments.shell_process, ShellProcessMode::Supervised);
     }
 
     #[cfg(feature = "backend-winit")]

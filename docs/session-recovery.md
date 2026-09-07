@@ -1,13 +1,16 @@
 # Session recovery
 
-The `nickel` executable owns both the Linux compositor session and the user-facing shell. During
-the transition to fully internal shell surfaces, the compositor starts a private
-`nickel --role shell` child. This role is an implementation detail, not a separate installed product
-or a user-facing startup command. An unexpected role exit does not close application clients or end
-the login session. Restarts use a bounded one-to-four-second delay; a role that remains healthy for
-thirty seconds clears the consecutive failure count.
+The `nickel` executable owns both the Linux compositor session and the user-facing shell. Normal
+`nickel --backend udev` and `nickel --backend winit` launches host shell surfaces inside the
+compositor process and communicate through typed in-process authority.
 
-After three consecutive failures the compositor presents its own recovery panel on every output.
+`--shell-process supervised` is a temporary rollback mode. It starts the private
+`nickel --role shell` child used by the previous architecture; `--command PROGRAM` also selects
+this mode explicitly. In supervised mode, an unexpected role exit does not close application
+clients or end the login session. Restarts use a bounded one-to-four-second delay; a role that
+remains healthy for thirty seconds clears the consecutive failure count.
+
+After three consecutive failures in supervised rollback mode, the compositor presents its own recovery panel on every output.
 This panel is not a shell client and remains available when the internal shell role cannot start.
 While it is visible, ordinary keyboard, pointer, and touch input is withheld from application
 clients. `Enter` requests an immediate supervised restart and `Escape` terminates the compositor

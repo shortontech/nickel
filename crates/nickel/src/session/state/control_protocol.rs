@@ -1153,14 +1153,44 @@ impl NickelSession {
         let authenticated_shell_pid = self.authenticated_shell_pids.iter().copied().next();
         let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
         let surfaces = self.protocol_shell_surfaces();
+        let internal_surface_role = |role| {
+            use crate::winit_shell::SurfaceRole;
+            Some(match role {
+                ShellRole::Desktop => SurfaceRole::Desktop,
+                ShellRole::Panel => SurfaceRole::Panel,
+                ShellRole::Launcher => SurfaceRole::Launcher,
+                ShellRole::ControlCenter => SurfaceRole::ControlCenter,
+                ShellRole::ContextMenu => SurfaceRole::WindowContextMenu,
+                ShellRole::Preview => SurfaceRole::WindowPreview,
+                ShellRole::Notification => SurfaceRole::Notification,
+                ShellRole::VolumeOsd => SurfaceRole::VolumeOsd,
+                ShellRole::ProjectMenu => SurfaceRole::CodexProjectMenu,
+                ShellRole::Lock => SurfaceRole::Lock,
+                ShellRole::Screenshot => SurfaceRole::Screenshot,
+                ShellRole::OnScreenKeyboard => SurfaceRole::OnScreenKeyboard,
+                ShellRole::Recovery => return None,
+            })
+        };
+        let internal_role_count = |role| {
+            self.internal_shell.as_ref().and_then(|shell| {
+                let role = internal_surface_role(role)?;
+                Some(
+                    shell
+                        .surfaces()
+                        .iter()
+                        .filter(|surface| surface.role == role)
+                        .count(),
+                )
+            })
+        };
         let role_count = |role| {
-            u16::try_from(
+            let count = internal_role_count(role).unwrap_or_else(|| {
                 surfaces
                     .iter()
                     .filter(|surface| surface.role == role)
-                    .count(),
-            )
-            .unwrap_or(u16::MAX)
+                    .count()
+            });
+            u16::try_from(count).unwrap_or(u16::MAX)
         };
         let output_names = self
             .space
@@ -1178,7 +1208,7 @@ impl NickelSession {
                 .collect::<HashSet<_>>()
         };
         let registered_role_count = |role| {
-            u16::try_from(
+            let count = internal_role_count(role).unwrap_or_else(|| {
                 self.registered_shell_role_slots
                     .iter()
                     .filter(|registration| {
@@ -1189,9 +1219,9 @@ impl NickelSession {
                                 &expected_panel_outputs,
                             )
                     })
-                    .count(),
-            )
-            .unwrap_or(u16::MAX)
+                    .count()
+            });
+            u16::try_from(count).unwrap_or(u16::MAX)
         };
         // Readiness is a protocol registration barrier, not a rendering
         // barrier. The shell deliberately waits for readiness before it
@@ -1227,24 +1257,37 @@ impl NickelSession {
         .all(|role| registered_role_count(role) == 1 && role_count(role) <= 1);
         let expected_panels = u16::try_from(expected_panel_outputs.len()).unwrap_or(u16::MAX);
         let registered_role_outputs = |role| {
-            self.registered_shell_role_slots
-                .iter()
-                .filter(|registration| {
-                    registration.role == role
-                        && shell_registration_is_active(
-                            registration,
-                            &output_names,
-                            &expected_panel_outputs,
-                        )
-                })
-                .filter_map(|registration| registration.output.clone())
-                .collect::<HashSet<_>>()
+            if let Some(shell) = &self.internal_shell {
+                let Some(role) = internal_surface_role(role) else {
+                    return HashSet::new();
+                };
+                shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| surface.role == role)
+                    .filter_map(|surface| surface.output.clone())
+                    .collect::<HashSet<_>>()
+            } else {
+                self.registered_shell_role_slots
+                    .iter()
+                    .filter(|registration| {
+                        registration.role == role
+                            && shell_registration_is_active(
+                                registration,
+                                &output_names,
+                                &expected_panel_outputs,
+                            )
+                    })
+                    .filter_map(|registration| registration.output.clone())
+                    .collect::<HashSet<_>>()
+            }
         };
         let output_roles_ready = registered_role_outputs(ShellRole::Desktop) == output_names
             && registered_role_outputs(ShellRole::Panel) == expected_panel_outputs
             && registered_role_outputs(ShellRole::Lock) == output_names;
-        let ready = expected_shell_pid.is_some()
-            && expected_shell_pid == authenticated_shell_pid
+        let shell_authority_ready = self.internal_shell.is_some()
+            || (expected_shell_pid.is_some() && expected_shell_pid == authenticated_shell_pid);
+        let ready = shell_authority_ready
             && desktops == outputs
             && panels == expected_panels
             && locks == outputs
