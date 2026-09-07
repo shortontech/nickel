@@ -2424,6 +2424,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "nickel"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "bitflags 2.13.1",
+ "evdev",
+ "freedesktop-desktop-entry",
+ "freedesktop-icons",
+ "image",
+ "jiff",
+ "libloading",
+ "nickel-build-support",
+ "nickel-codex",
+ "nickel-codex-ui",
+ "nickel-core",
+ "nickel-file",
+ "nickel-i18n",
+ "nickel-input",
+ "nickel-logging",
+ "nickel-platform",
+ "nickel-session-protocol",
+ "nickel-ui",
+ "nickel-ui-testkit",
+ "nix 0.31.3",
+ "notify",
+ "nucleo-matcher",
+ "pipewire-native",
+ "pipewire-native-spa",
+ "pollster",
+ "raw-window-handle",
+ "resvg",
+ "serde_json",
+ "sha2",
+ "shlex 1.3.0",
+ "smithay",
+ "smithay-client-toolkit 0.20.0",
+ "softbuffer",
+ "tempfile",
+ "thiserror 2.0.20",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "windows",
+ "windows-core",
+ "winit 0.30.13",
+ "xcursor",
+ "zbus",
+ "zeroize",
+]
+
+[[package]]
 name = "nickel-build-support"
 version = "0.1.0"
 dependencies = [
@@ -2627,33 +2677,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nickel-session"
-version = "0.1.0"
-dependencies = [
- "bitflags 2.13.1",
- "evdev",
- "image",
- "nickel-core",
- "nickel-input",
- "nickel-logging",
- "nickel-session-protocol",
- "nickel-ui",
- "nix 0.31.3",
- "resvg",
- "serde_json",
- "sha2",
- "smithay",
- "smithay-client-toolkit 0.20.0",
- "softbuffer",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "winit 0.30.13",
- "xcursor",
- "zbus",
-]
-
-[[package]]
 name = "nickel-session-protocol"
 version = "0.1.0"
 dependencies = [
@@ -2684,49 +2707,6 @@ dependencies = [
  "windows",
  "winit 0.30.13",
  "zbus",
-]
-
-[[package]]
-name = "nickel-shell"
-version = "0.1.0"
-dependencies = [
- "arboard",
- "freedesktop-desktop-entry",
- "freedesktop-icons",
- "image",
- "jiff",
- "libloading",
- "nickel-build-support",
- "nickel-codex",
- "nickel-codex-ui",
- "nickel-core",
- "nickel-file",
- "nickel-i18n",
- "nickel-input",
- "nickel-logging",
- "nickel-platform",
- "nickel-session-protocol",
- "nickel-ui",
- "nickel-ui-testkit",
- "notify",
- "nucleo-matcher",
- "pipewire-native",
- "pipewire-native-spa",
- "pollster",
- "raw-window-handle",
- "resvg",
- "serde_json",
- "sha2",
- "shlex 1.3.0",
- "softbuffer",
- "tempfile",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "windows",
- "windows-core",
- "winit 0.30.13",
- "zbus",
- "zeroize",
 ]
 
 [[package]]
@@ -2803,11 +2783,11 @@ name = "nickel-ui-workbench"
 version = "0.1.0"
 dependencies = [
  "image",
+ "nickel",
  "nickel-file",
  "nickel-gaze",
  "nickel-markdown",
  "nickel-markdown-ui",
- "nickel-shell",
  "nickel-ui",
  "nickel-ui-testkit",
  "serde",

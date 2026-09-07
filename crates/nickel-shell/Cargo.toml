@@ -1,5 +1,5 @@
 [package]
-name = "nickel-shell"
+name = "nickel"
 version = "0.1.0"
 default-run = "nickel"
 autobins = false
@@ -7,9 +7,25 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# Preserve the Rust library name while downstream crates migrate to the unified
+# package. The product package and primary executable are both named `nickel`.
+[lib]
+name = "nickel_shell"
+
 [features]
-default = []
+default = ["backend-udev"]
 workbench-fixtures = ["dep:nickel-ui-testkit", "nickel-codex-ui/workbench-fixtures"]
+backend-winit = ["smithay/backend_winit", "nickel-input/winit"]
+backend-udev = [
+    "smithay/backend_drm",
+    "smithay/backend_egl",
+    "smithay/backend_gbm",
+    "smithay/backend_libinput",
+    "smithay/backend_session_libseat",
+    "smithay/backend_udev",
+    "smithay/renderer_gl",
+    "smithay/renderer_multi",
+]
 
 [dependencies]
 image.workspace = true
@@ -44,6 +60,12 @@ notify.workspace = true
 pipewire-native.workspace = true
 pipewire-native-spa.workspace = true
 serde_json.workspace = true
+smithay.workspace = true
+evdev = "0.13.2"
+bitflags.workspace = true
+nix.workspace = true
+thiserror.workspace = true
+xcursor.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 arboard = "3.6.1"
@@ -84,12 +106,29 @@ windows = { workspace = true, features = [
 [dev-dependencies]
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 sha2.workspace = true
+smithay-client-toolkit = "0.20.0"
 tempfile = "3.25.0"
 toml.workspace = true
 
 [[bin]]
 name = "nickel"
 path = "src/bin/nickel-shell.rs"
+
+[[bin]]
+name = "nickel-session"
+path = "src/bin/nickel-session.rs"
+
+[[bin]]
+name = "nickel-login"
+path = "src/bin/nickel-login.rs"
+
+[[bin]]
+name = "nickel-screenshot"
+path = "src/bin/nickel-screenshot.rs"
+
+[[bin]]
+name = "nickel-test-input"
+path = "src/bin/nickel-test-input.rs"
 
 [[bin]]
 name = "nickel-test-notification"
@@ -107,6 +146,10 @@ path = "src/bin/nickel-input-harness.rs"
 name = "nickel-launcher-verify"
 path = "src/bin/nickel-launcher-verify.rs"
 required-features = ["workbench-fixtures"]
+
+[[example]]
+name = "pointer_constraints"
+required-features = ["backend-winit"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 nickel-build-support = { path = "../nickel-build-support" }

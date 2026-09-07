@@ -1,4 +1,4 @@
-use crate::{
+use crate::session::{
     NickelSession,
     grabs::resize_grab,
     state::{ClientState, SurfaceBufferCommit},

@@ -134,7 +134,7 @@ pub fn fit_keyboard_recipient(content: Geometry, area: Geometry, decorated: bool
     if !decorated {
         return constrain_to_area(content, area);
     }
-    let outer = crate::window_frame::outer_geometry(content);
+    let outer = crate::session::window_frame::outer_geometry(content);
     let fitted = constrain_to_area(outer, area);
     Geometry {
         x: fitted.x + content.x - outer.x,
@@ -329,7 +329,7 @@ mod tests {
         };
         for content in [small, large] {
             let fitted = super::fit_keyboard_recipient(content, area, true);
-            let outer = crate::window_frame::outer_geometry(fitted);
+            let outer = crate::session::window_frame::outer_geometry(fitted);
             assert!(outer.y >= area.y);
             assert!(outer.y + outer.height <= area.y + area.height);
             assert!(outer.x + outer.width <= area.x + area.width);

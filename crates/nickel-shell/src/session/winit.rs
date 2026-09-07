@@ -33,7 +33,7 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
 };
 
-use crate::{NickelSession, state::PreviewFrame};
+use crate::session::{NickelSession, state::PreviewFrame};
 
 const PREVIEW_CAPTURE_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -126,7 +126,7 @@ pub fn init_winit(
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
     let mut last_preview_highlight = None;
     let mut pending_output_capture = None;
-    let frame_icons = crate::window_frame::FrameIcons::load();
+    let frame_icons = crate::session::window_frame::FrameIcons::load();
 
     // SAFETY: startup is single-threaded and no child process is spawned until
     // after this function returns.
@@ -302,7 +302,7 @@ pub fn init_winit(
                             let dim_buffer =
                                 SolidColorBuffer::new(
                                     size.to_logical(1),
-                                    crate::state::shell_scrim(0.62),
+                                    crate::session::state::shell_scrim(0.62),
                                 );
                             overlay_elements.push(WinitFrameElement::from(
                                 SolidColorRenderElement::from_buffer(
@@ -319,7 +319,7 @@ pub fn init_winit(
                             let dim =
                                 SolidColorBuffer::new(
                                     size.to_logical(1),
-                                    crate::state::shell_scrim(0.48),
+                                    crate::session::state::shell_scrim(0.48),
                                 );
                             overlay_elements.insert(
                                 0,
@@ -355,7 +355,7 @@ pub fn init_winit(
                             && let Some(icon) = state.dnd_icon.as_ref()
                         {
                             let pointer = state.seat.get_pointer().unwrap().current_location();
-                            let location = crate::state::drag_icon_location(
+                            let location = crate::session::state::drag_icon_location(
                                 pointer,
                                 Rectangle::from_size(size.to_logical(1)),
                             )
@@ -383,8 +383,8 @@ pub fn init_winit(
                         }
                         let recovery_banner = recovery_visible.then(|| {
                                 let panel = state.recovery_ui.render_buffer();
-                                let panel_geometry = crate::recovery_ui::RecoveryUi::panel_geometry(
-                                    crate::shell_layout::Geometry {
+                                let panel_geometry = crate::session::recovery_ui::RecoveryUi::panel_geometry(
+                                    crate::session::shell_layout::Geometry {
                                         x: 0,
                                         y: 0,
                                         width: size.w,
@@ -590,8 +590,10 @@ pub fn init_winit(
     Ok(())
 }
 
-fn frame_cursor_icon(cursor: crate::window_frame::FrameCursor) -> ::winit::window::CursorIcon {
-    use crate::window_frame::FrameCursor;
+fn frame_cursor_icon(
+    cursor: crate::session::window_frame::FrameCursor,
+) -> ::winit::window::CursorIcon {
+    use crate::session::window_frame::FrameCursor;
     use ::winit::window::CursorIcon;
 
     match cursor {
@@ -611,10 +613,10 @@ fn window_frame_elements(
     state: &NickelSession,
     renderer: &mut GlesRenderer,
     output: &Output,
-    icons: Option<&crate::window_frame::FrameIcons>,
+    icons: Option<&crate::session::window_frame::FrameIcons>,
     palette: &ThemePalette,
 ) -> Vec<WinitFrameElement<GlesRenderer>> {
-    crate::window_frame::retain_titlebars_for_windows(
+    crate::session::window_frame::retain_titlebars_for_windows(
         state.surface_windows.values().map(|id| id.0),
     );
     let Some(output_geometry) = state.space.output_geometry(output) else {
@@ -679,14 +681,15 @@ fn window_frame_elements(
         let Some(frame_bounds) = state.space.element_geometry(window) else {
             continue;
         };
-        let titlebar_geometry =
-            crate::window_frame::titlebar_geometry(crate::shell_layout::Geometry {
+        let titlebar_geometry = crate::session::window_frame::titlebar_geometry(
+            crate::session::shell_layout::Geometry {
                 x: frame_bounds.loc.x,
                 y: frame_bounds.loc.y,
                 width: frame_bounds.size.w,
                 height: frame_bounds.size.h,
-            });
-        if let Some(titlebar) = crate::window_frame::render_titlebar_for(
+            },
+        );
+        if let Some(titlebar) = crate::session::window_frame::render_titlebar_for(
             registry_id.map(|id| id.0),
             titlebar_geometry.width,
             title,
@@ -707,9 +710,10 @@ fn window_frame_elements(
             frame.push(WinitFrameElement::from(element));
         }
         if let Some(icons) = icons {
-            let icon_y =
-                frame_bounds.loc.y - output_geometry.loc.y - crate::window_frame::TITLEBAR_HEIGHT
-                    + 8;
+            let icon_y = frame_bounds.loc.y
+                - output_geometry.loc.y
+                - crate::session::window_frame::TITLEBAR_HEIGHT
+                + 8;
             let icon_x = frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
             let maximized = state.is_maximized_window(window);
             for (buffer, offset) in [
@@ -802,7 +806,7 @@ fn capture_preview(
     (|| {
         let geometry = window.geometry();
         let dimensions =
-            crate::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
+            crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
         let width = i32::from(dimensions.0);
         let height = i32::from(dimensions.1);
         let mut texture = Offscreen::<GlesTexture>::create_buffer(
@@ -846,10 +850,14 @@ fn capture_preview(
             .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)
             .ok()?;
         let mapped = renderer.map_texture(&mapping).ok()?;
-        if !crate::state::preview_mapping_has_exact_size(mapped, dimensions.0, dimensions.1) {
+        if !crate::session::state::preview_mapping_has_exact_size(
+            mapped,
+            dimensions.0,
+            dimensions.1,
+        ) {
             return None;
         }
-        let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
+        let replacement = crate::session::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
         Some(dimensions)
     })()

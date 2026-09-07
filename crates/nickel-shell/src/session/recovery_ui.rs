@@ -3,7 +3,7 @@ use nickel_ui::{
     SoftwareRenderer, Text, UiEvent, UiHost, ViewContext,
 };
 
-use crate::shell_layout::Geometry;
+use crate::session::shell_layout::Geometry;
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,

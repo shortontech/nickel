@@ -174,7 +174,7 @@ fn overlay_pixels_are_drawn_into_the_persistent_render_buffer_allocation() {
 #[test]
 fn task_switcher_overlay_key_reuses_only_unchanged_composition() {
     let key = TaskSwitcherBufferKey {
-        candidates: vec![crate::window_registry::WindowId(1)],
+        candidates: vec![crate::session::window_registry::WindowId(1)],
         selected: 0,
         output_size: (1920, 1080),
         preview_generation: 3,

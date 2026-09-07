@@ -1,4 +1,4 @@
-use crate::{NickelSession, focus::PointerFocusTarget};
+use crate::session::{NickelSession, focus::PointerFocusTarget};
 use smithay::{
     desktop::Window,
     input::pointer::{

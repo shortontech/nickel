@@ -83,7 +83,7 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
     [0.035, 0.043, 0.055, alpha]
 }
 
-use crate::{
+use crate::session::{
     output_retirement::{DeferredRetirements, RetirementAction, capacity_available},
     shell_layout::{self, Geometry},
     window_registry::{WindowId, WindowRegistry},
@@ -420,7 +420,7 @@ pub struct NickelSession {
     pub display_handle: DisplayHandle,
     pub event_loop_handle: smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
     #[cfg(feature = "backend-udev")]
-    pub native: Option<crate::backend::udev::UdevData>,
+    pub native: Option<crate::session::backend::udev::UdevData>,
 
     pub space: Space<Window>,
     pub loop_signal: LoopSignal,
@@ -450,7 +450,7 @@ pub struct NickelSession {
     pub output_capture_source_state: OutputCaptureSourceState,
     pub image_copy_capture_state: ImageCopyCaptureState,
     pub image_copy_sessions: Vec<Session>,
-    pub(crate) pending_image_copy_frames: Vec<crate::handlers::PendingImageCopyFrame>,
+    pub(crate) pending_image_copy_frames: Vec<crate::session::handlers::PendingImageCopyFrame>,
     pub xwm: Option<(XwmId, X11Wm)>,
     pub xwayland_restart_pending: bool,
     pub xwayland_display: Option<u32>,
@@ -458,7 +458,7 @@ pub struct NickelSession {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
-    pub(crate) on_screen_keyboard: crate::on_screen_keyboard::OnScreenKeyboardState,
+    pub(crate) on_screen_keyboard: crate::session::on_screen_keyboard::OnScreenKeyboardState,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
     surface_effective_outputs: HashMap<ObjectId, String>,
@@ -484,7 +484,7 @@ pub struct NickelSession {
     last_logged_shell_readiness: Option<nickel_session_protocol::ShellReadinessSnapshot>,
     test_control_enabled: bool,
     #[cfg(target_os = "linux")]
-    pub(crate) test_controller: Option<crate::test_input::TestController>,
+    pub(crate) test_controller: Option<crate::session::test_input::TestController>,
     expected_shell_pid: Arc<AtomicU32>,
     pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
@@ -542,7 +542,7 @@ pub struct NickelSession {
     pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
     idle_controller: IdleController,
     pub dimmed: bool,
-    pub frame_cursor: crate::window_frame::FrameCursor,
+    pub frame_cursor: crate::session::window_frame::FrameCursor,
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     identify_outputs_generation: u64,
@@ -551,12 +551,12 @@ pub struct NickelSession {
     pub output_capture_reply_path: Option<PathBuf>,
     pub output_capture_request_id: Option<u64>,
     pub shell_failure_count: u8,
-    pub(crate) recovery_ui: crate::recovery_ui::RecoveryUi,
+    pub(crate) recovery_ui: crate::session::recovery_ui::RecoveryUi,
     control_socket_path: PathBuf,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
     deferred_focus_restore: channel::Sender<WindowId>,
-    shell_supervisor: Option<std::sync::mpsc::Sender<crate::ShellSupervisorCommand>>,
+    shell_supervisor: Option<std::sync::mpsc::Sender<crate::session::ShellSupervisorCommand>>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
 }
@@ -797,8 +797,8 @@ impl NickelSession {
                     self.lock_session();
                 }
                 IdleEffect::Suspend => {
-                    crate::session_services::request(
-                        crate::session_services::SystemAction::Suspend,
+                    crate::session::session_services::request(
+                        crate::session::session_services::SystemAction::Suspend,
                     );
                 }
             }
@@ -937,11 +937,11 @@ impl NickelSession {
         let image_capture_source_state = ImageCaptureSourceState::new();
         let output_capture_source_state = OutputCaptureSourceState::new_with_filter::<Self, _>(
             &dh,
-            crate::handlers::is_portal_capture_client,
+            crate::session::handlers::is_portal_capture_client,
         );
         let image_copy_capture_state = ImageCopyCaptureState::new_with_filter::<Self, _>(
             &dh,
-            crate::handlers::is_portal_capture_client,
+            crate::session::handlers::is_portal_capture_client,
         );
         let popups = PopupManager::default();
 
@@ -991,7 +991,7 @@ impl NickelSession {
             unsafe { std::env::remove_var("NICKEL_SHELL_TEST_CONTROL") };
         }
         let secure_storage_state = Arc::new(AtomicU8::new(
-            crate::login_services::SecureStorageState::Starting as u8,
+            crate::session::login_services::SecureStorageState::Starting as u8,
         ));
         let secure_storage_retry = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (deferred_focus_restore, deferred_focus_restore_rx) = channel::channel();
@@ -1139,7 +1139,7 @@ impl NickelSession {
             active_touch_slots: HashSet::new(),
             idle_controller,
             dimmed: false,
-            frame_cursor: crate::window_frame::FrameCursor::Arrow,
+            frame_cursor: crate::session::window_frame::FrameCursor::Arrow,
             buffer_commit_tx: None,
             identify_outputs_until: None,
             identify_outputs_generation: 0,
@@ -1148,7 +1148,7 @@ impl NickelSession {
             output_capture_reply_path: None,
             output_capture_request_id: None,
             shell_failure_count: 0,
-            recovery_ui: crate::recovery_ui::RecoveryUi::new(),
+            recovery_ui: crate::session::recovery_ui::RecoveryUi::new(),
             control_socket_path,
             secure_storage_state,
             secure_storage_retry,
@@ -1189,8 +1189,10 @@ impl NickelSession {
         Arc::clone(&self.secure_storage_retry)
     }
 
-    pub(crate) fn secure_storage_state(&self) -> crate::login_services::SecureStorageState {
-        crate::login_services::SecureStorageState::from_u8(
+    pub(crate) fn secure_storage_state(
+        &self,
+    ) -> crate::session::login_services::SecureStorageState {
+        crate::session::login_services::SecureStorageState::from_u8(
             self.secure_storage_state.load(Ordering::Acquire),
         )
     }
@@ -1201,13 +1203,13 @@ impl NickelSession {
 
     pub(crate) fn set_shell_supervisor(
         &mut self,
-        supervisor: std::sync::mpsc::Sender<crate::ShellSupervisorCommand>,
+        supervisor: std::sync::mpsc::Sender<crate::session::ShellSupervisorCommand>,
     ) {
         self.shell_supervisor = Some(supervisor);
     }
 
     pub fn shell_recovery_visible(&self) -> bool {
-        crate::shell_recovery_visible_for(self.shell_failure_count)
+        crate::session::shell_recovery_visible_for(self.shell_failure_count)
     }
 
     pub(crate) fn retry_shell_from_recovery(&mut self) -> bool {
@@ -1218,7 +1220,7 @@ impl NickelSession {
             return false;
         };
         if supervisor
-            .send(crate::ShellSupervisorCommand::Restart)
+            .send(crate::session::ShellSupervisorCommand::Restart)
             .is_err()
         {
             return false;
@@ -2324,7 +2326,7 @@ impl NickelSession {
             let _request = self.launcher_focus.request(surface.id());
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Some(crate::focus::KeyboardFocusTarget::Wayland(surface)),
+                Some(crate::session::focus::KeyboardFocusTarget::Wayland(surface)),
                 SERIAL_COUNTER.next_serial(),
             );
             self.space.elements().for_each(|window| {
@@ -2386,10 +2388,10 @@ impl NickelSession {
                 .get_keyboard()
                 .and_then(|keyboard| keyboard.current_focus())
                 .and_then(|focus| match focus {
-                    crate::focus::KeyboardFocusTarget::Wayland(surface) => {
+                    crate::session::focus::KeyboardFocusTarget::Wayland(surface) => {
                         self.surface_windows.get(&surface.id()).copied()
                     }
-                    crate::focus::KeyboardFocusTarget::X11(surface) => {
+                    crate::session::focus::KeyboardFocusTarget::X11(surface) => {
                         self.x11_windows.get(&surface.window_id()).copied()
                     }
                 })
@@ -2407,7 +2409,7 @@ impl NickelSession {
         self.space.raise_element(&target, true);
         self.seat.get_keyboard().unwrap().set_focus(
             self,
-            crate::focus::KeyboardFocusTarget::for_window(&target),
+            crate::session::focus::KeyboardFocusTarget::for_window(&target),
             SERIAL_COUNTER.next_serial(),
         );
         self.space.elements().for_each(|window| {
@@ -2428,7 +2430,7 @@ impl NickelSession {
         } else {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                Option::<crate::focus::KeyboardFocusTarget>::None,
+                Option::<crate::session::focus::KeyboardFocusTarget>::None,
                 SERIAL_COUNTER.next_serial(),
             );
         }
@@ -2978,9 +2980,9 @@ impl NickelSession {
         }
         self.relayout_lock_surfaces();
         if self.locked {
-            let focus = window
-                .wl_surface()
-                .map(|surface| crate::focus::KeyboardFocusTarget::Wayland(surface.into_owned()));
+            let focus = window.wl_surface().map(|surface| {
+                crate::session::focus::KeyboardFocusTarget::Wayland(surface.into_owned())
+            });
             self.seat
                 .get_keyboard()
                 .unwrap()
@@ -3076,7 +3078,9 @@ impl NickelSession {
             .lock_windows
             .first()
             .and_then(Window::wl_surface)
-            .map(|surface| crate::focus::KeyboardFocusTarget::Wayland(surface.into_owned()));
+            .map(|surface| {
+                crate::session::focus::KeyboardFocusTarget::Wayland(surface.into_owned())
+            });
         self.seat
             .get_keyboard()
             .unwrap()
@@ -3243,7 +3247,7 @@ impl NickelSession {
         if focus {
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
-                crate::focus::KeyboardFocusTarget::for_window(&window),
+                crate::session::focus::KeyboardFocusTarget::for_window(&window),
                 SERIAL_COUNTER.next_serial(),
             );
         }
@@ -3514,7 +3518,7 @@ impl NickelSession {
         });
         self.seat.get_keyboard().unwrap().set_focus(
             self,
-            crate::focus::KeyboardFocusTarget::for_window(&window),
+            crate::session::focus::KeyboardFocusTarget::for_window(&window),
             SERIAL_COUNTER.next_serial(),
         );
         self.space.elements().for_each(|window| {
@@ -4818,7 +4822,7 @@ impl NickelSession {
                 )
                 .ok()
                 .is_some_and(|credentials| {
-                    crate::handlers::portal_capture_pid_allowed(credentials.pid())
+                    crate::session::handlers::portal_capture_pid_allowed(credentials.pid())
                 });
                 state
                     .display_handle
@@ -4894,7 +4898,10 @@ impl NickelSession {
     pub fn pointer_surface_under(
         &self,
         pos: Point<f64, Logical>,
-    ) -> Option<(crate::focus::PointerFocusTarget, Point<f64, Logical>)> {
+    ) -> Option<(
+        crate::session::focus::PointerFocusTarget,
+        Point<f64, Logical>,
+    )> {
         self.space
             .element_under(pos)
             .filter(|(window, _)| !self.locked || self.lock_windows.contains(window))
@@ -4903,8 +4910,8 @@ impl NickelSession {
                     .surface_under(pos - location.to_f64(), WindowSurfaceType::ALL)
                     .map(|(surface, origin)| {
                         let target = window.x11_surface().map_or_else(
-                            || crate::focus::PointerFocusTarget::Wayland(surface),
-                            |x11| crate::focus::PointerFocusTarget::X11(x11.clone()),
+                            || crate::session::focus::PointerFocusTarget::Wayland(surface),
+                            |x11| crate::session::focus::PointerFocusTarget::X11(x11.clone()),
                         );
                         (target, (origin + location).to_f64())
                     })
@@ -4929,12 +4936,14 @@ fn locale_is_rtl() -> bool {
 fn maximized_content_geometry(frame: Geometry, server_decorated: bool) -> Geometry {
     if server_decorated {
         Geometry {
-            x: frame.x + crate::window_frame::RESIZE_BORDER,
-            y: frame.y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
-            width: (frame.width - crate::window_frame::RESIZE_BORDER * 2).max(1),
+            x: frame.x + crate::session::window_frame::RESIZE_BORDER,
+            y: frame.y
+                + crate::session::window_frame::TITLEBAR_HEIGHT
+                + crate::session::window_frame::RESIZE_BORDER,
+            width: (frame.width - crate::session::window_frame::RESIZE_BORDER * 2).max(1),
             height: (frame.height
-                - crate::window_frame::TITLEBAR_HEIGHT
-                - crate::window_frame::RESIZE_BORDER * 2)
+                - crate::session::window_frame::TITLEBAR_HEIGHT
+                - crate::session::window_frame::RESIZE_BORDER * 2)
                 .max(1),
         }
     } else {
@@ -4943,7 +4952,7 @@ fn maximized_content_geometry(frame: Geometry, server_decorated: bool) -> Geomet
 }
 
 fn clamp_decorated_content_to_work_area(content: Geometry, work_area: Geometry) -> Geometry {
-    let outer = crate::window_frame::outer_geometry(content);
+    let outer = crate::session::window_frame::outer_geometry(content);
     let location = clamp_window_location(
         (outer.x, outer.y).into(),
         (outer.width, outer.height).into(),
@@ -4964,12 +4973,12 @@ fn restored_drag_content_geometry(
     work_area: Geometry,
 ) -> Geometry {
     let current_outer = if server_decorated {
-        crate::window_frame::outer_geometry(current_content)
+        crate::session::window_frame::outer_geometry(current_content)
     } else {
         current_content
     };
     let restored_outer_size = if server_decorated {
-        crate::window_frame::outer_geometry(Geometry {
+        crate::session::window_frame::outer_geometry(Geometry {
             x: 0,
             y: 0,
             ..restore_content
@@ -4984,8 +4993,10 @@ fn restored_drag_content_geometry(
     let horizontal = ((pointer.x - f64::from(current_outer.x))
         / f64::from(current_outer.width.max(1)))
     .clamp(0.0, 1.0);
-    let titlebar_offset = (pointer.y - f64::from(current_outer.y))
-        .clamp(0.0, f64::from(crate::window_frame::TITLEBAR_HEIGHT.max(1)));
+    let titlebar_offset = (pointer.y - f64::from(current_outer.y)).clamp(
+        0.0,
+        f64::from(crate::session::window_frame::TITLEBAR_HEIGHT.max(1)),
+    );
     let minimum_visible = 32.min(restored_outer_size.width.max(1));
     let outer_x = (pointer.x - horizontal * f64::from(restored_outer_size.width)).round() as i32;
     let outer_y = (pointer.y - titlebar_offset).round() as i32;
@@ -4995,13 +5006,15 @@ fn restored_drag_content_geometry(
     );
     let outer_y = outer_y.clamp(
         work_area.y,
-        work_area.y + work_area.height - crate::window_frame::TITLEBAR_HEIGHT.max(1),
+        work_area.y + work_area.height - crate::session::window_frame::TITLEBAR_HEIGHT.max(1),
     );
 
     if server_decorated {
         Geometry {
-            x: outer_x + crate::window_frame::RESIZE_BORDER,
-            y: outer_y + crate::window_frame::TITLEBAR_HEIGHT + crate::window_frame::RESIZE_BORDER,
+            x: outer_x + crate::session::window_frame::RESIZE_BORDER,
+            y: outer_y
+                + crate::session::window_frame::TITLEBAR_HEIGHT
+                + crate::session::window_frame::RESIZE_BORDER,
             width: restore_content.width,
             height: restore_content.height,
         }
@@ -5050,12 +5063,12 @@ mod protocol_tests {
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke,
     };
-    use crate::output_retirement::{
+    use crate::session::output_retirement::{
         BIND_SETTLE_GRACE as OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
         DISABLED_GRACE as OUTPUT_GLOBAL_DISABLED_GRACE,
         MAX_PENDING as MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
     };
-    use crate::shell_layout::Geometry;
+    use crate::session::shell_layout::Geometry;
     use nickel_session_protocol::{
         Command, OutputTransform, Query, ServerEnvelope, ServerMessage, SessionAction,
         ShellBehaviorSetting, ShellBehaviorTransaction, ShellBehaviorValue, ShellRole, TestOutput,
@@ -5674,7 +5687,7 @@ mod protocol_tests {
         let (_event_loop, mut session) = preview_test_session();
         let id = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_admitted.insert(id);
         session.preview_frames.insert(
@@ -5704,7 +5717,7 @@ mod protocol_tests {
         let (_event_loop, mut session) = preview_test_session();
         let id = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_admitted.insert(id);
         let width = 210;
@@ -5733,7 +5746,7 @@ mod protocol_tests {
             .map(|_| {
                 session
                     .windows
-                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .insert(crate::session::window_registry::WindowAdmission::Ordinary)
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5799,7 +5812,7 @@ mod protocol_tests {
         let (mut event_loop, mut session) = preview_test_session();
         let old = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_retry_pending.insert(old);
         session.schedule_preview_retry();
@@ -5808,7 +5821,7 @@ mod protocol_tests {
         session.clear_all_previews();
         let current = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_content_generation.insert(current, 10);
         session.preview_retry_pending.insert(current);
@@ -5828,7 +5841,7 @@ mod protocol_tests {
         let (mut event_loop, mut session) = preview_test_session();
         let id = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_content_generation.insert(id, 4);
         session.preview_retry_pending.insert(id);
@@ -5863,7 +5876,7 @@ mod protocol_tests {
             .map(|_| {
                 session
                     .windows
-                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .insert(crate::session::window_registry::WindowAdmission::Ordinary)
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5871,7 +5884,7 @@ mod protocol_tests {
             .map(|_| {
                 session
                     .windows
-                    .insert(crate::window_registry::WindowAdmission::Ordinary)
+                    .insert(crate::session::window_registry::WindowAdmission::Ordinary)
                     .unwrap()
             })
             .collect::<Vec<_>>();
@@ -5904,7 +5917,7 @@ mod protocol_tests {
         let (_event_loop, mut session) = preview_test_session();
         let id = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_admitted.insert(id);
         session.preview_frames.insert(
@@ -5946,7 +5959,7 @@ mod protocol_tests {
         let (_event_loop, mut session) = preview_test_session();
         let id = session
             .windows
-            .insert(crate::window_registry::WindowAdmission::Ordinary)
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
         session.preview_content_generation.insert(id, 6);
         let first_node_wave = session.begin_preview_render_wave();
@@ -6299,7 +6312,10 @@ mod protocol_tests {
 
         let content = maximized_content_geometry(work_area, true);
 
-        assert_eq!(crate::window_frame::outer_geometry(content), work_area);
+        assert_eq!(
+            crate::session::window_frame::outer_geometry(content),
+            work_area
+        );
     }
 
     #[test]
@@ -6320,7 +6336,7 @@ mod protocol_tests {
             work_area,
         );
 
-        let outer = crate::window_frame::outer_geometry(content);
+        let outer = crate::session::window_frame::outer_geometry(content);
         assert_eq!(outer.x, work_area.x);
         assert_eq!(outer.y, work_area.y);
         assert_eq!(content.width, 1200);
@@ -6426,7 +6442,7 @@ mod protocol_tests {
             true,
             work_area,
         );
-        let outer = crate::window_frame::outer_geometry(geometry);
+        let outer = crate::session::window_frame::outer_geometry(geometry);
 
         assert!(outer.x + outer.width >= work_area.x + 32);
         assert!(outer.y >= work_area.y);

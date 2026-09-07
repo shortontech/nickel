@@ -69,7 +69,7 @@ use nickel_core::{
     theme::{Appearance, ThemePalette},
 };
 
-use crate::{
+use crate::session::{
     NickelSession,
     backend::{
         OutputLayout, SessionActivity,
@@ -702,8 +702,8 @@ pub struct UdevData {
     layout: OutputLayout,
     bootstrap_render_until: Instant,
     client_bootstrap_started: bool,
-    cursors: HashMap<crate::window_frame::FrameCursor, CursorBuffer>,
-    frame_icons: Option<crate::window_frame::FrameIcons>,
+    cursors: HashMap<crate::session::window_frame::FrameCursor, CursorBuffer>,
+    frame_icons: Option<crate::session::window_frame::FrameIcons>,
     identify_badges: IdentifyBadgeCache,
     task_switcher_cache: Option<TaskSwitcherBufferCache>,
 }
@@ -772,7 +772,7 @@ impl IdentifyBadgeCache {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct TaskSwitcherBufferKey {
-    candidates: Vec<crate::window_registry::WindowId>,
+    candidates: Vec<crate::session::window_registry::WindowId>,
     selected: usize,
     output_size: (i32, i32),
     preview_generation: u64,
@@ -975,7 +975,7 @@ pub fn init_udev(
         bootstrap_render_until: Instant::now() + BOOTSTRAP_RENDER_TIMEOUT,
         client_bootstrap_started: false,
         cursors: themed_cursors(),
-        frame_icons: crate::window_frame::FrameIcons::load(),
+        frame_icons: crate::session::window_frame::FrameIcons::load(),
         identify_badges: IdentifyBadgeCache::default(),
         task_switcher_cache: None,
     });
@@ -2273,7 +2273,11 @@ impl NickelSession {
             let cursor = native
                 .cursors
                 .get(&self.frame_cursor)
-                .or_else(|| native.cursors.get(&crate::window_frame::FrameCursor::Arrow))
+                .or_else(|| {
+                    native
+                        .cursors
+                        .get(&crate::session::window_frame::FrameCursor::Arrow)
+                })
                 .cloned()
                 .unwrap_or_else(fallback_arrow_cursor);
             let frame_icons = native.frame_icons.clone();
@@ -2376,7 +2380,7 @@ impl NickelSession {
             let frame_palette = ThemePalette::from_appearance(
                 ShellSettings::load_default().resolve_appearance(Appearance::default()),
             );
-            crate::window_frame::retain_titlebars_for_windows(
+            crate::session::window_frame::retain_titlebars_for_windows(
                 self.surface_windows.values().map(|id| id.0),
             );
             if let Some(output_geometry) = self.space.output_geometry(&output) {
@@ -2438,14 +2442,15 @@ impl NickelSession {
                     } else {
                         frame_palette.muted
                     };
-                    let titlebar_geometry =
-                        crate::window_frame::titlebar_geometry(crate::shell_layout::Geometry {
+                    let titlebar_geometry = crate::session::window_frame::titlebar_geometry(
+                        crate::session::shell_layout::Geometry {
                             x: frame_bounds.loc.x,
                             y: frame_bounds.loc.y,
                             width: frame_bounds.size.w,
                             height: frame_bounds.size.h,
-                        });
-                    if let Some(titlebar) = crate::window_frame::render_titlebar_for(
+                        },
+                    );
+                    if let Some(titlebar) = crate::session::window_frame::render_titlebar_for(
                         registry_id.map(|id| id.0),
                         titlebar_geometry.width,
                         title,
@@ -2465,10 +2470,12 @@ impl NickelSession {
                     ) {
                         elements.push(NativeCustomElement::from(element).into());
                     }
-                    let frame_height = frame_bounds.size.h + crate::window_frame::TITLEBAR_HEIGHT;
-                    for shadow in
-                        crate::window_frame::shadow_layers(frame_bounds.size.w, frame_height)
-                    {
+                    let frame_height =
+                        frame_bounds.size.h + crate::session::window_frame::TITLEBAR_HEIGHT;
+                    for shadow in crate::session::window_frame::shadow_layers(
+                        frame_bounds.size.w,
+                        frame_height,
+                    ) {
                         elements.push(
                             NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                                 &shadow.buffer,
@@ -2476,7 +2483,7 @@ impl NickelSession {
                                     frame_bounds.loc.x - output_geometry.loc.x + shadow.offset.0,
                                     frame_bounds.loc.y
                                         - output_geometry.loc.y
-                                        - crate::window_frame::TITLEBAR_HEIGHT
+                                        - crate::session::window_frame::TITLEBAR_HEIGHT
                                         + shadow.offset.1,
                                 ),
                                 1.0,
@@ -2489,7 +2496,7 @@ impl NickelSession {
                     if let Some(icons) = &frame_icons {
                         let icon_y = frame_bounds.loc.y
                             - output_geometry.loc.y
-                            - crate::window_frame::TITLEBAR_HEIGHT
+                            - crate::session::window_frame::TITLEBAR_HEIGHT
                             + 8;
                         let icon_x =
                             frame_bounds.loc.x - output_geometry.loc.x + frame_bounds.size.w;
@@ -2577,8 +2584,10 @@ impl NickelSession {
                             .map(|element| NativeElement::from(NativeCustomElement::from(element))),
                     );
                 }
-                let dim =
-                    SolidColorBuffer::new(output_geometry.size, crate::state::shell_scrim(0.62));
+                let dim = SolidColorBuffer::new(
+                    output_geometry.size,
+                    crate::session::state::shell_scrim(0.62),
+                );
                 peek_elements.push(
                     NativeCustomElement::from(SolidColorRenderElement::from_buffer(
                         &dim,
@@ -2597,13 +2606,14 @@ impl NickelSession {
                     .current_mode()
                     .map(|mode| mode.size)
                     .unwrap_or_else(|| (1, 1).into());
-                let panel_geometry =
-                    crate::recovery_ui::RecoveryUi::panel_geometry(crate::shell_layout::Geometry {
+                let panel_geometry = crate::session::recovery_ui::RecoveryUi::panel_geometry(
+                    crate::session::shell_layout::Geometry {
                         x: 0,
                         y: 0,
                         width: recovery_size.w,
                         height: recovery_size.h,
-                    });
+                    },
+                );
                 let panel = self.recovery_ui.render_buffer();
                 if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                     &mut renderer,
@@ -2625,7 +2635,7 @@ impl NickelSession {
                     .output_geometry(&output)
                     .map(|geometry| geometry.size)
                     .unwrap_or_else(|| (1, 1).into());
-                let dim = SolidColorBuffer::new(size, crate::state::shell_scrim(0.48));
+                let dim = SolidColorBuffer::new(size, crate::session::state::shell_scrim(0.48));
                 elements.insert(
                     0,
                     NativeCustomElement::from(SolidColorRenderElement::from_buffer(
@@ -2727,7 +2737,8 @@ impl NickelSession {
                 && let Some(geometry) = self.space.output_geometry(&output)
             {
                 let pointer = self.seat.get_pointer().unwrap().current_location();
-                if let Some(location) = crate::state::drag_icon_location(pointer, geometry) {
+                if let Some(location) = crate::session::state::drag_icon_location(pointer, geometry)
+                {
                     let location = location.to_physical(1);
                     let icon_elements = render_elements_from_surface_tree::<
                         _,
@@ -3045,8 +3056,8 @@ fn themed_arrow_cursor() -> CursorBuffer {
     themed_cursor(&["default", "left_ptr"]).unwrap_or_else(fallback_arrow_cursor)
 }
 
-fn themed_cursors() -> HashMap<crate::window_frame::FrameCursor, CursorBuffer> {
-    use crate::window_frame::FrameCursor;
+fn themed_cursors() -> HashMap<crate::session::window_frame::FrameCursor, CursorBuffer> {
+    use crate::session::window_frame::FrameCursor;
 
     let arrow = themed_arrow_cursor();
     let mut cursors = HashMap::from([(FrameCursor::Arrow, arrow.clone())]);
@@ -3436,7 +3447,7 @@ fn capture_preview(
     (|| {
         let geometry = window.geometry();
         let dimensions =
-            crate::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
+            crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
         let width = i32::from(dimensions.0);
         let height = i32::from(dimensions.1);
         let mut texture = <NativeRenderer<'_> as Offscreen<GlesTexture>>::create_buffer(
@@ -3480,10 +3491,14 @@ fn capture_preview(
             .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
             .ok()?;
         let mapped = renderer.map_texture(&mapping).ok()?;
-        if !crate::state::preview_mapping_has_exact_size(mapped, dimensions.0, dimensions.1) {
+        if !crate::session::state::preview_mapping_has_exact_size(
+            mapped,
+            dimensions.0,
+            dimensions.1,
+        ) {
             return None;
         }
-        let replacement = crate::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
+        let replacement = crate::session::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
         *rgba = replacement;
         Some(dimensions)
     })()

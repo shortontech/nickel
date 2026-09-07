@@ -16,7 +16,7 @@ use smithay::{
     },
 };
 
-use crate::NickelSession;
+use crate::session::NickelSession;
 
 const MAX_IDLE_INHIBITED_SURFACES: usize = 256;
 const MAX_TRACKED_POINTER_LOCKS: usize = 256;

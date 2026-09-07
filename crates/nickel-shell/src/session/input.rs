@@ -21,7 +21,7 @@ use smithay::{
     wayland::seat::WaylandFocus,
 };
 
-use crate::{
+use crate::session::{
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     state::NickelSession,
     window_frame::{self, FramePart},
@@ -32,10 +32,10 @@ impl NickelSession {
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
         pressed: bool,
-    ) -> Option<crate::recovery_ui::RecoveryAction> {
+    ) -> Option<crate::session::recovery_ui::RecoveryAction> {
         let output = self.space.outputs().find_map(|output| {
             let geometry = self.space.output_geometry(output)?;
-            let output = crate::shell_layout::Geometry {
+            let output = crate::session::shell_layout::Geometry {
                 x: geometry.loc.x,
                 y: geometry.loc.y,
                 width: geometry.size.w,
@@ -51,12 +51,15 @@ impl NickelSession {
             .pointer(output, position.x, position.y, pressed)
     }
 
-    pub(crate) fn apply_recovery_action(&mut self, action: crate::recovery_ui::RecoveryAction) {
+    pub(crate) fn apply_recovery_action(
+        &mut self,
+        action: crate::session::recovery_ui::RecoveryAction,
+    ) {
         match action {
-            crate::recovery_ui::RecoveryAction::Retry => {
+            crate::session::recovery_ui::RecoveryAction::Retry => {
                 self.retry_shell_from_recovery();
             }
-            crate::recovery_ui::RecoveryAction::Exit => {
+            crate::session::recovery_ui::RecoveryAction::Exit => {
                 self.exit_from_recovery();
             }
         }
@@ -67,9 +70,7 @@ impl NickelSession {
         let pressed = keyboard.pressed_keys();
         for keycode in pressed {
             if keycode.raw() == 9 {
-                tracing::warn!(
-                    "diagnostic: releasing a retained Escape after host focus loss"
-                );
+                tracing::warn!("diagnostic: releasing a retained Escape after host focus loss");
             }
             keyboard.input::<Option<i32>, _>(
                 self,
@@ -143,7 +144,7 @@ impl NickelSession {
                             .is_some()
                     });
                 let bounds = self.space.element_geometry(window)?;
-                let geometry = crate::shell_layout::Geometry {
+                let geometry = crate::session::shell_layout::Geometry {
                     x: bounds.loc.x,
                     y: bounds.loc.y,
                     width: bounds.size.w,
@@ -291,7 +292,7 @@ impl NickelSession {
                     let geometry = self.space.output_geometry(output)?;
                     let position =
                         event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                    let output = crate::shell_layout::Geometry {
+                    let output = crate::session::shell_layout::Geometry {
                         x: geometry.loc.x,
                         y: geometry.loc.y,
                         width: geometry.size.w,
@@ -650,7 +651,7 @@ impl NickelSession {
                                         .is_some()
                                 });
                             let bounds = self.space.element_geometry(window)?;
-                            let geometry = crate::shell_layout::Geometry {
+                            let geometry = crate::session::shell_layout::Geometry {
                                 x: bounds.loc.x,
                                 y: bounds.loc.y,
                                 width: bounds.size.w,
@@ -687,7 +688,7 @@ impl NickelSession {
                         }
                         keyboard.set_focus(
                             self,
-                            crate::focus::KeyboardFocusTarget::for_window(&window),
+                            crate::session::focus::KeyboardFocusTarget::for_window(&window),
                             serial,
                         );
                         self.space.elements().for_each(|window| {
@@ -902,7 +903,7 @@ impl NickelSession {
                                 });
                                 keyboard.set_focus(
                                     self,
-                                    crate::focus::KeyboardFocusTarget::for_window(&window),
+                                    crate::session::focus::KeyboardFocusTarget::for_window(&window),
                                     serial,
                                 );
                                 self.space.elements().for_each(|window| {
@@ -921,7 +922,7 @@ impl NickelSession {
                         });
                         keyboard.set_focus(
                             self,
-                            Option::<crate::focus::KeyboardFocusTarget>::None,
+                            Option::<crate::session::focus::KeyboardFocusTarget>::None,
                             serial,
                         );
                     }

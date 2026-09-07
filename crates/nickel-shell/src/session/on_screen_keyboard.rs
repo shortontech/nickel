@@ -12,13 +12,13 @@ use smithay::{
     wayland::{seat::WaylandFocus, text_input::TextInputSeat},
 };
 
-use crate::state::NickelSession;
+use crate::session::state::NickelSession;
 
 pub(crate) struct OnScreenKeyboardState {
     pub(crate) height: u32,
     pub(crate) dock_top: bool,
     pub(crate) output_name: Option<String>,
-    pub(crate) displaced: Vec<(Window, crate::shell_layout::Geometry)>,
+    pub(crate) displaced: Vec<(Window, crate::session::shell_layout::Geometry)>,
     pub(crate) auto_show_requested: bool,
     pub(crate) touchscreens: std::collections::HashSet<String>,
     controller_barrier_unix_ms: u64,
@@ -189,7 +189,7 @@ impl NickelSession {
                     text_input.done(false);
                 } else if matches!(
                     keyboard.current_focus(),
-                    Some(crate::focus::KeyboardFocusTarget::X11(_))
+                    Some(crate::session::focus::KeyboardFocusTarget::X11(_))
                 ) {
                     // Xwayland does not apply the throwaway keymap used by
                     // inject_text_keysyms: its spare code 9 arrives as Escape.

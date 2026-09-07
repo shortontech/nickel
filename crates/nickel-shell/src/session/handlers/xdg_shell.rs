@@ -28,7 +28,7 @@ use smithay::{
     },
 };
 
-use crate::{
+use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
@@ -1142,8 +1142,8 @@ mod tests {
 
     #[test]
     fn ordinary_exhaustion_preserves_critical_authenticated_shell_admission() {
-        let mut windows = crate::window_registry::WindowRegistry::default();
-        let reserved = crate::window_registry::RESERVED_AUTHENTICATED_SHELL_WINDOWS;
+        let mut windows = crate::session::window_registry::WindowRegistry::default();
+        let reserved = crate::session::window_registry::RESERVED_AUTHENTICATED_SHELL_WINDOWS;
         let ordinary_capacity = nickel_session_protocol::MAX_WINDOWS - reserved;
 
         for _ in 0..ordinary_capacity {

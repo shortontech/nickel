@@ -9,7 +9,7 @@ use smithay::{
     },
 };
 
-use crate::NickelSession;
+use crate::session::NickelSession;
 
 const ACTIVATION_TOKEN_MAX_AGE: Duration = Duration::from_secs(10);
 const MAX_PENDING_ACTIVATION_TOKENS: usize = 256;

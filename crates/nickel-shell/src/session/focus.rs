@@ -21,7 +21,7 @@ use smithay::{
     xwayland::{X11Surface, xwm::XwmOfferData},
 };
 
-use crate::NickelSession;
+use crate::session::NickelSession;
 
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]

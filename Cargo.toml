@@ -21,7 +21,6 @@ members = [
     "crates/nickel-i18n-lint",
     "crates/nickel-platform",
     "crates/nickel-render-assets",
-    "crates/nickel-session",
     "crates/nickel-session-protocol",
     "crates/nickel-settings",
     "crates/nickel-terminal",

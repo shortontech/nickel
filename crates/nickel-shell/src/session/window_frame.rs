@@ -1,4 +1,4 @@
-use crate::shell_layout::Geometry;
+use crate::session::shell_layout::Geometry;
 #[cfg(test)]
 use sha2::{Digest, Sha256};
 #[cfg(feature = "backend-udev")]
@@ -558,7 +558,7 @@ mod tests {
         retain_titlebars_for_windows, titlebar_cache_diagnostics, titlebar_geometry,
         topmost_frame_target,
     };
-    use crate::shell_layout::Geometry;
+    use crate::session::shell_layout::Geometry;
 
     const CONTENT: Geometry = Geometry {
         x: 100,

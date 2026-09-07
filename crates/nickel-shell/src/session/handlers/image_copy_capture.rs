@@ -14,7 +14,7 @@ use smithay::{
     },
 };
 
-use crate::NickelSession;
+use crate::session::NickelSession;
 
 const MAX_CAPTURE_SESSIONS: usize = 16;
 const MAX_PENDING_CAPTURE_FRAMES: usize = 32;
@@ -46,7 +46,7 @@ pub(crate) struct ImageCopyCaptureDiagnostics {
 
 pub(crate) fn is_portal_capture_client(client: &Client) -> bool {
     client
-        .get_data::<crate::state::ClientState>()
+        .get_data::<crate::session::state::ClientState>()
         .is_some_and(|state| state.portal_capture_allowed)
 }
 

@@ -17,7 +17,7 @@ use smithay::backend::input::{
 };
 use smithay::utils::{Logical, Rectangle};
 
-use crate::state::NickelSession;
+use crate::session::state::NickelSession;
 
 #[cfg(target_os = "linux")]
 pub(crate) struct TestController {
@@ -658,8 +658,8 @@ impl NickelSession {
                 None => "session has no output".into(),
             })?;
         let action = match action {
-            RecoveryTargetAction::Retry => crate::recovery_ui::RecoveryAction::Retry,
-            RecoveryTargetAction::Exit => crate::recovery_ui::RecoveryAction::Exit,
+            RecoveryTargetAction::Retry => crate::session::recovery_ui::RecoveryAction::Retry,
+            RecoveryTargetAction::Exit => crate::session::recovery_ui::RecoveryAction::Exit,
         };
         let action = self
             .recovery_ui
@@ -675,7 +675,7 @@ impl NickelSession {
         interaction: PointerInteraction,
     ) -> Result<(), String> {
         let window = self
-            .window_for_registry_id(crate::window_registry::WindowId(window.0))
+            .window_for_registry_id(crate::session::window_registry::WindowId(window.0))
             .ok_or("managed window is not mapped")?;
         let geometry = self
             .space
