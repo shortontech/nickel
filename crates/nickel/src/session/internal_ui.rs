@@ -383,6 +383,23 @@ impl SmithayFrameRenderer {
         self.diagnostics
     }
 
+    /// Release regenerable frame-sized state while the owning surface cannot
+    /// be presented. Shared texture caches remain available to other surfaces.
+    fn suspend(&mut self) {
+        if let Some(mut software) = self.software.take() {
+            software.suspend();
+        }
+        self.raster = None;
+        self.primitives.clear();
+        self.import_fallback = None;
+        self.mode = InternalUiPresentationMode::GpuSolid;
+        self.diagnostics.software_frame_bytes = 0;
+        self.diagnostics.fallback_raster_bytes = 0;
+        self.diagnostics.fallback_primitive_count = 0;
+        self.diagnostics.fallback_text_count = 0;
+        self.diagnostics.fallback_image_count = 0;
+    }
+
     fn supports_gpu(commands: &[PaintCommand]) -> bool {
         commands.iter().all(|command| {
             matches!(
@@ -1376,6 +1393,7 @@ impl InternalUiRuntime {
         if visible {
             surface.dirty = true;
         } else {
+            surface.renderer.suspend();
             if self.focused == Some(id) {
                 self.focused = None;
             }
@@ -1987,6 +2005,37 @@ mod tests {
         assert!(!runtime.has_damage());
         assert!(runtime.remove(id));
         assert!(runtime.is_empty());
+    }
+
+    #[test]
+    fn hiding_fallback_surface_releases_frame_sized_storage_until_shown() {
+        let mut runtime = InternalUiRuntime::default();
+        runtime.set_renderer_mode(InternalUiRendererMode::Software);
+        let id = runtime.insert_scene(
+            vec![PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(0.0, 0.0, 120.0, 32.0),
+                color: 0xff336699,
+            }],
+            placement(Some("DP-1")),
+            1.0,
+        );
+
+        assert!(runtime.render_buffer(id).is_some());
+        let live = runtime.renderer_diagnostics(id).unwrap();
+        assert_eq!(live.software_frame_bytes, 120 * 32 * 4);
+        assert_eq!(live.fallback_raster_bytes, 120 * 32 * 4);
+
+        assert!(runtime.set_visible(id, false));
+        let hidden = runtime.renderer_diagnostics(id).unwrap();
+        assert_eq!(hidden.software_frame_bytes, 0);
+        assert_eq!(hidden.fallback_raster_bytes, 0);
+        assert_eq!(hidden.fallback_primitive_count, 0);
+
+        assert!(runtime.set_visible(id, true));
+        assert!(runtime.render_buffer(id).is_some());
+        let shown = runtime.renderer_diagnostics(id).unwrap();
+        assert_eq!(shown.software_frame_bytes, 120 * 32 * 4);
+        assert_eq!(shown.fallback_raster_bytes, 120 * 32 * 4);
     }
 
     #[test]
