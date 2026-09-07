@@ -2629,8 +2629,10 @@ impl NickelSession {
                     .map(|element| NativeElement::from(NativeCustomElement::from(element)));
                 // DRM elements are front-to-back. Keep internal applications at
                 // the ordinary application boundary, behind mapped clients.
-                elements.extend(application_elements);
-                let overlay_elements = self
+                if !self.internal_applications_are_foremost() {
+                    elements.extend(application_elements);
+                }
+                let mut overlay_elements = self
                     .internal_ui
                     .render_elements_for_layer(
                         &mut renderer,
@@ -2639,7 +2641,21 @@ impl NickelSession {
                         Some(crate::session::InternalSurfaceLayer::Overlay),
                     )
                     .into_iter()
-                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                    .map(|element| NativeElement::from(NativeCustomElement::from(element)))
+                    .collect::<Vec<_>>();
+                if self.internal_applications_are_foremost() {
+                    let application_elements = self
+                        .internal_ui
+                        .render_elements_for_layer(
+                            &mut renderer,
+                            &output.name(),
+                            output_geometry.loc,
+                            Some(crate::session::InternalSurfaceLayer::Application),
+                        )
+                        .into_iter()
+                        .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                    overlay_elements.extend(application_elements);
+                }
                 elements.splice(0..0, overlay_elements);
             }
             if !self.locked && self.shell_recovery_visible() {

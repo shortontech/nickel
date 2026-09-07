@@ -1281,6 +1281,18 @@ impl NickelSession {
         self.internal_surface_windows.get(&surface).copied()
     }
 
+    /// Whether the foremost ordinary window is compositor-hosted.
+    ///
+    /// Internal applications currently form one contiguous scene group. The
+    /// canonical registry decides which side of the external client group it
+    /// occupies, so activating either kind produces ordinary raise behavior.
+    pub(crate) fn internal_applications_are_foremost(&self) -> bool {
+        self.windows
+            .snapshot()
+            .last()
+            .is_some_and(|window| self.internal_surface_for_window(window.id).is_some())
+    }
+
     fn apply_internal_file_action(&mut self, action: nickel_file::FileWindowAction) {
         use nickel_file::FileWindowAction;
         match action {

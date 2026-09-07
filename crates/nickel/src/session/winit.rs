@@ -238,7 +238,8 @@ pub fn init_winit(
                             .into_iter()
                             .map(WinitBaseElement::from)
                             .collect::<Vec<_>>();
-                        base_elements.extend(
+                        if !state.internal_applications_are_foremost() {
+                            base_elements.extend(
                             state
                                 .internal_ui
                                 .render_elements_for_layer(
@@ -249,7 +250,8 @@ pub fn init_winit(
                                 )
                                 .into_iter()
                                 .map(WinitBaseElement::from),
-                        );
+                            );
+                        }
                         base_elements.extend(background_elements.map(WinitBaseElement::from));
                         damage_tracker
                             .render_output(
@@ -284,6 +286,20 @@ pub fn init_winit(
                                 .into_iter()
                                 .map(WinitFrameElement::from),
                         );
+                        if state.internal_applications_are_foremost() {
+                            overlay_elements.extend(
+                                state
+                                    .internal_ui
+                                    .render_elements_for_layer(
+                                        renderer,
+                                        &output.name(),
+                                        (0, 0).into(),
+                                        Some(crate::session::InternalSurfaceLayer::Application),
+                                    )
+                                    .into_iter()
+                                    .map(WinitFrameElement::from),
+                            );
+                        }
                         if !state.locked
                             && let Some(window) = state.preview_highlight.and_then(|highlight| {
                                 state.space.elements().find(|window| {

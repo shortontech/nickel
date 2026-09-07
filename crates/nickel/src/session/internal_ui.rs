@@ -1929,6 +1929,7 @@ mod tests {
         );
         assert!(runtime.pointer_button((10.0, 60.0), true));
         assert_eq!(runtime.focused(), Some(application));
+        assert!(runtime.surface_at((10.0, 60.0), true).is_none());
         assert!(runtime.keyboard(UiEvent::KeyboardActivate));
         assert_eq!(
             runtime
@@ -2030,7 +2031,11 @@ mod tests {
         );
         assert_eq!(
             runtime.ordered_ids_for_layer("nested", Some(InternalSurfaceLayer::Overlay)),
-            vec![overlay, panel, application]
+            vec![overlay, panel]
+        );
+        assert_eq!(
+            runtime.ordered_ids_for_layer("nested", Some(InternalSurfaceLayer::Application)),
+            vec![application]
         );
         assert_eq!(runtime.surface_at((10.0, 10.0), true).unwrap().0, overlay);
     }

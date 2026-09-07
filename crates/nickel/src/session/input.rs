@@ -63,7 +63,8 @@ impl NickelSession {
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
     ) -> bool {
-        let client_present = self.client_scene_under(position);
+        let client_present =
+            self.client_scene_under(position) && !self.internal_applications_are_foremost();
         let handled = self
             .internal_ui
             .pointer_motion_with_client((position.x, position.y), client_present);
@@ -655,11 +656,13 @@ impl NickelSession {
                 let button_state = event.state();
 
                 let location = pointer.current_location();
-                let client_present = self.client_scene_under(location);
+                let client_present =
+                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
                 if event.button() == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
                     && keyboard.modifier_state().logo
                     && !pointer.is_grabbed()
+                    && !client_present
                     && let Some((surface, _)) = self
                         .internal_ui
                         .application_surface_at((location.x, location.y))
@@ -667,6 +670,7 @@ impl NickelSession {
                 {
                     self.hotkeys.begin_pointer_chord();
                     self.internal_ui.focus_surface(surface);
+                    self.reconcile_internal_application_focus();
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -1134,7 +1138,8 @@ impl NickelSession {
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let location = pointer.current_location();
-                let client_present = self.client_scene_under(location);
+                let client_present =
+                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
                 if self.internal_ui.scroll_with_client(
                     (location.x, location.y),
                     horizontal_amount as f32,
@@ -1176,7 +1181,8 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                let client_present = self.client_scene_under(location);
+                let client_present =
+                    self.client_scene_under(location) && !self.internal_applications_are_foremost();
                 if self.internal_ui.touch_with_client(
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),

@@ -1,4 +1,5 @@
-use crate::session::{InternalSurfaceId, NickelSession, focus::PointerFocusTarget};
+use crate::session::{NickelSession, focus::PointerFocusTarget};
+use nickel_ui::InternalSurfaceId;
 use smithay::input::pointer::{
     ButtonEvent, GrabStartData, MotionEvent, PointerGrab, PointerInnerHandle,
 };
