@@ -234,6 +234,12 @@ impl NickelSession {
                 }
             }
             OnScreenKeyboardInput::Key { keysym, modifiers } => {
+                if keysym == 0xff1b {
+                    tracing::warn!(
+                        epoch,
+                        "diagnostic: delivering Escape from the on-screen keyboard"
+                    );
+                }
                 // Only keyboard modifiers are accepted as a chord prefix.
                 if modifiers.len() > 5
                     || modifiers

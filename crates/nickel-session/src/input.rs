@@ -66,6 +66,11 @@ impl NickelSession {
         let keyboard = self.seat.get_keyboard().unwrap();
         let pressed = keyboard.pressed_keys();
         for keycode in pressed {
+            if keycode.raw() == 9 {
+                tracing::warn!(
+                    "diagnostic: releasing a retained Escape after host focus loss"
+                );
+            }
             keyboard.input::<Option<i32>, _>(
                 self,
                 keycode,
@@ -311,6 +316,20 @@ impl NickelSession {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time();
                 let state = event.state();
+                // XKB keycodes are evdev codes plus eight, so Escape is keycode nine. Keep this
+                // diagnostic deliberately limited to Escape: logging ordinary keys would expose
+                // typed text, while this provenance is essential for distinguishing a physical
+                // HID report from the compositor's auxiliary and test input paths.
+                if event.key_code().raw() == 9 {
+                    let device = event.device();
+                    tracing::warn!(
+                        device_id = %device.id(),
+                        device_name = %device.name(),
+                        device_path = ?device.syspath(),
+                        ?state,
+                        "diagnostic: received Escape from an input backend"
+                    );
+                }
                 let keyboard = self.seat.get_keyboard().unwrap();
                 return keyboard
                     .input::<Option<i32>, _>(
