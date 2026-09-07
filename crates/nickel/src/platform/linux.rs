@@ -391,7 +391,7 @@ pub fn system_status_receiver() -> mpsc::Receiver<super::SystemStatusUpdate> {
             let Ok(mut watcher) =
                 notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                     let Ok(event) = event else { return };
-                    if event.paths.iter().any(|changed| changed == &watched_path) {
+                    if shell_settings_event_changed(&event, &watched_path) {
                         let _ =
                             settings_sender.send(super::SystemStatusUpdate::ShellSettingsChanged);
                     }
@@ -407,6 +407,15 @@ pub fn system_status_receiver() -> mpsc::Receiver<super::SystemStatusUpdate> {
             }
         });
     receiver
+}
+
+fn shell_settings_event_changed(event: &notify::Event, watched_path: &std::path::Path) -> bool {
+    use notify::EventKind;
+
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) && event.paths.iter().any(|changed| changed == watched_path)
 }
 
 pub fn set_audio_volume(_volume_percent: u8) -> bool {
@@ -2277,7 +2286,10 @@ fn resolve_application_id(native_app_id: &str, launcher: &Launcher) -> Option<Ap
 #[cfg(test)]
 mod tests {
     use super::protocol_preview_image;
+    use notify::event::{AccessKind, CreateKind, ModifyKind, RemoveKind};
+    use notify::{Event, EventKind};
     use std::io;
+    use std::path::Path;
     use std::time::Duration;
 
     use crate::{
@@ -2296,6 +2308,26 @@ mod tests {
         secure_storage_retry_response, session_receive_error, shell_command_payload,
         subscription_shortcut, tray_retry_delay,
     };
+
+    #[test]
+    fn shell_settings_watch_ignores_reads_that_it_triggers_itself() {
+        let path = Path::new("/tmp/nickel/shell-settings.json");
+        let access = Event::new(EventKind::Access(AccessKind::Read)).add_path(path.into());
+        assert!(!super::shell_settings_event_changed(&access, path));
+
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            let mutation = Event::new(kind).add_path(path.into());
+            assert!(super::shell_settings_event_changed(&mutation, path));
+        }
+
+        let unrelated = Event::new(EventKind::Modify(ModifyKind::Any))
+            .add_path("/tmp/nickel/wallpaper-settings.json".into());
+        assert!(!super::shell_settings_event_changed(&unrelated, path));
+    }
 
     #[test]
     fn internal_window_feed_has_no_pid_derived_transport() {

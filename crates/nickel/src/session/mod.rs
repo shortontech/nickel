@@ -59,6 +59,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    // The unified session bypasses the old standalone-shell entry point. Set
+    // PipeWire's plugin search path before logging or any other worker can be
+    // spawned, preserving the process-wide initialization contract.
+    crate::platform::prepare_audio_environment();
     nickel_logging::init("nickel")?;
 
     let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
