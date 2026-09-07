@@ -2,6 +2,7 @@
 
 mod handlers;
 
+mod authority;
 mod backend;
 mod focus;
 mod grabs;
@@ -40,6 +41,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
 use std::sync::{Condvar, Mutex, atomic::AtomicU64};
 
+pub use authority::{SessionAuthority, SessionAuthorityRequest};
 use smithay::reexports::{
     calloop::{
         EventLoop,
@@ -49,7 +51,7 @@ use smithay::reexports::{
 };
 pub use state::NickelSession;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--available-backends")) {
         if cfg!(feature = "backend-winit") {
             println!("winit");
@@ -637,7 +639,7 @@ mod tests {
     #[test]
     fn shell_start_gate_waits_for_authoritative_secure_storage_readiness() {
         let state = Arc::new(AtomicU8::new(
-            crate::login_services::SecureStorageState::Locked as u8,
+            crate::session::login_services::SecureStorageState::Locked as u8,
         ));
         let retry = Arc::new(AtomicBool::new(false));
         let (_sender, receiver) = mpsc::channel();
@@ -652,7 +654,7 @@ mod tests {
             "locked storage must hold the shell gate"
         );
         state.store(
-            crate::login_services::SecureStorageState::Ready as u8,
+            crate::session::login_services::SecureStorageState::Ready as u8,
             Ordering::Release,
         );
         assert!(gate.join().unwrap());
@@ -680,7 +682,7 @@ mod tests {
             .spawn()
             .unwrap();
         let (_sender, receiver) = mpsc::channel();
-        let state = AtomicU8::new(crate::login_services::SecureStorageState::Locked as u8);
+        let state = AtomicU8::new(crate::session::login_services::SecureStorageState::Locked as u8);
 
         assert!(matches!(
             wait_for_shell(&mut child, &receiver, Some(&state)),
@@ -754,7 +756,7 @@ mod tests {
 
     #[test]
     fn native_storage_deadline_returns_to_sddm_but_preserves_provider_prompts() {
-        use crate::login_services::SecureStorageState;
+        use crate::session::login_services::SecureStorageState;
 
         assert!(!secure_storage_startup_timed_out(
             true,

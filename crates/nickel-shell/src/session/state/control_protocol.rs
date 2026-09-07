@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::SessionAuthorityRequest;
 
 static CONTROL_SOCKET_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
@@ -152,7 +153,7 @@ impl NickelSession {
                 }
                 ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot()))
             }
-            Request::Query(query) => self.handle_protocol_query(query),
+            Request::Query(query) => self.handle_authority_request(query.into()),
             Request::Command(command) => {
                 if command_requires_shell_identity(&command)
                     && !self.authenticated_shell_pids.contains(&peer_pid)
@@ -163,7 +164,32 @@ impl NickelSession {
                         "command requires the authenticated Nickel shell process",
                     );
                 }
-                self.handle_protocol_command(command, source, request_id)
+                // Keep reply routing for the one asynchronous transport
+                // command. All other behavior shares the same typed dispatch
+                // used by trusted in-process components.
+                if matches!(command, SessionCommand::CaptureOutput { .. }) {
+                    self.handle_protocol_command(command, source, request_id)
+                } else {
+                    self.handle_authority_request(command.into())
+                }
+            }
+        }
+    }
+
+    /// Dispatch a request from code hosted by Nickel itself.
+    ///
+    /// Unlike `handle_protocol_request`, this intentionally performs no
+    /// PID/token authentication: exclusive mutable access to the compositor
+    /// state is the capability. External callers must continue through the
+    /// authenticated protocol path above.
+    pub(super) fn handle_authority_request(
+        &mut self,
+        request: SessionAuthorityRequest,
+    ) -> ServerMessage {
+        match request {
+            SessionAuthorityRequest::Query(query) => self.handle_protocol_query(query),
+            SessionAuthorityRequest::Command(command) => {
+                self.handle_protocol_command(command, None, 0)
             }
         }
     }
@@ -189,8 +215,8 @@ impl NickelSession {
             Query::SecureStorage => ServerMessage::SecureStorage {
                 state: self.protocol_secure_storage_state(),
                 reason: (self.secure_storage_state()
-                    == crate::login_services::SecureStorageState::Unavailable)
-                    .then(crate::login_services::secure_storage_unavailable_reason)
+                    == crate::session::login_services::SecureStorageState::Unavailable)
+                    .then(crate::session::login_services::secure_storage_unavailable_reason)
                     .flatten(),
             },
             Query::IdleInhibition => ServerMessage::IdleInhibition {
@@ -201,13 +227,13 @@ impl NickelSession {
             },
             Query::CacheDiagnostics => {
                 let metadata = self.windows.metadata_diagnostics();
-                let titlebar = crate::window_frame::titlebar_cache_diagnostics();
+                let titlebar = crate::session::window_frame::titlebar_cache_diagnostics();
                 let recovery = self.recovery_ui.raster_diagnostics();
                 #[cfg(feature = "backend-udev")]
                 let identify = self
                     .native
                     .as_ref()
-                    .map(crate::backend::udev::UdevData::identify_badge_diagnostics)
+                    .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
@@ -487,7 +513,7 @@ impl NickelSession {
                         );
                     };
                     if supervisor
-                        .send(crate::ShellSupervisorCommand::Restart)
+                        .send(crate::session::ShellSupervisorCommand::Restart)
                         .is_err()
                     {
                         return protocol_error(
@@ -500,16 +526,18 @@ impl NickelSession {
                     self.lock_session();
                 }
                 nickel_session_protocol::SessionAction::Suspend => {
-                    crate::session_services::request(
-                        crate::session_services::SystemAction::Suspend,
+                    crate::session::session_services::request(
+                        crate::session::session_services::SystemAction::Suspend,
                     );
                 }
                 nickel_session_protocol::SessionAction::Reboot => {
-                    crate::session_services::request(crate::session_services::SystemAction::Reboot);
+                    crate::session::session_services::request(
+                        crate::session::session_services::SystemAction::Reboot,
+                    );
                 }
                 nickel_session_protocol::SessionAction::PowerOff => {
-                    crate::session_services::request(
-                        crate::session_services::SystemAction::PowerOff,
+                    crate::session::session_services::request(
+                        crate::session::session_services::SystemAction::PowerOff,
                     );
                 }
             },
@@ -1314,13 +1342,19 @@ impl NickelSession {
 
     pub(super) fn protocol_secure_storage_state(&self) -> ProtocolSecureStorage {
         match self.secure_storage_state() {
-            crate::login_services::SecureStorageState::Starting => ProtocolSecureStorage::Starting,
-            crate::login_services::SecureStorageState::Locked => ProtocolSecureStorage::Locked,
-            crate::login_services::SecureStorageState::PromptRequired => {
+            crate::session::login_services::SecureStorageState::Starting => {
+                ProtocolSecureStorage::Starting
+            }
+            crate::session::login_services::SecureStorageState::Locked => {
+                ProtocolSecureStorage::Locked
+            }
+            crate::session::login_services::SecureStorageState::PromptRequired => {
                 ProtocolSecureStorage::PromptRequired
             }
-            crate::login_services::SecureStorageState::Ready => ProtocolSecureStorage::Ready,
-            crate::login_services::SecureStorageState::Unavailable => {
+            crate::session::login_services::SecureStorageState::Ready => {
+                ProtocolSecureStorage::Ready
+            }
+            crate::session::login_services::SecureStorageState::Unavailable => {
                 ProtocolSecureStorage::Unavailable
             }
         }
