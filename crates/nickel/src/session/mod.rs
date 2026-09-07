@@ -82,7 +82,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
-    publish_test_control_environment(arguments.test_control)?;
     // Keep the typed internal command path live alongside the compatibility
     // socket. Compositor-hosted UI will receive this handle instead of the
     // platform transport when it is moved into `NickelSession`.
@@ -182,6 +181,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         "nickel-session listening on {}",
         state.socket_name.to_string_lossy()
     );
+    // Publishing the test capability is also the readiness barrier for the
+    // external acceptance harness. Do not expose it until every backend and
+    // internal-shell source has been installed and the event loop can service
+    // control datagrams.
+    publish_test_control_environment(arguments.test_control)?;
 
     if arguments.backend == backend::BackendKind::Udev {
         import_runtime_environment();
