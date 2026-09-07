@@ -7,7 +7,7 @@ use nickel_session_protocol::{
 };
 
 const HELP: &str = "\
-Inject one input event into a Nickel nested session started with --test-control.
+Remotely inspect or control an explicitly test-enabled Nickel session.
 
 Usage:
   ni c connect|disconnect

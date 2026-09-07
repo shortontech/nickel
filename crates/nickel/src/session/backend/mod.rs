@@ -105,10 +105,6 @@ impl SessionArguments {
             }
         }
 
-        if test_control && backend != BackendKind::Winit {
-            return Err("--test-control is available only with the nested backend".into());
-        }
-
         if !backend.available() {
             let name = match backend {
                 BackendKind::Winit => "winit",
@@ -198,23 +194,28 @@ mod tests {
         assert!(error.to_string().contains("unexpected argument"));
     }
 
-    #[cfg(feature = "backend-winit")]
     #[test]
-    fn test_control_is_explicit_and_nested_only() {
-        let arguments = SessionArguments::parse([
-            OsString::from("--backend"),
-            OsString::from("nested"),
-            OsString::from("--test-control"),
-        ])
-        .expect("nested test control should be accepted");
-        assert!(arguments.test_control);
+    fn test_control_is_an_explicit_backend_independent_capability() {
+        #[cfg(feature = "backend-winit")]
+        {
+            let arguments = SessionArguments::parse([
+                OsString::from("--backend"),
+                OsString::from("nested"),
+                OsString::from("--test-control"),
+            ])
+            .expect("nested test control should be accepted");
+            assert!(arguments.test_control);
+        }
 
-        let error = SessionArguments::parse([
-            OsString::from("--backend"),
-            OsString::from("udev"),
-            OsString::from("--test-control"),
-        ])
-        .expect_err("native test control must be rejected");
-        assert!(error.to_string().contains("only with the nested backend"));
+        #[cfg(feature = "backend-udev")]
+        {
+            let arguments = SessionArguments::parse([
+                OsString::from("--backend"),
+                OsString::from("udev"),
+                OsString::from("--test-control"),
+            ])
+            .expect("native test control should be accepted when explicitly requested");
+            assert!(arguments.test_control);
+        }
     }
 }
