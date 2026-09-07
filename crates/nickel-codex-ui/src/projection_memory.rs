@@ -2,6 +2,13 @@
 use nickel_markdown::{Block, Inline, MarkdownDocument};
 use nickel_ui::SelectionRun;
 
+/// Conservative allowance for the full selection document's cloned run IDs,
+/// vector slots, and index buckets. Run text is Arc-shared with the item cache.
+pub(crate) fn selection_capacity(runs: &[SelectionRun]) -> usize {
+    4 * runs.len() * (size_of::<SelectionRun>() + size_of::<(String, usize)>() + 1)
+        + 2 * runs.iter().map(|run| run.id.capacity()).sum::<usize>()
+}
+
 fn inline_bytes(inlines: &Vec<Inline>) -> usize {
     inlines.capacity() * size_of::<Inline>()
         + inlines

@@ -1835,6 +1835,10 @@ mod tests {
         assert!(has_accessible_text(&tree, "history message 1999"));
         assert!(!has_accessible_text(&tree, "history message 0"));
         assert!(
+            !state.transcript_selection_document().is_materialized(),
+            "ordinary virtualized layout must not parse offscreen selection text"
+        );
+        assert!(
             tree.resource_diagnostics().paint_primitive_count < 500,
             "{} paint primitives",
             tree.resource_diagnostics().paint_primitive_count

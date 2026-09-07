@@ -1,7 +1,10 @@
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
     collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use nickel_codex::{
@@ -21,8 +24,7 @@ const MAX_THREADS: usize = 200;
 const MAX_PENDING: usize = 32;
 pub const MAX_ITEM_TEXT_BYTES: usize = 256 * 1024;
 pub const MAX_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024 * 1024;
-const OMISSION_MARKER: &str =
-    "\n\n[Further output omitted from this local view; reload server history.]";
+const OMISSION_MARKER: &str = "\n\n[Further output omitted from this local view (256 KiB limit); server history is unchanged.]";
 
 fn bound_text(text: &mut String) {
     if text.len() > MAX_ITEM_TEXT_BYTES {
@@ -58,13 +60,30 @@ fn append_bounded(text: &mut String, delta: &str) {
 #[derive(Clone, Debug, Default)]
 struct ItemProjection {
     generation: u64,
-    cached: RefCell<Option<DerivedItem>>,
-    builds: Cell<u64>,
+    cached: RefCell<Option<Arc<ItemSnapshot>>>,
+    builds: BuildCounter,
+}
+
+#[derive(Clone, Debug, Default)]
+struct BuildCounter(Arc<AtomicU64>);
+
+impl BuildCounter {
+    #[cfg(test)]
+    fn get(&self) -> u64 {
+        self.0.load(Ordering::Relaxed)
+    }
+}
+
+#[derive(Debug)]
+struct ItemSnapshot {
+    generation: u64,
+    item: ChatItem,
+    derived: OnceLock<DerivedItem>,
+    builds: BuildCounter,
 }
 
 #[derive(Clone, Debug)]
 struct DerivedItem {
-    generation: u64,
     document: Arc<MarkdownDocument>,
     runs: Vec<SelectionRun>,
 }
@@ -75,39 +94,56 @@ impl ItemProjection {
         *self.cached.get_mut() = None;
     }
 
-    fn ensure(&self, item: &ChatItem) {
+    fn snapshot(&self, item: &ChatItem) -> Arc<ItemSnapshot> {
         if self
             .cached
             .borrow()
             .as_ref()
             .is_some_and(|cached| cached.generation == self.generation)
         {
-            return;
+            return self.cached.borrow().as_ref().unwrap().clone();
         }
-        let mut document = Arc::new(item_markdown_document(item));
-        let mut runs = selection_runs_from_document(item, &document);
-        // Tie derived expansion to the aggregate source budget, including run identifiers.
-        let budget = 2048 + 16 * item.text.capacity() + 4 * item.id.capacity();
-        if crate::projection_memory::derived_capacity(&document, &runs) > budget {
-            let source = format!(
-                "{}\n\n[Formatting omitted from this local view to limit memory use.]",
-                item_markdown_source(item)
-            );
-            document = Arc::new(MarkdownDocument {
-                source: source.clone(),
-                blocks: vec![nickel_markdown::Block::Paragraph {
-                    inlines: vec![nickel_markdown::Inline::Text { text: source }],
-                }],
-                diagnostics: Vec::new(),
-            });
-            runs = selection_runs_from_document(item, &document);
-        }
-        *self.cached.borrow_mut() = Some(DerivedItem {
+        let snapshot = Arc::new(ItemSnapshot {
             generation: self.generation,
-            document,
-            runs,
+            item: item.clone(),
+            derived: OnceLock::new(),
+            builds: self.builds.clone(),
         });
-        self.builds.set(self.builds.get().saturating_add(1));
+        *self.cached.borrow_mut() = Some(snapshot.clone());
+        snapshot
+    }
+}
+
+impl std::ops::Deref for ItemSnapshot {
+    type Target = DerivedItem;
+
+    fn deref(&self) -> &DerivedItem {
+        self.derived.get_or_init(|| {
+            let item = &self.item;
+            let mut document = Arc::new(item_markdown_document(item));
+            let mut runs = selection_runs_from_document(item, &document);
+            // Tie derived expansion to the aggregate source budget, including run identifiers.
+            let budget = 2048 + 16 * item.text.capacity() + 4 * item.id.capacity();
+            let selection_budget = 2048 + 8 * item.text.capacity() + 4 * item.id.capacity();
+            if crate::projection_memory::derived_capacity(&document, &runs) > budget
+                || crate::projection_memory::selection_capacity(&runs) > selection_budget
+            {
+                let source = format!(
+                    "{}\n\n[Formatting omitted from this local view to limit memory use.]",
+                    item_markdown_source(item)
+                );
+                document = Arc::new(MarkdownDocument {
+                    source: source.clone(),
+                    blocks: vec![nickel_markdown::Block::Paragraph {
+                        inlines: vec![nickel_markdown::Inline::Text { text: source }],
+                    }],
+                    diagnostics: Vec::new(),
+                });
+                runs = selection_runs_from_document(item, &document);
+            }
+            self.builds.0.fetch_add(1, Ordering::Relaxed);
+            DerivedItem { document, runs }
+        })
     }
 }
 
@@ -947,7 +983,7 @@ impl ChatState {
             evicted = true;
         }
         if evicted {
-            self.push_diagnostic("Older output omitted from this local view; reload server history for retained history".into());
+            self.push_diagnostic("Older output omitted from this local view to limit memory; server history is unchanged".into());
         }
     }
 
@@ -1091,22 +1127,27 @@ impl ChatState {
                 return cache.2.clone();
             }
         }
-        let runs = if self.item_selection_runs.len() == self.items.len() {
+        let snapshots = if self.item_selection_runs.len() == self.items.len() {
             self.item_selection_runs
                 .iter()
                 .zip(&self.items)
-                .flat_map(|(projection, item)| {
-                    projection.ensure(item);
-                    projection.cached.borrow().as_ref().unwrap().runs.clone()
-                })
+                .map(|(projection, item)| projection.snapshot(item))
                 .collect::<Vec<_>>()
         } else {
             self.items
                 .iter()
-                .flat_map(selection_runs_for_item)
+                .map(|item| ItemProjection::default().snapshot(item))
                 .collect()
         };
-        let document = Arc::new(SelectionDocument::new(runs));
+        let document = Arc::new(SelectionDocument::lazy(
+            self.selection_revision,
+            move || {
+                snapshots
+                    .iter()
+                    .flat_map(|snapshot| snapshot.runs.clone())
+                    .collect()
+            },
+        ));
         *self.selection_document_cache.borrow_mut() =
             (self.selection_revision, self.items.len(), document.clone());
         document
@@ -1115,14 +1156,7 @@ impl ChatState {
     pub(crate) fn markdown_document(&self, index: usize) -> Arc<MarkdownDocument> {
         if self.item_selection_runs.len() == self.items.len() {
             let projection = &self.item_selection_runs[index];
-            projection.ensure(&self.items[index]);
-            projection
-                .cached
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .document
-                .clone()
+            projection.snapshot(&self.items[index]).document.clone()
         } else {
             Arc::new(item_markdown_document(&self.items[index]))
         }
@@ -1141,6 +1175,7 @@ pub(crate) fn item_markdown_document(item: &ChatItem) -> MarkdownDocument {
     MarkdownDocument::parse(item_markdown_source(item))
 }
 
+#[cfg(test)]
 fn selection_runs_for_item(item: &ChatItem) -> Vec<SelectionRun> {
     selection_runs_from_document(item, &item_markdown_document(item))
 }
@@ -1289,7 +1324,7 @@ mod tests {
         assert_eq!(small.item_selection_runs[1].builds.get(), 1);
         assert_eq!(small.item_selection_runs[0].builds.get(), 0);
         // The full selection document is an explicit consumer of offscreen logical text.
-        small.transcript_selection_document();
+        small.transcript_selection_document().runs();
         assert_eq!(small.item_selection_runs[1].builds.get(), 1);
         assert_eq!(small.item_selection_runs[0].builds.get(), 1);
         let mut big = ChatState::default();
@@ -1432,10 +1467,11 @@ mod tests {
             for index in 0..count {
                 delta(&mut state, &chunk);
                 if (index + 1) % 128 == 0 {
-                    black_box(state.transcript_selection_document());
+                    black_box(state.transcript_selection_document().runs());
                 }
             }
             let selected = state.transcript_selection_document();
+            black_box(selected.runs());
             let elapsed = started.elapsed();
             let builds = state.item_selection_runs[0].builds.get();
             assert_eq!(
@@ -1650,7 +1686,7 @@ mod tests {
         let cached = state.transcript_selection_document();
         let recomputed =
             SelectionDocument::new(state.items.iter().flat_map(selection_runs_for_item));
-        assert_eq!(&*cached, &recomputed);
+        assert_eq!(cached.runs(), recomputed.runs());
 
         state.clear_conversation();
         assert!(state.items.is_empty());
