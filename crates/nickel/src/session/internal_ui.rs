@@ -136,6 +136,25 @@ pub struct InternalUiRendererDiagnostics {
     pub texture_import_failures: u64,
     /// Full-surface compatibility buffers which also failed to import.
     pub fallback_import_failures: u64,
+    /// Full-surface CPU pixels currently retained for software fallback.
+    pub software_frame_bytes: usize,
+    /// Full-surface CPU pixels currently retained by the importable fallback buffer.
+    pub fallback_raster_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AggregateInternalUiRendererDiagnostics {
+    pub surfaces: usize,
+    pub gpu_frames: u64,
+    pub fallback_frames: u64,
+    pub software_frame_bytes: usize,
+    pub fallback_raster_bytes: usize,
+    pub image_cache_entries: usize,
+    pub image_cache_bytes: usize,
+    pub text_cache_entries: usize,
+    pub text_cache_bytes: usize,
+    pub texture_import_failures: u64,
+    pub fallback_import_failures: u64,
 }
 
 /// Nickel display-list adapter for Smithay's renderer element API.
@@ -144,7 +163,7 @@ pub struct InternalUiRendererDiagnostics {
 /// their own textures, while text is rasterized into tightly bounded glyph
 /// textures; neither causes a full-surface software upload.
 pub struct SmithayFrameRenderer {
-    software: SoftwareRenderer,
+    software: Option<SoftwareRenderer>,
     text_software: SoftwareRenderer,
     primitives: Vec<GpuPrimitive>,
     raster: Option<MemoryRenderBuffer>,
@@ -303,9 +322,12 @@ const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
 const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
 impl SmithayFrameRenderer {
-    fn new(width: u32, height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
+    fn new(_width: u32, _height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
         Self {
-            software: SoftwareRenderer::new(width, height, scale),
+            // The healthy GPU path has no reason to commit a full-surface CPU
+            // framebuffer. Software presentation remains available and is
+            // allocated on demand by `prepare_fallback`.
+            software: None,
             // Text commands are rasterized into bounded textures. Reuse one
             // renderer so its process font database and shaping cache survive
             // across every label in a scene; constructing a font system per
@@ -726,12 +748,22 @@ impl SmithayFrameRenderer {
     }
 
     fn prepare_fallback(&mut self, frame: RenderFrame<'_>) -> DamageRegion {
-        let damage = self.software.render(frame.commands);
-        let mut bytes = Vec::with_capacity(self.software.pixels().len() * 4);
-        for pixel in self.software.pixels() {
+        let width = ((frame.logical_size.0 as f32) * frame.scale_factor)
+            .round()
+            .max(1.0) as u32;
+        let height = ((frame.logical_size.1 as f32) * frame.scale_factor)
+            .round()
+            .max(1.0) as u32;
+        let software = self
+            .software
+            .get_or_insert_with(|| SoftwareRenderer::new(width, height, frame.scale_factor));
+        software.resize(width, height, frame.scale_factor);
+        let damage = software.render(frame.commands);
+        let mut bytes = Vec::with_capacity(software.pixels().len() * 4);
+        for pixel in software.pixels() {
             bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
         }
-        let (width, height) = self.software.size();
+        let (width, height) = software.size();
         self.raster = Some(MemoryRenderBuffer::from_slice(
             &bytes,
             Fourcc::Abgr8888,
@@ -742,6 +774,8 @@ impl SmithayFrameRenderer {
         ));
         self.primitives.clear();
         self.import_fallback = None;
+        self.diagnostics.software_frame_bytes = texture_bytes(width, height);
+        self.diagnostics.fallback_raster_bytes = texture_bytes(width, height);
         damage
     }
 
@@ -891,6 +925,11 @@ impl FrameRenderer for SmithayFrameRenderer {
             self.diagnostics.fallback_text_count = 0;
             self.diagnostics.fallback_image_count = 0;
             self.prepare_gpu(frame);
+            if let Some(mut software) = self.software.take() {
+                software.suspend();
+            }
+            self.diagnostics.software_frame_bytes = 0;
+            self.diagnostics.fallback_raster_bytes = 0;
             DamageRegion {
                 rects: [nickel_ui::Rect::new(
                     0.0,
@@ -1368,6 +1407,42 @@ impl InternalUiRuntime {
         self.presentation
             .get(&id)
             .map(|surface| surface.renderer.diagnostics())
+    }
+
+    pub fn aggregate_renderer_diagnostics(&self) -> AggregateInternalUiRendererDiagnostics {
+        self.presentation.values().fold(
+            AggregateInternalUiRendererDiagnostics::default(),
+            |mut total, surface| {
+                let item = surface.renderer.diagnostics();
+                total.surfaces = total.surfaces.saturating_add(1);
+                total.gpu_frames = total.gpu_frames.saturating_add(item.gpu_frames);
+                total.fallback_frames = total.fallback_frames.saturating_add(item.fallback_frames);
+                total.software_frame_bytes = total
+                    .software_frame_bytes
+                    .saturating_add(item.software_frame_bytes);
+                total.fallback_raster_bytes = total
+                    .fallback_raster_bytes
+                    .saturating_add(item.fallback_raster_bytes);
+                total.image_cache_entries = total
+                    .image_cache_entries
+                    .saturating_add(item.image_cache_entries);
+                total.image_cache_bytes = total
+                    .image_cache_bytes
+                    .saturating_add(item.image_cache_bytes);
+                total.text_cache_entries = total
+                    .text_cache_entries
+                    .saturating_add(item.text_cache_entries);
+                total.text_cache_bytes =
+                    total.text_cache_bytes.saturating_add(item.text_cache_bytes);
+                total.texture_import_failures = total
+                    .texture_import_failures
+                    .saturating_add(item.texture_import_failures);
+                total.fallback_import_failures = total
+                    .fallback_import_failures
+                    .saturating_add(item.fallback_import_failures);
+                total
+            },
+        )
     }
 
     /// Force the compositor-owned UI renderer used by both native and nested backends.
@@ -2090,7 +2165,18 @@ mod tests {
         };
         assert_eq!(*rect, nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0));
         assert!(renderer.raster.is_none());
+        assert!(renderer.software.is_none());
+        assert_eq!(renderer.diagnostics().software_frame_bytes, 0);
         assert_eq!(renderer.diagnostics().gpu_frames, 1);
+    }
+
+    #[test]
+    fn gpu_renderer_does_not_eagerly_allocate_a_software_framebuffer() {
+        let renderer = SmithayFrameRenderer::new(3840, 2160, 1.0, InternalUiRendererMode::Gpu);
+
+        assert!(renderer.software.is_none());
+        assert_eq!(renderer.diagnostics().software_frame_bytes, 0);
+        assert_eq!(renderer.diagnostics().fallback_raster_bytes, 0);
     }
 
     #[test]
@@ -2113,8 +2199,44 @@ mod tests {
         assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
         assert!(renderer.primitives.is_empty());
         assert!(renderer.raster.is_some());
+        assert!(renderer.software.is_some());
+        assert_eq!(renderer.diagnostics().software_frame_bytes, 40 * 30 * 4);
+        assert_eq!(renderer.diagnostics().fallback_raster_bytes, 40 * 30 * 4);
         assert_eq!(renderer.diagnostics().gpu_frames, 0);
         assert_eq!(renderer.diagnostics().fallback_frames, 1);
+    }
+
+    #[test]
+    fn successful_gpu_frame_releases_software_fallback_storage() {
+        let commands = [PaintCommand::Fill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+            color: 0xff336699,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0, InternalUiRendererMode::Software);
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (40, 30),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        renderer.renderer_mode = InternalUiRendererMode::Gpu;
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (40, 30),
+                scale_factor: 1.0,
+                generation: 2,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert!(renderer.software.is_none());
+        assert!(renderer.raster.is_none());
+        assert_eq!(renderer.diagnostics().software_frame_bytes, 0);
+        assert_eq!(renderer.diagnostics().fallback_raster_bytes, 0);
     }
 
     #[test]

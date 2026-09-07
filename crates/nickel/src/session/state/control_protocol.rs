@@ -247,6 +247,7 @@ impl NickelSession {
                 let metadata = self.windows.metadata_diagnostics();
                 let titlebar = crate::session::window_frame::titlebar_cache_diagnostics();
                 let recovery = self.recovery_ui.raster_diagnostics();
+                let internal_ui = self.internal_ui.aggregate_renderer_diagnostics();
                 #[cfg(feature = "backend-udev")]
                 let identify = self
                     .native
@@ -254,6 +255,19 @@ impl NickelSession {
                     .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
                 ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
+                    internal_ui_surfaces: u16::try_from(internal_ui.surfaces).unwrap_or(u16::MAX),
+                    internal_ui_gpu_frames: internal_ui.gpu_frames,
+                    internal_ui_fallback_frames: internal_ui.fallback_frames,
+                    internal_ui_software_frame_bytes: internal_ui.software_frame_bytes as u64,
+                    internal_ui_fallback_raster_bytes: internal_ui.fallback_raster_bytes as u64,
+                    internal_ui_image_cache_entries: u16::try_from(internal_ui.image_cache_entries)
+                        .unwrap_or(u16::MAX),
+                    internal_ui_image_cache_bytes: internal_ui.image_cache_bytes as u64,
+                    internal_ui_text_cache_entries: u16::try_from(internal_ui.text_cache_entries)
+                        .unwrap_or(u16::MAX),
+                    internal_ui_text_cache_bytes: internal_ui.text_cache_bytes as u64,
+                    internal_ui_texture_import_failures: internal_ui.texture_import_failures,
+                    internal_ui_fallback_import_failures: internal_ui.fallback_import_failures,
                     preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
                     preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
                     preview_bytes: self.preview_bytes() as u64,

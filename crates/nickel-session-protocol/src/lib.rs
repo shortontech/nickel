@@ -484,6 +484,28 @@ pub enum ServerMessage {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheDiagnostics {
+    #[serde(default)]
+    pub internal_ui_surfaces: u16,
+    #[serde(default)]
+    pub internal_ui_gpu_frames: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_frames: u64,
+    #[serde(default)]
+    pub internal_ui_software_frame_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_raster_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_image_cache_entries: u16,
+    #[serde(default)]
+    pub internal_ui_image_cache_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_text_cache_entries: u16,
+    #[serde(default)]
+    pub internal_ui_text_cache_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_texture_import_failures: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_import_failures: u64,
     pub preview_entries: u16,
     pub preview_capacity: u16,
     pub preview_bytes: u64,
