@@ -216,6 +216,22 @@ impl InternalShellCoordinator {
             .collect()
     }
 
+    /// Refresh state supplied by session services rather than UI deadlines.
+    ///
+    /// Secure-storage transitions originate on the login-services worker and
+    /// are delivered to the compositor loop explicitly. They must not depend
+    /// on an animation, clock, or keyboard deadline happening to poll first.
+    pub fn refresh_system(&mut self) -> Vec<InternalSurfaceId> {
+        if !self.shell.refresh_secure_storage() {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|surface| surface.role == SurfaceRole::Launcher)
+            .map(|surface| surface.id)
+            .collect()
+    }
+
     pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) {
         self.shell.apply_internal_session_snapshot(snapshot);
     }
@@ -291,6 +307,7 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
 mod tests {
     use super::*;
     use crate::platform::{SessionRequestError, ShellCommand};
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     struct TestHost;
 
@@ -313,6 +330,47 @@ mod tests {
     fn coordinator() -> InternalShellCoordinator {
         InternalShellCoordinator::new(Arc::new(TestHost), PanelEdge::Bottom)
             .expect("headless shell coordinator")
+    }
+
+    struct StorageHost(Arc<AtomicU8>);
+
+    impl SessionHost for StorageHost {
+        fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
+            Ok(())
+        }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<crate::platform::SecureStorageState, SessionRequestError> {
+            Ok(match self.0.load(Ordering::Acquire) {
+                0 => crate::platform::SecureStorageState::Starting,
+                _ => crate::platform::SecureStorageState::Ready,
+            })
+        }
+    }
+
+    #[test]
+    fn session_service_transition_refreshes_deadline_driven_shell_immediately() {
+        let state = Arc::new(AtomicU8::new(0));
+        let mut coordinator = InternalShellCoordinator::new(
+            Arc::new(StorageHost(Arc::clone(&state))),
+            PanelEdge::Bottom,
+        )
+        .unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "one".into(),
+            width: 1920,
+            height: 1080,
+        }]);
+
+        state.store(1, Ordering::Release);
+        let changed = coordinator.refresh_system();
+
+        assert_eq!(
+            changed,
+            [coordinator.surface(SurfaceRole::Launcher, None).unwrap().id]
+        );
+        assert!(coordinator.refresh_system().is_empty());
     }
 
     #[test]

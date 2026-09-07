@@ -86,6 +86,15 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let monitor_secure_storage_state = state.secure_storage_state_handle();
     let monitor_secure_storage_retry = state.secure_storage_retry_handle();
     let monitor_secure_storage_may_start = Arc::clone(&secure_storage_may_start);
+    let (secure_storage_changed, secure_storage_changes) =
+        smithay::reexports::calloop::channel::channel();
+    event_loop
+        .handle()
+        .insert_source(secure_storage_changes, |event, _, state| {
+            if let smithay::reexports::calloop::channel::Event::Msg(()) = event {
+                state.refresh_internal_shell_system();
+            }
+        })?;
     thread::Builder::new()
         .name("nickel-login-services".into())
         .spawn(move || {
@@ -93,6 +102,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut previous = None;
             login_services::monitor_secure_storage(monitor_secure_storage_retry, |storage_state| {
                 monitor_secure_storage_state.store(storage_state as u8, Ordering::Release);
+                // The old out-of-process shell discovered transitions through
+                // its periodic control-socket query. The compositor-owned
+                // shell is deadline-driven, so explicitly wake its event loop
+                // after publishing the shared state instead of leaving its UI
+                // and launch gating on the construction-time snapshot.
+                let _ = secure_storage_changed.send(());
                 if previous != Some(storage_state) {
                     tracing::info!(
                         state = storage_state.as_str(),

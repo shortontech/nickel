@@ -1225,44 +1225,48 @@ impl LiveShell {
         changed
     }
 
-    pub fn refresh_system(&mut self) -> bool {
-        let mut changed = false;
-        #[cfg(target_os = "linux")]
-        {
-            let secure_storage_state = match self.session_host.secure_storage_state() {
-                Ok(state) => {
-                    if self.secure_storage_query_error.take().is_some() {
-                        tracing::info!("secure-storage session query recovered");
-                    }
-                    state
+    #[cfg(target_os = "linux")]
+    pub(crate) fn refresh_secure_storage(&mut self) -> bool {
+        let secure_storage_state = match self.session_host.secure_storage_state() {
+            Ok(state) => {
+                if self.secure_storage_query_error.take().is_some() {
+                    tracing::info!("secure-storage session query recovered");
                 }
-                Err(error) => {
-                    let now = Instant::now();
-                    let should_log = self.secure_storage_query_error.as_ref().is_none_or(
-                        |(previous, logged)| {
+                state
+            }
+            Err(error) => {
+                let now = Instant::now();
+                let should_log =
+                    self.secure_storage_query_error
+                        .as_ref()
+                        .is_none_or(|(previous, logged)| {
                             previous != &error
                                 || now.duration_since(*logged) >= RECURRING_DIAGNOSTIC_INTERVAL
-                        },
-                    );
-                    if should_log {
-                        tracing::warn!(%error, "secure-storage query failed during shell refresh");
-                        self.secure_storage_query_error = Some((error, now));
-                    }
-                    platform::SecureStorageState::ControlUnavailable
+                        });
+                if should_log {
+                    tracing::warn!(%error, "secure-storage query failed during shell refresh");
+                    self.secure_storage_query_error = Some((error, now));
                 }
-            };
-            if secure_storage_state != self.secure_storage_state {
-                self.secure_storage_state = secure_storage_state;
-                changed = true;
+                platform::SecureStorageState::ControlUnavailable
             }
-            if self.launcher_status.is_some()
-                && secure_storage_state == platform::SecureStorageState::Ready
-            {
-                self.launcher_status = None;
-                self.secure_storage_override = None;
-                changed = true;
-            }
+        };
+        let mut changed = secure_storage_state != self.secure_storage_state;
+        self.secure_storage_state = secure_storage_state;
+        if self.launcher_status.is_some()
+            && secure_storage_state == platform::SecureStorageState::Ready
+        {
+            self.launcher_status = None;
+            self.secure_storage_override = None;
+            changed = true;
         }
+        changed
+    }
+
+    pub fn refresh_system(&mut self) -> bool {
+        #[cfg(target_os = "linux")]
+        let mut changed = self.refresh_secure_storage();
+        #[cfg(not(target_os = "linux"))]
+        let mut changed = false;
         let shell_settings = ShellSettings::load_default();
         let wallpaper_settings = WallpaperSettings::load_default();
         if self.refresh_configured_wallpaper(wallpaper_settings.image) {

@@ -885,6 +885,17 @@ impl NickelSession {
         }
     }
 
+    pub(crate) fn refresh_internal_shell_system(&mut self) {
+        let changed = self
+            .internal_shell
+            .as_mut()
+            .is_some_and(|shell| !shell.refresh_system().is_empty());
+        if changed {
+            self.sync_internal_shell();
+        }
+        self.schedule_internal_shell_deadline();
+    }
+
     pub(crate) fn show_internal_codex_project_menu(
         &mut self,
         placement: crate::internal_codex::CodexSurfacePlacement,
