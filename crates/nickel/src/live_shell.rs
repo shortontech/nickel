@@ -2906,12 +2906,7 @@ impl LiveShell {
             window_belongs_to_panel(
                 self.all_windows_on_every_bar,
                 self.panel_output.as_deref(),
-                if self.all_windows_on_every_bar {
-                    None
-                } else {
-                    self.window_feed.window_output(window.id)
-                }
-                .as_deref(),
+                window.state.output.as_deref(),
             )
         })
     }
