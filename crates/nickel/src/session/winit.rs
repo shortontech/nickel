@@ -236,6 +236,13 @@ pub fn init_winit(
                             &frame_palette,
                         );
                         let mut overlay_elements = Vec::new();
+                        overlay_elements.extend(
+                            state
+                                .internal_ui
+                                .render_elements(renderer, &output.name(), (0, 0).into())
+                                .into_iter()
+                                .map(WinitFrameElement::from),
+                        );
                         if !state.locked
                             && let Some(window) = state.preview_highlight.and_then(|highlight| {
                                 state.space.elements().find(|window| {

@@ -423,6 +423,8 @@ pub struct NickelSession {
     pub native: Option<crate::session::backend::udev::UdevData>,
 
     pub space: Space<Window>,
+    /// UI applications hosted directly by the compositor, without a Wayland client.
+    pub internal_ui: crate::session::InternalUiRuntime,
     pub loop_signal: LoopSignal,
 
     // Smithay State
@@ -578,6 +580,45 @@ use preview::{
     admitted_preview_ids, advance_preview_content_generation, record_preview_capture_attempt,
 };
 impl NickelSession {
+    pub fn insert_internal_surface<A: nickel_ui::Application + 'static>(
+        &mut self,
+        application: A,
+        placement: crate::session::InternalSurfacePlacement,
+        scale: f32,
+    ) -> nickel_ui::InternalSurfaceId {
+        let id = self.internal_ui.insert(application, placement, scale);
+        self.schedule_internal_ui_frame();
+        id
+    }
+
+    pub fn remove_internal_surface(&mut self, id: nickel_ui::InternalSurfaceId) -> bool {
+        let removed = self.internal_ui.remove(id);
+        if removed {
+            self.schedule_internal_ui_frame();
+        }
+        removed
+    }
+
+    pub fn step_internal_surface(
+        &mut self,
+        id: nickel_ui::InternalSurfaceId,
+        batch: nickel_ui::HostBatch,
+    ) -> bool {
+        let changed = self.internal_ui.step(id, batch);
+        if changed {
+            self.schedule_internal_ui_frame();
+        }
+        changed
+    }
+
+    fn schedule_internal_ui_frame(&mut self) {
+        self.request_output_redraw();
+        #[cfg(feature = "backend-udev")]
+        if self.native.is_some() {
+            self.render_all_outputs();
+        }
+    }
+
     pub(crate) fn configured_output_scale(&self, output: &Output) -> OutputScale {
         self.output_scale_preferences
             .get(&stable_output_identity(output))
@@ -1021,6 +1062,7 @@ impl NickelSession {
             native: None,
 
             space,
+            internal_ui: Default::default(),
             loop_signal,
             socket_name,
 

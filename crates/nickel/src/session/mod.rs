@@ -7,6 +7,7 @@ mod backend;
 mod focus;
 mod grabs;
 mod input;
+mod internal_ui;
 mod login_services;
 mod on_screen_keyboard;
 mod output_retirement;
@@ -42,6 +43,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Condvar, Mutex, atomic::AtomicU64};
 
 pub use authority::{SessionAuthority, SessionAuthorityRequest};
+pub use internal_ui::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
 use smithay::reexports::{
     calloop::{
         EventLoop,
