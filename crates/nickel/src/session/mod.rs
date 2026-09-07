@@ -45,6 +45,7 @@ use smithay::reexports::{
     },
     wayland_server::Display,
 };
+pub(crate) use state::InternalCaptureState;
 pub use state::NickelSession;
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -77,6 +78,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         &event_loop.handle(),
         state.secure_storage_state_handle(),
         state.secure_storage_retry_handle(),
+        Arc::clone(&state.internal_projection_outputs),
+        Arc::clone(&state.internal_capture),
     )?;
     let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
     let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));

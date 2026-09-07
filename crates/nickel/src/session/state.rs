@@ -439,6 +439,13 @@ struct CompatibilityControlState {
     socket_path: PathBuf,
 }
 
+#[derive(Debug)]
+pub(crate) enum InternalCaptureState {
+    Idle,
+    Pending(PathBuf),
+    Complete(PathBuf, nickel_session_protocol::CaptureResult),
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -584,6 +591,8 @@ pub struct NickelSession {
     pub output_capture_name: Option<String>,
     pub output_capture_reply_path: Option<PathBuf>,
     pub output_capture_request_id: Option<u64>,
+    pub(crate) internal_capture: Arc<std::sync::Mutex<InternalCaptureState>>,
+    pub(crate) internal_projection_outputs: Arc<std::sync::RwLock<Vec<OutputSnapshot>>>,
     pub shell_failure_count: u8,
     pub(crate) recovery_ui: crate::session::recovery_ui::RecoveryUi,
     secure_storage_state: Arc<AtomicU8>,
@@ -788,6 +797,7 @@ impl NickelSession {
             return;
         }
         let snapshot = self.protocol_snapshot();
+        *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
         let shell = self.internal_shell.as_mut().unwrap();
         shell.apply_session_snapshot(snapshot);
         let changed = shell.poll(now);
@@ -1603,6 +1613,8 @@ impl NickelSession {
             output_capture_name: None,
             output_capture_reply_path: None,
             output_capture_request_id: None,
+            internal_capture: Arc::new(std::sync::Mutex::new(InternalCaptureState::Idle)),
+            internal_projection_outputs: Arc::new(std::sync::RwLock::new(Vec::new())),
             shell_failure_count: 0,
             recovery_ui: crate::session::recovery_ui::RecoveryUi::new(),
             secure_storage_state,

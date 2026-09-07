@@ -460,6 +460,7 @@ pub struct ShellDeadlineOutcome {
 
 pub struct LiveShell {
     session_host: Arc<dyn SessionHost>,
+    screenshot_capture_pending: bool,
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
@@ -889,6 +890,7 @@ impl LiveShell {
         );
         Ok(Self {
             session_host,
+            screenshot_capture_pending: false,
             host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
@@ -2073,7 +2075,8 @@ impl LiveShell {
             self.close_window_preview();
             outcome.visibility_changed |= was_open;
         }
-        outcome.capture_screenshot = self.screenshot.capture_ready_at(now);
+        outcome.capture_screenshot =
+            self.screenshot.capture_ready_at(now) || self.screenshot_capture_pending;
         if self.screenshot.poll_pointer_deadline(now) {
             outcome.redraw.push(SurfaceRole::Screenshot);
         }
@@ -3703,18 +3706,26 @@ impl LiveShell {
     }
 
     pub fn capture_screenshot(&mut self) -> bool {
-        match platform::capture_desktop() {
-            Ok(capture) => {
-                self.screenshot.show(capture.image);
-                self.set_screenshot_focus(true);
-                true
+        match self.session_host.capture_desktop() {
+            crate::session_host::DesktopCapturePoll::Pending => {
+                self.screenshot_capture_pending = true;
+                false
             }
-            Err(error) => {
-                tracing::warn!(%error, "failed to capture desktop");
-                self.screenshot.show_error(error);
-                self.set_screenshot_focus(true);
-                true
-            }
+            crate::session_host::DesktopCapturePoll::Ready(result) => match result {
+                Ok(capture) => {
+                    self.screenshot_capture_pending = false;
+                    self.screenshot.show(capture.image);
+                    self.set_screenshot_focus(true);
+                    true
+                }
+                Err(error) => {
+                    self.screenshot_capture_pending = false;
+                    tracing::warn!(%error, "failed to capture desktop");
+                    self.screenshot.show_error(error);
+                    self.set_screenshot_focus(true);
+                    true
+                }
+            },
         }
     }
 
@@ -4641,11 +4652,13 @@ impl LiveShell {
     }
 }
 
-fn supported_projection_modes() -> Vec<nickel_core::display_projection::ProjectionMode> {
+fn supported_projection_modes(
+    session_host: &dyn SessionHost,
+) -> Vec<nickel_core::display_projection::ProjectionMode> {
     #[cfg(target_os = "linux")]
     {
         use nickel_core::display_projection::{ProjectionChooser, ProjectionOutput};
-        let Ok(outputs) = platform::projection_outputs() else {
+        let Ok(outputs) = session_host.projection_outputs() else {
             return Vec::new();
         };
         let outputs = outputs
@@ -4679,7 +4692,7 @@ fn window_belongs_to_panel(
 
 impl LiveShell {
     fn sync_control_host(&mut self, width: u32, height: u32) {
-        let supported_projection_modes = supported_projection_modes();
+        let supported_projection_modes = supported_projection_modes(self.session_host.as_ref());
         self.control_host.application_mut().sync(
             &self.network,
             &self.bluetooth,
@@ -4928,7 +4941,7 @@ impl LiveShell {
             use nickel_core::display_projection::{
                 ProjectionChooser, ProjectionOutput, ProjectionPlacement,
             };
-            let Ok(outputs) = platform::projection_outputs() else {
+            let Ok(outputs) = self.session_host.projection_outputs() else {
                 return false;
             };
             let topology = outputs
@@ -5004,7 +5017,7 @@ impl LiveShell {
         self.projection_rollback_deadline = None;
         #[cfg(target_os = "linux")]
         if let Some(mut previous) = self.projection_chooser.rollback() {
-            if let Ok(outputs) = platform::projection_outputs() {
+            if let Ok(outputs) = self.session_host.projection_outputs() {
                 previous.retain(|entry| outputs.iter().any(|output| output.name == entry.name));
                 if !previous.iter().any(|entry| entry.enabled)
                     && let Some(first) = previous.first_mut()

@@ -6,9 +6,14 @@
 
 use crate::platform::{self, SecureStorageState, SessionRequestError, ShellCommand};
 
+pub(crate) enum DesktopCapturePoll {
+    Pending,
+    Ready(Result<platform::DesktopCapture, String>),
+}
+
 #[cfg(target_os = "linux")]
 use std::sync::{
-    Arc,
+    Arc, Mutex, RwLock,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
 
@@ -17,8 +22,18 @@ use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
 pub trait SessionHost: Send + Sync {
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError>;
-    fn secure_storage_state(&self) -> Result<SecureStorageState, SessionRequestError>;
-    fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError>;
+    fn secure_storage_state(&self) -> Result<SecureStorageState, SessionRequestError> {
+        Ok(SecureStorageState::Ready)
+    }
+    fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
+        Ok(())
+    }
+    fn projection_outputs(&self) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+        platform::projection_outputs()
+    }
+    fn capture_desktop(&self) -> DesktopCapturePoll {
+        DesktopCapturePoll::Ready(platform::capture_desktop())
+    }
 }
 
 #[derive(Default)]
@@ -67,6 +82,8 @@ pub(crate) struct InProcessSessionHost {
     sender: smithay::reexports::calloop::channel::Sender<SessionAuthorityRequest>,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<AtomicBool>,
+    projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
+    capture: Arc<Mutex<crate::session::InternalCaptureState>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -100,6 +117,53 @@ impl SessionHost for InProcessSessionHost {
         self.secure_storage_retry.store(true, Ordering::Release);
         Ok(())
     }
+
+    fn projection_outputs(&self) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+        Ok(self.projection_outputs.read().unwrap().clone())
+    }
+
+    fn capture_desktop(&self) -> DesktopCapturePoll {
+        use crate::session::InternalCaptureState;
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let mut capture = self.capture.lock().unwrap();
+        match std::mem::replace(&mut *capture, InternalCaptureState::Idle) {
+            InternalCaptureState::Idle => {
+                let sequence = SEQUENCE.fetch_add(1, Ordering::Relaxed);
+                let path =
+                    std::env::temp_dir().join(format!("nickel-internal-capture-{sequence}.png"));
+                *capture = InternalCaptureState::Pending(path.clone());
+                let request = nickel_session_protocol::Command::CaptureOutput {
+                    path: path.to_string_lossy().into_owned(),
+                    output: None,
+                };
+                if self.sender.send(request.into()).is_err() {
+                    *capture = InternalCaptureState::Idle;
+                    return DesktopCapturePoll::Ready(Err(
+                        "internal capture authority is unavailable".into(),
+                    ));
+                }
+                DesktopCapturePoll::Pending
+            }
+            InternalCaptureState::Pending(path) => {
+                *capture = InternalCaptureState::Pending(path);
+                DesktopCapturePoll::Pending
+            }
+            InternalCaptureState::Complete(path, result) => {
+                let answer = match result {
+                    nickel_session_protocol::CaptureResult::Saved { .. } => image::open(&path)
+                        .map(|image| platform::DesktopCapture {
+                            image: image.into_rgba8(),
+                        })
+                        .map_err(|error| {
+                            format!("could not read captured desktop pixels: {error}")
+                        }),
+                    nickel_session_protocol::CaptureResult::Failed { message } => Err(message),
+                };
+                let _ = std::fs::remove_file(path);
+                DesktopCapturePoll::Ready(answer)
+            }
+        }
+    }
 }
 
 /// Install the in-process authority bridge into the compositor event loop.
@@ -112,6 +176,8 @@ pub(crate) fn install_in_process_session_host(
     loop_handle: &smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<AtomicBool>,
+    projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
+    capture: Arc<Mutex<crate::session::InternalCaptureState>>,
 ) -> Result<
     InProcessSessionHost,
     smithay::reexports::calloop::InsertError<
@@ -128,6 +194,8 @@ pub(crate) fn install_in_process_session_host(
         sender,
         secure_storage_state,
         secure_storage_retry,
+        projection_outputs,
+        capture,
     })
 }
 
@@ -163,14 +231,14 @@ impl SessionHost for TestSessionHost {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use std::sync::{
-        Arc,
+        Arc, Mutex, RwLock,
         atomic::{AtomicBool, AtomicU8, Ordering},
     };
 
     use nickel_session_protocol::{Command, ShellRole};
     use smithay::reexports::calloop::channel::channel;
 
-    use super::{InProcessSessionHost, SessionHost};
+    use super::{DesktopCapturePoll, InProcessSessionHost, SessionHost};
     use crate::{platform::ShellCommand, session::SessionAuthorityRequest};
 
     fn host(
@@ -182,6 +250,8 @@ mod tests {
                 crate::session::login_services::SecureStorageState::Ready as u8,
             )),
             secure_storage_retry: Arc::new(AtomicBool::new(false)),
+            projection_outputs: Arc::new(RwLock::new(Vec::new())),
+            capture: Arc::new(Mutex::new(crate::session::InternalCaptureState::Idle)),
         }
     }
 
@@ -226,5 +296,57 @@ mod tests {
         );
         host.request_secure_storage_retry().unwrap();
         assert!(host.secure_storage_retry.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn in_process_projection_query_reads_shared_compositor_state() {
+        let (sender, _receiver) = channel();
+        let host = host(sender);
+        host.projection_outputs
+            .write()
+            .unwrap()
+            .push(nickel_session_protocol::OutputSnapshot {
+                name: "DP-1".into(),
+                model: "Test".into(),
+                geometry: nickel_session_protocol::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                },
+                work_area: nickel_session_protocol::Geometry {
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1040,
+                },
+                scale_120: 120,
+                transform: nickel_session_protocol::OutputTransform::Normal,
+                physical_width_mm: 0,
+                physical_height_mm: 0,
+                primary: true,
+                enabled: true,
+            });
+        assert_eq!(host.projection_outputs().unwrap()[0].name, "DP-1");
+    }
+
+    #[test]
+    fn in_process_capture_enqueues_typed_request_without_a_reply_socket() {
+        let (sender, receiver) = channel();
+        let host = host(sender);
+
+        assert!(matches!(
+            host.capture_desktop(),
+            DesktopCapturePoll::Pending
+        ));
+        let request = receiver.try_recv().expect("typed capture request");
+        assert!(matches!(
+            request,
+            SessionAuthorityRequest::Command(Command::CaptureOutput { output: None, .. })
+        ));
+        assert!(matches!(
+            host.capture_desktop(),
+            DesktopCapturePoll::Pending
+        ));
     }
 }
