@@ -2402,6 +2402,7 @@ pub fn run() -> Result<(), String> {
                         scheduled_wakeups,
                     ) = state.host_runtime_samples();
                     let host_phase_samples_available = !input_to_frame_us.is_empty();
+                    let executable_predictions = executable_index::prediction_metrics();
                     platform::respond_runtime_diagnostics(
                         request_id,
                         &reply_path,
@@ -2432,6 +2433,9 @@ pub fn run() -> Result<(), String> {
                                     unavailable_reason: None,
                                 }
                             },
+                            executable_prediction_observations: executable_predictions.observations,
+                            executable_prediction_descendant_windows: executable_predictions
+                                .descendant_windows,
                         },
                     );
                 }

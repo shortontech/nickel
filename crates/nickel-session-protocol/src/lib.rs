@@ -610,6 +610,13 @@ pub struct ShellRuntimeDiagnostics {
     pub host_phase_samples_available: bool,
     pub retained_presenter_bytes: u64,
     pub frame_allocations: AllocationMeasurement,
+    /// Rows are likely-graphical, likely-terminal, unknown, and unavailable;
+    /// columns are no qualifying window and a qualifying window.
+    #[serde(default)]
+    pub executable_prediction_observations: [[u64; 2]; 4],
+    /// Qualifying-window observations attributed through a child process.
+    #[serde(default)]
+    pub executable_prediction_descendant_windows: u64,
 }
 
 impl ShellRuntimeDiagnostics {
@@ -1444,12 +1451,16 @@ mod tests {
                 scope: AllocationScope::Process,
                 unavailable_reason: None,
             },
+            executable_prediction_observations: [[1, 2], [3, 4], [5, 6], [7, 8]],
+            executable_prediction_descendant_windows: 9,
         };
         assert_eq!(diagnostics.validate(), Ok(()));
         let json = serde_json::to_value(&diagnostics).unwrap();
         assert_eq!(json["warm_present_us"][0], 950);
         assert_eq!(json["input_to_frame_us"][0], 480);
         assert_eq!(json["frame_allocations"]["scope"], "process");
+        assert_eq!(json["executable_prediction_observations"][0][1], 2);
+        assert_eq!(json["executable_prediction_descendant_windows"], 9);
         let response = ServerEnvelope {
             request_id: 14,
             message: ServerMessage::ShellRuntimeDiagnostics(diagnostics.clone()),
