@@ -6,7 +6,6 @@ use nickel_session_protocol::{
     encode as encode_session,
 };
 use std::{
-    borrow::Cow,
     cell::RefCell,
     collections::HashMap,
     env,
@@ -51,7 +50,7 @@ pub fn wallpaper() -> Wallpaper {
 
 pub fn capture_active_window() -> Result<(), String> {
     let image = capture_active_window_image()?;
-    copy_image_to_clipboard(&image)
+    copy_image_to_clipboard(image)
 }
 
 pub fn capture_active_window_to_file() -> Result<(), String> {
@@ -268,15 +267,8 @@ fn receive_capture_response(
     }
 }
 
-pub fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
-    let mut clipboard = wayland_clipboard()?;
-    clipboard
-        .set_image(arboard::ImageData {
-            width: image.width() as usize,
-            height: image.height() as usize,
-            bytes: Cow::Borrowed(image.as_raw()),
-        })
-        .map_err(|error| format!("could not copy screenshot pixels: {error}"))
+pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
+    queue_wayland_clipboard(ClipboardJob::Image(image))
 }
 
 pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
@@ -291,26 +283,72 @@ pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String>
     image
         .save(&path)
         .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
-    let mut clipboard = wayland_clipboard()?;
-    if let Err(error) = clipboard.set_text(path.to_string_lossy()) {
+    if let Err(error) =
+        queue_wayland_clipboard(ClipboardJob::Text(path.to_string_lossy().into_owned()))
+    {
         let _ = std::fs::remove_file(&path);
-        return Err(format!("could not copy temporary screenshot path: {error}"));
+        return Err(error);
     }
     Ok(path)
 }
 
-fn wayland_clipboard() -> Result<std::sync::MutexGuard<'static, arboard::Clipboard>, String> {
-    static CLIPBOARD: OnceLock<Result<Mutex<arboard::Clipboard>, String>> = OnceLock::new();
-    let clipboard = CLIPBOARD.get_or_init(|| {
-        arboard::Clipboard::new()
-            .map(Mutex::new)
-            .map_err(|error| format!("could not connect to the Wayland clipboard: {error}"))
-    });
-    clipboard
-        .as_ref()
-        .map_err(Clone::clone)?
-        .lock()
-        .map_err(|_| "Wayland clipboard state is unavailable".into())
+enum ClipboardJob {
+    Image(image::RgbaImage),
+    Text(String),
+}
+
+const CLIPBOARD_QUEUE_CAPACITY: usize = 4;
+
+fn queue_wayland_clipboard(job: ClipboardJob) -> Result<(), String> {
+    static WORKER: OnceLock<Result<mpsc::SyncSender<ClipboardJob>, String>> = OnceLock::new();
+    let sender = WORKER.get_or_init(start_wayland_clipboard_worker);
+    enqueue_clipboard_job(sender.as_ref().map_err(Clone::clone)?, job)
+}
+
+// The in-process shell invokes this path from the compositor thread. A Wayland
+// clipboard client performs a roundtrip while connecting and publishing its
+// offer, so running arboard here would wait for the very event loop that called
+// us. Keep every Wayland client operation on this dedicated worker instead.
+fn start_wayland_clipboard_worker() -> Result<mpsc::SyncSender<ClipboardJob>, String> {
+    let (sender, receiver) = mpsc::sync_channel(CLIPBOARD_QUEUE_CAPACITY);
+    thread::Builder::new()
+        .name("nickel-clipboard".into())
+        .spawn(move || wayland_clipboard_worker(receiver))
+        .map_err(|error| format!("could not start the Wayland clipboard worker: {error}"))?;
+    Ok(sender)
+}
+
+fn enqueue_clipboard_job(
+    sender: &mpsc::SyncSender<ClipboardJob>,
+    job: ClipboardJob,
+) -> Result<(), String> {
+    sender.try_send(job).map_err(|error| match error {
+        mpsc::TrySendError::Full(_) => "Wayland clipboard is busy".into(),
+        mpsc::TrySendError::Disconnected(_) => "Wayland clipboard worker stopped".into(),
+    })
+}
+
+fn wayland_clipboard_worker(receiver: mpsc::Receiver<ClipboardJob>) {
+    let mut clipboard = match arboard::Clipboard::new() {
+        Ok(clipboard) => clipboard,
+        Err(error) => {
+            tracing::warn!(%error, "could not connect to the Wayland clipboard");
+            return;
+        }
+    };
+    while let Ok(job) = receiver.recv() {
+        let result = match job {
+            ClipboardJob::Image(image) => clipboard.set_image(arboard::ImageData {
+                width: image.width() as usize,
+                height: image.height() as usize,
+                bytes: std::borrow::Cow::Owned(image.into_raw()),
+            }),
+            ClipboardJob::Text(text) => clipboard.set_text(text),
+        };
+        if let Err(error) = result {
+            tracing::warn!(%error, "could not publish the Nickel screenshot clipboard payload");
+        }
+    }
 }
 
 pub fn network_status() -> super::NetworkStatus {
@@ -2290,7 +2328,7 @@ mod tests {
     use notify::{Event, EventKind};
     use std::io;
     use std::path::Path;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use crate::{
         launcher::Launcher,
@@ -2299,15 +2337,33 @@ mod tests {
     };
 
     use super::{
-        MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, PendingLaunchSignal,
+        ClipboardJob, MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, PendingLaunchSignal,
         SubscriptionState, WindowFeed, bounded_notification_text, capture_active_window,
         capture_active_window_to_file, command_response, crop_output_geometry,
-        deliver_pending_launch_expiry, deliver_pending_launch_observation, logical_rect,
-        notification_actions, notification_name_owned, owning_output, parse_window, pixmap_to_rgba,
-        resolve_application_id, response_for_request, response_message, secure_storage_response,
-        secure_storage_retry_response, session_receive_error, shell_command_payload,
-        subscription_shortcut, tray_retry_delay,
+        deliver_pending_launch_expiry, deliver_pending_launch_observation, enqueue_clipboard_job,
+        logical_rect, notification_actions, notification_name_owned, owning_output, parse_window,
+        pixmap_to_rgba, resolve_application_id, response_for_request, response_message,
+        secure_storage_response, secure_storage_retry_response, session_receive_error,
+        shell_command_payload, subscription_shortcut, tray_retry_delay,
     };
+
+    #[test]
+    fn screenshot_clipboard_submission_never_waits_for_wayland_roundtrips() {
+        // Model a clipboard worker stuck waiting for its compositor connection:
+        // queued publication from the compositor thread must still return.
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let started = Instant::now();
+        enqueue_clipboard_job(&sender, ClipboardJob::Text("capture".into()))
+            .expect("bounded queue has room");
+        assert!(started.elapsed() < Duration::from_millis(100));
+
+        // A saturated worker reports back-pressure instead of blocking the
+        // compositor's input and presentation loop.
+        let started = Instant::now();
+        assert!(enqueue_clipboard_job(&sender, ClipboardJob::Text("next".into())).is_err());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(receiver);
+    }
 
     #[test]
     fn shell_settings_watch_ignores_reads_that_it_triggers_itself() {

@@ -67,7 +67,7 @@ pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
     Err("desktop capture is unsupported on this platform".into())
 }
 
-pub fn copy_image_to_clipboard(_image: &image::RgbaImage) -> Result<(), String> {
+pub fn copy_image_to_clipboard(_image: image::RgbaImage) -> Result<(), String> {
     Err("image clipboard support is unavailable on this platform".into())
 }
 

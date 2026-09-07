@@ -615,7 +615,7 @@ impl ScreenshotTool {
         self.cropped(width, height)
             .ok_or_else(|| "COPY FAILED · NO SELECTION".to_owned())
             .and_then(|image| {
-                platform::copy_image_to_clipboard(&image)
+                platform::copy_image_to_clipboard(image)
                     .map(|()| "IMAGE COPIED".to_owned())
                     .map_err(|error| format!("COPY FAILED · {error}"))
             })

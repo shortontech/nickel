@@ -243,7 +243,7 @@ pub fn active_display_point() -> Option<(i32, i32)> {
     }
 }
 
-pub fn copy_image_to_clipboard(image: &image::RgbaImage) -> Result<(), String> {
+pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
     const CF_BITMAP: u32 = 2;
     let info = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
