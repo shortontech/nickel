@@ -581,14 +581,14 @@ pub struct TerminalPalette {
 impl Default for TerminalPalette {
     fn default() -> Self {
         Self {
-            foreground: 0xffd8dee9,
+            foreground: 0xfffcfcfc,
             background: 0xff111318,
             cursor: 0xffeceff4,
             selection: 0xff3b526b,
             indexed: [
-                0xff000000, 0xffbf616a, 0xffa3be8c, 0xffebcb8b, 0xff81a1c1, 0xffb48ead, 0xff88c0d0,
-                0xffe5e9f0, 0xff4c566a, 0xffd08770, 0xffb8d8a8, 0xffffdf9b, 0xff9cc1e6, 0xffd5a5d2,
-                0xff8fdbdf, 0xffffffff,
+                0xff232627, 0xffed1515, 0xff11d116, 0xfff67400, 0xff1d99f3, 0xff9b59b6, 0xff1abc9c,
+                0xfffcfcfc, 0xff7f8c8d, 0xffc0392b, 0xff1cdc9a, 0xfffdbc4b, 0xff3daee9, 0xff8e44ad,
+                0xff16a085, 0xffffffff,
             ],
             bold_is_bright: true,
             cursor_style: nickel_core::terminal_settings::TerminalCursorStyle::Block,
@@ -1004,6 +1004,38 @@ mod tests {
         assert!(explicit_index.bold);
         assert!(!explicit_index.italic);
         assert_eq!(explicit_index.color, Some(palette.indexed[4]));
+    }
+
+    #[test]
+    fn default_ansi_palette_keeps_common_shell_categories_visually_distinct() {
+        let palette = TerminalPalette::default();
+        assert_eq!(palette.foreground, 0xfffcfcfc);
+        assert_eq!(palette.indexed[1], 0xffed1515);
+        assert_eq!(palette.indexed[2], 0xff11d116);
+        assert_eq!(palette.indexed[4], 0xff1d99f3);
+        assert_eq!(palette.indexed[6], 0xff1abc9c);
+        assert_eq!(palette.indexed[12], 0xff3daee9);
+
+        let rgb = |color: u32| {
+            [
+                ((color >> 16) & 0xff) as i32,
+                ((color >> 8) & 0xff) as i32,
+                (color & 0xff) as i32,
+            ]
+        };
+        let distance = |left: u32, right: u32| {
+            rgb(left)
+                .into_iter()
+                .zip(rgb(right))
+                .map(|(left, right)| (left - right).unsigned_abs())
+                .sum::<u32>()
+        };
+        for (left, right) in [(1, 2), (1, 4), (2, 6), (4, 6), (9, 10), (12, 14)] {
+            assert!(
+                distance(palette.indexed[left], palette.indexed[right]) >= 96,
+                "ANSI colors {left} and {right} are too similar"
+            );
+        }
     }
 
     #[test]

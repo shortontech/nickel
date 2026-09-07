@@ -38,7 +38,7 @@ impl Default for TerminalSettings {
             font_size_tenths: 140,
             scrollback_lines: 10_000,
             cursor_style: TerminalCursorStyle::Block,
-            foreground: 0xffd8dee9,
+            foreground: 0xfffcfcfc,
             background: 0xff111318,
             close_on_successful_exit: false,
         }
@@ -91,7 +91,7 @@ impl TerminalSettings {
                         _ => TerminalCursorStyle::Block,
                     }
                 }
-                "foreground" => settings.foreground = parse_color(value).unwrap_or(0xffd8dee9),
+                "foreground" => settings.foreground = parse_color(value).unwrap_or(0xfffcfcfc),
                 "background" => settings.background = parse_color(value).unwrap_or(0xff111318),
                 "close_on_successful_exit" => settings.close_on_successful_exit = parse_bool(value),
                 _ => {}
