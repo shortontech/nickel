@@ -1,3 +1,5 @@
+#![cfg(target_os = "linux")]
+
 use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn executable(path: &Path) {

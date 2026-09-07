@@ -1,12 +1,14 @@
-use std::{
-    env,
-    os::unix::process::CommandExt,
-    path::{Path, PathBuf},
-    process::Command,
-};
+#[cfg(target_os = "linux")]
+use std::{env, os::unix::process::CommandExt, path::PathBuf, process::Command};
 
+#[cfg(any(target_os = "linux", test))]
+use std::path::Path;
+
+#[cfg(any(target_os = "linux", test))]
 const CURRENT_DESKTOP: &str = "Nickel:KDE";
+#[cfg(any(target_os = "linux", test))]
 const KDE_SESSION_VERSION: &str = "6";
+#[cfg(any(target_os = "linux", test))]
 const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CONFIG_HOME", ".config"),
     ("XDG_DATA_HOME", ".local/share"),
@@ -14,6 +16,7 @@ const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CACHE_HOME", ".cache"),
 ];
 
+#[cfg(target_os = "linux")]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let executable = env::current_exe()?;
     let directory = executable
@@ -27,6 +30,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Err(error.into())
 }
 
+#[cfg(not(target_os = "linux"))]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    Err("nickel-login is only available on Linux".into())
+}
+
+#[cfg(target_os = "linux")]
 fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
     let home = env::var_os("HOME").map(PathBuf::from);
     // SAFETY: nickel-login is single-threaded and has not launched a child.
@@ -49,7 +58,11 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn sibling_binary(directory: &Path, name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+#[cfg(any(target_os = "linux", test))]
+fn sibling_binary(
+    directory: &Path,
+    name: &str,
+) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
     let path = directory.join(name);
     if path.is_file() {
         Ok(path)

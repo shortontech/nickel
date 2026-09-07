@@ -55,6 +55,7 @@ Usage:
   nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
+#[cfg_attr(not(unix), allow(dead_code))]
 enum Parsed {
     KeyboardStatus,
     Input(TestInput),
@@ -1098,6 +1099,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
         Parsed::Input(_)
+        | Parsed::KeyboardStatus
         | Parsed::Semantic(_)
         | Parsed::GroupedWindowsScenario(_)
         | Parsed::Windows
@@ -1113,6 +1115,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         | Parsed::WorkspaceRemove(_)
         | Parsed::WorkspaceMove { .. }
         | Parsed::WindowAction { .. }
+        | Parsed::SessionAction(_)
+        | Parsed::Unlock
         | Parsed::IdleInhibition => {
             Err("nested compositor test input is only available on Unix".into())
         }

@@ -106,9 +106,12 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
-smithay-client-toolkit = "0.20.0"
+sha2.workspace = true
 tempfile = "3.25.0"
 toml.workspace = true
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+smithay-client-toolkit = "0.20.0"
 
 [[bin]]
 name = "nickel"
@@ -150,6 +153,10 @@ required-features = ["workbench-fixtures"]
 
 [[example]]
 name = "pointer_constraints"
+required-features = ["backend-winit"]
+
+[[example]]
+name = "input_method_acceptance"
 required-features = ["backend-winit"]
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
