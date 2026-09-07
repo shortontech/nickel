@@ -19,17 +19,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let directory = executable
         .parent()
         .ok_or("Nickel login launcher has no executable directory")?;
-    let session = sibling_binary(directory, "nickel-session")?;
-    let shell = sibling_binary(directory, "nickel")?;
+    let nickel = sibling_binary(directory, "nickel")?;
 
     prepare_login_environment()?;
 
-    let error = Command::new(session)
-        .arg("--backend")
-        .arg("udev")
-        .arg("--command")
-        .arg(shell)
-        .exec();
+    let error = Command::new(nickel).arg("--backend").arg("udev").exec();
     Err(error.into())
 }
 
