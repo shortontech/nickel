@@ -274,7 +274,7 @@ impl LiveShell {
         )
     }
 
-    fn keyboard_step(&mut self, batch: HostBatch, epoch: Option<u64>) -> bool {
+    pub(super) fn keyboard_step(&mut self, batch: HostBatch, epoch: Option<u64>) -> bool {
         // Retain the lease displayed to the user, not a fresh lease acquired after activation.
         let outcome = self.keyboard_host.step(batch);
         for effect in self.keyboard_host.application_mut().take_effects() {

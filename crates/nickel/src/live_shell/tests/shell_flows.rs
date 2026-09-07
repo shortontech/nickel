@@ -1048,3 +1048,82 @@
                 .is_empty()
         );
     }
+
+    #[test]
+    fn compositor_owned_notification_ui_uses_production_effect_reducer() {
+        let mut shell = LiveShell::new().unwrap();
+        let mut store = NotificationStore::default();
+        store.notify(
+            0,
+            NotificationRequest {
+                app_name: "Test".into(),
+                summary: "Ready".into(),
+                body: "Choose".into(),
+                actions: vec![NotificationAction {
+                    key: "open".into(),
+                    label: "Open".into(),
+                }],
+                expire_timeout_ms: 0,
+            },
+            Instant::now(),
+        );
+        shell.notification = store.newest();
+        let _ = shell.scene(SurfaceRole::Notification, 420, 180);
+        let target = shell
+            .notification_host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: nickel_ui::SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .unwrap();
+        let point = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+
+        assert!(shell.shell_role_host_ui(
+            SurfaceRole::Notification,
+            UiEvent::PointerPressed(point),
+            420,
+            180,
+        ));
+        assert!(shell.shell_role_host_ui(
+            SurfaceRole::Notification,
+            UiEvent::PointerReleased(point),
+            420,
+            180,
+        ));
+        assert!(shell.notification.is_none());
+    }
+
+    #[test]
+    fn compositor_owned_control_center_ui_updates_the_production_host() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.control_visible = true;
+        let _ = shell.scene(SurfaceRole::ControlCenter, 420, 600);
+        let target = shell
+            .control_host
+            .query(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::Button,
+            ))
+            .into_iter()
+            .next()
+            .expect("control center button");
+        let point = Point {
+            x: target.bounds.origin.x + target.bounds.size.width / 2.0,
+            y: target.bounds.origin.y + target.bounds.size.height / 2.0,
+        };
+
+        assert!(shell.shell_role_host_ui(
+            SurfaceRole::ControlCenter,
+            UiEvent::PointerPressed(point),
+            420,
+            600,
+        ));
+        assert!(shell.shell_role_host_ui(
+            SurfaceRole::ControlCenter,
+            UiEvent::PointerReleased(point),
+            420,
+            600,
+        ));
+    }

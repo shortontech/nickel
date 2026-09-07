@@ -2148,6 +2148,135 @@ impl LiveShell {
         outcome.changed
     }
 
+    /// Dispatches compositor-owned semantic UI events through the same hosts and
+    /// effect reducers used by the windowed shell.
+    pub(crate) fn shell_role_host_ui(
+        &mut self,
+        role: SurfaceRole,
+        event: UiEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        match role {
+            SurfaceRole::Panel => self.panel_host_ui(event, width),
+            SurfaceRole::Launcher => self.launcher_host_ui(event, width, height),
+            SurfaceRole::ControlCenter => {
+                if !self.control_visible {
+                    return false;
+                }
+                self.sync_control_host(width, height);
+                let changed = self.step_control_host(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                });
+                self.apply_control_effects();
+                changed
+            }
+            SurfaceRole::Notification => {
+                if self.notification.is_none() && !self.notification_history_visible {
+                    return false;
+                }
+                self.sync_notification_host(width, height);
+                let outcome = self.notification_host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                });
+                outcome.changed | self.apply_notification_effects()
+            }
+            SurfaceRole::WindowPreview => {
+                let Some(frame) = self.preview_frame.as_mut() else {
+                    return false;
+                };
+                let outcome = frame.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                });
+                let actions = frame.take_actions();
+                for action in actions {
+                    self.apply_preview_action(action);
+                }
+                outcome.changed
+            }
+            SurfaceRole::WindowContextMenu => {
+                if self.application_menu_target.is_some() {
+                    if self.application_menu_host.is_none() {
+                        let _ = self.application_menu_scene();
+                    }
+                    let Some(host) = self.application_menu_host.as_mut() else {
+                        return false;
+                    };
+                    let outcome = host.step(HostBatch {
+                        surface_size: Some((width, height)),
+                        events: vec![HostEvent::Ui(event)],
+                        ..HostBatch::default()
+                    });
+                    let effects = host.application_mut().take_effects();
+                    for effect in effects {
+                        self.apply_application_menu_action(effect);
+                        self.close_window_preview();
+                    }
+                    return outcome.changed;
+                }
+                if self.window_menu_host.is_none() {
+                    let _ = self.window_menu_scene();
+                }
+                let Some(host) = self.window_menu_host.as_mut() else {
+                    return false;
+                };
+                let outcome = host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                });
+                let effects = host.application_mut().take_effects();
+                for effect in effects {
+                    self.apply_window_menu_action(effect);
+                    self.close_window_preview();
+                }
+                outcome.changed
+            }
+            SurfaceRole::Lock => {
+                if !self.locked {
+                    return false;
+                }
+                let outcome = self.lock_host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                });
+                outcome.changed | self.apply_lock_effects()
+            }
+            SurfaceRole::OnScreenKeyboard => self.keyboard_step(
+                HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Ui(event)],
+                    ..HostBatch::default()
+                },
+                self.keyboard_recipient
+                    .as_ref()
+                    .map(|recipient| recipient.generation),
+            ),
+            SurfaceRole::Screenshot => match event {
+                UiEvent::PointerMoved(point) => {
+                    self.screenshot_pointer_moved(point.x, point.y, width, height)
+                }
+                UiEvent::PointerPressed(point) => {
+                    self.screenshot_pointer_pressed(point.x, point.y, width, height)
+                }
+                UiEvent::PointerReleased(_) => self.screenshot_pointer_released(),
+                _ => false,
+            },
+            // These are intentionally passive or hosted outside LiveShell.
+            SurfaceRole::Desktop
+            | SurfaceRole::VolumeOsd
+            | SurfaceRole::CodexProjectMenu
+            | SurfaceRole::CodexChat => false,
+        }
+    }
+
     fn apply_panel_action(&mut self, action: PanelAction) {
         let anchored_role = match &action {
             PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),

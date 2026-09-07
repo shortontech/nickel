@@ -239,14 +239,9 @@ impl InternalShellCoordinator {
             let nickel_ui::HostEvent::Ui(event) = event else {
                 continue;
             };
-            changed |= match entry.role {
-                SurfaceRole::Panel => self.shell.panel_host_ui(event, entry.size.0),
-                SurfaceRole::Launcher => {
-                    self.shell
-                        .launcher_host_ui(event, entry.size.0, entry.size.1)
-                }
-                _ => false,
-            };
+            changed |= self
+                .shell
+                .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1);
         }
         changed
     }
