@@ -28,6 +28,15 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
+    let host_wayland = env::var_os("WAYLAND_DISPLAY").and_then(|display| {
+        let display = PathBuf::from(display);
+        let path = if display.is_absolute() {
+            display
+        } else {
+            PathBuf::from(env::var_os("XDG_RUNTIME_DIR")?).join(display)
+        };
+        path.exists().then_some(path)
+    });
     let harness = env::current_exe().map_err(|error| error.to_string())?;
     let directory = harness
         .parent()
@@ -47,7 +56,8 @@ fn run() -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     let capability_file = runtime.join("shell-environment");
 
-    let mut compositor = Command::new(&nickel)
+    let mut command = Command::new(&nickel);
+    command
         .args([
             "--backend",
             "winit",
@@ -58,11 +68,17 @@ fn run() -> Result<(), String> {
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
-        // Prefer the host X server when both host protocols are advertised.
-        // This keeps the acceptance window independent of the Nickel session
-        // under test and avoids nesting its bootstrap inside itself.
-        .env("WINIT_UNIX_BACKEND", "x11")
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    if let Some(host_wayland) = host_wayland {
+        // Preserve the absolute host socket while isolating the nested
+        // compositor's own runtime directory and Wayland listener.
+        command
+            .env("WINIT_UNIX_BACKEND", "wayland")
+            .env("WAYLAND_DISPLAY", host_wayland);
+    } else {
+        command.env("WINIT_UNIX_BACKEND", "x11");
+    }
+    let mut compositor = command
         .spawn()
         .map_err(|error| format!("could not start nested compositor: {error}"))?;
 
