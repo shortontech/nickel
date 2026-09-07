@@ -328,6 +328,27 @@ impl InternalShellCoordinator {
         self.shell.surface_visible(SurfaceRole::Launcher)
     }
 
+    /// Identify the concrete panel receiving an internal pointer event.
+    ///
+    /// Panel scenes are duplicated per output, while `LiveShell` owns one
+    /// reusable panel host. Set its invocation context immediately before
+    /// dispatch so popovers retain the clicked panel's output and origin.
+    pub fn set_panel_context(&mut self, output: impl Into<String>, origin: (i32, i32)) {
+        self.shell.set_panel_output(output);
+        self.shell.set_panel_origin_x(origin.0);
+        self.shell.set_panel_origin_y(origin.1);
+    }
+
+    pub fn popover_anchor(
+        &self,
+        preferred: nickel_session_protocol::AnchorSide,
+    ) -> Option<(
+        nickel_session_protocol::ShellRole,
+        nickel_session_protocol::ShellPopoverAnchor,
+    )> {
+        self.shell.popover_anchor(preferred)
+    }
+
     /// Deliver a compositor-owned shortcut directly to the in-process shell.
     ///
     /// The native input reducer already owns suppression and key-repeat

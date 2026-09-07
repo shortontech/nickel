@@ -72,8 +72,8 @@ mod tests {
         Thread, ThreadId, TurnId,
     };
     use nickel_ui::{
-        Application, DocumentSelection, Rect, SelectionEndpoint, SemanticRole, Shortcut,
-        SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore,
+        Application, DocumentSelection, HostBatch, HostEvent, Rect, SelectionEndpoint,
+        SemanticRole, Shortcut, SoftwareRenderer, UiEvent, UiFrame, UiHost, UiId, UiStateStore,
     };
     use nickel_ui_testkit::{ActivationVia, Scenario, Selector};
 
@@ -1735,6 +1735,39 @@ mod tests {
                 initial_thread: None,
             }]
         );
+    }
+
+    #[test]
+    fn embedded_project_menu_idle_poll_advances_deadline_without_redraw() {
+        let backend = ReplayBackend::from_json(r#"{"name":"embedded","events":[]}"#).unwrap();
+        let app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        })
+        .as_shell_project_menu();
+        let mut host = UiHost::new(app, 520, 680);
+        let limit = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while host.application().state.status != ConnectionStatus::Ready
+            && std::time::Instant::now() < limit
+        {
+            host.step(HostBatch {
+                now: Some(std::time::Instant::now()),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            });
+            std::thread::yield_now();
+        }
+        assert_eq!(host.application().state.status, ConnectionStatus::Ready);
+
+        let now = std::time::Instant::now();
+        let idle = host.step(HostBatch {
+            now: Some(now),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+
+        assert!(!idle.changed);
+        assert!(host.next_deadline().is_some_and(|deadline| deadline > now));
     }
 
     #[test]

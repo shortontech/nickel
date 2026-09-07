@@ -85,8 +85,9 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
 
 #[cfg(test)]
 mod internal_shell_placement_tests {
-    use super::internal_shell_surface_placement;
+    use super::{internal_codex_project_menu_placement, internal_shell_surface_placement};
     use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
+    use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
     fn outputs() -> Vec<(InternalOutput, i32, i32)> {
         vec![
@@ -148,6 +149,36 @@ mod internal_shell_placement_tests {
         assert_eq!(left.output.as_deref(), Some("left"));
         assert_eq!(left.geometry, (-1902, 176, 960, 720));
         assert_ne!(right.geometry, left.geometry);
+    }
+
+    #[test]
+    fn codex_menu_uses_clicked_panel_output_global_coordinates() {
+        let anchor = ShellPopoverAnchor {
+            control: "panel-codex".into(),
+            output: "right".into(),
+            bounds: Geometry {
+                x: 2200,
+                y: 1392,
+                width: 48,
+                height: 48,
+            },
+            preferred: AnchorSide::Above,
+        };
+
+        let placement =
+            internal_codex_project_menu_placement(Some(&anchor), &outputs(), Some("left"));
+
+        assert_eq!(placement.output.as_deref(), Some("right"));
+        assert_eq!(placement.origin, (1964, 936));
+        assert_eq!(placement.scale, 1.0);
+    }
+
+    #[test]
+    fn codex_menu_fallback_includes_negative_output_origin() {
+        let placement = internal_codex_project_menu_placement(None, &outputs(), Some("left"));
+
+        assert_eq!(placement.output.as_deref(), Some("left"));
+        assert_eq!(placement.origin, (-1920, 216));
     }
 }
 
@@ -958,6 +989,11 @@ impl NickelSession {
             let actions = shell.drain_file_actions();
             let shell_changed = !changed.is_empty();
             let codex_menu_visible = shell.codex_project_menu_visible();
+            let codex_menu_anchor = shell
+                .popover_anchor(nickel_session_protocol::AnchorSide::Above)
+                .and_then(|(role, anchor)| {
+                    (role == nickel_session_protocol::ShellRole::ProjectMenu).then_some(anchor)
+                });
             let requested_codex_project = shell.take_requested_codex_project();
             let _ = shell;
             if shell_changed {
@@ -967,18 +1003,14 @@ impl NickelSession {
                 self.apply_internal_file_action(action);
             }
             if codex_menu_visible {
-                let output = self
-                    .space
-                    .outputs()
-                    .next()
-                    .map(smithay::output::Output::name);
-                if let Err(error) = self.show_internal_codex_project_menu(
-                    crate::internal_codex::CodexSurfacePlacement {
-                        output,
-                        origin: (24, 64),
-                        scale: 1.0,
-                    },
-                ) {
+                let outputs = self.internal_outputs();
+                let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
+                let placement = internal_codex_project_menu_placement(
+                    codex_menu_anchor.as_ref(),
+                    &outputs,
+                    fallback.as_deref(),
+                );
+                if let Err(error) = self.show_internal_codex_project_menu(placement) {
                     tracing::warn!(%error, "could not host Codex project menu internally");
                 }
             } else if let Some(mut host) = self.internal_codex.take() {
@@ -1056,11 +1088,17 @@ impl NickelSession {
             .internal_codex
             .take()
             .ok_or_else(|| "Codex integration is disabled".to_owned())?;
+        let previous = host
+            .project_menu()
+            .and_then(|id| self.internal_ui.placement(id).cloned());
         let result = host.ensure_project_menu(&mut self.internal_ui, placement);
         self.internal_codex = Some(host);
         if let Ok(id) = result {
+            let presentation_changed = previous.as_ref() != self.internal_ui.placement(id);
             self.internal_ui.focus_surface(id);
-            self.schedule_internal_ui_frame();
+            if presentation_changed {
+                self.schedule_internal_ui_frame();
+            }
         }
         result
     }
@@ -1136,9 +1174,21 @@ impl NickelSession {
             return;
         }
         let reverse = self
-            .internal_shell_surfaces
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
             .iter()
-            .map(|(shell, runtime)| (*runtime, *shell))
+            .filter_map(|surface| {
+                self.internal_shell_surfaces
+                    .get(&surface.id)
+                    .map(|runtime| (*runtime, (surface.id, surface.role, surface.output.clone())))
+            })
+            .collect::<HashMap<_, _>>();
+        let output_origins = self
+            .internal_outputs()
+            .into_iter()
+            .map(|(output, x, y)| (output.name, (x, y)))
             .collect::<HashMap<_, _>>();
         let launcher_was_visible = self
             .internal_shell
@@ -1147,9 +1197,15 @@ impl NickelSession {
         let shell = self.internal_shell.as_mut().unwrap();
         let mut changed = false;
         for (runtime_id, event) in events {
-            let Some(shell_id) = reverse.get(&runtime_id).copied() else {
+            let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
+            if role == crate::winit_shell::SurfaceRole::Panel
+                && let Some(output) = output
+            {
+                let origin = output_origins.get(&output).copied().unwrap_or_default();
+                shell.set_panel_context(output, origin);
+            }
             changed |= shell.step_slot(
                 shell_id,
                 nickel_ui::HostBatch {
@@ -5715,6 +5771,37 @@ fn internal_shell_surface_placement(
         role,
         geometry: (x, y, surface_size.0, surface_size.1),
         output: output_name,
+    }
+}
+
+fn internal_codex_project_menu_placement(
+    anchor: Option<&nickel_session_protocol::ShellPopoverAnchor>,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+    fallback_output: Option<&str>,
+) -> crate::internal_codex::CodexSurfacePlacement {
+    let requested = anchor
+        .map(|anchor| anchor.output.as_str())
+        .or(fallback_output);
+    let selected = requested
+        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+        .or_else(|| outputs.first());
+    let Some((output, origin_x, origin_y)) = selected else {
+        return crate::internal_codex::CodexSurfacePlacement::default();
+    };
+    let (menu_width, menu_height) = crate::internal_codex::MENU_SIZE;
+    let max_x = output.width.saturating_sub(menu_width) as i32;
+    let anchor_center = anchor
+        .filter(|anchor| anchor.output == output.name)
+        .map_or(24, |anchor| anchor.bounds.x + anchor.bounds.width / 2);
+    let x = (anchor_center - menu_width as i32 / 2).clamp(0, max_x);
+    let work_height = output
+        .height
+        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+    let y = work_height.saturating_sub(menu_height).saturating_sub(8) as i32;
+    crate::internal_codex::CodexSurfacePlacement {
+        output: Some(output.name.clone()),
+        origin: (origin_x + x, origin_y + y),
+        scale: output.scale,
     }
 }
 

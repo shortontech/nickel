@@ -13,7 +13,7 @@ use nickel_ui::{HostBatch, InternalSurfaceId};
 
 use crate::session::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
 
-const MENU_SIZE: (u32, u32) = (520, 680);
+pub(crate) const MENU_SIZE: (u32, u32) = (520, 680);
 const CHAT_SIZE: (u32, u32) = (1120, 760);
 
 #[derive(Clone, Debug)]
@@ -84,6 +84,10 @@ impl InternalCodexHost {
         placement: CodexSurfacePlacement,
     ) -> Result<InternalSurfaceId, String> {
         if let Some(id) = self.project_menu {
+            runtime.relocate(
+                id,
+                internal_placement(placement, MENU_SIZE, InternalSurfaceRole::Overlay),
+            );
             return Ok(id);
         }
         let mut application = shell_application_with_backend(
@@ -369,6 +373,43 @@ mod tests {
         assert!(runtime.application::<TestApp>(id).is_some());
         assert!(host.close(&mut runtime, id));
         assert!(runtime.is_empty());
+    }
+
+    #[test]
+    fn existing_project_menu_moves_without_recreating_its_host() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(
+            TestApp,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Overlay,
+                geometry: (10, 20, MENU_SIZE.0, MENU_SIZE.1),
+                output: Some("test".into()),
+            },
+            1.0,
+        );
+        let mut host = host();
+        host.project_menu = Some(id);
+
+        let same = host
+            .ensure_project_menu(
+                &mut runtime,
+                CodexSurfacePlacement {
+                    output: Some("right".into()),
+                    origin: (1920, 312),
+                    scale: 1.0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(same, id);
+        assert_eq!(
+            runtime.placement(id).unwrap().output.as_deref(),
+            Some("right")
+        );
+        assert_eq!(
+            runtime.placement(id).unwrap().geometry,
+            (1920, 312, 520, 680)
+        );
     }
 
     #[test]
