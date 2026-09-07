@@ -5010,6 +5010,8 @@ mod tests {
         app.persistence_enabled = false;
         app.codex_feature.capability.installation = FeatureInstallation::Installed;
         app.codex_feature.capability.support = FeatureSupport::Supported;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
+        app.optional_feature_runtime.active_windows = 0;
         let enabled = app.optional_features.codex_enabled;
         app.handle_settings_message(SettingsMessage::SetCodexEnabled(!enabled));
         assert_eq!(app.optional_features.codex_enabled, !enabled);
@@ -5096,6 +5098,9 @@ mod tests {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.persistence_enabled = false;
         app.codex_probe_rx = None;
+        app.codex_feature.capability.policy = FeaturePolicy::Editable;
+        app.optional_feature_runtime.active_windows = 0;
+        app.optional_features.codex_source = CodexSource::CompatibleInstalled;
         let generation = app.optional_features.codex_generation;
         app.handle_settings_message(SettingsMessage::SetCodexSource(CodexSource::Bundled));
         assert_eq!(app.optional_features.codex_source, CodexSource::Bundled);
