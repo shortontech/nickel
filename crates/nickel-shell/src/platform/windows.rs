@@ -2932,12 +2932,18 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
             }
             return true;
         }
-        ShellCommand::ShowContextMenu { x, width, height } => {
+        ShellCommand::ShowContextMenu {
+            x,
+            y: _,
+            width,
+            height,
+        } => {
             clear_dwm_thumbnails();
             return show_context_window(x, width, height);
         }
         ShellCommand::ShowPreview {
             x,
+            y: _,
             width,
             height,
             windows,

@@ -1319,11 +1319,16 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             },
         },
         ShellCommand::Unlock => SessionCommand::Unlock,
-        ShellCommand::ShowContextMenu { x, width, height } => SessionCommand::ShowOverlay {
+        ShellCommand::ShowContextMenu {
+            x,
+            y,
+            width,
+            height,
+        } => SessionCommand::ShowOverlay {
             role: SessionShellRole::ContextMenu,
             geometry: SessionGeometry {
                 x,
-                y: 0,
+                y,
                 width,
                 height,
             },
@@ -1331,6 +1336,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
         },
         ShellCommand::ShowPreview {
             x,
+            y,
             width,
             height,
             windows,
@@ -1338,7 +1344,7 @@ fn shell_command_payload(command: ShellCommand) -> SessionCommand {
             role: SessionShellRole::Preview,
             geometry: SessionGeometry {
                 x,
-                y: 0,
+                y,
                 width,
                 height,
             },

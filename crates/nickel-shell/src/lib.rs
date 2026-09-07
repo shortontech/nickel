@@ -1724,6 +1724,7 @@ fn handle_shell_input(
                 }
                 if let Some(display) = shell.surface_display_geometry(surface) {
                     state.set_panel_origin_x(display.x);
+                    state.set_panel_origin_y(display.y);
                 }
                 let width = shell
                     .surface(surface)
@@ -1785,6 +1786,7 @@ fn handle_shell_input(
                 }
                 if let Some(display) = shell.surface_display_geometry(surface) {
                     state.set_panel_origin_x(display.x);
+                    state.set_panel_origin_y(display.y);
                 }
                 let width = shell
                     .surface(surface)

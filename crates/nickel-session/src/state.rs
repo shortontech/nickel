@@ -212,6 +212,10 @@ pub(crate) fn drag_icon_location(
         .then(|| (pointer - output.loc.to_f64()).to_i32_round())
 }
 
+fn output_contains_logical_point(output: Rectangle<i32, Logical>, x: i32, y: i32) -> bool {
+    output.contains(Point::from((x, y)))
+}
+
 fn process_uid(pid: u32) -> Option<String> {
     std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()?
@@ -3160,6 +3164,7 @@ impl NickelSession {
     pub fn show_context_menu(
         &mut self,
         x: i32,
+        y: i32,
         requested_width: i32,
         requested_height: i32,
         focus: bool,
@@ -3167,6 +3172,7 @@ impl NickelSession {
         self.show_transient(
             self.context_menu_window.clone(),
             x,
+            y,
             requested_width,
             requested_height,
             focus,
@@ -3174,10 +3180,11 @@ impl NickelSession {
         );
     }
 
-    pub fn show_preview(&mut self, x: i32, requested_width: i32, requested_height: i32) {
+    pub fn show_preview(&mut self, x: i32, y: i32, requested_width: i32, requested_height: i32) {
         self.show_transient(
             self.preview_window.clone(),
             x,
+            y,
             requested_width,
             requested_height,
             false,
@@ -3189,6 +3196,7 @@ impl NickelSession {
         &mut self,
         window: Option<Window>,
         x: i32,
+        y: i32,
         requested_width: i32,
         requested_height: i32,
         focus: bool,
@@ -3201,7 +3209,7 @@ impl NickelSession {
             .space
             .outputs()
             .filter_map(|output| self.space.output_geometry(output))
-            .find(|geometry| x >= geometry.loc.x && x < geometry.loc.x + geometry.size.w)
+            .find(|geometry| output_contains_logical_point(*geometry, x, y))
             .map(|geometry| Geometry {
                 x: geometry.loc.x,
                 y: geometry.loc.y,
@@ -5032,7 +5040,7 @@ mod protocol_tests {
         admitted_preview_ids, advance_preview_content_generation, apply_shell_behavior_value,
         bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
-        maximized_content_geometry, output_index_for_shell_surface,
+        maximized_content_geometry, output_contains_logical_point, output_index_for_shell_surface,
         pending_launch_window_disposition, prepare_shell_behavior_update,
         preview_mapping_has_exact_size, protocol_preview_from_cached,
         record_preview_capture_attempt, restored_drag_content_geometry,
@@ -6433,5 +6441,16 @@ mod protocol_tests {
 
         assert_eq!(drag_icon_location(pointer, left), None);
         assert_eq!(drag_icon_location(pointer, right), Some((92, 85).into()));
+    }
+
+    #[test]
+    fn transient_output_hit_testing_uses_both_global_axes() {
+        let upper = smithay::utils::Rectangle::new((0, -1080).into(), (1920, 1080).into());
+        let lower = smithay::utils::Rectangle::new((0, 0).into(), (1920, 1080).into());
+
+        assert!(output_contains_logical_point(upper, 960, -40));
+        assert!(!output_contains_logical_point(lower, 960, -40));
+        assert!(!output_contains_logical_point(upper, 960, 1040));
+        assert!(output_contains_logical_point(lower, 960, 1040));
     }
 }

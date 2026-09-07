@@ -525,11 +525,13 @@ pub struct LiveShell {
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
     window_menu_anchor_x: Option<i32>,
+    window_menu_anchor_y: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
     application_menu_target: Option<ApplicationMenuTarget>,
     application_menu_host: Option<nickel_ui::UiHost<ApplicationMenuApp>>,
     notification_host: NotificationHost,
     panel_origin_x: i32,
+    panel_origin_y: i32,
     control_host: ControlCenterHost,
     control_change_token: HostChangeToken,
     control_deadline: Option<Instant>,
@@ -903,11 +905,13 @@ impl LiveShell {
             window_menu: None,
             window_menu_snapshot: None,
             window_menu_anchor_x: None,
+            window_menu_anchor_y: None,
             window_menu_host: None,
             application_menu_target: None,
             application_menu_host: None,
             notification_host,
             panel_origin_x: 0,
+            panel_origin_y: 0,
             control_host,
             control_change_token: HostChangeToken::default(),
             control_deadline: Some(Instant::now()),
@@ -2181,10 +2185,12 @@ impl LiveShell {
                     .map(|target| target.bounds.origin.x.round() as i32)
                     .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
                 self.window_menu_anchor_x = Some(self.panel_origin_x + x);
+                self.window_menu_anchor_y = Some(self.panel_origin_y);
                 let _ = send_session_command(
                     "show-context-menu",
                     ShellCommand::ShowContextMenu {
                         x: self.panel_origin_x + x,
+                        y: self.panel_origin_y,
                         width: MENU_WIDTH as i32,
                         height: self.window_context_menu_height(),
                     },
@@ -2455,6 +2461,10 @@ impl LiveShell {
         self.panel_origin_x = origin_x;
     }
 
+    pub fn set_panel_origin_y(&mut self, origin_y: i32) {
+        self.panel_origin_y = origin_y;
+    }
+
     pub fn set_panel_output(&mut self, output: impl Into<String>) {
         self.panel_output = Some(output.into());
     }
@@ -2657,10 +2667,12 @@ impl LiveShell {
                     .cloned();
                 self.window_menu_host = None;
                 self.window_menu_anchor_x = Some(x);
+                self.window_menu_anchor_y = Some(self.panel_origin_y);
                 let _ = send_session_command(
                     "show-context-menu",
                     ShellCommand::ShowContextMenu {
                         x,
+                        y: self.panel_origin_y,
                         width: MENU_WIDTH as i32,
                         height: self.window_context_menu_height(),
                     },
@@ -3048,6 +3060,7 @@ impl LiveShell {
                     "show-preview",
                     ShellCommand::ShowPreview {
                         x,
+                        y: self.panel_origin_y,
                         width: width as i32,
                         height: height as i32,
                         windows,
@@ -3062,10 +3075,12 @@ impl LiveShell {
         }
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
+            let y = self.window_menu_anchor_y.unwrap_or(self.panel_origin_y);
             let _ = send_session_command(
                 "show-context-menu",
                 ShellCommand::ShowContextMenu {
                     x,
+                    y,
                     width: MENU_WIDTH as i32,
                     height: self.window_context_menu_height(),
                 },
@@ -3141,6 +3156,7 @@ impl LiveShell {
         self.window_menu = None;
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
+        self.window_menu_anchor_y = None;
         self.window_menu_host = None;
         self.application_menu_target = None;
         self.application_menu_host = None;
@@ -3159,6 +3175,7 @@ impl LiveShell {
         self.window_menu = None;
         self.window_menu_snapshot = None;
         self.window_menu_anchor_x = None;
+        self.window_menu_anchor_y = None;
         self.window_menu_host = None;
         self.application_menu_target = None;
         self.application_menu_host = None;
@@ -3752,10 +3769,12 @@ impl LiveShell {
         self.window_menu_snapshot = Some(snapshot);
         self.window_menu_host = None;
         self.window_menu_anchor_x = Some(self.panel_origin_x);
+        self.window_menu_anchor_y = Some(self.panel_origin_y);
         let sent = send_session_command(
             "show-context-menu",
             ShellCommand::ShowContextMenu {
                 x: self.panel_origin_x,
+                y: self.panel_origin_y,
                 width: MENU_WIDTH as i32,
                 height: self.window_context_menu_height(),
             },

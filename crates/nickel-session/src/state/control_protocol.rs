@@ -530,7 +530,13 @@ impl NickelSession {
                             "context menu does not accept preview windows",
                         );
                     }
-                    self.show_context_menu(geometry.x, geometry.width, geometry.height, true)
+                    self.show_context_menu(
+                        geometry.x,
+                        geometry.y,
+                        geometry.width,
+                        geometry.height,
+                        true,
+                    )
                 }
                 ShellRole::Preview => {
                     if windows.iter().any(|window| !self.window_exists(*window)) {
@@ -539,7 +545,7 @@ impl NickelSession {
                     self.set_overlay_preview_interest(
                         windows.iter().map(|window| WindowId(window.0)).collect(),
                     );
-                    self.show_preview(geometry.x, geometry.width, geometry.height)
+                    self.show_preview(geometry.x, geometry.y, geometry.width, geometry.height)
                 }
                 _ => {
                     return protocol_error(

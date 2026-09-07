@@ -382,11 +382,13 @@ pub enum ShellCommand {
     Unlock,
     ShowContextMenu {
         x: i32,
+        y: i32,
         width: i32,
         height: i32,
     },
     ShowPreview {
         x: i32,
+        y: i32,
         width: i32,
         height: i32,
         windows: Vec<WindowId>,
