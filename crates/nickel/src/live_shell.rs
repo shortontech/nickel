@@ -2822,6 +2822,20 @@ impl LiveShell {
             .collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn taskbar_has_application(&self, application_id: &str) -> bool {
+        self.launcher
+            .taskbar_applications(&self.windows)
+            .iter()
+            .any(|application| {
+                application
+                    .application_id
+                    .as_ref()
+                    .is_some_and(|id| id.as_str() == application_id)
+                    && !application.windows.is_empty()
+            })
+    }
+
     pub fn primary_output_name(&self) -> Option<String> {
         self.window_feed.primary_output()
     }

@@ -729,6 +729,11 @@ mod tests {
         };
 
         assert!(coordinator.apply_session_snapshot(snapshot.clone()));
+        assert!(
+            coordinator
+                .shell_mut()
+                .taskbar_has_application("org.kde.konsole")
+        );
         assert!(!coordinator.apply_session_snapshot(snapshot));
     }
 
