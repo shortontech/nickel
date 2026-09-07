@@ -14,7 +14,7 @@ use nickel_ui::{HostBatch, InternalSurfaceId};
 use crate::session::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
 
 pub(crate) const MENU_SIZE: (u32, u32) = (520, 680);
-const CHAT_SIZE: (u32, u32) = (1120, 760);
+pub(crate) const CHAT_SIZE: (u32, u32) = (1120, 760);
 
 #[derive(Clone, Debug)]
 pub struct CodexSurfacePlacement {

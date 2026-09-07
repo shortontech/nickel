@@ -86,7 +86,10 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
 
 #[cfg(test)]
 mod internal_shell_placement_tests {
-    use super::{internal_codex_project_menu_placement, internal_shell_surface_placement};
+    use super::{
+        internal_codex_chat_placement, internal_codex_project_menu_placement,
+        internal_shell_surface_placement,
+    };
     use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
     use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
 
@@ -180,6 +183,45 @@ mod internal_shell_placement_tests {
 
         assert_eq!(placement.output.as_deref(), Some("left"));
         assert_eq!(placement.origin, (-1920, 216));
+    }
+
+    #[test]
+    fn codex_chat_frame_is_centered_inside_nonzero_output_work_area() {
+        let placement = internal_codex_chat_placement(&outputs(), Some("right"));
+
+        assert_eq!(placement.output.as_deref(), Some("right"));
+        assert_eq!(placement.origin, (720, 572));
+        assert_eq!(placement.scale, 1.0);
+        let outer =
+            crate::session::window_frame::outer_geometry(crate::session::shell_layout::Geometry {
+                x: placement.origin.0,
+                y: placement.origin.1,
+                width: crate::internal_codex::CHAT_SIZE.0 as i32,
+                height: crate::internal_codex::CHAT_SIZE.1 as i32,
+            });
+        assert!(outer.x >= 0);
+        assert!(outer.y >= 240);
+        assert!(outer.x + outer.width <= 2560);
+        assert!(outer.y + outer.height <= 240 + 1440 - crate::winit_shell::PANEL_HEIGHT as i32);
+    }
+
+    #[test]
+    fn codex_chat_frame_preserves_negative_output_origin() {
+        let placement = internal_codex_chat_placement(&outputs(), Some("left"));
+
+        assert_eq!(placement.output.as_deref(), Some("left"));
+        assert_eq!(placement.origin, (-1520, 32));
+        let outer =
+            crate::session::window_frame::outer_geometry(crate::session::shell_layout::Geometry {
+                x: placement.origin.0,
+                y: placement.origin.1,
+                width: crate::internal_codex::CHAT_SIZE.0 as i32,
+                height: crate::internal_codex::CHAT_SIZE.1 as i32,
+            });
+        assert!(outer.x >= -1920);
+        assert!(outer.y >= -120);
+        assert!(outer.x + outer.width <= 0);
+        assert!(outer.y + outer.height <= -120 + 1080 - crate::winit_shell::PANEL_HEIGHT as i32);
     }
 }
 
@@ -1001,6 +1043,19 @@ impl NickelSession {
                 });
             let requested_codex_project = shell.take_requested_codex_project();
             let _ = shell;
+            let outputs = self.internal_outputs();
+            let menu_output = codex_menu_anchor
+                .as_ref()
+                .map(|anchor| anchor.output.as_str())
+                .or_else(|| {
+                    self.internal_codex
+                        .as_ref()
+                        .and_then(crate::internal_codex::InternalCodexHost::project_menu)
+                        .and_then(|id| self.internal_ui.placement(id))
+                        .and_then(|placement| placement.output.as_deref())
+                })
+                .map(str::to_owned);
+            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
             if shell_changed {
                 self.sync_internal_shell();
             }
@@ -1008,8 +1063,6 @@ impl NickelSession {
                 self.apply_internal_file_action(action);
             }
             if codex_menu_visible {
-                let outputs = self.internal_outputs();
-                let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
                 let placement = internal_codex_project_menu_placement(
                     codex_menu_anchor.as_ref(),
                     &outputs,
@@ -1027,7 +1080,10 @@ impl NickelSession {
             if let Some(project_id) = requested_codex_project
                 && let Some(mut host) = self.internal_codex.take()
             {
-                let placement = crate::internal_codex::CodexSurfacePlacement::default();
+                let placement = internal_codex_chat_placement(
+                    &outputs,
+                    menu_output.as_deref().or(fallback.as_deref()),
+                );
                 if let Err(error) =
                     host.open_project_by_id(&mut self.internal_ui, placement, &project_id)
                 {
@@ -1036,11 +1092,20 @@ impl NickelSession {
                 self.internal_codex = Some(host);
             }
         }
+        let chat_output = self
+            .internal_codex
+            .as_ref()
+            .and_then(crate::internal_codex::InternalCodexHost::project_menu)
+            .and_then(|id| self.internal_ui.placement(id))
+            .and_then(|placement| placement.output.as_deref())
+            .map(str::to_owned)
+            .or_else(|| self.resolve_interaction_output(InvocationSource::RecentInteraction));
+        let chat_placement =
+            internal_codex_chat_placement(&self.internal_outputs(), chat_output.as_deref());
         if let Some(mut codex) = self.internal_codex.take() {
             let changed = codex.poll_due(&mut self.internal_ui, now);
-            let placement = crate::internal_codex::CodexSurfacePlacement::default();
             let opened = codex
-                .service_requests(&mut self.internal_ui, placement)
+                .service_requests(&mut self.internal_ui, chat_placement)
                 .unwrap_or_else(|error| {
                     tracing::warn!(%error, "could not service internal Codex request");
                     Vec::new()
@@ -5808,6 +5873,38 @@ fn internal_codex_project_menu_placement(
     crate::internal_codex::CodexSurfacePlacement {
         output: Some(output.name.clone()),
         origin: (origin_x + x, origin_y + y),
+        scale: output.scale,
+    }
+}
+
+fn internal_codex_chat_placement(
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+    requested_output: Option<&str>,
+) -> crate::internal_codex::CodexSurfacePlacement {
+    let selected = requested_output
+        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+        .or_else(|| outputs.first());
+    let Some((output, origin_x, origin_y)) = selected else {
+        return crate::internal_codex::CodexSurfacePlacement::default();
+    };
+    let (content_width, content_height) = crate::internal_codex::CHAT_SIZE;
+    let border = crate::session::window_frame::RESIZE_BORDER.max(0) as u32;
+    let titlebar = crate::session::window_frame::TITLEBAR_HEIGHT.max(0) as u32;
+    let outer_width = content_width.saturating_add(border.saturating_mul(2));
+    let outer_height = content_height
+        .saturating_add(titlebar)
+        .saturating_add(border.saturating_mul(2));
+    let work_height = output
+        .height
+        .saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+    let outer_x = output.width.saturating_sub(outer_width) / 2;
+    let outer_y = work_height.saturating_sub(outer_height) / 2;
+    crate::internal_codex::CodexSurfacePlacement {
+        output: Some(output.name.clone()),
+        origin: (
+            origin_x + outer_x as i32 + border as i32,
+            origin_y + outer_y as i32 + titlebar as i32 + border as i32,
+        ),
         scale: output.scale,
     }
 }
