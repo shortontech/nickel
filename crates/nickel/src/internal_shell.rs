@@ -216,9 +216,28 @@ impl InternalShellCoordinator {
     }
 
     pub fn step_slot(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
-        self.surfaces
-            .get_mut(id)
-            .is_some_and(|surface| surface.step(batch).changed)
+        let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
+            return false;
+        };
+        let mut changed = false;
+        for event in batch.events {
+            let nickel_ui::HostEvent::Ui(event) = event else {
+                continue;
+            };
+            changed |= match entry.role {
+                SurfaceRole::Panel => self.shell.panel_host_ui(event, entry.size.0),
+                SurfaceRole::Launcher => {
+                    self.shell
+                        .launcher_host_ui(event, entry.size.0, entry.size.1)
+                }
+                _ => false,
+            };
+        }
+        changed
+    }
+
+    pub fn toggle_launcher(&mut self) -> bool {
+        self.shell.request_launcher_toggle()
     }
 
     #[cfg(test)]
@@ -303,5 +322,48 @@ mod tests {
             .id;
         assert!(!coordinator.scene(panel).unwrap().is_empty());
         assert!(coordinator.shell_mut().surface_visible(SurfaceRole::Panel));
+    }
+
+    #[test]
+    fn meta_launcher_toggle_changes_internal_visibility_without_session_transport() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+        }]);
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        assert!(!coordinator.visible(launcher));
+        assert!(coordinator.toggle_launcher());
+        assert!(coordinator.visible(launcher));
+    }
+
+    #[test]
+    fn panel_semantic_click_opens_the_internal_launcher() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+        }]);
+        let panel = coordinator
+            .surface(SurfaceRole::Panel, Some("nested"))
+            .unwrap()
+            .id;
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        for event in [
+            nickel_ui::UiEvent::PointerPressed(nickel_ui::Point { x: 20.0, y: 28.0 }),
+            nickel_ui::UiEvent::PointerReleased(nickel_ui::Point { x: 20.0, y: 28.0 }),
+        ] {
+            coordinator.step_slot(
+                panel,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(event)],
+                    ..Default::default()
+                },
+            );
+        }
+        assert!(coordinator.visible(launcher));
+        assert!(!coordinator.scene(launcher).unwrap().is_empty());
     }
 }

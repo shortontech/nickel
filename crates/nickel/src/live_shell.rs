@@ -2120,6 +2120,34 @@ impl LiveShell {
         outcome.changed
     }
 
+    pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
+        self.sync_panel_host();
+        let outcome = self.panel_host.step(HostBatch {
+            surface_size: Some((width, 56)),
+            events: vec![HostEvent::Ui(event)],
+            ..HostBatch::default()
+        });
+        self.panel_change_token = outcome.change_token;
+        self.panel_deadline = outcome.next_deadline;
+        outcome.changed | self.apply_panel_effects()
+    }
+
+    pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        let outcome = self.launcher_host.step(HostBatch {
+            surface_size: Some((width, height)),
+            events: vec![HostEvent::Ui(event)],
+            ..HostBatch::default()
+        });
+        for action in self.launcher_host.application_mut().take_effects() {
+            self.apply_launcher_action(action);
+        }
+        outcome.changed
+    }
+
     fn apply_panel_action(&mut self, action: PanelAction) {
         let anchored_role = match &action {
             PanelAction::Codex => Some((ShellRole::ProjectMenu, "panel-codex")),

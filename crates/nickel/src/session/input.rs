@@ -65,6 +65,7 @@ impl NickelSession {
     ) -> bool {
         let handled = self.internal_ui.pointer_motion((position.x, position.y));
         if handled {
+            self.flush_internal_shell_input();
             self.request_output_redraw();
         }
         handled
@@ -501,6 +502,7 @@ impl NickelSession {
                                 if let Some(event) = internal_keyboard_event(sym, state) {
                                     session.internal_ui.keyboard(event);
                                 }
+                                session.flush_internal_shell_input();
                                 session.request_output_redraw();
                                 return FilterResult::Intercept(None);
                             }
@@ -652,6 +654,7 @@ impl NickelSession {
                     (pointer.current_location().x, pointer.current_location().y),
                     button_state == ButtonState::Pressed,
                 ) {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                     return None;
                 }
@@ -1098,6 +1101,7 @@ impl NickelSession {
                     horizontal_amount as f32,
                     vertical_amount as f32,
                 ) {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                     return None;
                 }
@@ -1137,6 +1141,7 @@ impl NickelSession {
                     (location.x, location.y),
                     crate::session::TouchPhase::Started,
                 ) {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                     return None;
                 }
@@ -1178,6 +1183,7 @@ impl NickelSession {
                     (location.x, location.y),
                     crate::session::TouchPhase::Moved,
                 ) {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                     return None;
                 }
@@ -1199,6 +1205,7 @@ impl NickelSession {
                     (0.0, 0.0),
                     crate::session::TouchPhase::Ended,
                 ) {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                     return None;
                 }

@@ -491,6 +491,7 @@ pub struct InternalUiRuntime {
     focused: Option<InternalSurfaceId>,
     hovered: Option<InternalSurfaceId>,
     touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
+    routed_events: Vec<(InternalSurfaceId, UiEvent)>,
 }
 
 impl InternalUiRuntime {
@@ -616,6 +617,19 @@ impl InternalUiRuntime {
         changed
     }
 
+    pub fn update_scene(&mut self, id: InternalSurfaceId, commands: Vec<PaintCommand>) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        surface.external_scene = Some(commands);
+        surface.dirty = true;
+        true
+    }
+
+    pub fn drain_routed_events(&mut self) -> Vec<(InternalSurfaceId, UiEvent)> {
+        std::mem::take(&mut self.routed_events)
+    }
+
     pub fn mark_dirty(&mut self, id: InternalSurfaceId) {
         if let Some(surface) = self.presentation.get_mut(&id) {
             surface.dirty = true;
@@ -677,6 +691,17 @@ impl InternalUiRuntime {
     }
 
     fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {
+        self.routed_events.push((id, event.clone()));
+        if self
+            .presentation
+            .get(&id)
+            .is_some_and(|surface| surface.external_scene.is_some())
+        {
+            // Renderer-neutral scenes are owned by the shell coordinator. It
+            // consumes this event after routing and supplies the next scene;
+            // the identity-only SceneSlot must never reduce input itself.
+            return true;
+        }
         self.step(
             id,
             HostBatch {

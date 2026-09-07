@@ -427,7 +427,8 @@ pub struct NickelSession {
     pub internal_ui: crate::session::InternalUiRuntime,
     /// Built-in shell state when no supervised shell client is requested.
     pub(crate) internal_shell: Option<crate::internal_shell::InternalShellCoordinator>,
-    internal_shell_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    pub(crate) internal_shell_surfaces:
+        HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     pub loop_signal: LoopSignal,
 
@@ -680,14 +681,12 @@ impl NickelSession {
             return;
         };
         let changed = shell.poll(now);
-        for coordinator_id in changed {
-            if let Some(runtime_id) = self.internal_shell_surfaces.get(&coordinator_id).copied()
-                && let Some(scene) = shell.scene(coordinator_id)
-            {
-                self.internal_ui.update_scene(runtime_id, scene);
-            }
-        }
         let actions = shell.drain_file_actions();
+        let shell_changed = !changed.is_empty();
+        let _ = shell;
+        if shell_changed {
+            self.sync_internal_shell();
+        }
         for action in actions {
             self.apply_internal_file_action(action);
         }
@@ -759,6 +758,107 @@ impl NickelSession {
             }
             FileWindowAction::NotFound(_) => {}
         }
+    }
+
+    pub(crate) fn toggle_internal_launcher(&mut self) -> bool {
+        let Some(shell) = self.internal_shell.as_mut() else {
+            return false;
+        };
+        let changed = shell.toggle_launcher();
+        if changed {
+            self.sync_internal_shell();
+        }
+        changed
+    }
+
+    pub(crate) fn flush_internal_shell_input(&mut self) {
+        let events = self.internal_ui.drain_routed_events();
+        if events.is_empty() || self.internal_shell.is_none() {
+            return;
+        }
+        let reverse = self
+            .internal_shell_surfaces
+            .iter()
+            .map(|(shell, runtime)| (*runtime, *shell))
+            .collect::<HashMap<_, _>>();
+        let shell = self.internal_shell.as_mut().unwrap();
+        let mut changed = false;
+        for (runtime_id, event) in events {
+            let Some(shell_id) = reverse.get(&runtime_id).copied() else {
+                continue;
+            };
+            changed |= shell.step_slot(
+                shell_id,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Ui(event)],
+                    ..Default::default()
+                },
+            );
+        }
+        if changed {
+            self.sync_internal_shell();
+        }
+    }
+
+    pub(crate) fn sync_internal_shell(&mut self) {
+        let Some(mut shell) = self.internal_shell.take() else {
+            return;
+        };
+        let entries = shell.surfaces().to_vec();
+        for surface in entries {
+            let visible = shell.visible(surface.id);
+            if !visible {
+                if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                    self.internal_ui.remove(runtime_id);
+                }
+                continue;
+            }
+            let Some(scene) = shell.scene(surface.id) else {
+                continue;
+            };
+            if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
+                self.internal_ui.update_scene(runtime_id, scene);
+                continue;
+            }
+            let output_geometry = surface.output.as_deref().and_then(|name| {
+                self.space
+                    .outputs()
+                    .find(|output| output.name() == name)
+                    .and_then(|output| self.space.output_geometry(output))
+            });
+            let origin = output_geometry
+                .map(|geometry| geometry.loc)
+                .unwrap_or_default();
+            let output_height = output_geometry
+                .map(|geometry| geometry.size.h.max(0) as u32)
+                .unwrap_or(surface.size.1);
+            let y = if surface.role == crate::winit_shell::SurfaceRole::Panel {
+                origin.y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32
+            } else {
+                origin.y
+            };
+            let role = match surface.role {
+                crate::winit_shell::SurfaceRole::Desktop => {
+                    crate::session::InternalSurfaceRole::Desktop
+                }
+                crate::winit_shell::SurfaceRole::Panel => {
+                    crate::session::InternalSurfaceRole::Panel
+                }
+                _ => crate::session::InternalSurfaceRole::Overlay,
+            };
+            let runtime_id = self.internal_ui.insert_scene(
+                scene,
+                crate::session::InternalSurfacePlacement {
+                    role,
+                    geometry: (origin.x, y, surface.size.0, surface.size.1),
+                    output: surface.output.clone(),
+                },
+                1.0,
+            );
+            self.internal_shell_surfaces.insert(surface.id, runtime_id);
+        }
+        self.internal_shell = Some(shell);
+        self.schedule_internal_ui_frame();
     }
 
     pub fn insert_internal_surface<A: nickel_ui::Application + 'static>(
@@ -2234,6 +2334,9 @@ impl NickelSession {
     }
 
     pub fn toggle_launcher_visibility(&mut self) {
+        if self.toggle_internal_launcher() {
+            return;
+        }
         self.set_launcher_visible_from(
             !self.launcher_visibility.is_visible(),
             InvocationSource::Keyboard,

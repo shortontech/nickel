@@ -94,6 +94,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Timer::from_duration(Duration::from_secs(1)),
         move |_, _, state| {
             state.poll_idle_policy();
+            state.poll_internal_shell(Instant::now());
             let storage_state = state.secure_storage_state();
             if secure_storage_startup_timed_out(
                 secure_storage_required,
