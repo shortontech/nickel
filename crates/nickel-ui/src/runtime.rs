@@ -1234,8 +1234,33 @@ impl<A: Application> UiHost<A> {
         self.tree.commands()
     }
 
+    /// Exports the current resolved display list without copying commands or
+    /// shared image pixels. This is the presentation boundary used by native
+    /// compositor and software backends alike.
+    pub fn render_frame(&self) -> crate::backend::RenderFrame<'_> {
+        crate::backend::RenderFrame {
+            commands: self.tree.commands(),
+            logical_size: (
+                self.bounds.size.width as u32,
+                self.bounds.size.height as u32,
+            ),
+            scale_factor: self.scale_factor,
+            generation: self.frame_generation,
+        }
+    }
+
+    pub fn render_with<R: crate::backend::FrameRenderer>(
+        &self,
+        renderer: &mut R,
+    ) -> Result<DamageRegion, R::Error> {
+        renderer.render_frame(self.render_frame())
+    }
+
     pub fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion {
-        renderer.render(self.tree.commands())
+        match self.render_with(renderer) {
+            Ok(damage) => damage,
+            Err(error) => match error {},
+        }
     }
 
     pub fn pointer_icon_at(&self, point: crate::Point) -> PointerIcon {

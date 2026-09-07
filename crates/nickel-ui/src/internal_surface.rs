@@ -43,6 +43,7 @@ pub trait InternalUiSurface {
     fn step(&mut self, batch: HostBatch) -> HostEventOutcome;
     fn inspect(&self) -> HostInspection;
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot>;
+    fn render_frame(&self) -> crate::backend::RenderFrame<'_>;
     fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion;
     fn paste_clipboard_image(&mut self, width: u32, height: u32, rgba: &[u8]) -> bool;
     fn set_controller_family(&mut self, family: ControllerFamily) -> bool;
@@ -111,6 +112,10 @@ impl<A: crate::Application + 'static> InternalUiSurface for HostedApplication<A>
 
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         self.host.semantic_nodes()
+    }
+
+    fn render_frame(&self) -> crate::backend::RenderFrame<'_> {
+        self.host.render_frame()
     }
 
     fn render_software(&self, renderer: &mut SoftwareRenderer) -> DamageRegion {

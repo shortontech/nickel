@@ -109,6 +109,77 @@ pub(crate) use ui::PaintCommand;
 pub mod backend {
     pub use crate::ui::PaintCommand;
 
+    use std::{convert::Infallible, sync::Arc};
+
+    use image::RgbaImage;
+
+    use crate::{DamageRegion, SoftwareRenderer};
+
+    /// Borrowed display list and presentation metadata for one resolved UI frame.
+    ///
+    /// Presenters may consume this directly (for example by translating fills to
+    /// GPU quads and caching image resources) without involving the software
+    /// renderer or taking ownership of application resources.
+    #[derive(Clone, Copy, Debug)]
+    pub struct RenderFrame<'frame> {
+        pub commands: &'frame [PaintCommand],
+        pub logical_size: (u32, u32),
+        pub scale_factor: f32,
+        pub generation: u64,
+    }
+
+    impl<'frame> RenderFrame<'frame> {
+        pub fn image_resources(&self) -> impl Iterator<Item = ImageResource<'frame>> {
+            self.commands.iter().filter_map(|command| match command {
+                PaintCommand::Image {
+                    id,
+                    generation,
+                    image,
+                    high_density,
+                    ..
+                } => Some(ImageResource {
+                    key: ImageResourceKey {
+                        id: *id,
+                        generation: *generation,
+                    },
+                    image,
+                    high_density: high_density.as_ref(),
+                }),
+                _ => None,
+            })
+        }
+    }
+
+    /// Cache identity assigned by Nickel UI to an image resource.
+    #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+    pub struct ImageResourceKey {
+        pub id: u16,
+        pub generation: u64,
+    }
+
+    /// Borrowed image payload advertised by a [`RenderFrame`].
+    #[derive(Clone, Copy, Debug)]
+    pub struct ImageResource<'frame> {
+        pub key: ImageResourceKey,
+        pub image: &'frame Arc<RgbaImage>,
+        pub high_density: Option<&'frame Arc<RgbaImage>>,
+    }
+
+    /// Renderer-neutral presentation boundary for Nickel UI display lists.
+    pub trait FrameRenderer {
+        type Error;
+
+        fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error>;
+    }
+
+    impl FrameRenderer for SoftwareRenderer {
+        type Error = Infallible;
+
+        fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
+            Ok(self.render(frame.commands))
+        }
+    }
+
     /// Test/diagnostic inspection kept beside the renderer command authority so
     /// application crates never need to pattern-match the display list.
     #[doc(hidden)]
@@ -119,6 +190,70 @@ pub mod backend {
         commands.iter().any(|command| {
             matches!(command, PaintCommand::Image { image, .. } if image.as_raw() == pixels.as_raw())
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use std::sync::Arc;
+
+        use image::RgbaImage;
+
+        use super::{FrameRenderer, ImageResourceKey, PaintCommand, RenderFrame};
+        use crate::{Rect, SoftwareRenderer};
+
+        #[test]
+        fn frame_exposes_borrowed_image_resources_with_cache_identity() {
+            let image = Arc::new(RgbaImage::new(8, 4));
+            let high_density = Arc::new(RgbaImage::new(16, 8));
+            let commands = [PaintCommand::Image {
+                bounds: Rect::new(0.0, 0.0, 8.0, 4.0),
+                id: 7,
+                generation: 12,
+                image: Arc::clone(&image),
+                high_density: Some(Arc::clone(&high_density)),
+            }];
+            let frame = RenderFrame {
+                commands: &commands,
+                logical_size: (8, 4),
+                scale_factor: 2.0,
+                generation: 31,
+            };
+
+            let resources = frame.image_resources().collect::<Vec<_>>();
+            assert_eq!(resources.len(), 1);
+            assert_eq!(
+                resources[0].key,
+                ImageResourceKey {
+                    id: 7,
+                    generation: 12
+                }
+            );
+            assert!(Arc::ptr_eq(resources[0].image, &image));
+            assert!(Arc::ptr_eq(
+                resources[0].high_density.unwrap(),
+                &high_density
+            ));
+        }
+
+        #[test]
+        fn software_fallback_consumes_the_same_render_frame() {
+            let commands = [PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 2.0, 2.0),
+                color: 0xff0000,
+            }];
+            let frame = RenderFrame {
+                commands: &commands,
+                logical_size: (2, 2),
+                scale_factor: 1.0,
+                generation: 1,
+            };
+            let mut renderer = SoftwareRenderer::new_pixel_buffer(2, 2, 1.0);
+
+            let damage = renderer.render_frame(frame).unwrap();
+
+            assert!(!damage.is_empty());
+            assert!(renderer.pixels().iter().any(|pixel| pixel.a != 0));
+        }
     }
 }
 
