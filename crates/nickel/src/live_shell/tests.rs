@@ -89,6 +89,17 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
             self.0.lock().unwrap().push(command);
             Ok(())
         }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<crate::platform::SecureStorageState, crate::platform::SessionRequestError>
+        {
+            Ok(crate::platform::SecureStorageState::Ready)
+        }
+
+        fn request_secure_storage_retry(&self) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
     }
 
     #[derive(Default)]
