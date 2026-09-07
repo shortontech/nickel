@@ -415,6 +415,23 @@ fn recv_control_frame(
     Ok((length, source, peer_pid))
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InternalShellTimerCounters {
+    pub armed: u64,
+    pub cancelled: u64,
+    pub fired: u64,
+    pub polls: u64,
+    pub redraw_requests: u64,
+}
+
+#[derive(Debug, Default)]
+struct InternalShellTimer {
+    deadline: Option<Instant>,
+    token: Option<smithay::reexports::calloop::RegistrationToken>,
+    generation: u64,
+    counters: InternalShellTimerCounters,
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -431,6 +448,7 @@ pub struct NickelSession {
     pub(crate) internal_shell_surfaces:
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    internal_shell_timer: InternalShellTimer,
     pub loop_signal: LoopSignal,
 
     // Smithay State
@@ -597,6 +615,87 @@ impl NickelSession {
         Ok(())
     }
 
+    /// Arm exactly one compositor-loop wakeup for the shell's earliest real
+    /// deadline. Re-arming the same deadline is a no-op, so damage and input
+    /// paths may call this freely without recreating a frame-rate poller.
+    pub(crate) fn schedule_internal_shell_deadline(&mut self) {
+        let deadline = self
+            .internal_shell
+            .as_ref()
+            .and_then(crate::internal_shell::InternalShellCoordinator::next_deadline);
+        self.arm_internal_shell_timer(deadline);
+    }
+
+    /// Wake the shell once after input or an externally-driven state change.
+    /// The callback replaces this immediate wakeup with the next application
+    /// deadline (if any).
+    fn wake_internal_shell(&mut self) {
+        if self.internal_shell.is_some() {
+            self.arm_internal_shell_timer(Some(Instant::now()));
+        }
+    }
+
+    fn arm_internal_shell_timer(&mut self, deadline: Option<Instant>) {
+        if self.internal_shell_timer.deadline == deadline {
+            return;
+        }
+        if let Some(token) = self.internal_shell_timer.token.take() {
+            self.event_loop_handle.remove(token);
+            self.internal_shell_timer.counters.cancelled = self
+                .internal_shell_timer
+                .counters
+                .cancelled
+                .saturating_add(1);
+        }
+        self.internal_shell_timer.deadline = deadline;
+        self.internal_shell_timer.generation = self.internal_shell_timer.generation.wrapping_add(1);
+        let generation = self.internal_shell_timer.generation;
+        let Some(deadline) = deadline else {
+            return;
+        };
+        match self.event_loop_handle.insert_source(
+            smithay::reexports::calloop::timer::Timer::from_deadline(deadline),
+            move |_, _, state| {
+                if state.internal_shell_timer.generation != generation {
+                    return smithay::reexports::calloop::timer::TimeoutAction::Drop;
+                }
+                state.internal_shell_timer.deadline = None;
+                state.internal_shell_timer.token = None;
+                state.internal_shell_timer.counters.fired =
+                    state.internal_shell_timer.counters.fired.saturating_add(1);
+                state.internal_shell_timer.counters.polls =
+                    state.internal_shell_timer.counters.polls.saturating_add(1);
+                state.poll_internal_shell(Instant::now());
+                state.schedule_internal_shell_deadline();
+                let counters = state.internal_shell_timer_counters();
+                tracing::trace!(
+                    armed = counters.armed,
+                    cancelled = counters.cancelled,
+                    fired = counters.fired,
+                    polls = counters.polls,
+                    redraw_requests = counters.redraw_requests,
+                    next_deadline = ?state.internal_shell_timer.deadline,
+                    "internal shell one-shot timer counters"
+                );
+                smithay::reexports::calloop::timer::TimeoutAction::Drop
+            },
+        ) {
+            Ok(token) => {
+                self.internal_shell_timer.token = Some(token);
+                self.internal_shell_timer.counters.armed =
+                    self.internal_shell_timer.counters.armed.saturating_add(1);
+            }
+            Err(error) => {
+                self.internal_shell_timer.deadline = None;
+                tracing::error!(%error, "could not schedule internal shell deadline");
+            }
+        }
+    }
+
+    pub(crate) fn internal_shell_timer_counters(&self) -> InternalShellTimerCounters {
+        self.internal_shell_timer.counters
+    }
+
     fn internal_outputs(&self) -> Vec<(crate::internal_shell::InternalOutput, i32, i32)> {
         self.space
             .outputs()
@@ -674,6 +773,7 @@ impl NickelSession {
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         self.schedule_internal_ui_frame();
+        self.wake_internal_shell();
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
@@ -770,6 +870,7 @@ impl NickelSession {
         let changed = shell.toggle_launcher();
         if changed {
             self.sync_internal_shell();
+            self.wake_internal_shell();
         }
         changed
     }
@@ -801,6 +902,7 @@ impl NickelSession {
         if changed {
             self.sync_internal_shell();
         }
+        self.wake_internal_shell();
     }
 
     pub(crate) fn sync_internal_shell(&mut self) {
@@ -896,11 +998,17 @@ impl NickelSession {
     }
 
     fn schedule_internal_ui_frame(&mut self) {
+        self.internal_shell_timer.counters.redraw_requests = self
+            .internal_shell_timer
+            .counters
+            .redraw_requests
+            .saturating_add(1);
         self.request_output_redraw();
         #[cfg(feature = "backend-udev")]
         if self.native.is_some() {
             self.render_all_outputs();
         }
+        self.schedule_internal_shell_deadline();
     }
 
     pub(crate) fn configured_output_scale(&self, output: &Output) -> OutputScale {
@@ -1350,6 +1458,7 @@ impl NickelSession {
             internal_shell: None,
             internal_shell_surfaces: HashMap::new(),
             internal_file_surfaces: HashMap::new(),
+            internal_shell_timer: InternalShellTimer::default(),
             loop_signal,
             socket_name,
 
@@ -5382,6 +5491,10 @@ mod protocol_tests {
         MAX_PENDING as MAX_PENDING_OUTPUT_GLOBAL_RETIREMENTS,
     };
     use crate::session::shell_layout::Geometry;
+    use crate::{
+        platform::{SessionRequestError, ShellCommand},
+        session_host::SessionHost,
+    };
     use nickel_session_protocol::{
         Command, OutputTransform, Query, ServerEnvelope, ServerMessage, SessionAction,
         ShellBehaviorSetting, ShellBehaviorTransaction, ShellBehaviorValue, ShellRole, TestOutput,
@@ -5394,8 +5507,11 @@ mod protocol_tests {
         },
         utils::Point,
     };
-    use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Arc,
+    };
 
     #[test]
     fn late_window_callback_leaves_expiry_owned_by_the_registered_timer() {
@@ -5764,6 +5880,49 @@ mod protocol_tests {
         let display = Display::new().unwrap();
         let session = super::NickelSession::new(&mut event_loop, display, true);
         (event_loop, session)
+    }
+
+    struct IdleInternalHost;
+
+    impl SessionHost for IdleInternalHost {
+        fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn unchanged_internal_desktop_has_no_sixty_hertz_poll_or_redraw_loop() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        session
+            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .expect("headless internal shell");
+
+        // Consume the intentionally immediate initialization wakeup. The
+        // stable shell then owns a real application deadline well beyond a
+        // frame interval (keyboard discovery currently supplies the nearest).
+        event_loop
+            .dispatch(Duration::from_millis(25), &mut session)
+            .unwrap();
+        let settled = session.internal_shell_timer_counters();
+
+        // Damage/state paths may redundantly ask to maintain the schedule.
+        // Sixty such calls must keep the one existing one-shot instead of
+        // manufacturing a 60 Hz timer or redraw stream.
+        for _ in 0..60 {
+            session.schedule_internal_shell_deadline();
+        }
+        let after_rearm = session.internal_shell_timer_counters();
+        assert_eq!(after_rearm.armed, settled.armed);
+        assert_eq!(after_rearm.polls, settled.polls);
+        assert_eq!(after_rearm.redraw_requests, settled.redraw_requests);
+
+        event_loop
+            .dispatch(Duration::from_millis(75), &mut session)
+            .unwrap();
+        let after_idle = session.internal_shell_timer_counters();
+        assert!(after_idle.polls.saturating_sub(settled.polls) <= 1);
+        assert_eq!(after_idle.redraw_requests, settled.redraw_requests);
     }
 
     #[test]

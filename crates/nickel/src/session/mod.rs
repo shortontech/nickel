@@ -104,7 +104,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Timer::from_duration(Duration::from_secs(1)),
         move |_, _, state| {
             state.poll_idle_policy();
-            state.poll_internal_shell(Instant::now());
             let storage_state = state.secure_storage_state();
             if secure_storage_startup_timed_out(
                 secure_storage_required,
@@ -141,13 +140,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     state.enable_internal_shell(Arc::new(in_process_session_host.clone()))?;
-    event_loop.handle().insert_source(
-        Timer::from_duration(Duration::from_millis(16)),
-        |_, _, state| {
-            state.poll_internal_shell(Instant::now());
-            TimeoutAction::ToDuration(Duration::from_millis(16))
-        },
-    )?;
+    state.schedule_internal_shell_deadline();
     tracing::info!(
         surfaces = state.internal_ui.len(),
         "compositor-owned Nickel shell initialized"
