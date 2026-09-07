@@ -494,6 +494,24 @@ pub struct CacheDiagnostics {
     pub internal_ui_software_frame_bytes: u64,
     #[serde(default)]
     pub internal_ui_fallback_raster_bytes: u64,
+    /// Private text renderer pixel allocation capacity, separate from shared textures.
+    #[serde(default)]
+    pub internal_ui_text_scratch_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_text_private_cache_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_buffer_creations: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_buffer_reuses: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_converted_bytes: u64,
+    /// Submitted damage payload estimate; not measured driver upload traffic.
+    #[serde(default)]
+    pub internal_ui_fallback_upload_damage_bytes: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_full_repaints: u64,
+    #[serde(default)]
+    pub internal_ui_fallback_partial_repaints: u64,
     #[serde(default)]
     pub internal_ui_image_cache_entries: u16,
     #[serde(default)]
@@ -1242,6 +1260,47 @@ impl PreviewFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_memory_counters_round_trip_and_default_for_older_peers() {
+        let counters = CacheDiagnostics {
+            internal_ui_text_scratch_bytes: 4096,
+            internal_ui_text_private_cache_bytes: 8192,
+            internal_ui_fallback_buffer_creations: 1,
+            internal_ui_fallback_buffer_reuses: 7,
+            internal_ui_fallback_converted_bytes: 128,
+            internal_ui_fallback_upload_damage_bytes: 256,
+            internal_ui_fallback_full_repaints: 1,
+            internal_ui_fallback_partial_repaints: 7,
+            ..Default::default()
+        };
+        let envelope = ServerEnvelope {
+            request_id: 42,
+            message: ServerMessage::CacheDiagnostics(Box::new(counters)),
+        };
+        assert_eq!(
+            decode::<ServerEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+            envelope
+        );
+        let mut legacy = serde_json::to_value(CacheDiagnostics::default()).unwrap();
+        let fields = legacy.as_object_mut().unwrap();
+        for key in [
+            "internal_ui_text_scratch_bytes",
+            "internal_ui_text_private_cache_bytes",
+            "internal_ui_fallback_buffer_creations",
+            "internal_ui_fallback_buffer_reuses",
+            "internal_ui_fallback_converted_bytes",
+            "internal_ui_fallback_upload_damage_bytes",
+            "internal_ui_fallback_full_repaints",
+            "internal_ui_fallback_partial_repaints",
+        ] {
+            fields.remove(key);
+        }
+        assert_eq!(
+            serde_json::from_value::<CacheDiagnostics>(legacy).unwrap(),
+            CacheDiagnostics::default()
+        );
+    }
 
     #[test]
     fn round_trip_is_versioned_and_bounded() {

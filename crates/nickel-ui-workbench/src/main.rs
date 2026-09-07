@@ -772,16 +772,30 @@ enum CacheInventoryValidation {
 }
 
 const REQUIRED_UI_CACHE_IDS: &[&str] = &[
+    "builtin_application_icons",
+    "codex_backend_projection",
+    "codex_delivery_queues",
+    "codex_transcript_text",
     "compositor_cursor_buffers",
     "compositor_frame_action_icons",
     "compositor_identify_badges",
     "compositor_output_backgrounds",
     "cosmic_text_font_systems",
+    "file_sidebar_enumeration",
+    "file_sidebar_listings",
+    "file_sidebar_observation",
     "native_glyph_atlas",
     "native_image_textures",
+    "panel_output_hosts",
+    "panel_task_projections",
     "shell_presenter_pixels",
+    "smithay_fallback_pixels",
+    "smithay_image_source_buffers",
+    "smithay_private_text_scratch",
     "smithay_renderer_internal_caches",
+    "smithay_text_texture_buffers",
     "software_glyph_raster",
+    "software_text_raster",
     "window_titlebar_rasters",
 ];
 
@@ -4525,7 +4539,7 @@ mod tests {
 
     #[test]
     fn opaque_dependency_accounting_must_remain_explicit() {
-        let dishonest = CACHE_INVENTORY.replacen("opaque_dependency", "0", 1);
+        let dishonest = CACHE_INVENTORY.replacen("\topaque_dependency\t", "\t0\t", 1);
         let error = validate_cache_inventory_with(&dishonest, CacheInventoryValidation::Routine)
             .expect_err("opaque dependency accounting must be stated");
         assert!(error.to_string().contains("explicit opaque dependency"));
@@ -4535,15 +4549,11 @@ mod tests {
     fn opaque_admission_fails_closed_without_cardinality_bytes_or_drop_semantics() {
         let admitted = CACHE_INVENTORY
             .lines()
-            .find(|line| line.starts_with("software_glyph_raster\t"))
+            .find(|line| line.starts_with("compositor_output_backgrounds\t"))
             .expect("opaque admitted row");
 
         for dishonest in [
-            admitted.replacen(
-                "one SwashCache per SdlComponentRenderer owner",
-                "dependency-owned",
-                1,
-            ),
+            admitted.replacen("one owner per active output", "dependency-owned", 1),
             admitted.replacen("opaque_dependency", "0", 1),
             admitted.replace("drop", "release"),
         ] {
@@ -4620,8 +4630,16 @@ mod tests {
 
     #[test]
     fn final_completion_rejects_pending_performance_and_lifecycle_statuses() {
+        // Synthetic admitted input exercises the gate independently of the live
+        // ledger, which intentionally retains pending measurements for this audit.
+        let admitted = CACHE_INVENTORY.replace("\tpending_measure\t", "\tmeasured_admitted\t");
+        assert_eq!(
+            validate_cache_inventory_with(&admitted, CacheInventoryValidation::FinalCompletion)
+                .expect("synthetic admitted statuses satisfy the completion gate"),
+            44
+        );
         for status in ["pending_measure", "lifecycle_fixed"] {
-            let inventory = CACHE_INVENTORY.replacen("measured_admitted", status, 1);
+            let inventory = admitted.replacen("measured_admitted", status, 1);
             let error = validate_cache_inventory_with(
                 &inventory,
                 CacheInventoryValidation::FinalCompletion,
@@ -4629,11 +4647,9 @@ mod tests {
             .expect_err("provisional status must not satisfy final completion");
             assert!(error.to_string().contains(status));
         }
-        assert_eq!(
-            validate_cache_inventory_for_final_completion()
-                .expect("the checked-in inventory is final-completion ready"),
-            31
-        );
+        let error = validate_cache_inventory_for_final_completion()
+            .expect_err("the audit ledger must not claim unmeasured caches are complete");
+        assert!(error.to_string().contains("pending_measure"));
     }
 
     #[test]

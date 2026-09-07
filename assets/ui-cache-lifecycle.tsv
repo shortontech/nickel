@@ -30,3 +30,16 @@ codex_height_estimates	retain	clear	drop_owner	retain	retain	rebuild	rebuild	reb
 codex_item_index	retain	clear	drop_owner	retain	retain	retain	retain	retain	replace	drop_owner
 codex_selection_runs	retain	clear	drop_owner	retain	retain	rebuild	rebuild	rebuild	replace	drop_owner
 codex_selection_document	retain	clear	drop_owner	retain	retain	rebuild	rebuild	rebuild	replace	drop_owner
+smithay_image_source_buffers	retain	retain	drop_owner	reconcile	reconcile	reconcile	retain	retain	reconcile	drop_owner
+smithay_text_texture_buffers	retain	retain	drop_owner	reconcile	reconcile	reconcile	reconcile	reconcile	reconcile	drop_owner
+smithay_fallback_pixels	clear	clear	drop_owner	rebuild	drop_owner	rebuild	rebuild	rebuild	drop_owner	drop_owner
+smithay_private_text_scratch	clear	clear	drop_owner	rebuild	drop_owner	rebuild	rebuild	rebuild	drop_owner	drop_owner
+file_sidebar_listings	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
+file_sidebar_enumeration	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
+file_sidebar_observation	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
+panel_output_hosts	retain	retain	drop_owner	reconcile	reconcile	rebuild	rebuild	rebuild	drop_owner	drop_owner
+panel_task_projections	retain	retain	drop_owner	reconcile	reconcile	retain	rebuild	retain	replace	drop_owner
+builtin_application_icons	retain	retain	retain	retain	retain	retain	retain	retain	retain	retain
+codex_backend_projection	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
+codex_transcript_text	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
+codex_delivery_queues	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner

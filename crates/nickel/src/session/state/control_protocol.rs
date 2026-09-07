@@ -267,6 +267,18 @@ impl NickelSession {
                         internal_ui_fallback_frames: internal_ui.fallback_frames,
                         internal_ui_software_frame_bytes: internal_ui.software_frame_bytes as u64,
                         internal_ui_fallback_raster_bytes: internal_ui.fallback_raster_bytes as u64,
+                        internal_ui_text_scratch_bytes: internal_ui.text_scratch_bytes as u64,
+                        internal_ui_text_private_cache_bytes: internal_ui.text_private_cache_bytes
+                            as u64,
+                        internal_ui_fallback_buffer_creations: internal_ui
+                            .fallback_buffer_creations,
+                        internal_ui_fallback_buffer_reuses: internal_ui.fallback_buffer_reuses,
+                        internal_ui_fallback_converted_bytes: internal_ui.fallback_converted_bytes,
+                        internal_ui_fallback_upload_damage_bytes: internal_ui
+                            .fallback_upload_damage_bytes,
+                        internal_ui_fallback_full_repaints: internal_ui.fallback_full_repaints,
+                        internal_ui_fallback_partial_repaints: internal_ui
+                            .fallback_partial_repaints,
                         internal_ui_image_cache_entries: u16::try_from(
                             internal_ui.image_cache_entries,
                         )

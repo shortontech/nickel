@@ -1,10 +1,10 @@
 # crate	rust_sources
 nickel-build-support	1
-nickel-codex	11
+nickel-codex	12
 nickel-codex-fixture	3
-nickel-codex-ui	7
+nickel-codex-ui	8
 nickel-core	29
-nickel-file	17
+nickel-file	18
 nickel-gaze	8
 nickel-i18n	1
 nickel-i18n-lint	2
@@ -14,7 +14,7 @@ nickel-markdown	1
 nickel-markdown-ui	4
 nickel-platform	9
 nickel-render-assets	1
-nickel	91
+nickel	92
 nickel-session-protocol	2
 nickel-settings	11
 nickel-storage	1
