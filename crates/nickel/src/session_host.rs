@@ -29,7 +29,10 @@ pub trait SessionHost: Send + Sync {
         Ok(())
     }
     fn projection_outputs(&self) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
-        platform::projection_outputs()
+        #[cfg(target_os = "linux")]
+        return platform::projection_outputs();
+        #[cfg(not(target_os = "linux"))]
+        Err("display projection is unavailable on this platform".into())
     }
     fn capture_desktop(&self) -> DesktopCapturePoll {
         DesktopCapturePoll::Ready(platform::capture_desktop())
