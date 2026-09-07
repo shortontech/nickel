@@ -1,8 +1,38 @@
 use std::{
+    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::{Child, Command},
 };
+
+#[cfg(target_os = "linux")]
+static TRUSTED_SESSION_CAPABILITY: std::sync::Mutex<Option<(OsString, OsString)>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(target_os = "linux")]
+pub(crate) fn install_trusted_session_capability(socket: OsString, token: OsString) {
+    *TRUSTED_SESSION_CAPABILITY.lock().unwrap() = Some((socket, token));
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn clear_trusted_session_capability(socket: &std::ffi::OsStr) {
+    let mut capability = TRUSTED_SESSION_CAPABILITY.lock().unwrap();
+    if capability
+        .as_ref()
+        .is_some_and(|(candidate, _)| candidate == socket)
+    {
+        *capability = None;
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn authorize_trusted_session_client(command: &mut Command) {
+    if let Some((socket, token)) = TRUSTED_SESSION_CAPABILITY.lock().unwrap().as_ref() {
+        command
+            .env("NICKEL_SESSION_CONTROL", socket)
+            .env("NICKEL_SESSION_TOKEN", token);
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrayItem {
@@ -349,7 +379,11 @@ impl Application {
     #[cfg(target_os = "linux")]
     fn session_process(&self) -> io::Result<Command> {
         let mut command = self.process_with_capabilities()?;
-        command.env_remove("NICKEL_SHELL_TEST_CONTROL");
+        command
+            .env_remove("NICKEL_SESSION_CONTROL")
+            .env_remove("NICKEL_SESSION_TOKEN")
+            .env_remove("NICKEL_SHELL_TEST_CONTROL");
+        authorize_trusted_session_client(&mut command);
         Ok(command)
     }
 }
@@ -445,6 +479,8 @@ impl WindowGroup {
 #[cfg(test)]
 mod tests {
     use super::{Application, ApplicationId, ApplicationLaunchClass};
+    #[cfg(target_os = "linux")]
+    use super::{clear_trusted_session_capability, install_trusted_session_capability};
 
     #[test]
     fn application_ids_are_opaque() {
@@ -502,6 +538,10 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn trusted_session_client_retains_only_production_session_capabilities() {
+        install_trusted_session_capability(
+            "/run/user/1000/nickel-settings.sock".into(),
+            "secret".into(),
+        );
         let application = Application::new(
             "nickel-settings".into(),
             "Nickel Settings".into(),
@@ -510,12 +550,18 @@ mod tests {
             Some(vec!["true".into()]),
         );
         let command = application.session_process().unwrap();
-        let removals = command
+        let environment = command
             .get_envs()
-            .filter_map(|(name, value)| value.is_none().then_some(name))
+            .map(|(name, value)| (name.to_owned(), value.map(std::ffi::OsStr::to_owned)))
             .collect::<Vec<_>>();
-        assert!(!removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
-        assert!(!removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
-        assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
+        assert!(environment.contains(&(
+            "NICKEL_SESSION_CONTROL".into(),
+            Some("/run/user/1000/nickel-settings.sock".into())
+        )));
+        assert!(environment.contains(&("NICKEL_SESSION_TOKEN".into(), Some("secret".into()))));
+        assert!(environment.contains(&("NICKEL_SHELL_TEST_CONTROL".into(), None)));
+        clear_trusted_session_capability(std::ffi::OsStr::new(
+            "/run/user/1000/nickel-settings.sock",
+        ));
     }
 }

@@ -24,11 +24,12 @@ use crate::{
 };
 
 /// Geometry of an output supplied by the compositor-native host.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InternalOutput {
     pub name: String,
     pub width: u32,
     pub height: u32,
+    pub scale: f32,
 }
 
 /// Placement and identity of one compositor-owned shell surface.
@@ -75,6 +76,7 @@ pub(crate) struct InternalShellCoordinator {
     entries: Vec<InternalShellSurface>,
     indices: HashMap<(SurfaceRole, Option<String>), usize>,
     panel_edge: PanelEdge,
+    bar_on_all_displays: bool,
     file_windows: nickel_file::FileWindowCoordinator,
     file_requests: mpsc::Receiver<nickel_file::FileWindowRequest>,
     file_actions: Vec<nickel_file::FileWindowAction>,
@@ -83,12 +85,15 @@ pub(crate) struct InternalShellCoordinator {
 impl InternalShellCoordinator {
     pub fn new(session_host: Arc<dyn SessionHost>, panel_edge: PanelEdge) -> Result<Self, String> {
         let (file_window_host, file_requests) = internal_file_window_channel();
+        let bar_on_all_displays =
+            nickel_core::shell_settings::ShellSettings::load_default().bar_on_all_displays;
         Ok(Self {
             shell: LiveShell::new_with_internal_hosts(session_host, file_window_host)?,
             surfaces: InternalSurfaceSet::new(),
             entries: Vec::new(),
             indices: HashMap::new(),
             panel_edge,
+            bar_on_all_displays,
             file_windows: nickel_file::FileWindowCoordinator::new(),
             file_requests,
             file_actions: Vec::new(),
@@ -121,8 +126,13 @@ impl InternalShellCoordinator {
 
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
         let mut desired = Vec::new();
-        for output in outputs {
-            for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
+        for (index, output) in outputs.iter().enumerate() {
+            for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
+                let size = role_size(role, output.width, output.height, self.panel_edge);
+                desired.push((role, Some(output.name.clone()), size));
+            }
+            if self.bar_on_all_displays || index == 0 {
+                let role = SurfaceRole::Panel;
                 let size = role_size(role, output.width, output.height, self.panel_edge);
                 desired.push((role, Some(output.name.clone()), size));
             }
@@ -162,6 +172,15 @@ impl InternalShellCoordinator {
         for surface in existing.into_values() {
             self.surfaces.remove(surface.id);
         }
+    }
+
+    pub fn set_bar_on_all_displays(&mut self, enabled: bool) -> bool {
+        let changed = self.bar_on_all_displays != enabled;
+        self.bar_on_all_displays = enabled;
+        // The same persisted transaction also carries window-scope and
+        // desktop-count behavior consumed by LiveShell.
+        self.shell.refresh_system();
+        changed
     }
 
     fn insert(&mut self, role: SurfaceRole, output: Option<String>, size: (u32, u32)) {
@@ -369,8 +388,8 @@ fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) 
 mod tests {
     use super::*;
     use crate::platform::{SessionRequestError, ShellCommand};
-    use std::sync::atomic::{AtomicU8, Ordering};
     use nickel_core::hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge};
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     struct TestHost;
 
@@ -430,6 +449,7 @@ mod tests {
             name: "one".into(),
             width: 1920,
             height: 1080,
+            scale: 1.0,
         }]);
 
         state.store(1, Ordering::Release);
@@ -473,11 +493,13 @@ mod tests {
                 name: "one".into(),
                 width: 1920,
                 height: 1080,
+                scale: 1.0,
             },
             InternalOutput {
                 name: "two".into(),
                 width: 1280,
                 height: 720,
+                scale: 1.0,
             },
         ]);
 
@@ -491,6 +513,68 @@ mod tests {
     }
 
     #[test]
+    fn primary_only_panel_policy_reconciles_two_outputs_without_removing_desktops() {
+        let mut coordinator = coordinator();
+        coordinator.set_bar_on_all_displays(false);
+        coordinator.set_outputs(&[
+            InternalOutput {
+                name: "primary".into(),
+                width: 1920,
+                height: 1080,
+                scale: 1.5,
+            },
+            InternalOutput {
+                name: "secondary".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            },
+        ]);
+
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("primary"))
+                .is_some()
+        );
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("secondary"))
+                .is_none()
+        );
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("primary"))
+                .is_some()
+        );
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("secondary"))
+                .is_some()
+        );
+
+        assert!(coordinator.set_bar_on_all_displays(true));
+        coordinator.set_outputs(&[
+            InternalOutput {
+                name: "primary".into(),
+                width: 1920,
+                height: 1080,
+                scale: 1.5,
+            },
+            InternalOutput {
+                name: "secondary".into(),
+                width: 1280,
+                height: 720,
+                scale: 1.0,
+            },
+        ]);
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("secondary"))
+                .is_some()
+        );
+    }
+
+    #[test]
     fn topology_reconciliation_preserves_surfaces_for_unchanged_outputs() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[
@@ -498,11 +582,13 @@ mod tests {
                 name: "left".into(),
                 width: 1280,
                 height: 720,
+                scale: 1.0,
             },
             InternalOutput {
                 name: "right".into(),
                 width: 1920,
                 height: 1080,
+                scale: 1.0,
             },
         ]);
         let left_panel = coordinator
@@ -520,11 +606,13 @@ mod tests {
                 name: "right".into(),
                 width: 1600,
                 height: 900,
+                scale: 1.0,
             },
             InternalOutput {
                 name: "new".into(),
                 width: 1024,
                 height: 768,
+                scale: 1.0,
             },
         ]);
 
@@ -566,6 +654,7 @@ mod tests {
             name: "nested".into(),
             width: 800,
             height: 600,
+            scale: 1.0,
         }]);
         let panel = coordinator
             .surface(SurfaceRole::Panel, Some("nested"))
@@ -582,6 +671,7 @@ mod tests {
             name: "nested".into(),
             width: 800,
             height: 600,
+            scale: 1.0,
         }]);
         let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
         assert!(!coordinator.visible(launcher));
@@ -596,6 +686,7 @@ mod tests {
             name: "nested".into(),
             width: 800,
             height: 600,
+            scale: 1.0,
         }]);
         let panel = coordinator
             .surface(SurfaceRole::Panel, Some("nested"))
@@ -625,6 +716,7 @@ mod tests {
             name: "nested".into(),
             width: 800,
             height: 600,
+            scale: 1.0,
         }]);
         let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
         let mut hotkeys = CompositorShortcutAdapter::default();
@@ -650,6 +742,7 @@ mod tests {
             name: "nested".into(),
             width: 800,
             height: 600,
+            scale: 1.0,
         }]);
         let screenshot = coordinator
             .surface(SurfaceRole::Screenshot, None)

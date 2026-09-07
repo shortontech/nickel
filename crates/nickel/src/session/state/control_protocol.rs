@@ -19,6 +19,9 @@ impl NickelSession {
         let _ = std::fs::remove_file(&path);
         let socket =
             UnixDatagram::bind(&path).expect("failed to bind Nickel session control socket");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("failed to restrict Nickel session control socket permissions");
         socket
             .set_nonblocking(true)
             .expect("failed to make Nickel session control socket nonblocking");

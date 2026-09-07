@@ -95,6 +95,7 @@ mod internal_shell_placement_tests {
                     name: "left".into(),
                     width: 1920,
                     height: 1080,
+                    scale: 1.0,
                 },
                 -1920,
                 -120,
@@ -104,6 +105,7 @@ mod internal_shell_placement_tests {
                     name: "right".into(),
                     width: 2560,
                     height: 1440,
+                    scale: 1.0,
                 },
                 0,
                 240,
@@ -416,6 +418,24 @@ fn test_control_may_invoke(command: &SessionCommand) -> bool {
                 action: nickel_session_protocol::SessionAction::Lock
             }
     )
+}
+
+fn production_control_token() -> String {
+    use std::io::Read;
+
+    let mut bytes = [0_u8; 32];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut source| source.read_exact(&mut bytes))
+        .is_err()
+    {
+        let fallback = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        bytes[..16].copy_from_slice(&fallback.to_ne_bytes());
+        bytes[16..24].copy_from_slice(&u64::from(std::process::id()).to_ne_bytes());
+    }
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn output_index_for_shell_surface(output_name: &str, output_names: &[String]) -> Option<usize> {
@@ -840,7 +860,8 @@ impl NickelSession {
     }
 
     fn internal_outputs(&self) -> Vec<(crate::internal_shell::InternalOutput, i32, i32)> {
-        self.space
+        let mut outputs = self
+            .space
             .outputs()
             .filter_map(|output| {
                 let geometry = self.space.output_geometry(output)?;
@@ -849,12 +870,21 @@ impl NickelSession {
                         name: output.name(),
                         width: geometry.size.w.max(0) as u32,
                         height: geometry.size.h.max(0) as u32,
+                        scale: output.current_scale().fractional_scale() as f32,
                     },
                     geometry.loc.x,
                     geometry.loc.y,
                 ))
             })
-            .collect()
+            .collect::<Vec<_>>();
+        if let Some(primary) = self.primary_output_name.as_deref()
+            && let Some(index) = outputs
+                .iter()
+                .position(|(output, _, _)| output.name == primary)
+        {
+            outputs.swap(0, index);
+        }
+        outputs
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
@@ -891,7 +921,12 @@ impl NickelSession {
                 &outputs,
                 self.launcher_output_name.as_deref(),
             );
-            let runtime_id = self.internal_ui.insert_scene(scene, placement, 1.0);
+            let scale = surface
+                .output
+                .as_deref()
+                .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+                .map_or(1.0, |(output, _, _)| output.scale);
+            let runtime_id = self.internal_ui.insert_scene(scene, placement, scale);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         self.schedule_internal_ui_frame();
@@ -1157,7 +1192,16 @@ impl NickelSession {
                 self.internal_ui.relocate(runtime_id, placement);
                 continue;
             }
-            let runtime_id = self.internal_ui.insert_scene(scene, placement, 1.0);
+            let output_scale = surface
+                .output
+                .as_deref()
+                .and_then(|name| self.space.outputs().find(|output| output.name() == name))
+                .map_or(1.0, |output| {
+                    output.current_scale().fractional_scale() as f32
+                });
+            let runtime_id = self
+                .internal_ui
+                .insert_scene(scene, placement, output_scale);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         self.internal_shell = Some(shell);
@@ -1598,41 +1642,41 @@ impl NickelSession {
         // Outputs become views of a part of the Space and can be rendered via Space::render_output.
         let space = Space::default();
 
-        let compatibility_control = if test_control_enabled {
-            let protocol_token = format!(
-                "{:x}-{:x}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-            );
+        // The shell itself uses `InProcessSessionHost`; this authenticated
+        // endpoint exists only for trusted out-of-process Nickel utilities
+        // such as `nickel-settings`. Ordinary applications have both values
+        // stripped from their launch environment.
+        let compatibility_control = {
+            let protocol_token = production_control_token();
             // SAFETY: session initialization is single-threaded and precedes clients.
             unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
             let control_socket_path = Self::init_control_socket(event_loop);
+            crate::model::install_trusted_session_capability(
+                control_socket_path.as_os_str().to_owned(),
+                protocol_token.clone().into(),
+            );
             let control_socket_name = control_socket_path
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or("nickel");
-            let shell_test_path = control_socket_path
-                .with_file_name(format!("nickel-shell-test-{control_socket_name}"));
-            // SAFETY: session initialization is single-threaded and precedes shell launch.
-            unsafe { std::env::set_var("NICKEL_SHELL_TEST_CONTROL", shell_test_path) };
+            if test_control_enabled {
+                let shell_test_path = control_socket_path
+                    .with_file_name(format!("nickel-shell-test-{control_socket_name}"));
+                // SAFETY: initialization still precedes all client launches.
+                unsafe { std::env::set_var("NICKEL_SHELL_TEST_CONTROL", shell_test_path) };
+            } else {
+                unsafe {
+                    std::env::remove_var("NICKEL_SESSION_CONTROL");
+                    std::env::remove_var("NICKEL_SESSION_TOKEN");
+                    std::env::remove_var("NICKEL_SHELL_TEST_CONTROL");
+                }
+            }
             Some(CompatibilityControlState {
                 protocol_token,
                 authenticated_shell_pids: HashSet::new(),
                 expected_shell_pid: 0,
                 socket_path: control_socket_path,
             })
-        } else {
-            // Do not let inherited compatibility credentials accidentally
-            // become authority in a normal compositor-owned session.
-            unsafe {
-                std::env::remove_var("NICKEL_SESSION_CONTROL");
-                std::env::remove_var("NICKEL_SESSION_TOKEN");
-                std::env::remove_var("NICKEL_SHELL_TEST_CONTROL");
-            }
-            None
         };
         let secure_storage_state = Arc::new(AtomicU8::new(
             crate::session::login_services::SecureStorageState::Starting as u8,
@@ -2021,9 +2065,11 @@ impl NickelSession {
                 nickel_core::dpi::Scale120::new(placement.scale_120).unwrap_or_default(),
             );
         }
-        self.output_scale_preferences
-            .save_default()
-            .map_err(|_| "could not persist output scales")?;
+        if !self.test_control_enabled {
+            self.output_scale_preferences
+                .save_default()
+                .map_err(|_| "could not persist output scales")?;
+        }
         self.rescue_stranded_windows();
         self.relayout_shell_surfaces();
         self.reconstrain_all_reactive_popups();
@@ -2873,6 +2919,11 @@ impl NickelSession {
             self.apply_workspace_transition(transition);
         }
         let effective = self.protocol_shell_behavior();
+        if let Some(shell) = self.internal_shell.as_mut()
+            && shell.set_bar_on_all_displays(effective.bar_on_all_displays)
+        {
+            self.reconcile_internal_shell_outputs();
+        }
         self.notify_shell_behavior_snapshot(effective.clone());
         ServerMessage::ShellBehavior(effective)
     }
@@ -5766,6 +5817,22 @@ impl Drop for NickelSession {
     fn drop(&mut self) {
         if let Some(control) = &self.compatibility_control {
             let _ = std::fs::remove_file(&control.socket_path);
+            crate::model::clear_trusted_session_capability(control.socket_path.as_os_str());
+            if std::env::var_os("NICKEL_SESSION_CONTROL").as_deref()
+                == Some(control.socket_path.as_os_str())
+            {
+                // SAFETY: production owns one session; serialized session tests
+                // also tear down the capability they installed.
+                unsafe {
+                    std::env::remove_var("NICKEL_SESSION_CONTROL");
+                    if std::env::var("NICKEL_SESSION_TOKEN").as_deref()
+                        == Ok(control.protocol_token.as_str())
+                    {
+                        std::env::remove_var("NICKEL_SESSION_TOKEN");
+                    }
+                    std::env::remove_var("NICKEL_SHELL_TEST_CONTROL");
+                }
+            }
         }
     }
 }
@@ -6251,12 +6318,84 @@ mod protocol_tests {
     }
 
     #[test]
-    fn ordinary_session_has_no_external_control_or_pid_authority() {
+    fn applying_multi_output_fractional_scale_rebuilds_internal_surfaces_at_native_scale() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        for (name, width, height) in [("high", 1200, 900), ("normal", 1000, 800)] {
+            session
+                .apply_test_output(TestOutput::Connect {
+                    name: name.into(),
+                    logical_width: width,
+                    logical_height: height,
+                    scale_120: 120,
+                    transform: OutputTransform::Normal,
+                })
+                .unwrap();
+        }
+        session
+            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .unwrap();
+
+        session
+            .apply_output_layout(nickel_session_protocol::OutputLayout {
+                primary: "high".into(),
+                placements: vec![
+                    nickel_session_protocol::OutputPlacement {
+                        name: "high".into(),
+                        x: 0,
+                        y: 0,
+                        enabled: true,
+                        scale_120: 180,
+                    },
+                    nickel_session_protocol::OutputPlacement {
+                        name: "normal".into(),
+                        x: 800,
+                        y: 0,
+                        enabled: true,
+                        scale_120: 120,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let outputs = session.protocol_outputs();
+        let high = outputs.iter().find(|output| output.name == "high").unwrap();
+        let normal = outputs
+            .iter()
+            .find(|output| output.name == "normal")
+            .unwrap();
+        assert_eq!((high.geometry.width, high.scale_120), (800, 180));
+        assert_eq!((normal.geometry.x, normal.scale_120), (800, 120));
+
+        let shell = session.internal_shell.as_ref().unwrap();
+        for (name, expected) in [("high", 1.5_f32), ("normal", 1.0_f32)] {
+            let surface = shell
+                .surface(crate::winit_shell::SurfaceRole::Desktop, Some(name))
+                .unwrap();
+            let runtime = session.internal_shell_surfaces[&surface.id];
+            assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
+        }
+    }
+
+    #[test]
+    fn ordinary_session_exposes_a_restricted_settings_adapter_without_pid_authority() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let mut event_loop = EventLoop::try_new().unwrap();
         let display = Display::new().unwrap();
         let session = super::NickelSession::new(&mut event_loop, display, false);
 
-        assert!(session.compatibility_control.is_none());
+        let control = session.compatibility_control.as_ref().unwrap();
+        assert!(control.socket_path.exists());
+        assert_eq!(control.protocol_token.len(), 64);
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&control.socket_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         assert!(!session.is_authenticated_shell_pid(std::process::id()));
     }
 

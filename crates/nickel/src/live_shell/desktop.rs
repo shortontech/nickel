@@ -777,6 +777,8 @@ impl DesktopApplication {
                 });
                 let mut command = std::process::Command::new(exe);
                 command.args(destination.arguments());
+                #[cfg(target_os = "linux")]
+                crate::model::authorize_trusted_session_client(&mut command);
                 command
                     .spawn()
                     .map(|_| ())

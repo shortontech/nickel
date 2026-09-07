@@ -1264,6 +1264,13 @@ impl InternalUiRuntime {
         changed
     }
 
+    #[cfg(test)]
+    pub(crate) fn scale_factor(&self, id: InternalSurfaceId) -> Option<f32> {
+        self.presentation
+            .get(&id)
+            .map(|surface| surface.scale_factor)
+    }
+
     pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;
