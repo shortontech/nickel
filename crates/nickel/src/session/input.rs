@@ -660,6 +660,12 @@ impl NickelSession {
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
                 if event.button() == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
+                    && client_present
+                {
+                    self.dismiss_internal_launcher_for_client_press();
+                }
+                if event.button() == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
                     && keyboard.modifier_state().logo
                     && !pointer.is_grabbed()
                     && !client_present

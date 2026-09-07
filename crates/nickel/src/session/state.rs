@@ -1035,8 +1035,17 @@ impl NickelSession {
             let snapshot = self.protocol_snapshot();
             *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
             let shell = self.internal_shell.as_mut().unwrap();
-            shell.apply_session_snapshot(snapshot);
-            let changed = shell.poll(now);
+            let snapshot_changed = shell.apply_session_snapshot(snapshot);
+            let mut changed = shell.poll(now);
+            if snapshot_changed {
+                changed.extend(
+                    shell
+                        .surfaces()
+                        .iter()
+                        .filter(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+                        .map(|surface| surface.id),
+                );
+            }
             let actions = shell.drain_file_actions();
             let shell_changed = !changed.is_empty();
             let codex_menu_visible = shell.codex_project_menu_visible();
@@ -1373,6 +1382,23 @@ impl NickelSession {
             self.wake_internal_shell();
         }
         changed
+    }
+
+    /// Hide the compositor-hosted launcher because an ordinary client is
+    /// about to receive a pointer press. The press itself establishes the new
+    /// focus, so do not briefly restore the window displaced when Launcher
+    /// opened.
+    pub(crate) fn dismiss_internal_launcher_for_client_press(&mut self) -> bool {
+        let Some(shell) = self.internal_shell.as_mut() else {
+            return false;
+        };
+        if !shell.launcher_visible() || !shell.toggle_launcher() {
+            return false;
+        }
+        self.launcher_restore_window = None;
+        self.sync_internal_shell();
+        self.wake_internal_shell();
+        true
     }
 
     pub(crate) fn flush_internal_shell_input(&mut self) {
@@ -6894,6 +6920,30 @@ mod protocol_tests {
 
         assert!(session.toggle_internal_launcher());
         assert_eq!(session.internal_ui.focused(), Some(application));
+    }
+
+    #[test]
+    fn ordinary_client_press_dismisses_internal_launcher_without_restoring_displaced_focus() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "test".into(),
+                logical_width: 1280,
+                logical_height: 720,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        session
+            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .expect("headless internal shell");
+
+        assert!(session.toggle_internal_launcher());
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+        assert!(session.dismiss_internal_launcher_for_client_press());
+        assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
+        assert!(session.launcher_restore_window.is_none());
     }
 
     #[test]

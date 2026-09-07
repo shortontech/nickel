@@ -275,8 +275,14 @@ impl InternalShellCoordinator {
             .collect()
     }
 
-    pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) {
+    pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) -> bool {
         self.shell.apply_internal_session_snapshot(snapshot);
+        // An external shell refreshes its feeds from the session socket. The
+        // unified shell instead receives the canonical snapshot directly, so
+        // consume it here before deciding which compositor-owned surfaces need
+        // repainting. Merely storing it leaves panels on their pinned-only
+        // startup projection until an unrelated full refresh happens.
+        self.shell.refresh_fast()
     }
 
     pub fn apply_system_status_update(
@@ -702,6 +708,28 @@ mod tests {
         assert!(!coordinator.visible(launcher));
         assert!(coordinator.toggle_launcher());
         assert!(coordinator.visible(launcher));
+    }
+
+    #[test]
+    fn applying_session_snapshot_immediately_refreshes_running_window_projection() {
+        let mut coordinator = coordinator();
+        let snapshot = nickel_session_protocol::Snapshot {
+            windows: vec![nickel_session_protocol::WindowSnapshot {
+                id: nickel_session_protocol::WindowId(41),
+                application_id: "org.kde.konsole".into(),
+                title: "Konsole".into(),
+                active: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                geometry: None,
+                workspace: nickel_session_protocol::WorkspaceId(1),
+            }],
+            ..Default::default()
+        };
+
+        assert!(coordinator.apply_session_snapshot(snapshot.clone()));
+        assert!(!coordinator.apply_session_snapshot(snapshot));
     }
 
     #[test]
