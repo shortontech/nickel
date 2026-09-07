@@ -22,6 +22,13 @@ use std::{
 #[doc(hidden)]
 pub mod allocation_counter;
 
+/// Linux compositor and login-session runtime.
+///
+/// This remains independently invokable during the first integration stage,
+/// while sharing the product package with the shell.
+#[cfg(target_os = "linux")]
+pub mod session;
+
 fn is_clipboard_paste(event: &InputEvent) -> bool {
     matches!(event, InputEvent::Key(key)
         if key.edge == KeyEdge::Pressed
@@ -71,6 +78,7 @@ mod places;
 #[allow(dead_code, unused_imports)]
 mod platform;
 mod screenshot;
+mod session_host;
 mod softbuffer_presenter;
 mod window_preview;
 #[allow(dead_code)]
@@ -1302,11 +1310,10 @@ fn sync_panel_popover_anchor(shell: &WinitShell, state: &LiveShell) {
     let Some((role, anchor)) = state.popover_anchor(preferred) else {
         return;
     };
-    if let Err(error) =
-        platform::send_shell_command(platform::ShellCommand::ShowAnchoredShellRole { role, anchor })
-    {
-        tracing::warn!(?role, %error, "failed to place anchored shell popover");
-    }
+    let _ = state.dispatch_session_command(
+        "place-anchored-shell-popover",
+        platform::ShellCommand::ShowAnchoredShellRole { role, anchor },
+    );
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1321,11 +1328,10 @@ fn set_surface_visibility(shell: &mut WinitShell, id: SurfaceId, role: SurfaceRo
     #[cfg(target_os = "linux")]
     if changed
         && let Some(role) = session_visibility_role(role)
-        && let Err(error) =
-            platform::send_shell_command(platform::ShellCommand::SetShellRoleVisible {
-                role,
-                visible,
-            })
+        && let Err(error) = session_host::SessionHost::dispatch(
+            &session_host::PlatformSessionHost,
+            platform::ShellCommand::SetShellRoleVisible { role, visible },
+        )
     {
         tracing::warn!(?role, visible, %error, "failed to reconcile compositor shell visibility");
     }

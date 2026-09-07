@@ -41,6 +41,7 @@ use crate::{
         NotificationSource, ShellCommand, TrayFeed, TraySource, WindowAction, WindowFeed,
     },
     screenshot::ScreenshotTool,
+    session_host::{SessionHost, default_session_host},
     window_preview::{
         ApplicationMenuAction, ApplicationMenuApp, ApplicationMenuTarget, MENU_WIDTH, MenuAction,
         PreviewAction, TaskbarPreviewAnchor, WindowMenuApp, WindowPreviewFrame,
@@ -457,6 +458,7 @@ pub struct ShellDeadlineOutcome {
 }
 
 pub struct LiveShell {
+    session_host: Arc<dyn SessionHost>,
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
@@ -684,6 +686,12 @@ impl LiveShell {
         }
     }
     pub fn new() -> Result<Self, String> {
+        Self::new_with_session_host(default_session_host())
+    }
+
+    pub(crate) fn new_with_session_host(
+        session_host: Arc<dyn SessionHost>,
+    ) -> Result<Self, String> {
         let shell_settings = ShellSettings::load_default();
         let application_discovery = platform::application_discovery();
         let application_status = application_discovery_status_label(application_discovery.status());
@@ -841,6 +849,7 @@ impl LiveShell {
             56,
         );
         Ok(Self {
+            session_host,
             host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
@@ -2144,7 +2153,7 @@ impl LiveShell {
                 } else if let Some(window) =
                     groups.get(index).and_then(|group| group.windows.first())
                 {
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "activate-window",
                         ShellCommand::WindowAction {
                             window: window.id,
@@ -2186,7 +2195,7 @@ impl LiveShell {
                     .unwrap_or((PANEL_ITEM_WIDTH * (index + 1) as f32).round() as i32);
                 self.window_menu_anchor_x = Some(self.panel_origin_x + x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "show-context-menu",
                     ShellCommand::ShowContextMenu {
                         x: self.panel_origin_x + x,
@@ -2196,7 +2205,8 @@ impl LiveShell {
                     },
                 );
                 #[cfg(target_os = "linux")]
-                let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+                let _ =
+                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
             PanelAction::ToggleTaskPin(id) => {
                 self.launcher.toggle_pin(&id);
@@ -2573,7 +2583,7 @@ impl LiveShell {
         } else {
             self.preview_leave_deadline = Some(Instant::now() + PREVIEW_LEAVE_DELAY);
             if self.preview_hovered.take().is_some() {
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "clear-window-highlight",
                     ShellCommand::ClearWindowHighlight,
                 );
@@ -2595,7 +2605,7 @@ impl LiveShell {
             ShellCommand::ClearWindowHighlight,
             ShellCommand::HighlightWindow,
         );
-        let _ = send_session_command("highlight-preview-window", command);
+        let _ = self.send_session_command("highlight-preview-window", command);
         true
     }
 
@@ -2668,7 +2678,7 @@ impl LiveShell {
                 self.window_menu_host = None;
                 self.window_menu_anchor_x = Some(x);
                 self.window_menu_anchor_y = Some(self.panel_origin_y);
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "show-context-menu",
                     ShellCommand::ShowContextMenu {
                         x,
@@ -2678,7 +2688,8 @@ impl LiveShell {
                     },
                 );
                 #[cfg(target_os = "linux")]
-                let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+                let _ =
+                    self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
             }
             PreviewAction::Dismiss => self.close_window_preview(),
         }
@@ -2705,7 +2716,7 @@ impl LiveShell {
                     self.close_window_preview();
                 }
                 #[cfg(target_os = "linux")]
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "restore-application-focus",
                     ShellCommand::RestoreApplicationFocus,
                 );
@@ -2717,7 +2728,7 @@ impl LiveShell {
                 });
                 self.preview_hovered = frame.controller_selected_window();
                 if let Some(window) = self.preview_hovered {
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "highlight-preview-window",
                         ShellCommand::HighlightWindow(window),
                     );
@@ -2730,7 +2741,7 @@ impl LiveShell {
                 });
                 self.preview_hovered = frame.controller_selected_window();
                 if let Some(window) = self.preview_hovered {
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "highlight-preview-window",
                         ShellCommand::HighlightWindow(window),
                     );
@@ -2805,11 +2816,11 @@ impl LiveShell {
             MenuAction::SnapTrailing(window) => {
                 self.try_send_window_action(window, WindowAction::SnapTrailing)
             }
-            MenuAction::MoveToWorkspace(window, workspace) => send_session_command(
+            MenuAction::MoveToWorkspace(window, workspace) => self.send_session_command(
                 "move-window-to-workspace",
                 ShellCommand::MoveWindowToWorkspace { window, workspace },
             ),
-            MenuAction::MoveToDisplay(window, output) => send_session_command(
+            MenuAction::MoveToDisplay(window, output) => self.send_session_command(
                 "move-window-to-display",
                 ShellCommand::MoveWindowToDisplay { window, output },
             ),
@@ -3037,7 +3048,7 @@ impl LiveShell {
                 .map(|window| window.id)
                 .collect::<Vec<_>>();
             let (width, height) = preview_dimensions(windows.len());
-            let _ = send_session_command(
+            let _ = self.send_session_command(
                 "show-task-switcher",
                 ShellCommand::ShowTaskSwitcher {
                     width: width as i32,
@@ -3056,7 +3067,7 @@ impl LiveShell {
                     .collect::<Vec<_>>();
                 let (width, height) = preview_dimensions(windows.len());
                 let x = self.preview_origin_x(index, width);
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "show-preview",
                     ShellCommand::ShowPreview {
                         x,
@@ -3068,7 +3079,7 @@ impl LiveShell {
                 );
                 if self.preview_focus_requested {
                     #[cfg(target_os = "linux")]
-                    let _ = send_session_command("focus-preview", ShellCommand::FocusPreview);
+                    let _ = self.send_session_command("focus-preview", ShellCommand::FocusPreview);
                     self.preview_focus_requested = false;
                 }
             }
@@ -3076,7 +3087,7 @@ impl LiveShell {
         if self.window_menu.is_some() || self.application_menu_target.is_some() {
             let x = self.window_menu_anchor_x.unwrap_or(self.panel_origin_x);
             let y = self.window_menu_anchor_y.unwrap_or(self.panel_origin_y);
-            let _ = send_session_command(
+            let _ = self.send_session_command(
                 "show-context-menu",
                 ShellCommand::ShowContextMenu {
                     x,
@@ -3129,7 +3140,7 @@ impl LiveShell {
     }
 
     fn try_send_window_action(&self, window: crate::model::WindowId, action: WindowAction) -> bool {
-        send_session_command(
+        self.send_session_command(
             "window-action",
             ShellCommand::WindowAction { window, action },
         )
@@ -3179,8 +3190,9 @@ impl LiveShell {
         self.window_menu_host = None;
         self.application_menu_target = None;
         self.application_menu_host = None;
-        let _ = send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
-        let _ = send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
+        let _ =
+            self.send_session_command("clear-window-highlight", ShellCommand::ClearWindowHighlight);
+        let _ = self.send_session_command("hide-context-menu", ShellCommand::HideContextMenu);
     }
 
     fn dismiss_window_menu(&mut self) {
@@ -3188,7 +3200,7 @@ impl LiveShell {
         self.close_window_preview();
         if focused_menu {
             #[cfg(target_os = "linux")]
-            let _ = send_session_command(
+            let _ = self.send_session_command(
                 "restore-window-menu-focus",
                 ShellCommand::RestoreApplicationFocus,
             );
@@ -3258,7 +3270,7 @@ impl LiveShell {
                 self.notification = history.first().cloned();
                 self.notification_history_visible = true;
                 #[cfg(target_os = "linux")]
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "focus-notifications",
                     ShellCommand::SetShellRoleVisible {
                         role: nickel_session_protocol::ShellRole::Notification,
@@ -3268,7 +3280,7 @@ impl LiveShell {
                 true
             }
             platform::GlobalShortcut::ShowDesktop => {
-                send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
+                self.send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop)
             }
             platform::GlobalShortcut::ProjectDisplays => {
                 self.control_host
@@ -3386,7 +3398,7 @@ impl LiveShell {
         for effect in effects {
             match effect {
                 TaskSwitchEffect::ActivateWindow(window) => {
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "task-switcher-activate",
                         ShellCommand::WindowAction {
                             window,
@@ -3445,7 +3457,7 @@ impl LiveShell {
         } else {
             ShellCommand::Hide
         };
-        if !send_session_command("controller-launcher-visibility", command) {
+        if !self.send_session_command("controller-launcher-visibility", command) {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
             return false;
         }
@@ -3519,7 +3531,7 @@ impl LiveShell {
 
     fn set_screenshot_focus(&self, visible: bool) {
         #[cfg(target_os = "linux")]
-        let _ = send_session_command(
+        let _ = self.send_session_command(
             "screenshot-focus",
             if visible {
                 ShellCommand::FocusScreenshot
@@ -3532,7 +3544,7 @@ impl LiveShell {
     }
 
     fn set_launcher_visible(&mut self, visible: bool) {
-        if !send_session_command(
+        if !self.send_session_command(
             "launcher-visibility",
             if visible {
                 ShellCommand::Show
@@ -3572,7 +3584,7 @@ impl LiveShell {
 
     fn set_control_visible(&mut self, visible: bool) {
         #[cfg(target_os = "linux")]
-        if !send_session_command(
+        if !self.send_session_command(
             "control-center-focus",
             if visible {
                 ShellCommand::FocusControlCenter
@@ -3689,7 +3701,7 @@ impl LiveShell {
         match role {
             SurfaceRole::Launcher if self.launcher_visible => {
                 self.apply_session_launcher_visibility(false);
-                let _ = send_session_command("hide-launcher", ShellCommand::Hide);
+                let _ = self.send_session_command("hide-launcher", ShellCommand::Hide);
                 true
             }
             SurfaceRole::ControlCenter if self.control_visible => {
@@ -3770,7 +3782,7 @@ impl LiveShell {
         self.window_menu_host = None;
         self.window_menu_anchor_x = Some(self.panel_origin_x);
         self.window_menu_anchor_y = Some(self.panel_origin_y);
-        let sent = send_session_command(
+        let sent = self.send_session_command(
             "show-context-menu",
             ShellCommand::ShowContextMenu {
                 x: self.panel_origin_x,
@@ -3780,7 +3792,7 @@ impl LiveShell {
             },
         );
         #[cfg(target_os = "linux")]
-        let _ = send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
+        let _ = self.send_session_command("focus-context-menu", ShellCommand::FocusContextMenu);
         sent
     }
 
@@ -3986,7 +3998,7 @@ impl LiveShell {
                     match authenticated {
                         Ok(true) => {
                             #[cfg(target_os = "linux")]
-                            if let Err(error) = platform::send_shell_command(ShellCommand::Unlock) {
+                            if let Err(error) = self.session_host.dispatch(ShellCommand::Unlock) {
                                 tracing::warn!(%error, "session unlock command failed");
                                 application.status = Some("Could not contact the session".into());
                             }
@@ -4058,7 +4070,7 @@ impl LiveShell {
                     self.notification_history_visible = false;
                     self.notification = None;
                     #[cfg(target_os = "linux")]
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "hide-notification-history",
                         ShellCommand::SetShellRoleVisible {
                             role: nickel_session_protocol::ShellRole::Notification,
@@ -4066,7 +4078,7 @@ impl LiveShell {
                         },
                     );
                     #[cfg(target_os = "linux")]
-                    let _ = send_session_command(
+                    let _ = self.send_session_command(
                         "restore-notification-focus",
                         ShellCommand::RestoreApplicationFocus,
                     );
@@ -4598,23 +4610,24 @@ impl LiveShell {
                 log_control_result("select-audio-device", platform::select_audio_device(&id));
             }
             ControlAction::SwitchWorkspace(workspace) => {
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "switch-workspace",
                     ShellCommand::SwitchWorkspace(workspace),
                 );
             }
             ControlAction::CreateWorkspace => {
-                let _ = send_session_command("create-workspace", ShellCommand::CreateWorkspace);
+                let _ =
+                    self.send_session_command("create-workspace", ShellCommand::CreateWorkspace);
             }
             ControlAction::ToggleShowDesktop => {
-                let _ =
-                    send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop);
+                let _ = self
+                    .send_session_command("toggle-show-desktop", ShellCommand::ToggleShowDesktop);
             }
             ControlAction::ShowNotifications => {
                 self.global_shortcut(platform::GlobalShortcut::ShowNotifications);
             }
             ControlAction::RemoveWorkspace(workspace) => {
-                let _ = send_session_command(
+                let _ = self.send_session_command(
                     "remove-workspace",
                     ShellCommand::RemoveWorkspace(workspace),
                 );
@@ -4635,7 +4648,8 @@ impl LiveShell {
             | ControlAction::CancelSessionAction
             | ControlAction::ConfirmSessionAction => {}
             ControlAction::SessionAction(action) => {
-                let _ = send_session_command("session-action", ShellCommand::SessionAction(action));
+                let _ = self
+                    .send_session_command("session-action", ShellCommand::SessionAction(action));
             }
         }
         let _ = self.refresh();
@@ -4708,7 +4722,7 @@ impl LiveShell {
                     })
                     .collect(),
             };
-            if send_session_command("preview-projection", ShellCommand::ApplyOutputs(layout)) {
+            if self.send_session_command("preview-projection", ShellCommand::ApplyOutputs(layout)) {
                 self.projection_chooser.preview(previous, plan);
                 self.projection_rollback_deadline = Some(Instant::now() + Duration::from_secs(15));
                 return true;
@@ -4755,8 +4769,27 @@ impl LiveShell {
                     })
                     .collect(),
             };
-            let _ = send_session_command("rollback-projection", ShellCommand::ApplyOutputs(layout));
+            let _ = self
+                .send_session_command("rollback-projection", ShellCommand::ApplyOutputs(layout));
         }
+    }
+
+    pub(crate) fn dispatch_session_command(
+        &self,
+        operation: &'static str,
+        command: ShellCommand,
+    ) -> bool {
+        match self.session_host.dispatch(command) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(operation, %error, "session command failed");
+                false
+            }
+        }
+    }
+
+    fn send_session_command(&self, operation: &'static str, command: ShellCommand) -> bool {
+        self.dispatch_session_command(operation, command)
     }
 }
 
@@ -4800,29 +4833,6 @@ fn secure_storage_status_label(state: platform::SecureStorageState) -> Option<&'
             Some("Nickel cannot reach the session service.")
         }
         platform::SecureStorageState::Ready => None,
-    }
-}
-
-fn send_session_command(operation: &'static str, command: ShellCommand) -> bool {
-    #[cfg(test)]
-    {
-        let _ = (operation, command);
-        true
-    }
-    #[cfg(all(target_os = "linux", not(test)))]
-    {
-        match platform::send_shell_command(command) {
-            Ok(()) => true,
-            Err(error) => {
-                tracing::warn!(operation, %error, "session command failed");
-                false
-            }
-        }
-    }
-    #[cfg(all(not(target_os = "linux"), not(test)))]
-    {
-        let _ = operation;
-        platform::send_shell_command(command)
     }
 }
 

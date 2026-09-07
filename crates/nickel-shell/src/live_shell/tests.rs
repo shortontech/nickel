@@ -31,3 +31,29 @@ include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
+
+#[test]
+fn injected_session_host_receives_shell_commands_without_platform_transport() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingHost(AtomicUsize);
+
+    impl crate::session_host::SessionHost for RecordingHost {
+        fn dispatch(
+            &self,
+            _command: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    let host = Arc::new(RecordingHost(AtomicUsize::new(0)));
+    let mut shell = LiveShell::new_with_session_host(host.clone()).expect("live shell");
+
+    assert!(shell.dispatch_session_command(
+        "test-direct-session-host",
+        crate::platform::ShellCommand::CreateWorkspace,
+    ));
+    assert_eq!(host.0.load(Ordering::Relaxed), 1);
+}
