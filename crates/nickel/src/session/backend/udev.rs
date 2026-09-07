@@ -149,6 +149,7 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Pointer=MemoryRenderBufferRenderElement<R>,
     Solid=SolidColorRenderElement,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
 }
 smithay::backend::renderer::element::render_elements! {
     NativeElement<R, E> where R: ImportAll + ImportMem;

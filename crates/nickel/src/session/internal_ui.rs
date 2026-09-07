@@ -3,19 +3,31 @@
 use std::collections::BTreeMap;
 
 use nickel_ui::{
-    Application, HostBatch, HostEvent, InternalSurfaceId, InternalSurfaceSet, Point as UiPoint,
-    SoftwareRenderer, Text, UiEvent, View, ViewContext, backend::PaintCommand,
+    Application, DamageRegion, HostBatch, HostEvent, InternalSurfaceId, InternalSurfaceSet,
+    Point as UiPoint, SoftwareRenderer, Text, UiEvent, View, ViewContext,
+    backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            ImportMem, Renderer,
-            element::{Kind, memory::MemoryRenderBuffer, memory::MemoryRenderBufferRenderElement},
+            Color32F, ImportMem, Renderer,
+            element::{
+                Kind,
+                memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
+                solid::{SolidColorBuffer, SolidColorRenderElement},
+            },
         },
     },
     utils::{Logical, Point, Transform},
 };
+
+smithay::backend::renderer::element::render_elements! {
+    /// Smithay elements emitted by the compositor-owned Nickel UI presenter.
+    pub InternalUiRenderElement<R> where R: Renderer + ImportMem;
+    Memory=MemoryRenderBufferRenderElement<R>,
+    Solid=SolidColorRenderElement,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalSurfaceRole {
@@ -34,10 +46,10 @@ pub struct InternalSurfacePlacement {
 
 struct PresentedSurface {
     placement: InternalSurfacePlacement,
-    renderer: SoftwareRenderer,
-    buffer: Option<MemoryRenderBuffer>,
+    renderer: SmithayFrameRenderer,
     dirty: bool,
     external_scene: Option<Vec<PaintCommand>>,
+    scale_factor: f32,
 }
 
 struct SceneSlot;
@@ -57,6 +69,268 @@ fn output_local_location(
     (
         f64::from(geometry.0 - output_origin.x),
         f64::from(geometry.1 - output_origin.y),
+    )
+}
+
+/// How the most recently prepared UI frame will reach Smithay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalUiPresentationMode {
+    /// Every primitive maps to GPU-native Smithay solid elements.
+    GpuSolid,
+    /// The display list contains a primitive not yet handled natively and is
+    /// rasterized once into an importable texture to preserve exact ordering.
+    RasterFallback,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InternalUiRendererDiagnostics {
+    pub gpu_frames: u64,
+    pub fallback_frames: u64,
+    pub fallback_primitive_count: usize,
+}
+
+/// Nickel display-list adapter for Smithay's renderer element API.
+///
+/// Rectangular fills and strokes become solid render elements and never enter
+/// the software rasterizer. Rounded geometry, gradients, text, and images use
+/// one bounded full-surface upload until dedicated GPU primitives are added.
+pub struct SmithayFrameRenderer {
+    software: SoftwareRenderer,
+    solids: Vec<(nickel_ui::Rect, SolidColorBuffer)>,
+    raster: Option<MemoryRenderBuffer>,
+    mode: InternalUiPresentationMode,
+    diagnostics: InternalUiRendererDiagnostics,
+}
+
+impl SmithayFrameRenderer {
+    fn new(width: u32, height: u32, scale: f32) -> Self {
+        Self {
+            software: SoftwareRenderer::new(width, height, scale),
+            solids: Vec::new(),
+            raster: None,
+            mode: InternalUiPresentationMode::RasterFallback,
+            diagnostics: InternalUiRendererDiagnostics::default(),
+        }
+    }
+
+    pub fn mode(&self) -> InternalUiPresentationMode {
+        self.mode
+    }
+
+    pub fn diagnostics(&self) -> InternalUiRendererDiagnostics {
+        self.diagnostics
+    }
+
+    fn supports_gpu(commands: &[PaintCommand]) -> bool {
+        commands.iter().all(|command| {
+            matches!(
+                command,
+                PaintCommand::Fill { .. }
+                    | PaintCommand::OverlayFill { .. }
+                    | PaintCommand::Stroke { .. }
+                    | PaintCommand::OverlayStroke { .. }
+                    | PaintCommand::PushClip(_)
+                    | PaintCommand::PopClip
+            )
+        })
+    }
+
+    fn push_solid(&mut self, rect: nickel_ui::Rect, color: u32, clip: nickel_ui::Rect) {
+        let Some(rect) = intersect(rect, clip) else {
+            return;
+        };
+        let size = (
+            rect.size.width.ceil().max(1.0) as i32,
+            rect.size.height.ceil().max(1.0) as i32,
+        );
+        self.solids
+            .push((rect, SolidColorBuffer::new(size, color32f(color))));
+    }
+
+    fn prepare_gpu(&mut self, frame: RenderFrame<'_>) {
+        self.solids.clear();
+        let viewport = nickel_ui::Rect::new(
+            0.0,
+            0.0,
+            frame.logical_size.0 as f32,
+            frame.logical_size.1 as f32,
+        );
+        let mut clips = vec![viewport];
+        for command in frame.commands {
+            let clip = *clips.last().unwrap_or(&viewport);
+            match command {
+                PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
+                    self.push_solid(*rect, *color, clip)
+                }
+                PaintCommand::Stroke { rect, color, width }
+                | PaintCommand::OverlayStroke { rect, color, width } => {
+                    let width = width.max(0.0).min(rect.size.width).min(rect.size.height);
+                    self.push_solid(
+                        nickel_ui::Rect::new(rect.origin.x, rect.origin.y, rect.size.width, width),
+                        *color,
+                        clip,
+                    );
+                    self.push_solid(
+                        nickel_ui::Rect::new(
+                            rect.origin.x,
+                            rect.origin.y + rect.size.height - width,
+                            rect.size.width,
+                            width,
+                        ),
+                        *color,
+                        clip,
+                    );
+                    self.push_solid(
+                        nickel_ui::Rect::new(
+                            rect.origin.x,
+                            rect.origin.y + width,
+                            width,
+                            (rect.size.height - width * 2.0).max(0.0),
+                        ),
+                        *color,
+                        clip,
+                    );
+                    self.push_solid(
+                        nickel_ui::Rect::new(
+                            rect.origin.x + rect.size.width - width,
+                            rect.origin.y + width,
+                            width,
+                            (rect.size.height - width * 2.0).max(0.0),
+                        ),
+                        *color,
+                        clip,
+                    );
+                }
+                PaintCommand::PushClip(rect) => clips.push(
+                    intersect(clip, *rect)
+                        .unwrap_or_else(|| nickel_ui::Rect::new(0.0, 0.0, 0.0, 0.0)),
+                ),
+                PaintCommand::PopClip => {
+                    if clips.len() > 1 {
+                        clips.pop();
+                    }
+                }
+                _ => unreachable!("GPU support checked before translation"),
+            }
+        }
+        self.raster = None;
+    }
+
+    fn prepare_fallback(&mut self, frame: RenderFrame<'_>) -> DamageRegion {
+        let damage = self.software.render(frame.commands);
+        let mut bytes = Vec::with_capacity(self.software.pixels().len() * 4);
+        for pixel in self.software.pixels() {
+            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        let (width, height) = self.software.size();
+        self.raster = Some(MemoryRenderBuffer::from_slice(
+            &bytes,
+            Fourcc::Abgr8888,
+            (width as i32, height as i32),
+            1,
+            Transform::Normal,
+            None,
+        ));
+        self.solids.clear();
+        damage
+    }
+
+    fn elements<R: Renderer + ImportMem>(
+        &self,
+        renderer: &mut R,
+        location: Point<i32, Logical>,
+        logical_size: (u32, u32),
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        match self.mode {
+            InternalUiPresentationMode::GpuSolid => self
+                .solids
+                .iter()
+                .rev()
+                .map(|(rect, buffer)| {
+                    SolidColorRenderElement::from_buffer(
+                        buffer,
+                        (
+                            location.x + rect.origin.x.round() as i32,
+                            location.y + rect.origin.y.round() as i32,
+                        ),
+                        1.0,
+                        1.0,
+                        Kind::Unspecified,
+                    )
+                    .into()
+                })
+                .collect(),
+            InternalUiPresentationMode::RasterFallback => self
+                .raster
+                .as_ref()
+                .and_then(|buffer| {
+                    MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        (f64::from(location.x), f64::from(location.y)),
+                        buffer,
+                        None,
+                        None,
+                        Some((logical_size.0 as i32, logical_size.1 as i32).into()),
+                        Kind::Unspecified,
+                    )
+                    .ok()
+                })
+                .map(|element| vec![element.into()])
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl FrameRenderer for SmithayFrameRenderer {
+    type Error = std::convert::Infallible;
+
+    fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
+        let damage = if Self::supports_gpu(frame.commands) {
+            self.mode = InternalUiPresentationMode::GpuSolid;
+            self.diagnostics.gpu_frames += 1;
+            self.prepare_gpu(frame);
+            DamageRegion {
+                rects: [nickel_ui::Rect::new(
+                    0.0,
+                    0.0,
+                    frame.logical_size.0 as f32,
+                    frame.logical_size.1 as f32,
+                )]
+                .into_iter()
+                .collect(),
+            }
+        } else {
+            self.mode = InternalUiPresentationMode::RasterFallback;
+            self.diagnostics.fallback_frames += 1;
+            self.diagnostics.fallback_primitive_count = frame.commands.len();
+            self.prepare_fallback(frame)
+        };
+        Ok(damage)
+    }
+}
+
+fn intersect(left: nickel_ui::Rect, right: nickel_ui::Rect) -> Option<nickel_ui::Rect> {
+    let x = left.origin.x.max(right.origin.x);
+    let y = left.origin.y.max(right.origin.y);
+    let right_edge = (left.origin.x + left.size.width).min(right.origin.x + right.size.width);
+    let bottom = (left.origin.y + left.size.height).min(right.origin.y + right.size.height);
+    (right_edge > x && bottom > y).then(|| nickel_ui::Rect::new(x, y, right_edge - x, bottom - y))
+}
+
+fn color32f(color: u32) -> Color32F {
+    let alpha = if color <= 0x00ff_ffff {
+        0xff
+    } else {
+        (color >> 24) & 0xff
+    };
+    Color32F::new(
+        ((color >> 16) & 0xff) as f32 / 255.0,
+        ((color >> 8) & 0xff) as f32 / 255.0,
+        (color & 0xff) as f32 / 255.0,
+        alpha as f32 / 255.0,
     )
 }
 
@@ -85,10 +359,10 @@ impl InternalUiRuntime {
             id,
             PresentedSurface {
                 placement,
-                renderer: SoftwareRenderer::new(physical_width, physical_height, scale),
-                buffer: None,
+                renderer: SmithayFrameRenderer::new(physical_width, physical_height, scale),
                 dirty: true,
                 external_scene: None,
+                scale_factor: scale,
             },
         );
         id
@@ -138,6 +412,21 @@ impl InternalUiRuntime {
         if let Some(surface) = self.presentation.get_mut(&id) {
             surface.dirty = true;
         }
+    }
+
+    pub fn presentation_mode(&self, id: InternalSurfaceId) -> Option<InternalUiPresentationMode> {
+        self.presentation
+            .get(&id)
+            .map(|surface| surface.renderer.mode())
+    }
+
+    pub fn renderer_diagnostics(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Option<InternalUiRendererDiagnostics> {
+        self.presentation
+            .get(&id)
+            .map(|surface| surface.renderer.diagnostics())
     }
 
     pub fn has_damage(&self) -> bool {
@@ -353,35 +642,28 @@ impl InternalUiRuntime {
         })
     }
 
-    /// Rasterize a dirty surface and expose it as a Smithay-importable memory buffer.
+    /// Prepare a dirty surface and return its Smithay-importable fallback buffer.
+    ///
+    /// `None` after preparation means the frame is represented by GPU-native
+    /// solid elements and should be obtained through [`Self::render_elements`].
     pub fn render_buffer(&mut self, id: InternalSurfaceId) -> Option<MemoryRenderBuffer> {
         let presentation = self.presentation.get_mut(&id)?;
         if presentation.dirty {
-            let damage = if let Some(commands) = &presentation.external_scene {
-                presentation.renderer.render(commands)
+            if let Some(commands) = &presentation.external_scene {
+                let (_, _, width, height) = presentation.placement.geometry;
+                let _ = presentation.renderer.render_frame(RenderFrame {
+                    commands,
+                    logical_size: (width, height),
+                    scale_factor: presentation.scale_factor,
+                    generation: 0,
+                });
             } else {
-                self.surfaces
-                    .get(id)?
-                    .render_software(&mut presentation.renderer)
-            };
-            if !damage.is_empty() || presentation.buffer.is_none() {
-                let mut bytes = Vec::with_capacity(presentation.renderer.pixels().len() * 4);
-                for pixel in presentation.renderer.pixels() {
-                    bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
-                }
-                let (width, height) = presentation.renderer.size();
-                presentation.buffer = Some(MemoryRenderBuffer::from_slice(
-                    &bytes,
-                    Fourcc::Abgr8888,
-                    (width as i32, height as i32),
-                    1,
-                    Transform::Normal,
-                    None,
-                ));
+                let surface = self.surfaces.get(id)?;
+                let _ = presentation.renderer.render_frame(surface.render_frame());
             }
             presentation.dirty = false;
         }
-        presentation.buffer.clone()
+        presentation.renderer.raster.clone()
     }
 
     /// Build render elements in output-local coordinates for the backend's current renderer.
@@ -390,7 +672,7 @@ impl InternalUiRuntime {
         renderer: &mut R,
         output: &str,
         output_origin: Point<i32, Logical>,
-    ) -> Vec<MemoryRenderBufferRenderElement<R>>
+    ) -> Vec<InternalUiRenderElement<R>>
     where
         R::TextureId: Send + Clone + 'static,
     {
@@ -398,18 +680,31 @@ impl InternalUiRuntime {
         ids.into_iter()
             .filter_map(|id| {
                 let placement = self.presentation.get(&id)?.placement.clone();
-                let buffer = self.render_buffer(id)?;
-                MemoryRenderBufferRenderElement::from_buffer(
+                if self.presentation.get(&id)?.dirty {
+                    let presentation = self.presentation.get_mut(&id)?;
+                    if let Some(commands) = &presentation.external_scene {
+                        let (_, _, width, height) = placement.geometry;
+                        let _ = presentation.renderer.render_frame(RenderFrame {
+                            commands,
+                            logical_size: (width, height),
+                            scale_factor: presentation.scale_factor,
+                            generation: 0,
+                        });
+                    } else {
+                        let surface = self.surfaces.get(id)?;
+                        let _ = presentation.renderer.render_frame(surface.render_frame());
+                    }
+                    presentation.dirty = false;
+                }
+                let presentation = self.presentation.get(&id)?;
+                let local = output_local_location(placement.geometry, output_origin);
+                Some(presentation.renderer.elements(
                     renderer,
-                    output_local_location(placement.geometry, output_origin),
-                    &buffer,
-                    None,
-                    None,
-                    Some((placement.geometry.2 as i32, placement.geometry.3 as i32).into()),
-                    Kind::Unspecified,
-                )
-                .ok()
+                    (local.0.round() as i32, local.1.round() as i32).into(),
+                    (placement.geometry.2, placement.geometry.3),
+                ))
             })
+            .flatten()
             .collect()
     }
 
@@ -551,7 +846,11 @@ mod tests {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert_scene(Vec::new(), placement(Some("nested")), 1.0);
         assert!(runtime.has_damage());
-        assert!(runtime.render_buffer(id).is_some());
+        assert!(runtime.render_buffer(id).is_none());
+        assert_eq!(
+            runtime.presentation_mode(id),
+            Some(InternalUiPresentationMode::GpuSolid)
+        );
         assert!(!runtime.has_damage());
     }
 
@@ -562,5 +861,61 @@ mod tests {
         assert!(!runtime.pointer_motion((500.0, 500.0)));
         assert!(!runtime.pointer_button((500.0, 500.0), true));
         assert!(!runtime.scroll((500.0, 500.0), 0.0, 1.0));
+    }
+
+    #[test]
+    fn rectangular_display_list_selects_gpu_solids_and_honors_clip() {
+        let commands = [
+            PaintCommand::PushClip(nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0)),
+            PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+                color: 0xff336699,
+            },
+            PaintCommand::PopClip,
+        ];
+        let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (40, 30),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert_eq!(renderer.solids.len(), 1);
+        assert_eq!(
+            renderer.solids[0].0,
+            nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0)
+        );
+        assert!(renderer.raster.is_none());
+        assert_eq!(renderer.diagnostics().gpu_frames, 1);
+    }
+
+    #[test]
+    fn unsupported_primitive_selects_bounded_raster_fallback() {
+        let commands = [PaintCommand::RoundedFill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
+            color: 0x336699,
+            radius: 4.0,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (20, 12),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert!(renderer.raster.is_some());
+        assert!(renderer.solids.is_empty());
+        assert_eq!(renderer.diagnostics().fallback_frames, 1);
+        assert_eq!(renderer.diagnostics().fallback_primitive_count, 1);
     }
 }

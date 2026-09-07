@@ -53,6 +53,7 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
     Solid=SolidColorRenderElement,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
 }
 
 fn advance_output_capture(
