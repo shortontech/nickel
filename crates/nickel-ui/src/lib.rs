@@ -6,6 +6,7 @@ pub mod controller;
 pub mod document_selection;
 pub mod gpu;
 pub mod input;
+mod internal_surface;
 pub mod layout;
 pub mod on_screen_keyboard;
 pub mod overlay;
@@ -27,6 +28,9 @@ pub use gpu::{
     SoftwareRenderer,
 };
 pub use input::{FocusedInputDispatcher, InputCommand, InputContext};
+pub use internal_surface::{
+    HostedApplication, InternalSurfaceId, InternalSurfaceSet, InternalUiSurface,
+};
 pub use layout::{
     Align, Axis, Constraints, FlexItem, Insets, Justify, Length, Overflow, Point, Rect, Size,
     Track, layout_flex,
