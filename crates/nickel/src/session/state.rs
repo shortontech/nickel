@@ -5604,9 +5604,7 @@ impl NickelSession {
             {
                 return None;
             }
-            let Some(bounds) = self.space.element_geometry(window) else {
-                return None;
-            };
+            let bounds = self.space.element_geometry(window)?;
             crate::session::window_frame::hit_test(
                 crate::session::shell_layout::Geometry {
                     x: bounds.loc.x,
