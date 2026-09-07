@@ -63,7 +63,7 @@ impl NickelSession {
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
     ) -> bool {
-        let client_present = self.surface_under(position).is_some();
+        let client_present = self.client_scene_under(position);
         let handled = self
             .internal_ui
             .pointer_motion_with_client((position.x, position.y), client_present);
@@ -654,7 +654,7 @@ impl NickelSession {
                 let button_state = event.state();
 
                 let location = pointer.current_location();
-                let client_present = self.surface_under(location).is_some();
+                let client_present = self.client_scene_under(location);
                 if self.internal_ui.pointer_button_with_client(
                     (location.x, location.y),
                     button_state == ButtonState::Pressed,
@@ -1102,7 +1102,7 @@ impl NickelSession {
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let location = pointer.current_location();
-                let client_present = self.surface_under(location).is_some();
+                let client_present = self.client_scene_under(location);
                 if self.internal_ui.scroll_with_client(
                     (location.x, location.y),
                     horizontal_amount as f32,
@@ -1144,7 +1144,7 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                let client_present = self.surface_under(location).is_some();
+                let client_present = self.client_scene_under(location);
                 if self.internal_ui.touch_with_client(
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),

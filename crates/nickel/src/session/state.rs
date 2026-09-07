@@ -5528,6 +5528,42 @@ impl NickelSession {
             })
     }
 
+    /// Whether the ordinary client scene occupies `pos`, including the
+    /// compositor-owned portion of a server-decorated window.
+    ///
+    /// Server-side titlebars live outside their client's input surface.  They
+    /// must nevertheless mask the internal desktop, which is rendered and hit
+    /// tested below ordinary windows.  Foreground internal surfaces still get
+    /// their usual priority; this value is only used to make the desktop yield.
+    pub(crate) fn client_scene_under(&self, pos: Point<f64, Logical>) -> bool {
+        let frame = self.space.elements().rev().find_map(|window| {
+            if (self.locked && !self.lock_windows.contains(window))
+                || self.shell_windows().any(|shell| shell == window)
+                || self.is_fullscreen_window(window)
+                || !self.is_server_decorated(window)
+            {
+                return None;
+            }
+            let Some(bounds) = self.space.element_geometry(window) else {
+                return None;
+            };
+            crate::session::window_frame::hit_test(
+                crate::session::shell_layout::Geometry {
+                    x: bounds.loc.x,
+                    y: bounds.loc.y,
+                    width: bounds.size.w,
+                    height: bounds.size.h,
+                },
+                pos.x.round() as i32,
+                pos.y.round() as i32,
+            )
+        });
+        crate::session::window_frame::client_scene_occupies(
+            self.surface_under(pos).is_some(),
+            frame,
+        )
+    }
+
     pub fn pointer_surface_under(
         &self,
         pos: Point<f64, Logical>,

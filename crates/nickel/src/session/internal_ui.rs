@@ -1765,7 +1765,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_is_below_clients_but_system_surfaces_remain_above_them() {
+    fn desktop_is_below_the_complete_client_scene_but_system_surfaces_remain_above_it() {
         let mut runtime = InternalUiRuntime::default();
         let desktop = runtime.insert(
             Label,
@@ -1787,6 +1787,9 @@ mod tests {
         );
 
         assert_eq!(runtime.surface_at((50.0, 80.0), false).unwrap().0, desktop);
+        // `client_present` includes compositor-owned server decorations, not
+        // only the client's wl_surface. A titlebar click must therefore pass
+        // through the desktop and reach the frame dispatcher.
         assert!(runtime.surface_at((50.0, 80.0), true).is_none());
         assert_eq!(runtime.surface_at((50.0, 16.0), true).unwrap().0, panel);
     }

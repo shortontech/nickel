@@ -501,6 +501,18 @@ pub fn topmost_frame_target<T>(
     None
 }
 
+/// Reports whether a point is occupied by the ordinary client scene rather
+/// than the compositor's background desktop.
+///
+/// A server-side frame is part of that scene even though it has no Wayland
+/// input surface of its own.
+pub fn client_scene_occupies(
+    client_surface_present: bool,
+    server_frame_part: Option<FramePart>,
+) -> bool {
+    client_surface_present || server_frame_part.is_some()
+}
+
 pub fn outer_geometry(content: Geometry) -> Geometry {
     Geometry {
         x: content.x - RESIZE_BORDER,
@@ -553,8 +565,8 @@ mod tests {
     use super::{
         FramePart, RESIZE_BORDER, TITLEBAR_CACHE, TITLEBAR_CACHE_MAX_BYTES,
         TITLEBAR_CACHE_MAX_ENTRIES, TITLEBAR_HEIGHT, TitlebarCacheMode,
-        cached_titlebar_pixel_digest, hit_test, outer_geometry, render_titlebar,
-        render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
+        cached_titlebar_pixel_digest, client_scene_occupies, hit_test, outer_geometry,
+        render_titlebar, render_titlebar_for, render_titlebar_pixels, render_titlebar_with_mode,
         retain_titlebars_for_windows, titlebar_cache_diagnostics, titlebar_geometry,
         topmost_frame_target,
     };
@@ -826,6 +838,14 @@ mod tests {
         assert_eq!(hit_test(CONTENT, 550, 120), Some(FramePart::Maximize));
         assert_eq!(hit_test(CONTENT, 500, 120), Some(FramePart::Minimize));
         assert_eq!(hit_test(CONTENT, 200, 120), Some(FramePart::Titlebar));
+    }
+
+    #[test]
+    fn compositor_frame_controls_occupy_the_scene_above_the_desktop() {
+        assert!(client_scene_occupies(false, Some(FramePart::Close)));
+        assert!(client_scene_occupies(false, Some(FramePart::Titlebar)));
+        assert!(!client_scene_occupies(false, None));
+        assert!(client_scene_occupies(true, None));
     }
 
     #[test]
