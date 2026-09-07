@@ -383,9 +383,7 @@ impl MaintenanceBackend for WindowsMaintenance {
 
     fn request(&self, action: MaintenanceAction) -> Result<MaintenanceOutcome, MaintenanceError> {
         match action {
-            MaintenanceAction::CheckForUpdates => run_windows_update_action(
-                "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$null=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0')",
-            ),
+            MaintenanceAction::CheckForUpdates => run_windows_check_updates(),
             MaintenanceAction::InstallUpdates => run_windows_install_updates(),
             MaintenanceAction::ScheduleRestart => windows_native_consent(
                 "ms-settings:windowsupdate-restartoptions",
@@ -780,8 +778,34 @@ fn windows_native_consent(uri: &str, detail: &str) -> Result<MaintenanceOutcome,
 }
 
 #[cfg(target_os = "windows")]
-fn run_windows_update_action(script: &str) -> Result<MaintenanceOutcome, MaintenanceError> {
-    windows_powershell(script).map(|_| MaintenanceOutcome::Accepted)
+fn run_windows_check_updates() -> Result<MaintenanceOutcome, MaintenanceError> {
+    let output = windows_powershell(
+        "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$r=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');[Console]::Out.WriteLine('SEARCH_RESULT:'+([int]$r.ResultCode))",
+    )?;
+    parse_windows_check_result(&output)
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_check_result(output: &str) -> Result<MaintenanceOutcome, MaintenanceError> {
+    match output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("SEARCH_RESULT:"))
+        .and_then(|value| value.parse::<u8>().ok())
+    {
+        Some(2) => Ok(MaintenanceOutcome::Accepted),
+        Some(5) => Err(MaintenanceError {
+            class: MaintenanceFailureClass::Cancelled,
+            detail: "Windows Update search was aborted".into(),
+        }),
+        Some(code) => Err(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: format!("Windows Update search returned operation result {code}"),
+        }),
+        None => Err(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: "Windows Update returned no terminal search result".into(),
+        }),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1331,6 +1355,27 @@ mod tests {
 
     #[test]
     fn windows_update_operation_results_cannot_masquerade_as_acceptance() {
+        assert_eq!(
+            parse_windows_check_result("SEARCH_RESULT:2\n").unwrap(),
+            MaintenanceOutcome::Accepted
+        );
+        assert_eq!(
+            parse_windows_check_result("SEARCH_RESULT:5\n")
+                .unwrap_err()
+                .class,
+            MaintenanceFailureClass::Cancelled
+        );
+        for output in [
+            "SEARCH_RESULT:3\n",
+            "SEARCH_RESULT:4\n",
+            "",
+            "SEARCH_RESULT:x\n",
+        ] {
+            assert_eq!(
+                parse_windows_check_result(output).unwrap_err().class,
+                MaintenanceFailureClass::Unknown
+            );
+        }
         assert_eq!(
             parse_windows_install_result("NO_UPDATES\n").unwrap(),
             MaintenanceOutcome::Accepted
