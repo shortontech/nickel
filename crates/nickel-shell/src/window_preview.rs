@@ -24,9 +24,9 @@ const CARD_PADDING: f32 = 8.0;
 const CARD_GAP: f32 = 2.0;
 const THUMBNAIL_HEIGHT: f32 = 116.0;
 pub const MENU_WIDTH: f32 = 220.0;
-const MENU_ROW_HEIGHT: f32 = 40.0;
-const MENU_ROW_GAP: f32 = 4.0;
-const MENU_PADDING: f32 = 8.0;
+const MENU_ROW_HEIGHT: f32 = 32.0;
+const MENU_ROW_GAP: f32 = 2.0;
+const MENU_PADDING: f32 = 6.0;
 
 pub(crate) fn semantic_theme_from_palette(palette: ThemePalette) -> SemanticTheme {
     SemanticTheme::from_tokens(nickel_ui::SemanticTokenSet::standard(
