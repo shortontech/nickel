@@ -780,7 +780,7 @@ impl SmithayFrameRenderer {
         let cached = self.text_cache.borrow_mut().get(&key);
         if let Some(texture) = cached {
             self.diagnostics.text_cache_hits = self.diagnostics.text_cache_hits.saturating_add(1);
-            let source = text_source_rect(rect, bounds, scale);
+            let source = text_source_rect(rect, bounds, texture.width, texture.height);
             self.primitives.push(GpuPrimitive::Texture {
                 rect,
                 source,
@@ -806,7 +806,6 @@ impl SmithayFrameRenderer {
             bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
         }
         let (physical_width, physical_height) = self.text_software.size();
-        let source = text_source_rect(rect, bounds, scale);
         let texture = CachedTexture {
             buffer: MemoryRenderBuffer::from_slice(
                 &bytes,
@@ -819,6 +818,7 @@ impl SmithayFrameRenderer {
             width: physical_width,
             height: physical_height,
         };
+        let source = text_source_rect(rect, bounds, texture.width, texture.height);
         self.diagnostics.text_allocations = self.diagnostics.text_allocations.saturating_add(1);
         self.diagnostics.text_uploads = self.diagnostics.text_uploads.saturating_add(1);
         let evictions = self.text_cache.borrow_mut().insert(
@@ -1178,17 +1178,27 @@ fn text_texture_key(
 fn text_source_rect(
     rect: nickel_ui::Rect,
     bounds: nickel_ui::Rect,
-    scale: f32,
+    texture_width: u32,
+    texture_height: u32,
 ) -> Rectangle<f64, Logical> {
+    // The raster allocation is rounded up to whole physical pixels. Use its
+    // actual extent for the texture mapping instead of recomputing the ideal
+    // fractional extent from the output scale. In particular, a 153.6 px
+    // layout box owns a 154 px texture: sampling only 153.6 px and stretching
+    // that into Smithay's integer 154 px destination filters every glyph even
+    // on a 1x output. Mapping the complete allocation keeps unclipped text
+    // pixel-for-pixel and applies the same proportional crop at every scale.
+    let scale_x = f64::from(texture_width) / f64::from(bounds.size.width);
+    let scale_y = f64::from(texture_height) / f64::from(bounds.size.height);
     Rectangle::new(
         (
-            f64::from(rect.origin.x - bounds.origin.x) * f64::from(scale),
-            f64::from(rect.origin.y - bounds.origin.y) * f64::from(scale),
+            f64::from(rect.origin.x - bounds.origin.x) * scale_x,
+            f64::from(rect.origin.y - bounds.origin.y) * scale_y,
         )
             .into(),
         (
-            f64::from(rect.size.width) * f64::from(scale),
-            f64::from(rect.size.height) * f64::from(scale),
+            f64::from(rect.size.width) * scale_x,
+            f64::from(rect.size.height) * scale_y,
         )
             .into(),
     )
@@ -2580,6 +2590,49 @@ mod tests {
         assert!(renderer.raster.is_none());
         assert_eq!(renderer.diagnostics().fallback_text_count, 0);
         assert_eq!(renderer.diagnostics().fallback_image_count, 0);
+    }
+
+    #[test]
+    fn text_maps_the_complete_pixel_rounded_texture_at_fractional_bounds() {
+        let commands = [PaintCommand::Text {
+            bounds: nickel_ui::Rect::new(7.25, 3.5, 153.6, 17.2),
+            text: "Fractional label".into(),
+            scale: 1.0,
+            color: 0xff336699,
+            align: nickel_ui::TextAlign::Start,
+            bold: false,
+            wrap: false,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(200, 40, 1.0, InternalUiRendererMode::Gpu);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (200, 40),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        let GpuPrimitive::Texture { source, .. } = &renderer.primitives[0] else {
+            panic!("text should produce a texture")
+        };
+        assert_eq!(source.loc, (0.0, 0.0).into());
+        assert_eq!(source.size, (154.0, 18.0).into());
+    }
+
+    #[test]
+    fn clipped_text_crops_the_pixel_rounded_texture_proportionally() {
+        let bounds = nickel_ui::Rect::new(10.0, 5.0, 10.5, 8.5);
+        let rect = nickel_ui::Rect::new(12.0, 7.0, 5.0, 4.0);
+
+        assert_eq!(
+            text_source_rect(rect, bounds, 14, 11),
+            Rectangle::new(
+                ((2.0 / 10.5) * 14.0, (2.0 / 8.5) * 11.0).into(),
+                ((5.0 / 10.5) * 14.0, (4.0 / 8.5) * 11.0).into(),
+            )
+        );
     }
 
     #[test]
