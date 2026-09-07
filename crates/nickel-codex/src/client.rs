@@ -3,7 +3,7 @@ use std::{
     io::{BufRead, BufReader, ErrorKind, Read, Write},
     path::Path,
     process::{Child, ChildStdin, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::Duration,
@@ -23,8 +23,8 @@ use crate::process::command;
 use crate::protocol::*;
 
 const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
-const EVENT_BACKLOG: usize = 1024;
-const OUTBOUND_BACKLOG: usize = 256;
+const OUTBOUND_BACKLOG: usize = 16;
+const MAX_OUTBOUND_BYTES: usize = 160 * 1024 * 1024;
 
 fn parse_command_action(value: &Value) -> CommandAction {
     let string = |name: &str| value.get(name).and_then(Value::as_str).map(str::to_owned);
@@ -58,7 +58,7 @@ struct Inner {
     writer: RpcWriter,
     next_id: Mutex<u64>,
     pending: Mutex<HashMap<String, mpsc::Sender<Result<Value, CodexError>>>>,
-    subscribers: Mutex<Vec<mpsc::SyncSender<CodexEvent>>>,
+    subscribers: Mutex<Vec<crate::delivery::DeliverySender<CodexEvent>>>,
     outstanding: Mutex<HashMap<String, PendingInteraction>>,
     projection: Mutex<Projection>,
     sequence: Mutex<u64>,
@@ -70,12 +70,78 @@ struct Inner {
 
 enum RpcWriter {
     Stdio(Mutex<ChildStdin>),
-    WebSocket(mpsc::SyncSender<RemoteWrite>),
+    WebSocket(RemoteWriter),
 }
 
 enum RemoteWrite {
     Text(String),
     Close,
+}
+
+struct RemoteWriter {
+    sender: mpsc::SyncSender<QueuedRemoteWrite>,
+    retained: Arc<AtomicUsize>,
+    closed: Arc<AtomicBool>,
+}
+struct QueuedRemoteWrite {
+    message: RemoteWrite,
+    retained: Arc<AtomicUsize>,
+    bytes: usize,
+}
+impl Drop for QueuedRemoteWrite {
+    fn drop(&mut self) {
+        self.retained.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+impl RemoteWriter {
+    fn channel() -> (Self, mpsc::Receiver<QueuedRemoteWrite>) {
+        let (sender, receiver) = mpsc::sync_channel(OUTBOUND_BACKLOG);
+        (
+            Self {
+                sender,
+                retained: Arc::new(AtomicUsize::new(0)),
+                closed: Arc::new(AtomicBool::new(false)),
+            },
+            receiver,
+        )
+    }
+    fn try_send(&self, message: RemoteWrite) -> Result<(), mpsc::TrySendError<RemoteWrite>> {
+        if matches!(message, RemoteWrite::Close) {
+            self.closed.store(true, Ordering::Release);
+            return Ok(());
+        }
+        if self.closed.load(Ordering::Acquire) {
+            return Err(mpsc::TrySendError::Disconnected(message));
+        }
+        let bytes = match &message {
+            RemoteWrite::Text(text) => text.capacity(),
+            RemoteWrite::Close => 0,
+        };
+        if self
+            .retained
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |retained| {
+                retained
+                    .checked_add(bytes)
+                    .filter(|total| *total <= MAX_OUTBOUND_BYTES)
+            })
+            .is_err()
+        {
+            return Err(mpsc::TrySendError::Full(message));
+        }
+        let queued = QueuedRemoteWrite {
+            message,
+            retained: self.retained.clone(),
+            bytes,
+        };
+        self.sender.try_send(queued).map_err(|error| match error {
+            mpsc::TrySendError::Full(mut queued) => {
+                mpsc::TrySendError::Full(std::mem::replace(&mut queued.message, RemoteWrite::Close))
+            }
+            mpsc::TrySendError::Disconnected(mut queued) => mpsc::TrySendError::Disconnected(
+                std::mem::replace(&mut queued.message, RemoteWrite::Close),
+            ),
+        })
+    }
 }
 
 struct PendingInteraction {
@@ -175,10 +241,15 @@ impl CodexClient {
                 .map_err(|_| CodexError::Unavailable("remote bearer token is invalid".into()))?;
             request.headers_mut().insert(AUTHORIZATION, value);
         }
-        let (socket, _) = connect(request).map_err(|error| {
+        let (mut socket, _) = connect(request).map_err(|error| {
             CodexError::Unavailable(format!("remote app-server connection failed: {error}"))
         })?;
-        let (writer, outbound) = mpsc::sync_channel(OUTBOUND_BACKLOG);
+        socket.set_config(|config| {
+            config.max_message_size = Some(MAX_FRAME_BYTES);
+            config.max_frame_size = Some(MAX_FRAME_BYTES);
+        });
+        let (writer, outbound) = RemoteWriter::channel();
+        let outbound_closed = writer.closed.clone();
         let inner = Arc::new(Inner {
             child: Mutex::new(None),
             writer: RpcWriter::WebSocket(writer),
@@ -194,7 +265,7 @@ impl CodexClient {
             stderr: Mutex::new(Vec::new()),
         });
         let client = Self { inner };
-        client.start_websocket(socket, outbound);
+        client.start_websocket(socket, outbound, outbound_closed);
         client.initialize()?;
         Ok(client)
     }
@@ -234,7 +305,10 @@ impl CodexClient {
             let mut reader = BufReader::new(stdout);
             loop {
                 let mut line = String::new();
-                match reader.read_line(&mut line) {
+                match std::io::Read::by_ref(&mut reader)
+                    .take((MAX_FRAME_BYTES + 1) as u64)
+                    .read_line(&mut line)
+                {
                     Ok(0) => {
                         if let Some(inner) = inner.upgrade() {
                             Self { inner }.fail("app-server stdout closed");
@@ -290,14 +364,21 @@ impl CodexClient {
     fn start_websocket(
         &self,
         mut socket: tungstenite::WebSocket<MaybeTlsStream<std::net::TcpStream>>,
-        outbound: mpsc::Receiver<RemoteWrite>,
+        outbound: mpsc::Receiver<QueuedRemoteWrite>,
+        closed: Arc<AtomicBool>,
     ) {
         set_socket_timeout(socket.get_mut(), Duration::from_millis(50));
         let inner = Arc::downgrade(&self.inner);
         thread::spawn(move || {
             loop {
-                while let Ok(write) = outbound.try_recv() {
-                    let result = match write {
+                if closed.load(Ordering::Acquire) || inner.strong_count() == 0 {
+                    return;
+                }
+                while let Ok(mut write) = outbound.try_recv() {
+                    if closed.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let result = match std::mem::replace(&mut write.message, RemoteWrite::Close) {
                         RemoteWrite::Text(text) => socket.send(Message::Text(text.into())),
                         RemoteWrite::Close => {
                             let _ = socket.close(None);
@@ -347,6 +428,12 @@ impl CodexClient {
                         return;
                     }
                     Ok(Message::Ping(_) | Message::Pong(_) | Message::Frame(_)) => {}
+                    Err(tungstenite::Error::Capacity(_)) => {
+                        if let Some(inner) = inner.upgrade() {
+                            Self { inner }.fail("remote app-server frame exceeded limit");
+                        }
+                        return;
+                    }
                     Err(tungstenite::Error::Io(error))
                         if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(error) => {
@@ -376,14 +463,22 @@ impl CodexClient {
         };
         let key = id.to_string();
         let (tx, rx) = mpsc::channel();
-        self.inner.pending.lock().unwrap().insert(key.clone(), tx);
+        {
+            let mut pending = self.inner.pending.lock().unwrap();
+            if pending.len() >= 128 {
+                return Err(CodexError::Unavailable(
+                    "request correlation limit reached".into(),
+                ));
+            }
+            pending.insert(key.clone(), tx);
+        }
         if let Err(error) = self.write(&json!({"id": id, "method": method, "params": params})) {
             self.inner.pending.lock().unwrap().remove(&key);
             return Err(error);
         }
-        let result = rx
-            .recv_timeout(self.inner.request_timeout)
-            .map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
+        let received = rx.recv_timeout(self.inner.request_timeout);
+        self.inner.pending.lock().unwrap().remove(&key);
+        let result = received.map_err(|_| CodexError::Timeout(format!("{method} timed out")))?;
         if std::env::var_os("NICKEL_CODEX_TIMING").is_some() {
             eprintln!(
                 "nickel-codex timing: method={method} elapsed_ms={:.3} success={}",
@@ -399,8 +494,9 @@ impl CodexClient {
     }
 
     fn write(&self, value: &Value) -> Result<(), CodexError> {
-        let text = serde_json::to_string(value)?;
-        if text.len() > MAX_FRAME_BYTES {
+        let text = String::from_utf8(crate::delivery::encode_json(value, MAX_OUTBOUND_BYTES)?)
+            .expect("JSON encoder emits UTF-8");
+        if text.len() > MAX_OUTBOUND_BYTES {
             return Err(CodexError::Protocol(
                 "outbound app-server frame exceeded limit".into(),
             ));
@@ -429,6 +525,12 @@ impl CodexClient {
     }
 
     fn handle(&self, value: Value) {
+        if matches!(
+            self.state(),
+            ConnectionState::Failed | ConnectionState::Stopped
+        ) {
+            return;
+        }
         if let Some(id) = value.get("id").and_then(request_id) {
             if value.get("method").is_some() {
                 self.handle_server_request(id, &value);
@@ -466,7 +568,19 @@ impl CodexClient {
                     .map(ToOwned::to_owned)
             })
             .collect();
-        self.inner.outstanding.lock().unwrap().insert(
+        let mut outstanding = self.inner.outstanding.lock().unwrap();
+        if outstanding.len() >= 32
+            || id.len() > 4096
+            || method.len() > 4096
+            || question_ids.len() > 32
+            || question_ids.iter().map(String::capacity).sum::<usize>() > 32 * 1024
+        {
+            drop(outstanding);
+            let _ = self.write(&json!({"id": value["id"], "error": {"code": -32000, "message": "Local interaction capacity reached; retry after resolving pending requests"}}));
+            self.publish(EventKind::Error { message: "An additional interaction was rejected because local interaction capacity is full".into() });
+            return;
+        }
+        outstanding.insert(
             id.clone(),
             PendingInteraction {
                 method: method.into(),
@@ -474,6 +588,7 @@ impl CodexClient {
                 question_ids: question_ids.clone(),
             },
         );
+        drop(outstanding);
         let request_id = ServerRequestId(id);
         let params = &value["params"];
         match method {
@@ -613,12 +728,39 @@ impl CodexClient {
             },
         };
         self.project(&event);
-        self.publish(event);
+        if self.state() != ConnectionState::Failed {
+            self.publish(event);
+        }
     }
 
     fn project(&self, event: &EventKind) {
+        let metadata_valid = match event {
+            EventKind::ThreadStarted { thread_id } => thread_id.0.len() <= 4096,
+            EventKind::TurnStarted { thread_id, turn_id }
+            | EventKind::TurnCompleted {
+                thread_id, turn_id, ..
+            } => thread_id.0.len() <= 4096 && turn_id.0.len() <= 4096,
+            EventKind::ItemStarted {
+                item_id, item_type, ..
+            } => item_id.len() <= 4096 && item_type.len() <= 4096,
+            EventKind::AgentMessageDelta { item_id, .. }
+            | EventKind::CommandOutputDelta { item_id, .. }
+            | EventKind::FileChangeDelta { item_id, .. }
+            | EventKind::PlanDelta { item_id, .. }
+            | EventKind::ReasoningDelta { item_id, .. } => item_id.len() <= 4096,
+            _ => true,
+        };
+        if !metadata_valid {
+            self.publish(EventKind::Error {
+                message: "Lifecycle metadata exceeds projection limit; reload server history"
+                    .into(),
+            });
+            self.fail("Lifecycle metadata exceeds projection limit");
+            return;
+        }
         let mut projection = self.inner.projection.lock().unwrap();
         let mut inconsistency = None;
+        let mut metadata_changed = true;
         match event {
             EventKind::ThreadStarted { thread_id } => {
                 projection.threads.entry(thread_id.clone()).or_default();
@@ -656,25 +798,25 @@ impl CodexClient {
                 {
                     inconsistency = Some("terminal turn observed before matching start".into());
                 }
-                projection.active_turn = None;
+                if projection.active_turn.as_ref() == Some(turn_id) {
+                    projection.active_turn = None;
+                }
                 let thread = projection.threads.entry(thread_id.clone()).or_default();
-                thread.active_turn = None;
+                if thread.active_turn.as_ref() == Some(turn_id) {
+                    thread.active_turn = None;
+                }
                 if !thread.terminal_turns.contains(turn_id) {
                     thread.terminal_turns.push(turn_id.clone());
                 }
             }
             EventKind::ItemStarted {
-                item_id,
-                item_type,
-                initial_text,
-                ..
+                item_id, item_type, ..
             } => {
                 projection
                     .items
                     .entry(item_id.clone())
                     .or_insert_with(|| ProjectedItem {
                         item_type: item_type.clone(),
-                        text: initial_text.clone(),
                         ..ProjectedItem::default()
                     });
             }
@@ -685,31 +827,52 @@ impl CodexClient {
                     inconsistency = Some(format!("completion for unknown item {item_id}"));
                 }
             }
-            EventKind::AgentMessageDelta { item_id, delta }
-            | EventKind::CommandOutputDelta { item_id, delta }
-            | EventKind::FileChangeDelta { item_id, delta }
-            | EventKind::PlanDelta { item_id, delta }
-            | EventKind::ReasoningDelta { item_id, delta } => {
+            EventKind::AgentMessageDelta { item_id, .. }
+            | EventKind::CommandOutputDelta { item_id, .. }
+            | EventKind::FileChangeDelta { item_id, .. }
+            | EventKind::PlanDelta { item_id, .. }
+            | EventKind::ReasoningDelta { item_id, .. } => {
                 match projection.items.get_mut(item_id) {
-                    Some(item) if !item.completed => item.text.push_str(delta),
+                    Some(item) if !item.completed => {
+                        metadata_changed = false;
+                    }
                     Some(_) => {
                         inconsistency = Some(format!("delta for terminal item {item_id}"));
                     }
                     None => {
                         inconsistency = Some(format!("delta for unknown item {item_id}"));
-                        projection
-                            .items
-                            .entry(item_id.clone())
-                            .or_default()
-                            .text
-                            .push_str(delta);
+                        projection.items.entry(item_id.clone()).or_default();
                     }
                 }
             }
-            EventKind::Error { message } => projection.terminal_error = Some(message.clone()),
+            EventKind::Error { message } => {
+                let mut end = message.len().min(4096);
+                while !message.is_char_boundary(end) {
+                    end -= 1;
+                }
+                projection.terminal_error = Some(message[..end].to_owned());
+            }
             _ => {}
         }
+        let within_budget = !metadata_changed || projection.enforce_limits();
+        if !within_budget {
+            // A capacity failure is terminal, rather than silently forgetting live items.
+            // Keep the independently owned active turn available for cancellation diagnostics.
+            projection.items.clear();
+            projection.items.shrink_to_fit();
+            projection.threads.clear();
+            projection.threads.shrink_to_fit();
+            projection.terminal_error =
+                Some("Lifecycle capacity exceeded; reconnect and reload server history".into());
+        }
         drop(projection);
+        if !within_budget {
+            self.publish(EventKind::Error {
+                message: "Lifecycle capacity exceeded; reconnect and reload server history".into(),
+            });
+            self.fail("Lifecycle capacity exceeded; reconnect and reload server history");
+            return;
+        }
         if let Some(message) = inconsistency {
             self.publish(EventKind::Inconsistency { message });
         }
@@ -723,13 +886,12 @@ impl CodexClient {
         };
         let event = CodexEvent { sequence, kind };
         self.inner.subscribers.lock().unwrap().retain(|subscriber| {
-            match subscriber.try_send(event.clone()) {
+            match subscriber.send(event.clone()) {
                 Ok(()) => true,
-                Err(mpsc::TrySendError::Full(_)) => {
+                Err(_) => {
                     self.inner.dropped_events.fetch_add(1, Ordering::Relaxed);
-                    true
+                    false
                 }
-                Err(mpsc::TrySendError::Disconnected(_)) => false,
             }
         });
     }
@@ -1033,8 +1195,8 @@ impl CodexBackend for CodexClient {
         drop(outstanding);
         self.write(&json!({"id": raw_id, "result": result}))
     }
-    fn subscribe(&self) -> mpsc::Receiver<CodexEvent> {
-        let (tx, rx) = mpsc::sync_channel(EVENT_BACKLOG);
+    fn subscribe(&self) -> crate::delivery::DeliveryReceiver<CodexEvent> {
+        let (tx, rx) = crate::delivery::channel();
         self.inner.subscribers.lock().unwrap().push(tx);
         rx
     }
@@ -1245,6 +1407,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_outbound_budget_includes_in_flight_and_close_bypasses_saturation() {
+        let (writer, receiver) = RemoteWriter::channel();
+        // Simulate an in-flight payload; exercise remaining-byte admission.
+        writer
+            .retained
+            .store(MAX_OUTBOUND_BYTES - 4, Ordering::Release);
+        assert!(matches!(
+            writer.try_send(RemoteWrite::Text("12345".into())),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        assert_eq!(
+            writer.retained.load(Ordering::Acquire),
+            MAX_OUTBOUND_BYTES - 4
+        );
+        writer.retained.store(0, Ordering::Release);
+        assert!(writer.try_send(RemoteWrite::Text("1234".into())).is_ok());
+        let pending = receiver.try_recv().unwrap();
+        assert_eq!(writer.retained.load(Ordering::Acquire), 4);
+        drop(pending);
+        assert_eq!(writer.retained.load(Ordering::Acquire), 0);
+        for _ in 0..OUTBOUND_BACKLOG {
+            assert!(writer.try_send(RemoteWrite::Text("x".into())).is_ok());
+        }
+        assert!(matches!(
+            writer.try_send(RemoteWrite::Text("y".into())),
+            Err(mpsc::TrySendError::Full(_))
+        ));
+        assert!(writer.try_send(RemoteWrite::Close).is_ok());
+        assert!(writer.closed.load(Ordering::Acquire));
+        drop(receiver);
+        assert_eq!(writer.retained.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn project_and_thread_runtime_use_v2_app_server_fields() {
         let project = parse_project(&json!({
             "id": "project-1",
@@ -1347,6 +1543,10 @@ mod tests {
                         json!({"thread":{"id":"remote-thread","cwd":"/srv/code/nickel"}})
                     }
                     "turn/start" => {
+                        assert_eq!(
+                            value["params"]["input"][1]["url"].as_str().unwrap().len(),
+                            9 * 1024 * 1024
+                        );
                         saw_reasoning = value["params"]["effort"] == "high";
                         saw_turn_policy = value["params"]["approvalPolicy"] == "never";
                         json!({"turn":{"id":"remote-turn","status":"inProgress"}})
@@ -1472,7 +1672,9 @@ mod tests {
             .start_turn(StartTurn {
                 thread_id: thread.id.clone(),
                 text: "hello remotely".into(),
-                images: Vec::new(),
+                images: vec![crate::TurnImage {
+                    data_url: "a".repeat(9 * 1024 * 1024),
+                }],
                 model: None,
                 reasoning_effort: Some("high".into()),
                 approval_policy: ApprovalPolicy::Never,
@@ -1487,7 +1689,7 @@ mod tests {
                 .projection()
                 .items
                 .get("shell-1")
-                .is_some_and(|item| item.text.contains("5\n"))
+                .is_some_and(|item| item.completed)
             {
                 break;
             }
@@ -1499,11 +1701,8 @@ mod tests {
                 break request_id;
             }
         };
-        assert_eq!(client.projection().items["agent-1"].text, "remote response");
-        assert_eq!(
-            client.projection().items["shell-1"].text,
-            "!printf hello | wc -c\n5\n"
-        );
+        assert!(client.projection().items["agent-1"].text.is_empty());
+        assert!(client.projection().items["shell-1"].text.is_empty());
         client
             .respond(
                 request_id,
@@ -1533,7 +1732,9 @@ mod tests {
                 let mut socket = tungstenite::accept(stream).unwrap();
                 let _ = socket.read().unwrap();
                 if let Some(message) = message {
-                    socket.send(message).unwrap();
+                    // An oversized frame can be rejected from its header before
+                    // the server finishes writing the payload.
+                    let _ = socket.send(message);
                 }
             });
             let error = CodexClient::connect_remote_with_timeout(

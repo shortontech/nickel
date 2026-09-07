@@ -1,5 +1,6 @@
 mod bundle;
 mod client;
+pub mod delivery;
 mod process;
 mod protocol;
 mod replay;

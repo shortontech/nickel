@@ -1,4 +1,5 @@
-use std::{path::PathBuf, sync::mpsc::Receiver};
+use crate::delivery::DeliveryReceiver as Receiver;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -154,8 +155,88 @@ pub struct ProjectedThread {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProjectedItem {
     pub item_type: String,
+    /// Compatibility field. Live projections retain lifecycle metadata, not transcript bodies.
     pub text: String,
     pub completed: bool,
+}
+
+pub const MAX_PROJECTED_ITEMS: usize = 2048;
+pub const MAX_PROJECTED_THREADS: usize = 128;
+pub const MAX_TERMINAL_TURNS: usize = 32;
+pub const MAX_PROJECTION_BYTES: usize = 2 * 1024 * 1024;
+
+impl Projection {
+    /// Owned allocation estimate, including collection slots and string capacities.
+    /// Transcript data lives in the UI or authoritative server history.
+    pub fn retained_capacity(&self) -> usize {
+        self.items.capacity() * (size_of::<String>() + size_of::<ProjectedItem>() + 1)
+            + self.threads.capacity() * (size_of::<ThreadId>() + size_of::<ProjectedThread>() + 1)
+            + self
+                .items
+                .iter()
+                .map(|(id, item)| id.capacity() + item.item_type.capacity() + item.text.capacity())
+                .sum::<usize>()
+            + self
+                .threads
+                .iter()
+                .map(|(id, thread)| {
+                    id.0.capacity()
+                        + thread.active_turn.as_ref().map_or(0, |id| id.0.capacity())
+                        + thread.terminal_turns.capacity() * size_of::<TurnId>()
+                        + thread
+                            .terminal_turns
+                            .iter()
+                            .map(|id| id.0.capacity())
+                            .sum::<usize>()
+                })
+                .sum::<usize>()
+            + self.active_turn.as_ref().map_or(0, |id| id.0.capacity())
+            + self.terminal_error.as_ref().map_or(0, String::capacity)
+    }
+
+    pub(crate) fn enforce_limits(&mut self) -> bool {
+        for thread in self.threads.values_mut() {
+            if thread.terminal_turns.len() > MAX_TERMINAL_TURNS {
+                thread
+                    .terminal_turns
+                    .drain(..thread.terminal_turns.len() - MAX_TERMINAL_TURNS);
+                thread.terminal_turns.shrink_to_fit();
+            }
+        }
+        // Sorting avoids randomized HashMap iteration deciding what survives pressure.
+        // Completed item metadata is always retired before active item metadata.
+        while self.items.len() > MAX_PROJECTED_ITEMS
+            || self.retained_capacity() > MAX_PROJECTION_BYTES
+        {
+            let key = self
+                .items
+                .iter()
+                .filter(|(_, item)| item.completed)
+                .map(|(id, _)| id)
+                .min()
+                .cloned();
+            let Some(key) = key else { break };
+            self.items.remove(&key);
+            self.items.shrink_to_fit();
+        }
+        while self.threads.len() > MAX_PROJECTED_THREADS
+            || self.retained_capacity() > MAX_PROJECTION_BYTES
+        {
+            let key = self
+                .threads
+                .iter()
+                .filter(|(_, thread)| thread.active_turn.is_none())
+                .map(|(id, _)| id)
+                .min_by_key(|id| &id.0)
+                .cloned();
+            let Some(key) = key else { break };
+            self.threads.remove(&key);
+            self.threads.shrink_to_fit();
+        }
+        self.items.len() <= MAX_PROJECTED_ITEMS
+            && self.threads.len() <= MAX_PROJECTED_THREADS
+            && self.retained_capacity() <= MAX_PROJECTION_BYTES
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -223,7 +304,7 @@ pub struct StartTurn {
     pub approval_policy: ApprovalPolicy,
 }
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnImage {
     pub data_url: String,
 }
@@ -393,6 +474,51 @@ pub(crate) fn request_id(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_churn_retires_completed_metadata_and_preserves_active_turn() {
+        let mut projection = Projection {
+            active_turn: Some(TurnId("active".into())),
+            ..Projection::default()
+        };
+        for index in 0..5000 {
+            projection.items.insert(
+                format!("item-{index:05}"),
+                ProjectedItem {
+                    completed: true,
+                    ..ProjectedItem::default()
+                },
+            );
+            let thread = projection
+                .threads
+                .entry(ThreadId(format!("thread-{}", index / 64)))
+                .or_default();
+            thread.terminal_turns.push(TurnId(format!("turn-{index}")));
+            assert!(projection.enforce_limits());
+            assert!(projection.retained_capacity() <= MAX_PROJECTION_BYTES);
+            assert!(projection.items.len() <= MAX_PROJECTED_ITEMS);
+            assert!(
+                projection
+                    .threads
+                    .values()
+                    .all(|thread| thread.terminal_turns.len() <= MAX_TERMINAL_TURNS)
+            );
+        }
+        assert_eq!(projection.active_turn, Some(TurnId("active".into())));
+    }
+
+    #[test]
+    fn active_projection_capacity_requires_failure_instead_of_silent_eviction() {
+        let mut projection = Projection::default();
+        for index in 0..=MAX_PROJECTED_ITEMS {
+            projection
+                .items
+                .insert(format!("item-{index}"), ProjectedItem::default());
+        }
+        assert!(!projection.enforce_limits());
+        assert_eq!(projection.items.len(), MAX_PROJECTED_ITEMS + 1);
+        assert!(projection.items.values().all(|item| !item.completed));
+    }
 
     #[test]
     fn every_supported_approval_variant_matches_app_server_shape() {

@@ -4,7 +4,11 @@ use std::{
     io::ErrorKind,
     path::Path,
     path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::{self},
+    },
     thread,
     time::Duration,
 };
@@ -59,7 +63,7 @@ pub enum BackendMode {
     },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ControllerCommand {
     Refresh,
     LoadThreads,
@@ -90,7 +94,7 @@ pub enum ControllerCommand {
     Shutdown,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ControllerEvent {
     Ready {
         provenance: String,
@@ -118,9 +122,46 @@ pub enum ControllerEvent {
 
 pub struct ChatController {
     generation: u64,
-    commands: Sender<ControllerCommand>,
-    events: Receiver<(u64, ControllerEvent)>,
+    commands: nickel_codex::delivery::DeliverySender<ControllerCommand>,
+    events: nickel_codex::delivery::DeliveryReceiver<(u64, ControllerEvent)>,
+    shutdown: Arc<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
+    command_rejected: AtomicBool,
     worker: Option<thread::JoinHandle<()>>,
+}
+
+impl nickel_codex::delivery::Delivery for ControllerEvent {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_EVENT_BYTES: usize = 16 * 1024 * 1024;
+    fn coalesce_key(&self) -> Option<u64> {
+        match self {
+            Self::Protocol(event) => nickel_codex::delivery::Delivery::coalesce_key(event),
+            _ => None,
+        }
+    }
+    fn overflow(&self) -> Self {
+        Self::Failure(
+            "Event delivery exceeded its memory budget. Reconnect to reload authoritative state."
+                .into(),
+        )
+    }
+    fn merge(&mut self, next: &Self) -> bool {
+        match (self, next) {
+            (Self::Protocol(previous), Self::Protocol(next)) => {
+                nickel_codex::delivery::Delivery::merge(previous, next)
+            }
+            _ => false,
+        }
+    }
+}
+impl nickel_codex::delivery::Delivery for ControllerCommand {
+    const MAX_BYTES: usize = 160 * 1024 * 1024;
+    const MAX_EVENT_BYTES: usize = 160 * 1024 * 1024;
+    const MAX_ENTRIES: usize = 16;
+    const TERMINAL_OVERFLOW: bool = false;
+    fn overflow(&self) -> Self {
+        Self::Shutdown
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -133,13 +174,16 @@ enum SnapshotScope {
 impl ChatController {
     #[cfg(any(test, feature = "workbench-fixtures"))]
     pub(crate) fn fixture_idle(generation: u64) -> Self {
-        let (commands, command_receiver) = mpsc::channel();
-        let (_event_sender, events) = mpsc::channel();
+        let (commands, command_receiver) = nickel_codex::delivery::channel();
+        let (_event_sender, events) = nickel_codex::delivery::channel();
         drop(command_receiver);
         Self {
             generation,
             commands,
             events,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            command_rejected: AtomicBool::new(false),
             worker: None,
         }
     }
@@ -165,14 +209,30 @@ impl ChatController {
         generation: u64,
         scope: SnapshotScope,
     ) -> Self {
-        let (command_tx, command_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
-        let worker =
-            thread::spawn(move || run_worker(generation, mode, scope, command_rx, event_tx));
+        let (command_tx, command_rx) = nickel_codex::delivery::channel();
+        let (event_tx, event_rx) = nickel_codex::delivery::channel();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone();
+        let worker_interrupt = interrupt.clone();
+        let worker = thread::spawn(move || {
+            run_worker(
+                generation,
+                mode,
+                scope,
+                command_rx,
+                event_tx,
+                worker_shutdown,
+                worker_interrupt,
+            )
+        });
         Self {
             generation,
             commands: command_tx,
             events: event_rx,
+            shutdown,
+            interrupt,
+            command_rejected: AtomicBool::new(false),
             worker: Some(worker),
         }
     }
@@ -181,18 +241,39 @@ impl ChatController {
         self.generation
     }
 
+    pub fn delivery_metrics(&self) -> nickel_codex::delivery::DeliveryMetrics {
+        let mut metrics = self.events.metrics();
+        metrics.recoveries = self.generation.saturating_sub(1);
+        metrics
+    }
+
     pub fn send(&self, command: ControllerCommand) -> bool {
-        self.commands.send(command).is_ok()
+        if matches!(command, ControllerCommand::Shutdown) {
+            self.shutdown.store(true, Ordering::Release);
+            return true;
+        }
+        if matches!(command, ControllerCommand::Interrupt) {
+            self.interrupt.store(true, Ordering::Release);
+            return true;
+        }
+        let sent = self.commands.send(command).is_ok();
+        if !sent {
+            self.command_rejected.store(true, Ordering::Release);
+        }
+        sent
     }
 
     pub fn try_recv(&self) -> Option<(u64, ControllerEvent)> {
+        if self.command_rejected.swap(false, Ordering::AcqRel) {
+            return Some((self.generation, ControllerEvent::OperationFailed("Command could not be queued: delivery is busy, disconnected, or the message exceeds 160 MiB. Keep your draft and retry; remove attachments if it remains too large.".into())));
+        }
         self.events.try_recv().ok()
     }
 }
 
 impl Drop for ChatController {
     fn drop(&mut self) {
-        let _ = self.commands.send(ControllerCommand::Shutdown);
+        self.shutdown.store(true, Ordering::Release);
         if self
             .worker
             .as_ref()
@@ -208,8 +289,10 @@ fn run_worker(
     generation: u64,
     mode: BackendMode,
     scope: SnapshotScope,
-    commands: Receiver<ControllerCommand>,
-    events: Sender<(u64, ControllerEvent)>,
+    commands: nickel_codex::delivery::DeliveryReceiver<ControllerCommand>,
+    events: nickel_codex::delivery::DeliverySender<(u64, ControllerEvent)>,
+    shutdown: Arc<AtomicBool>,
+    interrupt: Arc<AtomicBool>,
 ) {
     let send = |event| events.send((generation, event)).is_ok();
     let (backend, cwd, provenance, remote): (Box<dyn CodexBackend>, PathBuf, String, bool) =
@@ -295,22 +378,42 @@ fn run_worker(
     let mut new_thread_project_id = None;
 
     loop {
-        while let Ok(event) = protocol_events.try_recv() {
+        if shutdown.load(Ordering::Acquire) || events.is_closed() {
+            return;
+        }
+        for _ in 0..32 {
+            let Ok(event) = protocol_events.try_recv() else {
+                break;
+            };
+            if let nickel_codex::EventKind::Connection { state } = &event.kind
+                && state.starts_with("failed: event delivery overflow")
+            {
+                let _ = send(ControllerEvent::Failure(state.clone()));
+                return;
+            }
             match &event.kind {
                 nickel_codex::EventKind::TurnStarted { turn_id, .. } => {
                     active_turn = Some(turn_id.clone())
                 }
-                nickel_codex::EventKind::TurnCompleted { .. } => active_turn = None,
+                nickel_codex::EventKind::TurnCompleted { turn_id, .. }
+                    if active_turn.as_ref() == Some(turn_id) =>
+                {
+                    active_turn = None
+                }
                 _ => {}
             }
             if !send(ControllerEvent::Protocol(event)) {
                 return;
             }
         }
-        let command = match commands.recv_timeout(Duration::from_millis(16)) {
-            Ok(command) => command,
-            Err(mpsc::RecvTimeoutError::Timeout) => continue,
-            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        let command = if interrupt.swap(false, Ordering::AcqRel) {
+            ControllerCommand::Interrupt
+        } else {
+            match commands.recv_timeout(Duration::from_millis(16)) {
+                Ok(command) => command,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
         };
         let result = match command {
             ControllerCommand::Refresh => send(current_snapshot())
@@ -783,6 +886,78 @@ mod tests {
         next_new_thread_cwd, project_snapshot, selection_failure_event, snapshot,
         sort_projects_by_recent_threads, verify_thread_is_resumable,
     };
+
+    #[test]
+    fn saturated_commands_preserve_interrupt_shutdown_and_explicit_failure() {
+        use super::{ChatController, ControllerCommand};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let (commands, receiver) = nickel_codex::delivery::channel();
+        let (_sender, events) = nickel_codex::delivery::channel();
+        let controller = ChatController {
+            generation: 7,
+            commands,
+            events,
+            worker: None,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            interrupt: Arc::new(AtomicBool::new(false)),
+            command_rejected: AtomicBool::new(false),
+        };
+        for _ in 0..16 {
+            assert!(controller.send(ControllerCommand::Refresh));
+        }
+        assert!(!controller.send(ControllerCommand::Refresh));
+        assert!(controller.send(ControllerCommand::Interrupt));
+        assert!(controller.interrupt.load(Ordering::Acquire));
+        assert!(matches!(
+            controller.try_recv().unwrap().1,
+            ControllerEvent::OperationFailed(_)
+        ));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            ControllerCommand::Refresh
+        ));
+        assert!(controller.send(ControllerCommand::Refresh));
+        let shutdown = controller.shutdown.clone();
+        drop(controller);
+        assert!(shutdown.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn attachment_commands_and_history_snapshots_can_exceed_protocol_event_limit() {
+        use super::ControllerCommand;
+        let (sender, receiver) = nickel_codex::delivery::channel();
+        let data_url = format!("data:image/png;base64,{}", "a".repeat(2 * 1024 * 1024));
+        sender
+            .send(ControllerCommand::Send {
+                text: "Describe this attachment".into(),
+                images: vec![nickel_codex::TurnImage {
+                    data_url: data_url.clone(),
+                }],
+                model: None,
+                reasoning_effort: None,
+                approval_policy: nickel_codex::ApprovalPolicy::default(),
+            })
+            .unwrap();
+        assert!(receiver.metrics().bytes > nickel_codex::delivery::EVENT_BYTES);
+        let ControllerCommand::Send { images, .. } = receiver.try_recv().unwrap() else {
+            panic!("expected send");
+        };
+        assert_eq!(images[0].data_url, data_url);
+        let (sender, receiver) = nickel_codex::delivery::channel();
+        let mut selected = thread("history", "/tmp", 1);
+        selected.title = Some("x".repeat(2 * 1024 * 1024));
+        sender
+            .send((4, ControllerEvent::ThreadSelected(selected)))
+            .unwrap();
+        assert!(receiver.metrics().bytes > nickel_codex::delivery::EVENT_BYTES);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            (4, ControllerEvent::ThreadSelected(_))
+        ));
+    }
 
     fn project(id: &str, root: &str) -> Project {
         Project {

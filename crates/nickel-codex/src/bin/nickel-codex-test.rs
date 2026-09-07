@@ -291,7 +291,7 @@ fn turn_text(args: &[String]) -> Result<String, nickel_codex::CodexError> {
 
 fn stream_turn(
     client: &CodexClient,
-    events: mpsc::Receiver<nickel_codex::CodexEvent>,
+    events: nickel_codex::delivery::DeliveryReceiver<nickel_codex::CodexEvent>,
     thread: ThreadId,
     initial_turn: Option<TurnId>,
 ) -> Result<String, nickel_codex::CodexError> {

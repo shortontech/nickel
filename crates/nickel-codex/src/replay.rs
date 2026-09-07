@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, mpsc},
+    sync::{Arc, Mutex},
 };
 
 use serde::{Deserialize, Serialize};
@@ -180,8 +180,8 @@ impl CodexBackend for ReplayBackend {
             .map(|_| ())
             .ok_or_else(|| CodexError::InvalidInteraction("fixture request is not pending".into()))
     }
-    fn subscribe(&self) -> mpsc::Receiver<CodexEvent> {
-        let (tx, rx) = mpsc::channel();
+    fn subscribe(&self) -> crate::delivery::DeliveryReceiver<CodexEvent> {
+        let (tx, rx) = crate::delivery::channel();
         for event in &self.scenario.events {
             let _ = tx.send(event.clone());
         }
@@ -215,8 +215,8 @@ mod tests {
             r#"{"name":"approval","events":[{"sequence":1,"kind":{"type":"approval_requested","request_id":"r1","approval_type":"command","summary":null}}]}"#,
         )
         .unwrap();
-        let first: Vec<_> = backend.subscribe().into_iter().collect();
-        let second: Vec<_> = backend.subscribe().into_iter().collect();
+        let first: Vec<_> = backend.subscribe().collect();
+        let second: Vec<_> = backend.subscribe().collect();
         assert_eq!(
             serde_json::to_string(&first).unwrap(),
             serde_json::to_string(&second).unwrap()
