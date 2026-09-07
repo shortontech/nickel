@@ -62,6 +62,8 @@ mod executable_index;
 mod file_window_host;
 #[allow(clippy::needless_borrow, dead_code)]
 mod icons;
+#[cfg(target_os = "linux")]
+mod internal_codex;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
 mod launcher;
 #[cfg(target_os = "linux")]
@@ -111,8 +113,8 @@ struct CommandLineOptions {
 impl CommandLineOptions {
     fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
         let mut options = Self::default();
-        let mut arguments = arguments.into_iter();
-        while let Some(argument) = arguments.next() {
+        let arguments = arguments.into_iter();
+        for argument in arguments {
             let argument = argument
                 .into_string()
                 .map_err(|_| "Nickel shell arguments must be valid UTF-8".to_string())?;

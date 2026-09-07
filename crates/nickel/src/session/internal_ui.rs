@@ -1,6 +1,6 @@
 //! Compositor ownership for Nickel UI applications which do not have a Wayland surface.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Instant};
 
 use nickel_ui::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
@@ -736,6 +736,46 @@ impl InternalUiRuntime {
 
     pub fn application<T: 'static>(&self, id: InternalSurfaceId) -> Option<&T> {
         self.surfaces.get(id)?.application().downcast_ref()
+    }
+
+    /// Mutably access an application hosted by the compositor.
+    pub fn application_mut<T: 'static>(&mut self, id: InternalSurfaceId) -> Option<&mut T> {
+        self.surfaces.get_mut(id)?.application_mut().downcast_mut()
+    }
+
+    /// Earliest application-owned wakeup across compositor surfaces.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.surfaces.next_deadline()
+    }
+
+    pub fn surface_deadline(&self, id: InternalSurfaceId) -> Option<Instant> {
+        self.surfaces.get(id)?.next_deadline()
+    }
+
+    /// Poll one surface when its application deadline has elapsed.
+    pub fn poll_surface(&mut self, id: InternalSurfaceId, now: Instant) -> bool {
+        if self
+            .surface_deadline(id)
+            .is_none_or(|deadline| deadline > now)
+        {
+            return false;
+        }
+        self.step(
+            id,
+            HostBatch {
+                now: Some(now),
+                events: vec![HostEvent::Poll],
+                ..HostBatch::default()
+            },
+        )
+    }
+
+    /// Poll every due surface and return those which produced a new frame.
+    pub fn poll_due(&mut self, now: Instant) -> Vec<InternalSurfaceId> {
+        let ids = self.surfaces.ids().collect::<Vec<_>>();
+        ids.into_iter()
+            .filter(|id| self.poll_surface(*id, now))
+            .collect()
     }
 
     pub fn focus_surface(&mut self, id: InternalSurfaceId) -> bool {

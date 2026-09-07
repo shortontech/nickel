@@ -459,6 +459,8 @@ pub struct NickelSession {
     pub internal_ui: crate::session::InternalUiRuntime,
     /// Built-in shell state when no supervised shell client is requested.
     pub(crate) internal_shell: Option<crate::internal_shell::InternalShellCoordinator>,
+    /// Codex menu/chat applications hosted in `internal_ui` on Linux.
+    pub(crate) internal_codex: Option<crate::internal_codex::InternalCodexHost>,
     pub(crate) internal_shell_surfaces:
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
@@ -626,6 +628,15 @@ impl NickelSession {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
         let shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        let feature_settings =
+            nickel_core::optional_features::OptionalFeatureSettings::load_default();
+        self.internal_codex = feature_settings.effective_codex_enabled().then(|| {
+            crate::internal_codex::InternalCodexHost::new(
+                feature_settings.codex_source,
+                shell.semantic_theme(),
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
+            )
+        });
         self.internal_shell = Some(shell);
         self.reconcile_internal_shell_outputs();
         Ok(())
@@ -635,10 +646,15 @@ impl NickelSession {
     /// deadline. Re-arming the same deadline is a no-op, so damage and input
     /// paths may call this freely without recreating a frame-rate poller.
     pub(crate) fn schedule_internal_shell_deadline(&mut self) {
-        let deadline = self
+        let shell_deadline = self
             .internal_shell
             .as_ref()
             .and_then(crate::internal_shell::InternalShellCoordinator::next_deadline);
+        let codex_deadline = self
+            .internal_codex
+            .as_ref()
+            .and_then(|host| host.next_deadline(&self.internal_ui));
+        let deadline = shell_deadline.into_iter().chain(codex_deadline).min();
         self.arm_internal_shell_timer(deadline);
     }
 
@@ -793,22 +809,57 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
-        if self.internal_shell.is_none() {
-            return;
+        if self.internal_shell.is_some() {
+            let snapshot = self.protocol_snapshot();
+            *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
+            let shell = self.internal_shell.as_mut().unwrap();
+            shell.apply_session_snapshot(snapshot);
+            let changed = shell.poll(now);
+            let actions = shell.drain_file_actions();
+            let shell_changed = !changed.is_empty();
+            let codex_menu_visible = shell.codex_project_menu_visible();
+            let _ = shell;
+            if shell_changed {
+                self.sync_internal_shell();
+            }
+            for action in actions {
+                self.apply_internal_file_action(action);
+            }
+            if codex_menu_visible {
+                let output = self
+                    .space
+                    .outputs()
+                    .next()
+                    .map(smithay::output::Output::name);
+                if let Err(error) = self.show_internal_codex_project_menu(
+                    crate::internal_codex::CodexSurfacePlacement {
+                        output,
+                        origin: (24, 64),
+                        scale: 1.0,
+                    },
+                ) {
+                    tracing::warn!(%error, "could not host Codex project menu internally");
+                }
+            } else if let Some(mut host) = self.internal_codex.take() {
+                if let Some(menu) = host.project_menu() {
+                    host.close(&mut self.internal_ui, menu);
+                }
+                self.internal_codex = Some(host);
+            }
         }
-        let snapshot = self.protocol_snapshot();
-        *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
-        let shell = self.internal_shell.as_mut().unwrap();
-        shell.apply_session_snapshot(snapshot);
-        let changed = shell.poll(now);
-        let actions = shell.drain_file_actions();
-        let shell_changed = !changed.is_empty();
-        let _ = shell;
-        if shell_changed {
-            self.sync_internal_shell();
-        }
-        for action in actions {
-            self.apply_internal_file_action(action);
+        if let Some(mut codex) = self.internal_codex.take() {
+            let changed = codex.poll_due(&mut self.internal_ui, now);
+            let placement = crate::internal_codex::CodexSurfacePlacement::default();
+            let opened = codex
+                .service_requests(&mut self.internal_ui, placement)
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "could not service internal Codex request");
+                    Vec::new()
+                });
+            self.internal_codex = Some(codex);
+            if !changed.is_empty() || !opened.is_empty() {
+                self.schedule_internal_ui_frame();
+            }
         }
         let closing = self
             .internal_file_surfaces
@@ -832,6 +883,23 @@ impl NickelSession {
         if self.internal_ui.has_damage() {
             self.schedule_internal_ui_frame();
         }
+    }
+
+    pub(crate) fn show_internal_codex_project_menu(
+        &mut self,
+        placement: crate::internal_codex::CodexSurfacePlacement,
+    ) -> Result<nickel_ui::InternalSurfaceId, String> {
+        let mut host = self
+            .internal_codex
+            .take()
+            .ok_or_else(|| "Codex integration is disabled".to_owned())?;
+        let result = host.ensure_project_menu(&mut self.internal_ui, placement);
+        self.internal_codex = Some(host);
+        if let Ok(id) = result {
+            self.internal_ui.focus_surface(id);
+            self.schedule_internal_ui_frame();
+        }
+        result
     }
 
     fn apply_internal_file_action(&mut self, action: nickel_file::FileWindowAction) {
@@ -928,6 +996,15 @@ impl NickelSession {
         };
         let entries = shell.surfaces().to_vec();
         for surface in entries {
+            // The real ChatApplication host owns this role. LiveShell retains
+            // only its visibility policy and must not paint a second shell
+            // scene over the compositor-owned menu.
+            if surface.role == crate::winit_shell::SurfaceRole::CodexProjectMenu {
+                if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                    self.internal_ui.remove(runtime_id);
+                }
+                continue;
+            }
             let visible = shell.visible(surface.id);
             if !visible {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
@@ -1486,6 +1563,7 @@ impl NickelSession {
             space,
             internal_ui: Default::default(),
             internal_shell: None,
+            internal_codex: None,
             internal_shell_surfaces: HashMap::new(),
             internal_file_surfaces: HashMap::new(),
             internal_shell_timer: InternalShellTimer::default(),

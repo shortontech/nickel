@@ -95,6 +95,14 @@ impl InternalShellCoordinator {
         })
     }
 
+    pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
+        self.shell.semantic_theme()
+    }
+
+    pub fn codex_project_menu_visible(&self) -> bool {
+        self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
+    }
+
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
         let mut desired = Vec::new();
         for output in outputs {
