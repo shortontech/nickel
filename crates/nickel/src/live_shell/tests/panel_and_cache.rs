@@ -43,6 +43,10 @@
         assert!(Arc::ptr_eq(&right, &shell.panel_hosts[&Some("right".into())].application().groups));
         shell.panel_host_ui(UiEvent::PointerMoved(Point { x: 0.0, y: 0.0 }), 1000);
         assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
+        shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 1000, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
+        assert!(shell.refresh_fast(), "a geometry-only output move invalidates task membership");
+        shell.panel_scene_for_output(Some("left"), 1000, 56);
+        assert!(shell.panel_host.application().groups.is_empty());
         shell.all_windows_on_every_bar = true;
         shell.panel_scene_for_output(Some("left"), 1000, 56);
         assert_eq!(shell.panel_host.application().groups.len(), 2);

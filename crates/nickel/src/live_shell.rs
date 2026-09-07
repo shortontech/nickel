@@ -1081,6 +1081,14 @@ impl LiveShell {
 
     pub fn refresh_fast(&mut self) -> bool {
         let mut changed = false;
+        // Window geometry is not part of OpenWindow's task model. Moving a
+        // window between outputs must still invalidate per-output taskbars.
+        let previous_outputs = (!self.all_windows_on_every_bar).then(|| {
+            self.windows
+                .iter()
+                .map(|window| (window.id, self.window_feed.window_output(window.id)))
+                .collect::<Vec<_>>()
+        });
         #[cfg(target_os = "linux")]
         let windows = self.internal_session_snapshot.take().map_or_else(
             || self.window_feed.snapshot(&self.launcher),
@@ -1093,6 +1101,11 @@ impl LiveShell {
         );
         #[cfg(not(target_os = "linux"))]
         let windows = self.window_feed.snapshot(&self.launcher);
+        changed |= previous_outputs.is_some_and(|outputs| {
+            outputs
+                .into_iter()
+                .any(|(window, output)| self.window_feed.window_output(window) != output)
+        });
         if update_feed_status(&mut self.window_feed_status, windows.status(), "windows") {
             changed = true;
         }
