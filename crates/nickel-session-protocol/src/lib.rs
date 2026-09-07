@@ -802,6 +802,11 @@ pub struct ShellBehaviorSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ShortcutAction {
+    SwitchNext,
+    SwitchPrevious,
+    SwitchGroupNext,
+    SwitchGroupPrevious,
+    CommitSwitch,
     ShowRun,
     OpenFiles,
     OpenSettings,

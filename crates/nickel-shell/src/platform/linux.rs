@@ -1922,6 +1922,17 @@ fn subscription_shortcut(
             != Some(locked))
         .then_some(GlobalShortcut::LockState { locked }),
         ServerMessage::Event(SessionEvent::GlobalShortcut { action }) => Some(match action {
+            nickel_session_protocol::ShortcutAction::SwitchNext => GlobalShortcut::SwitchNext,
+            nickel_session_protocol::ShortcutAction::SwitchPrevious => {
+                GlobalShortcut::SwitchPrevious
+            }
+            nickel_session_protocol::ShortcutAction::SwitchGroupNext => {
+                GlobalShortcut::SwitchGroupNext
+            }
+            nickel_session_protocol::ShortcutAction::SwitchGroupPrevious => {
+                GlobalShortcut::SwitchGroupPrevious
+            }
+            nickel_session_protocol::ShortcutAction::CommitSwitch => GlobalShortcut::CommitSwitch,
             nickel_session_protocol::ShortcutAction::ShowRun => GlobalShortcut::ShowRun,
             nickel_session_protocol::ShortcutAction::OpenFiles => GlobalShortcut::OpenFiles,
             nickel_session_protocol::ShortcutAction::OpenSettings => GlobalShortcut::OpenSettings,
@@ -2365,6 +2376,37 @@ mod tests {
                     &mut state,
                 ),
                 Some(GlobalShortcut::Screenshot(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn session_task_switch_events_reach_the_shell_switcher() {
+        use nickel_session_protocol::{Event, ServerMessage, ShortcutAction};
+
+        for (wire, expected) in [
+            (ShortcutAction::SwitchNext, GlobalShortcut::SwitchNext),
+            (
+                ShortcutAction::SwitchPrevious,
+                GlobalShortcut::SwitchPrevious,
+            ),
+            (
+                ShortcutAction::SwitchGroupNext,
+                GlobalShortcut::SwitchGroupNext,
+            ),
+            (
+                ShortcutAction::SwitchGroupPrevious,
+                GlobalShortcut::SwitchGroupPrevious,
+            ),
+            (ShortcutAction::CommitSwitch, GlobalShortcut::CommitSwitch),
+        ] {
+            let mut state = SubscriptionState::default();
+            assert_eq!(
+                subscription_shortcut(
+                    ServerMessage::Event(Event::GlobalShortcut { action: wire }),
+                    &mut state,
+                ),
+                Some(expected)
             );
         }
     }

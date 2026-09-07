@@ -376,7 +376,14 @@ impl NickelSession {
                                     | HotkeyAction::SwitchGroupNext
                                     | HotkeyAction::SwitchGroupPrevious
                                     | HotkeyAction::CommitSwitch),
-                                ) => session.apply_task_switch_action(action),
+                                ) => session.notify_global_shortcut(match action {
+                                    HotkeyAction::SwitchNext => nickel_session_protocol::ShortcutAction::SwitchNext,
+                                    HotkeyAction::SwitchPrevious => nickel_session_protocol::ShortcutAction::SwitchPrevious,
+                                    HotkeyAction::SwitchGroupNext => nickel_session_protocol::ShortcutAction::SwitchGroupNext,
+                                    HotkeyAction::SwitchGroupPrevious => nickel_session_protocol::ShortcutAction::SwitchGroupPrevious,
+                                    HotkeyAction::CommitSwitch => nickel_session_protocol::ShortcutAction::CommitSwitch,
+                                    _ => unreachable!(),
+                                }),
                                 Some(HotkeyAction::SwitchWorkspacePrevious) => session
                                     .switch_workspace_direction(
                                         nickel_core::workspaces::WorkspaceDirection::Previous,
