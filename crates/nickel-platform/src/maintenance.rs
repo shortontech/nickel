@@ -294,9 +294,9 @@ struct WindowsMaintenance;
 impl WindowsMaintenance {
     fn updates(&self) -> Observation<UpdateStatus> {
         let observed_at = SystemTime::now();
-        let script = "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');[Console]::Out.WriteLine($q.Updates.Count)";
+        let script = "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');[Console]::Out.WriteLine('SEARCH_RESULT:'+([int]$q.ResultCode));[Console]::Out.WriteLine('UPDATE_COUNT:'+([int]$q.Updates.Count))";
         match windows_powershell(script) {
-            Ok(output) => match output.trim().parse::<u32>() {
+            Ok(output) => match parse_windows_update_snapshot(&output) {
                 Ok(available) => {
                     let Ok(restart_required) = windows_restart_required() else {
                         return failed_observation(
@@ -318,7 +318,7 @@ impl WindowsMaintenance {
                         )),
                     }
                 }
-                Err(_) => failed_observation(observed_at, "Windows Update returned invalid data"),
+                Err(error) => command_failure_observation(observed_at, "Windows Update", error),
             },
             Err(error) => command_failure_observation(observed_at, "Windows Update", error),
         }
@@ -806,6 +806,19 @@ fn parse_windows_check_result(output: &str) -> Result<MaintenanceOutcome, Mainte
             detail: "Windows Update returned no terminal search result".into(),
         }),
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_update_snapshot(output: &str) -> Result<u32, MaintenanceError> {
+    parse_windows_check_result(output)?;
+    output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("UPDATE_COUNT:"))
+        .and_then(|value| value.parse::<u32>().ok())
+        .ok_or(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: "Windows Update returned no valid update count".into(),
+        })
 }
 
 #[cfg(target_os = "windows")]
@@ -1355,6 +1368,20 @@ mod tests {
 
     #[test]
     fn windows_update_operation_results_cannot_masquerade_as_acceptance() {
+        assert_eq!(
+            parse_windows_update_snapshot("SEARCH_RESULT:2\nUPDATE_COUNT:17\n").unwrap(),
+            17
+        );
+        for output in [
+            "SEARCH_RESULT:3\nUPDATE_COUNT:17\n",
+            "SEARCH_RESULT:2\n",
+            "SEARCH_RESULT:2\nUPDATE_COUNT:-1\n",
+        ] {
+            assert_eq!(
+                parse_windows_update_snapshot(output).unwrap_err().class,
+                MaintenanceFailureClass::Unknown
+            );
+        }
         assert_eq!(
             parse_windows_check_result("SEARCH_RESULT:2\n").unwrap(),
             MaintenanceOutcome::Accepted
