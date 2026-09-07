@@ -304,6 +304,52 @@ pub struct FileApp {
     pub(crate) reading_direction: ReadingDirection,
 }
 
+/// The product-level request used to construct a Nickel File application.
+///
+/// Keeping this separate from the standalone runner lets the unified Nickel
+/// process create and own file windows without manufacturing command-line
+/// arguments or allowing this crate to create an event loop.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FileLaunch {
+    Browse(PathBuf),
+    Properties(PathBuf),
+    Rename(PathBuf),
+}
+
+impl FileLaunch {
+    /// Parses the arguments accepted by the legacy `nickel-file` executable.
+    pub fn from_args_os(arguments: impl IntoIterator<Item = OsString>) -> Self {
+        let mut arguments = arguments.into_iter();
+        let first = arguments.next();
+        if first.as_deref() == Some(std::ffi::OsStr::new("--properties")) {
+            Self::Properties(
+                arguments
+                    .next()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(home_directory),
+            )
+        } else if first.as_deref() == Some(std::ffi::OsStr::new("--rename")) {
+            Self::Rename(
+                arguments
+                    .next()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(home_directory),
+            )
+        } else {
+            Self::Browse(first.map(PathBuf::from).unwrap_or_else(home_directory))
+        }
+    }
+
+    /// Builds application state without creating a window or event loop.
+    pub fn into_app(self) -> FileApp {
+        match self {
+            Self::Browse(path) => FileApp::launch(path),
+            Self::Properties(path) => FileApp::launch_properties(path),
+            Self::Rename(path) => FileApp::launch_rename(path),
+        }
+    }
+}
+
 pub(crate) struct FileTab {
     pub(crate) browser: DirectoryBrowser,
     pub(crate) selected: Option<crate::FileIdentity>,
@@ -332,6 +378,16 @@ pub(crate) struct FileTab {
 }
 
 impl FileApp {
+    /// Returns whether the containing window should be closed.
+    pub fn close_requested(&self) -> bool {
+        self.exit_requested
+    }
+
+    /// Requests closure when lifecycle ownership belongs to an embedding host.
+    pub fn request_close(&mut self) {
+        self.exit_requested = true;
+    }
+
     pub(crate) fn selected_index(&self) -> Option<usize> {
         self.selected
             .and_then(|identity| self.browser.index_of_identity(identity))
@@ -3140,26 +3196,43 @@ impl Application for FileApp {
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let _log_path = nickel_logging::init("nickel-file").ok();
-    let mut arguments = std::env::args_os().skip(1);
-    let first = arguments.next();
-    let application = if first.as_deref() == Some(std::ffi::OsStr::new("--properties")) {
-        FileApp::launch_properties(
-            arguments
-                .next()
-                .map(PathBuf::from)
-                .unwrap_or_else(home_directory),
-        )
-    } else if first.as_deref() == Some(std::ffi::OsStr::new("--rename")) {
-        FileApp::launch_rename(
-            arguments
-                .next()
-                .map(PathBuf::from)
-                .unwrap_or_else(home_directory),
-        )
-    } else {
-        FileApp::launch(first.map(PathBuf::from).unwrap_or_else(home_directory))
-    };
+    let application = FileLaunch::from_args_os(std::env::args_os().skip(1)).into_app();
     nickel_ui::run_with_adapter(application, FileHostAdapter::default())
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use std::{ffi::OsString, path::PathBuf};
+
+    use super::{FileApp, FileLaunch};
+
+    #[test]
+    fn parses_standalone_launch_modes_for_an_external_host() {
+        let target = PathBuf::from("/tmp/example.txt");
+
+        assert_eq!(
+            FileLaunch::from_args_os([OsString::from("--properties"), target.clone().into()]),
+            FileLaunch::Properties(target.clone())
+        );
+        assert_eq!(
+            FileLaunch::from_args_os([OsString::from("--rename"), target.clone().into()]),
+            FileLaunch::Rename(target.clone())
+        );
+        assert_eq!(
+            FileLaunch::from_args_os([OsString::from(target.as_os_str())]),
+            FileLaunch::Browse(target)
+        );
+    }
+
+    #[test]
+    fn embedded_host_owns_close_lifecycle() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+
+        assert!(!app.close_requested());
+        app.request_close();
+        assert!(app.close_requested());
+    }
 }
 
 #[cfg(test)]

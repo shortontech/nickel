@@ -30,7 +30,13 @@ fn set_nickel_file_icon(window: &Window) {
     }
 }
 
-pub(crate) struct FileHostAdapter {
+/// Native-window integration for the standalone Nickel File executable.
+///
+/// Embedded hosts normally drive [`FileApp`] directly through the
+/// [`nickel_ui::Application`] contract. This adapter remains public so a host
+/// which already uses Nickel UI's native runtime can preserve the standalone
+/// window behavior without asking this crate to create an event loop.
+pub struct FileHostAdapter {
     sync_requested: bool,
     drop_hover_deadline: Option<Instant>,
 }

@@ -24,7 +24,8 @@ pub mod watch;
 
 #[cfg(feature = "workbench-fixtures")]
 pub use app::FileFixtureProvider;
-pub use app::{FileApp, FileMessage, FileViewMode, run};
+pub use app::{FileApp, FileLaunch, FileMessage, FileViewMode, run};
+pub use host::FileHostAdapter;
 pub use watch::DirectoryWatch;
 
 pub fn desktop_directory() -> PathBuf {
