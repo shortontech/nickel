@@ -123,41 +123,76 @@ pub struct SoftwareRenderer {
     scale: f32,
     pixels: Vec<Pixel>,
     previous_commands: Vec<PaintCommand>,
+    framebuffer_valid: bool,
     clips: Vec<Rect>,
     text_rasters: Vec<Option<CachedSoftwareText>>,
+    rejected_text_rasters: Vec<bool>,
     font_system: ProcessFontSystem,
-    swash_cache: SwashCache,
-    swash_source_bytes: usize,
+    swash_cache: Option<SwashCache>,
+    glyph_bytes: usize,
+    glyph_generation_misses: usize,
+    raster_stats: SoftwareRasterDiagnostics,
 }
-type SoftwareGlyphPixels = Vec<(i32, i32, u32, u32, TextColor)>;
+type SoftwareGlyphPixels = Vec<(i32, i32, TextColor)>;
 const SOFTWARE_TEXT_RASTER_BUDGET: usize = 2 * 1024 * 1024;
+const SOFTWARE_GLYPH_BYTE_BUDGET: usize = 2 * 1024 * 1024;
+const SOFTWARE_GLYPH_ENTRY_BUDGET: usize = 2048;
+
+struct SampleDecorations<'a> {
+    renderer: &'a mut SoftwareRenderer,
+    candidate: &'a mut Option<SoftwareGlyphPixels>,
+    available: usize,
+    physical: Rect,
+    clip: Rect,
+}
+
+impl cosmic_text::Renderer for SampleDecorations<'_> {
+    fn glyph(&mut self, _: cosmic_text::PhysicalGlyph, _: TextColor) {
+        unreachable!("decoration rendering emits rectangles only");
+    }
+
+    fn rectangle(&mut self, x: i32, y: i32, width: u32, height: u32, color: TextColor) {
+        for row in 0..height {
+            for column in 0..width {
+                self.renderer.text_sample(
+                    self.candidate,
+                    self.available,
+                    self.physical,
+                    self.clip,
+                    x + column as i32,
+                    y + row as i32,
+                    color,
+                );
+            }
+        }
+    }
+}
+
+/// Known allocation capacities only; Swash's private scaler scratch and the
+/// shared font system are opaque and are not estimated from source text bytes.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SoftwareRasterDiagnostics {
+    pub glyph_hits: u64,
+    pub glyph_misses: u64,
+    pub glyph_resets: u64,
+    pub glyph_rejections: u64,
+    pub glyph_peak_bytes: usize,
+    pub candidate_peak_bytes: usize,
+    pub candidate_allocated_bytes: u64,
+    pub known_cache_peak_bytes: usize,
+    pub rejected_rasters: u64,
+}
 
 struct CachedSoftwareText {
-    command: PaintCommand,
     pixels: SoftwareGlyphPixels,
     strikes: StrikeLines,
 }
 
 impl CachedSoftwareText {
     fn retained_bytes(&self) -> usize {
-        let command_bytes = match &self.command {
-            PaintCommand::Text { text, .. } => text.capacity(),
-            PaintCommand::StyledText { text, spans, .. } => text.capacity().saturating_add(
-                spans
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<StyledTextSpan>()),
-            ),
-            _ => 0,
-        };
-        std::mem::size_of::<PaintCommand>()
-            .saturating_add(command_bytes)
-            .saturating_add(self.pixels.capacity().saturating_mul(std::mem::size_of::<(
-                i32,
-                i32,
-                u32,
-                u32,
-                TextColor,
-            )>()))
+        self.pixels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(i32, i32, TextColor)>())
             .saturating_add(
                 self.strikes
                     .capacity()
@@ -165,7 +200,6 @@ impl CachedSoftwareText {
             )
     }
 }
-const SOFTWARE_SWASH_SOURCE_BUDGET: usize = 2 * 1024 * 1024;
 type StrikeLines = Vec<(Rect, Color)>;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -242,11 +276,15 @@ impl SoftwareRenderer {
             scale: scale.max(0.25),
             pixels: vec![Pixel::TRANSPARENT; (width * height) as usize],
             previous_commands: Vec::new(),
+            framebuffer_valid: false,
             clips: Vec::new(),
             text_rasters: Vec::new(),
+            rejected_text_rasters: Vec::new(),
             font_system: ProcessFontSystem::new(),
-            swash_cache: SwashCache::new(),
-            swash_source_bytes: 0,
+            swash_cache: Some(SwashCache::new()),
+            glyph_bytes: 0,
+            glyph_generation_misses: 0,
+            raster_stats: SoftwareRasterDiagnostics::default(),
         }
     }
 
@@ -261,6 +299,10 @@ impl SoftwareRenderer {
         let scale = scale.max(0.25);
         if scale != self.scale {
             self.text_rasters.clear();
+            self.rejected_text_rasters.clear();
+            self.previous_commands.clear();
+            self.framebuffer_valid = false;
+            self.reset_glyph_cache();
         }
         self.scale = scale;
         if (width, height) != (self.width, self.height) {
@@ -269,6 +311,7 @@ impl SoftwareRenderer {
             self.pixels
                 .resize((self.width * self.height) as usize, Pixel::TRANSPARENT);
             self.previous_commands.clear();
+            self.framebuffer_valid = false;
         }
     }
 
@@ -280,6 +323,16 @@ impl SoftwareRenderer {
         &self.pixels
     }
 
+    pub fn pixel_capacity_bytes(&self) -> usize {
+        self.pixels
+            .capacity()
+            .saturating_mul(std::mem::size_of::<Pixel>())
+    }
+
+    pub fn software_raster_diagnostics(&self) -> SoftwareRasterDiagnostics {
+        self.raster_stats
+    }
+
     /// Reports bounded derived data retained by the software rasterizer. The
     /// frame-sized pixel buffer is presentation storage, not a cache.
     pub fn cache_diagnostics(&self) -> PresenterCacheDiagnostics {
@@ -289,19 +342,27 @@ impl SoftwareRenderer {
             .iter()
             .flatten()
             .map(CachedSoftwareText::retained_bytes)
-            .sum::<usize>()
-            .saturating_add(self.swash_source_bytes);
+            .sum::<usize>();
         PresenterCacheDiagnostics {
             text_layouts,
             text_layout_bytes,
-            live_bytes: text_layout_bytes,
-            peak_bytes: text_layout_bytes,
+            glyphs: self
+                .swash_cache
+                .as_ref()
+                .map_or(0, |cache| cache.image_cache.len()),
+            glyph_atlas_bytes: self.glyph_bytes,
+            live_bytes: text_layout_bytes.saturating_add(self.glyph_bytes),
+            peak_bytes: self.raster_stats.known_cache_peak_bytes,
+            hits: self.raster_stats.glyph_hits,
+            misses: self.raster_stats.glyph_misses,
+            invalidations: self.raster_stats.glyph_resets,
             ..PresenterCacheDiagnostics::default()
         }
     }
 
     pub fn invalidate(&mut self) {
         self.previous_commands.clear();
+        self.framebuffer_valid = false;
     }
 
     /// Release frame-sized and derived raster resources while a presenter is
@@ -312,10 +373,11 @@ impl SoftwareRenderer {
         self.height = 1;
         self.pixels = vec![Pixel::TRANSPARENT];
         self.previous_commands = Vec::new();
+        self.framebuffer_valid = false;
         self.clips = Vec::new();
         self.text_rasters = Vec::new();
-        self.swash_cache = SwashCache::new();
-        self.swash_source_bytes = 0;
+        self.rejected_text_rasters = Vec::new();
+        self.reset_glyph_cache();
     }
 
     /// Rasterize a component display list and return its conservative damage.
@@ -344,7 +406,14 @@ impl SoftwareRenderer {
             self.text_rasters.resize_with(commands.len(), || None);
         }
         self.text_rasters.truncate(commands.len());
+        self.rejected_text_rasters.resize(commands.len(), false);
         for (index, command) in commands.iter().enumerate() {
+            // A changed command can be skipped by clipping. Retire its old
+            // raster before committing the new authoritative command identity.
+            if self.previous_commands.get(index) != Some(command) {
+                self.text_rasters[index] = None;
+                self.rejected_text_rasters[index] = false;
+            }
             self.draw_command(index, command, &mut clips);
         }
         self.clips = clips;
@@ -358,6 +427,7 @@ impl SoftwareRenderer {
             self.previous_commands.clear();
             self.previous_commands.extend_from_slice(commands);
         }
+        self.framebuffer_valid = true;
         damage
     }
 
@@ -378,7 +448,7 @@ impl SoftwareRenderer {
     }
 
     fn damage(&self, commands: &[PaintCommand]) -> DamageRegion {
-        if self.previous_commands.is_empty() {
+        if !self.framebuffer_valid {
             return DamageRegion {
                 rects: smallvec![Rect::new(0.0, 0.0, self.width as f32, self.height as f32)],
             };
@@ -588,17 +658,13 @@ impl SoftwareRenderer {
             return;
         };
         let cached = self.text_rasters[index].take();
-        if let Some(cached) = cached.filter(|cached| cached.command == *command) {
+        if let Some(cached) = cached.filter(|_| self.previous_commands.get(index) == Some(command))
+        {
             self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
             self.text_rasters[index] = Some(cached);
             return;
         }
         let font_size = text_size(*scale) * self.scale;
-        if self.swash_source_bytes.saturating_add(text.len()) > SOFTWARE_SWASH_SOURCE_BUDGET {
-            self.swash_cache = SwashCache::new();
-            self.swash_source_bytes = 0;
-        }
-        self.swash_source_bytes = self.swash_source_bytes.saturating_add(text.len());
         let physical = physical_rect(*bounds, self.scale);
         let buffer_width = physical.size.width.max(1.0);
         let buffer_height = physical.size.height.max(font_size * 1.4);
@@ -620,25 +686,15 @@ impl SoftwareRenderer {
         buffer.shape_until_scroll(&mut font_system, false);
         let pixel = pixel(*color);
         let text_color = TextColor::rgba(pixel.r, pixel.g, pixel.b, pixel.a);
-        let mut glyph_pixels = Vec::new();
-        buffer.draw(
+        self.raster_text(
+            index,
+            &buffer,
             &mut font_system,
-            &mut self.swash_cache,
             text_color,
-            |x, y, width, height, glyph_color| {
-                glyph_pixels.push((x, y, width, height, glyph_color));
-            },
+            physical,
+            clip,
+            Vec::new(),
         );
-        // Cosmic Text emits already-rasterized 1x1 physical pixels. Keep their
-        // origin on the physical pixel grid; a fractional origin would make
-        // `for_pixels` expand each sample across adjacent pixels.
-        let cached = CachedSoftwareText {
-            command: command.clone(),
-            pixels: glyph_pixels,
-            strikes: Vec::new(),
-        };
-        self.draw_cached_text(&cached, physical, clip);
-        self.retain_text_raster(index, cached);
     }
 
     fn draw_cached_text(&mut self, cached: &CachedSoftwareText, physical: Rect, clip: Rect) {
@@ -646,13 +702,8 @@ impl SoftwareRenderer {
             x: physical.origin.x.round(),
             y: physical.origin.y.round(),
         };
-        for &(x, y, width, height, glyph_color) in &cached.pixels {
-            let glyph = Rect::new(
-                origin.x + x as f32,
-                origin.y + y as f32,
-                width as f32,
-                height as f32,
-            );
+        for &(x, y, glyph_color) in &cached.pixels {
+            let glyph = Rect::new(origin.x + x as f32, origin.y + y as f32, 1.0, 1.0);
             let Some(glyph) = intersection(glyph, clip) else {
                 continue;
             };
@@ -674,7 +725,24 @@ impl SoftwareRenderer {
         }
     }
 
-    fn retain_text_raster(&mut self, index: usize, cached: CachedSoftwareText) {
+    fn reset_glyph_cache(&mut self) {
+        self.swash_cache = Some(SwashCache::new());
+        self.glyph_bytes = 0;
+        self.glyph_generation_misses = 0;
+        self.raster_stats.glyph_resets += 1;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn raster_text(
+        &mut self,
+        index: usize,
+        buffer: &Buffer,
+        font_system: &mut cosmic_text::FontSystem,
+        color: TextColor,
+        physical: Rect,
+        clip: Rect,
+        strikes: StrikeLines,
+    ) {
         let other_bytes = self
             .text_rasters
             .iter()
@@ -684,8 +752,176 @@ impl SoftwareRenderer {
             .fold(0usize, |total, cached| {
                 total.saturating_add(cached.retained_bytes())
             });
-        if other_bytes.saturating_add(cached.retained_bytes()) <= SOFTWARE_TEXT_RASTER_BUDGET {
-            self.text_rasters[index] = Some(cached);
+        let strike_bytes = strikes
+            .capacity()
+            .saturating_mul(std::mem::size_of::<(Rect, Color)>());
+        let available =
+            SOFTWARE_TEXT_RASTER_BUDGET.saturating_sub(other_bytes.saturating_add(strike_bytes));
+        self.rejected_text_rasters
+            .resize(self.text_rasters.len(), false);
+        let mut candidate = (!self.rejected_text_rasters[index]).then(Vec::new);
+        for run in buffer.layout_runs() {
+            for glyph in run.glyphs {
+                let physical_glyph = glyph.physical((0.0, run.line_y), 1.0);
+                let key = physical_glyph.cache_key;
+                if self
+                    .swash_cache
+                    .as_ref()
+                    .expect("glyph cache")
+                    .image_cache
+                    .contains_key(&key)
+                {
+                    self.raster_stats.glyph_hits += 1;
+                } else {
+                    self.raster_stats.glyph_misses += 1;
+                    // Replacing the owner also retires opaque scaler scratch.
+                    if self.glyph_generation_misses >= SOFTWARE_GLYPH_ENTRY_BUDGET {
+                        self.reset_glyph_cache();
+                    }
+                    self.glyph_generation_misses += 1;
+                    let image = self
+                        .swash_cache
+                        .as_mut()
+                        .expect("glyph cache")
+                        .get_image_uncached(font_system, key);
+                    let bytes = image.as_ref().map_or(0, |image| image.data.capacity());
+                    // Swash exposes no preallocation limit: one newly rasterized
+                    // glyph is an explicit transient peak, separate from retention.
+                    self.raster_stats.glyph_peak_bytes = self
+                        .raster_stats
+                        .glyph_peak_bytes
+                        .max(self.glyph_bytes.saturating_add(bytes));
+                    if self.glyph_bytes.saturating_add(bytes) > SOFTWARE_GLYPH_BYTE_BUDGET
+                        || self
+                            .swash_cache
+                            .as_ref()
+                            .expect("glyph cache")
+                            .image_cache
+                            .len()
+                            >= SOFTWARE_GLYPH_ENTRY_BUDGET
+                    {
+                        self.reset_glyph_cache();
+                    }
+                    self.glyph_bytes += bytes;
+                    self.swash_cache
+                        .as_mut()
+                        .expect("glyph cache")
+                        .image_cache
+                        .insert(key, image);
+                }
+                let mut cache = self.swash_cache.take().expect("glyph cache");
+                cache.with_pixels(
+                    font_system,
+                    key,
+                    glyph.color_opt.unwrap_or(color),
+                    |x, y, color| {
+                        self.text_sample(
+                            &mut candidate,
+                            available,
+                            physical,
+                            clip,
+                            physical_glyph.x + x,
+                            physical_glyph.y + y,
+                            color,
+                        );
+                    },
+                );
+                self.swash_cache = Some(cache);
+                if self.glyph_bytes > SOFTWARE_GLYPH_BYTE_BUDGET {
+                    self.raster_stats.glyph_rejections += 1;
+                    self.reset_glyph_cache();
+                }
+            }
+            let mut decorations = SampleDecorations {
+                renderer: self,
+                candidate: &mut candidate,
+                available,
+                physical,
+                clip,
+            };
+            cosmic_text::render_decoration(&mut decorations, &run, color);
+        }
+        for &(rect, color) in &strikes {
+            self.fill_round(rect, 0.0, 0, color, clip);
+        }
+        if let Some(pixels) = candidate {
+            let cached = CachedSoftwareText { pixels, strikes };
+            if other_bytes.saturating_add(cached.retained_bytes()) <= SOFTWARE_TEXT_RASTER_BUDGET {
+                self.text_rasters[index] = Some(cached);
+            }
+        } else {
+            self.rejected_text_rasters[index] = true;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn text_sample(
+        &mut self,
+        candidate: &mut Option<SoftwareGlyphPixels>,
+        available: usize,
+        physical: Rect,
+        clip: Rect,
+        x: i32,
+        y: i32,
+        color: TextColor,
+    ) {
+        if let Some(pixels) = candidate {
+            let element_bytes = std::mem::size_of::<(i32, i32, TextColor)>();
+            if pixels.len() == pixels.capacity() {
+                let previous_capacity = pixels.capacity();
+                let capacity = pixels
+                    .capacity()
+                    .max(256)
+                    .saturating_mul(2)
+                    .min(available / element_bytes);
+                if capacity > pixels.len() {
+                    pixels.reserve_exact(capacity - pixels.len());
+                }
+                let bytes = pixels.capacity().saturating_mul(element_bytes);
+                self.raster_stats.candidate_allocated_bytes =
+                    self.raster_stats.candidate_allocated_bytes.saturating_add(
+                        pixels
+                            .capacity()
+                            .saturating_sub(previous_capacity)
+                            .saturating_mul(element_bytes) as u64,
+                    );
+                let retained = self
+                    .text_rasters
+                    .iter()
+                    .flatten()
+                    .map(CachedSoftwareText::retained_bytes)
+                    .sum::<usize>();
+                self.raster_stats.known_cache_peak_bytes =
+                    self.raster_stats.known_cache_peak_bytes.max(
+                        retained
+                            .saturating_add(bytes)
+                            .saturating_add(self.glyph_bytes),
+                    );
+            }
+            let bytes = pixels.capacity().saturating_mul(element_bytes);
+            self.raster_stats.candidate_peak_bytes =
+                self.raster_stats.candidate_peak_bytes.max(bytes);
+            if pixels.len() == pixels.capacity() || bytes > available {
+                *candidate = None;
+                self.raster_stats.rejected_rasters += 1;
+            } else {
+                pixels.push((x, y, color));
+            }
+        }
+        let sample = Rect::new(
+            physical.origin.x.round() + x as f32,
+            physical.origin.y.round() + y as f32,
+            1.0,
+            1.0,
+        );
+        if let Some(sample) = intersection(sample, clip) {
+            self.for_pixels(sample, |renderer, x, y| {
+                renderer.blend(
+                    x,
+                    y,
+                    Pixel::rgba(color.r(), color.g(), color.b(), color.a()),
+                )
+            });
         }
     }
 
@@ -704,7 +940,8 @@ impl SoftwareRenderer {
             return;
         };
         let cached = self.text_rasters[index].take();
-        if let Some(cached) = cached.filter(|cached| cached.command == *command) {
+        if let Some(cached) = cached.filter(|_| self.previous_commands.get(index) == Some(command))
+        {
             self.draw_cached_text(&cached, physical_rect(*bounds, self.scale), clip);
             self.text_rasters[index] = Some(cached);
             return;
@@ -725,23 +962,55 @@ impl SoftwareRenderer {
             Some(cosmic_align(*align)),
         );
         buffer.shape_until_scroll(&mut font_system, false);
-        let mut pixels = Vec::new();
-        buffer.draw(
+        self.raster_text(
+            index,
+            &buffer,
             &mut font_system,
-            &mut self.swash_cache,
             text_color(*color),
-            |x, y, width, height, glyph_color| {
-                pixels.push((x, y, width, height, glyph_color));
+            physical,
+            clip,
+            Vec::new(),
+        );
+        let other_bytes: usize = self
+            .text_rasters
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .filter_map(|(_, cached)| cached.as_ref())
+            .map(CachedSoftwareText::retained_bytes)
+            .sum();
+        let mut cached = self.text_rasters[index].take();
+        styled_strikes(
+            &buffer,
+            spans,
+            physical,
+            *color,
+            font_size,
+            |(rect, color)| {
+                self.fill_round(rect, 0.0, 0, color, clip);
+                if let Some(raster) = &mut cached {
+                    let bytes = std::mem::size_of::<(Rect, Color)>();
+                    if raster.strikes.len() == raster.strikes.capacity() {
+                        let available = SOFTWARE_TEXT_RASTER_BUDGET
+                            .saturating_sub(other_bytes.saturating_add(raster.retained_bytes()));
+                        if available >= bytes {
+                            raster.strikes.reserve_exact((available / bytes).min(256));
+                        }
+                    }
+                    if raster.strikes.len() == raster.strikes.capacity()
+                        || other_bytes.saturating_add(raster.retained_bytes())
+                            > SOFTWARE_TEXT_RASTER_BUDGET
+                    {
+                        cached = None;
+                        self.rejected_text_rasters[index] = true;
+                        self.raster_stats.rejected_rasters += 1;
+                    } else {
+                        raster.strikes.push((rect, color));
+                    }
+                }
             },
         );
-        let strikes = styled_strikes(&buffer, spans, physical, *color, font_size);
-        let cached = CachedSoftwareText {
-            command: command.clone(),
-            pixels,
-            strikes,
-        };
-        self.draw_cached_text(&cached, physical, clip);
-        self.retain_text_raster(index, cached);
+        self.text_rasters[index] = cached;
     }
 
     fn image(&mut self, rect: Rect, image: &image::RgbaImage, clip: Rect) {
@@ -961,8 +1230,8 @@ fn styled_strikes(
     bounds: Rect,
     default_color: Color,
     font_size: f32,
-) -> Vec<(Rect, Color)> {
-    let mut strikes = Vec::new();
+    mut emit: impl FnMut((Rect, Color)),
+) {
     for run in buffer.layout_runs() {
         for glyph in run.glyphs {
             let Some(span) = glyph
@@ -979,7 +1248,7 @@ fn styled_strikes(
                     glyph.w.max(1.0),
                     (font_size / 14.0).max(1.0),
                 );
-                strikes.push((rect, span.color.unwrap_or(default_color)));
+                emit((rect, span.color.unwrap_or(default_color)));
             }
             let thickness = (font_size / 14.0).max(1.0);
             let x = bounds.origin.x + glyph.x;
@@ -991,7 +1260,7 @@ fn styled_strikes(
                 let mut raised = false;
                 while offset < width {
                     let segment_width = segment.min(width - offset);
-                    strikes.push((
+                    emit((
                         Rect::new(
                             x + offset,
                             y + run.line_height * if raised { 0.82 } else { 0.9 },
@@ -1008,16 +1277,16 @@ fn styled_strikes(
             };
             match span.underline {
                 TextUnderlineStyle::None => {}
-                TextUnderlineStyle::Single => strikes.push((
+                TextUnderlineStyle::Single => emit((
                     Rect::new(x, y + run.line_height * 0.88, width, thickness),
                     color,
                 )),
                 TextUnderlineStyle::Double => {
-                    strikes.push((
+                    emit((
                         Rect::new(x, y + run.line_height * 0.8, width, thickness),
                         color,
                     ));
-                    strikes.push((
+                    emit((
                         Rect::new(x, y + run.line_height * 0.92, width, thickness),
                         color,
                     ));
@@ -1028,7 +1297,6 @@ fn styled_strikes(
             }
         }
     }
-    strikes
 }
 
 fn px(value: u32) -> u32 {
@@ -1040,6 +1308,275 @@ mod tests {
     use nickel_core::resource_owner::{DependencyOwnerKind, dependency_owner_diagnostics};
 
     use super::{PaintCommand, Pixel, Rect, SoftwareRenderer, TextAlign, command_intersects_clip};
+
+    fn label(styled: bool, scale: f32) -> PaintCommand {
+        if styled {
+            PaintCommand::StyledText {
+                bounds: Rect::new(2.3, 2.7, 95.0, 32.0),
+                text: "Hello 世界 🦀".into(),
+                spans: Vec::new(),
+                scale,
+                font_size: None,
+                color: 0xffaacc,
+                align: TextAlign::Start,
+            }
+        } else {
+            PaintCommand::Text {
+                bounds: Rect::new(2.3, 2.7, 95.0, 32.0),
+                text: "Hello 世界 🦀".into(),
+                scale,
+                color: 0xffaacc,
+                align: TextAlign::Start,
+                bold: false,
+                wrap: true,
+            }
+        }
+    }
+
+    #[test]
+    fn empty_frames_stay_clean_until_invalidated() {
+        let mut renderer = SoftwareRenderer::new(20, 20, 1.0);
+        assert!(!renderer.render(&[]).is_empty());
+        assert!(renderer.render(&[]).is_empty());
+        renderer.invalidate();
+        assert!(!renderer.render(&[]).is_empty());
+        assert!(renderer.render(&[]).is_empty());
+    }
+
+    #[test]
+    fn clipped_command_change_cannot_reuse_the_previous_raster() {
+        let mut renderer = SoftwareRenderer::new(160, 80, 1.0);
+        let full = Rect::new(0.0, 0.0, 160.0, 80.0);
+        let mut commands = vec![
+            PaintCommand::PushClip(full),
+            label(false, 1.0),
+            PaintCommand::PopClip,
+        ];
+        renderer.render(&commands);
+        assert!(renderer.text_rasters[1].is_some());
+        commands[0] = PaintCommand::PushClip(Rect::new(150.0, 70.0, 1.0, 1.0));
+        if let PaintCommand::Text { text, .. } = &mut commands[1] {
+            *text = "Changed".into();
+        }
+        renderer.render(&commands);
+        commands[0] = PaintCommand::PushClip(full);
+        renderer.render(&commands);
+        let mut fresh = SoftwareRenderer::new(160, 80, 1.0);
+        fresh.render(&commands);
+        assert_eq!(renderer.pixels(), fresh.pixels());
+    }
+
+    // Repeatable release microbenchmark. Targets chosen before implementation:
+    // 40% less sample payload, <=2 MiB candidates, <=25% cold regression.
+    // Timings are observations, not flaky CI assertions.
+    #[test]
+    #[ignore = "release memory/timing evidence"]
+    fn software_raster_memory_and_timing_evidence() {
+        use std::time::Instant;
+        let mut renderer = SoftwareRenderer::new(640, 200, 1.25);
+        let mut commands = vec![
+            PaintCommand::Fill {
+                rect: Rect::new(0.0, 0.0, 640.0, 200.0),
+                color: 0x112233,
+            },
+            label(true, 1.0),
+        ];
+        let cold = Instant::now();
+        renderer.render(&commands);
+        let cold = cold.elapsed();
+        let samples = renderer.text_rasters[1].as_ref().unwrap().pixels.len();
+        let capacity = renderer.text_rasters[1].as_ref().unwrap().pixels.capacity();
+        let warm = Instant::now();
+        for iteration in 0..500 {
+            if let PaintCommand::Fill { color, .. } = &mut commands[0] {
+                *color = 0x112233 + iteration % 2;
+            }
+            renderer.render(&commands);
+        }
+        let warm = warm.elapsed();
+        let churn = Instant::now();
+        for iteration in 0..500 {
+            if let PaintCommand::StyledText { text, .. } = &mut commands[1] {
+                *text = format!("Churn {iteration} 世界 🦀");
+            }
+            renderer.render(&commands);
+        }
+        eprintln!(
+            "software raster evidence: cold={cold:?}; warm500={warm:?}; churn500={:?}; samples={samples}; legacy_same_capacity={} compact_capacity={}; diagnostics={:?}; cache={:?}",
+            churn.elapsed(),
+            capacity * 20,
+            capacity * 12,
+            renderer.software_raster_diagnostics(),
+            renderer.cache_diagnostics()
+        );
+    }
+
+    #[test]
+    fn scale_only_resize_repaints_identical_commands_like_a_fresh_renderer() {
+        for styled in [false, true] {
+            let commands = [
+                PaintCommand::Fill {
+                    rect: Rect::new(1.0, 1.0, 10.0, 10.0),
+                    color: 0x336699,
+                },
+                label(styled, 1.0),
+            ];
+            let mut renderer = SoftwareRenderer::new(160, 80, 1.0);
+            renderer.render(&commands);
+            renderer.resize(160, 80, 1.0);
+            assert!(renderer.render(&commands).is_empty());
+            for scale in [1.25, 2.0, 0.75] {
+                renderer.resize(160, 80, scale);
+                assert!(!renderer.render(&commands).is_empty());
+                let mut fresh = SoftwareRenderer::new(160, 80, scale);
+                fresh.render(&commands);
+                assert_eq!(renderer.pixels(), fresh.pixels());
+                assert!(renderer.render(&commands).is_empty());
+            }
+            renderer.suspend();
+            renderer.resize(160, 80, 1.25);
+            assert!(!renderer.render(&commands).is_empty());
+        }
+    }
+
+    #[test]
+    fn compact_raster_matches_cosmic_reference_and_bounds_oversized_candidates() {
+        use cosmic_text::{Attrs, Buffer, Color, Metrics, Shaping, SwashCache};
+        let mut renderer = SoftwareRenderer::new(320, 160, 1.0);
+        let mut reference = SoftwareRenderer::new(320, 160, 1.0);
+        let fonts = nickel_render_assets::ProcessFontSystem::new();
+        let mut fonts = fonts.lock();
+        for size in [13.25, 32.0, 120.0] {
+            let mut buffer = Buffer::new(&mut fonts, Metrics::new(size, size * 1.3));
+            buffer.set_size(Some(320.0), Some(160.0));
+            buffer.set_text(
+                "Dense WWW sparse iii 世界 العربية 🦀",
+                &Attrs::new(),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(&mut fonts, false);
+            let physical = Rect::new(0.4, 0.6, 320.0, 160.0);
+            let clip = Rect::new(3.25, 4.5, 300.0, 150.0);
+            renderer.pixels.fill(Pixel::TRANSPARENT);
+            reference.pixels.fill(Pixel::TRANSPARENT);
+            renderer.text_rasters = vec![None];
+            renderer.raster_text(
+                0,
+                &buffer,
+                &mut fonts,
+                Color::rgb(10, 150, 200),
+                physical,
+                clip,
+                Vec::new(),
+            );
+            buffer.draw(
+                &mut fonts,
+                &mut SwashCache::new(),
+                Color::rgb(10, 150, 200),
+                |x, y, w, h, color| {
+                    let rect = Rect::new(
+                        physical.origin.x.round() + x as f32,
+                        physical.origin.y.round() + y as f32,
+                        w as f32,
+                        h as f32,
+                    );
+                    if let Some(rect) = super::intersection(rect, clip) {
+                        reference.for_pixels(rect, |renderer, x, y| {
+                            renderer.blend(
+                                x,
+                                y,
+                                Pixel::rgba(color.r(), color.g(), color.b(), color.a()),
+                            )
+                        });
+                    }
+                },
+            );
+            assert_eq!(renderer.pixels(), reference.pixels());
+        }
+        assert_eq!(std::mem::size_of::<(i32, i32, Color)>(), 12);
+        // Exercise the same admission path used by arbitrarily long labels:
+        // after rejection, subsequent samples draw directly without allocation.
+        let mut candidate = Some(Vec::new());
+        for _ in 0..300_000 {
+            renderer.text_sample(
+                &mut candidate,
+                super::SOFTWARE_TEXT_RASTER_BUDGET,
+                Rect::new(0.0, 0.0, 320.0, 160.0),
+                Rect::new(0.0, 0.0, 320.0, 160.0),
+                10,
+                10,
+                Color::rgb(255, 0, 0),
+            );
+        }
+        assert!(candidate.is_none());
+        assert!(renderer.raster_stats.candidate_peak_bytes <= super::SOFTWARE_TEXT_RASTER_BUDGET);
+        assert_eq!(renderer.pixels()[3210], Pixel::rgba(255, 0, 0, 255));
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(120.0, 156.0));
+        buffer.set_size(Some(20_000.0), Some(200.0));
+        buffer.set_text(&"W".repeat(1000), &Attrs::new(), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut fonts, false);
+        renderer.text_rasters = vec![None];
+        renderer.rejected_text_rasters = vec![false];
+        let rect = Rect::new(0.0, 0.0, 320.0, 160.0);
+        renderer.raster_text(
+            0,
+            &buffer,
+            &mut fonts,
+            Color::rgb(255, 0, 0),
+            rect,
+            rect,
+            Vec::new(),
+        );
+        assert!(renderer.rejected_text_rasters[0]);
+        let allocated = renderer.raster_stats.candidate_allocated_bytes;
+        renderer.raster_text(
+            0,
+            &buffer,
+            &mut fonts,
+            Color::rgb(255, 0, 0),
+            rect,
+            rect,
+            Vec::new(),
+        );
+        assert_eq!(renderer.raster_stats.candidate_allocated_bytes, allocated);
+    }
+
+    #[test]
+    fn plain_styled_and_mixed_churn_share_glyph_budget_and_suspend_release() {
+        for mode in 0..3 {
+            let mut renderer = SoftwareRenderer::new(160, 80, 1.0);
+            for iteration in 0..2200 {
+                // Preserve the owner while churning physical glyph sizes;
+                // resize's independent lifecycle reset is covered above.
+                renderer.scale = 0.75 + iteration as f32 / 3000.0;
+                let mut command = label(mode == 1 || mode == 2 && iteration % 2 == 0, 1.0);
+                match &mut command {
+                    PaintCommand::Text { text, .. } | PaintCommand::StyledText { text, .. } => {
+                        *text = "Ab".into();
+                    }
+                    _ => unreachable!(),
+                }
+                renderer.invalidate();
+                renderer.render(&[command]);
+                assert!(renderer.glyph_bytes <= super::SOFTWARE_GLYPH_BYTE_BUDGET);
+                assert!(
+                    renderer.swash_cache.as_ref().unwrap().image_cache.len()
+                        <= super::SOFTWARE_GLYPH_ENTRY_BUDGET
+                );
+            }
+            assert!(renderer.raster_stats.glyph_resets > 0);
+            renderer.invalidate();
+            renderer.render(&[label(true, 1.0)]);
+            renderer.invalidate();
+            renderer.render(&[label(true, 1.0)]);
+            assert!(renderer.raster_stats.glyph_hits > 0);
+            renderer.suspend();
+            assert_eq!(renderer.cache_diagnostics().live_bytes, 0);
+            assert_eq!(renderer.swash_cache.as_ref().unwrap().image_cache.len(), 0);
+            assert_eq!(renderer.pixel_capacity_bytes(), 4);
+        }
+    }
 
     #[test]
     fn rectangular_fill_fast_path_preserves_opaque_and_translucent_blending() {
