@@ -119,6 +119,13 @@ impl InternalShellCoordinator {
         self.shell.apply_codex_projection(projection)
     }
 
+    pub fn set_dashboard_projects(
+        &mut self,
+        projects: crate::launcher::DashboardSection<Vec<crate::launcher::DashboardProject>>,
+    ) -> bool {
+        self.shell.set_dashboard_projects(projects)
+    }
+
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
         self.shell.take_requested_codex_project()
     }

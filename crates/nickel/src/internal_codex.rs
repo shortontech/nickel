@@ -8,7 +8,7 @@ use std::{collections::HashSet, path::PathBuf, time::Instant};
 
 use nickel_codex::{BackendChoice, ThreadId};
 use nickel_codex_ui::{ChatApplication, ShellRequest, shell_application_with_backend};
-use nickel_core::optional_features::CodexSource;
+use nickel_core::optional_features::{CodexSource, OptionalFeatureSettings};
 use nickel_ui::{HostBatch, InternalSurfaceId};
 
 use crate::session::{InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime};
@@ -42,7 +42,7 @@ struct ChatSurface {
 
 /// Owns the identities and domain leases for compositor-hosted Codex UI.
 pub struct InternalCodexHost {
-    source: CodexSource,
+    settings: OptionalFeatureSettings,
     theme: nickel_ui::SemanticTheme,
     cwd: PathBuf,
     project_menu: Option<InternalSurfaceId>,
@@ -51,9 +51,13 @@ pub struct InternalCodexHost {
 }
 
 impl InternalCodexHost {
-    pub fn new(source: CodexSource, theme: nickel_ui::SemanticTheme, cwd: PathBuf) -> Self {
+    pub fn new(
+        settings: OptionalFeatureSettings,
+        theme: nickel_ui::SemanticTheme,
+        cwd: PathBuf,
+    ) -> Self {
         Self {
-            source,
+            settings,
             theme,
             cwd,
             project_menu: None,
@@ -64,6 +68,91 @@ impl InternalCodexHost {
 
     pub fn project_menu(&self) -> Option<InternalSurfaceId> {
         self.project_menu
+    }
+
+    /// Keep the project controller alive while releasing all hidden presentation storage.
+    pub fn set_project_menu_visible(&self, runtime: &mut InternalUiRuntime, visible: bool) -> bool {
+        self.project_menu
+            .is_some_and(|id| runtime.set_visible(id, visible))
+    }
+
+    pub fn sync_shell_projection(
+        &self,
+        runtime: &InternalUiRuntime,
+        shell: &mut crate::internal_shell::InternalShellCoordinator,
+    ) -> bool {
+        use crate::launcher::{
+            DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects,
+        };
+        use nickel_codex_ui::ConnectionStatus;
+        use nickel_core::optional_features::FeatureInstallation;
+
+        let Some(menu) = self.project_menu else {
+            return false;
+        };
+        let Some(snapshot) = runtime
+            .application::<ChatApplication>(menu)
+            .map(|app| &app.state)
+        else {
+            return false;
+        };
+        let diagnostic = (!snapshot.provenance.is_empty())
+            .then(|| snapshot.provenance.clone())
+            .or_else(|| snapshot.diagnostics.back().cloned());
+        let availability_changed = shell.apply_codex_projection(crate::codex_projection(
+            &self.settings,
+            FeatureInstallation::Missing,
+            snapshot.status.clone(),
+            snapshot.account.authenticated,
+            diagnostic.clone(),
+        ));
+        let projects = match snapshot.status {
+            ConnectionStatus::Loading => DashboardSection::Loading,
+            ConnectionStatus::Ready if !snapshot.account.authenticated => {
+                DashboardSection::Failed {
+                    message: "Sign in to Codex to load projects".into(),
+                    recoverable: true,
+                }
+            }
+            ConnectionStatus::Ready if snapshot.thread_snapshot_available => {
+                let projects = normalize_dashboard_projects(
+                    &snapshot.projects,
+                    &snapshot.threads,
+                    &snapshot.thread_runtime,
+                );
+                if projects.is_empty() {
+                    DashboardSection::Empty
+                } else {
+                    DashboardSection::Ready(projects)
+                }
+            }
+            ConnectionStatus::Ready => {
+                let projects = snapshot
+                    .projects
+                    .iter()
+                    .map(|project| DashboardProject {
+                        id: project.id.clone(),
+                        name: project.name.clone(),
+                        roots: project.roots.clone(),
+                        chat_count: None,
+                        activity: ProjectActivity::Unknown,
+                        last_used_at: None,
+                    })
+                    .collect::<Vec<_>>();
+                if projects.is_empty() {
+                    DashboardSection::Empty
+                } else {
+                    DashboardSection::Ready(projects)
+                }
+            }
+            ConnectionStatus::Unavailable
+            | ConnectionStatus::Disconnected
+            | ConnectionStatus::Incompatible => DashboardSection::Unavailable(
+                diagnostic.unwrap_or_else(|| "Codex backend unavailable".into()),
+            ),
+        };
+        let projects_changed = shell.set_dashboard_projects(projects);
+        availability_changed || projects_changed
     }
 
     pub fn surface_ids(&self) -> impl Iterator<Item = InternalSurfaceId> + '_ {
@@ -301,7 +390,7 @@ impl InternalCodexHost {
     }
 
     fn backend_choice(&self) -> Option<BackendChoice> {
-        match &self.source {
+        match &self.settings.codex_source {
             CodexSource::CompatibleInstalled => Some(BackendChoice::Installed),
             CodexSource::Bundled => Some(BackendChoice::Bundled),
             CodexSource::ApprovedRemote => None,
@@ -345,7 +434,10 @@ mod tests {
 
     fn host() -> InternalCodexHost {
         InternalCodexHost::new(
-            CodexSource::CompatibleInstalled,
+            OptionalFeatureSettings {
+                codex_source: nickel_core::optional_features::CodexSource::CompatibleInstalled,
+                ..OptionalFeatureSettings::default()
+            },
             crate::window_preview::semantic_theme_from_palette(
                 nickel_core::theme::ThemePalette::from_appearance(Default::default()),
             ),
@@ -449,5 +541,21 @@ mod tests {
         assert_eq!(runtime.len(), 1);
         assert!(runtime.application::<TestApp>(foreign).is_some());
         assert!(host.surface_ids().next().is_none());
+    }
+
+    #[test]
+    fn hidden_project_menu_retains_controller_host_without_presentation_storage() {
+        let mut runtime = InternalUiRuntime::default();
+        let menu = runtime.insert(TestApp, placement(InternalSurfaceRole::Overlay), 1.0);
+        let mut host = host();
+        host.project_menu = Some(menu);
+
+        assert!(runtime.is_visible(menu));
+        assert!(host.set_project_menu_visible(&mut runtime, false));
+        assert!(!runtime.is_visible(menu));
+        assert!(runtime.application::<TestApp>(menu).is_some());
+        assert!(!host.set_project_menu_visible(&mut runtime, false));
+        assert!(host.set_project_menu_visible(&mut runtime, true));
+        assert!(runtime.application::<TestApp>(menu).is_some());
     }
 }

@@ -860,13 +860,32 @@ impl NickelSession {
         }
         self.internal_codex = codex_enabled.then(|| {
             crate::internal_codex::InternalCodexHost::new(
-                feature_settings.codex_source,
+                feature_settings.clone(),
                 shell.semantic_theme(),
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("/")),
             )
         });
         self.internal_shell = Some(shell);
         self.reconcile_internal_shell_outputs();
+        if codex_enabled {
+            let outputs = self.internal_outputs();
+            let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            let placement =
+                internal_codex_project_menu_placement(None, &outputs, fallback.as_deref());
+            if let Some(mut host) = self.internal_codex.take() {
+                match host.ensure_project_menu(&mut self.internal_ui, placement) {
+                    Ok(_) => {
+                        host.set_project_menu_visible(&mut self.internal_ui, false);
+                        if let Some(shell) = self.internal_shell.as_mut() {
+                            host.sync_shell_projection(&self.internal_ui, shell);
+                        }
+                    }
+                    Err(error) => tracing::warn!(%error, "could not start Codex project discovery"),
+                }
+                self.internal_codex = Some(host);
+            }
+            self.schedule_internal_shell_deadline();
+        }
         Ok(())
     }
 
@@ -1084,9 +1103,9 @@ impl NickelSession {
                 if let Err(error) = self.show_internal_codex_project_menu(placement) {
                     tracing::warn!(%error, "could not host Codex project menu internally");
                 }
-            } else if let Some(mut host) = self.internal_codex.take() {
+            } else if let Some(host) = self.internal_codex.take() {
                 if let Some(menu) = host.project_menu() {
-                    host.close(&mut self.internal_ui, menu);
+                    self.internal_ui.set_visible(menu, false);
                 }
                 self.internal_codex = Some(host);
             }
@@ -1127,12 +1146,19 @@ impl NickelSession {
                     tracing::warn!(%error, "could not service internal Codex request");
                     Vec::new()
                 });
+            let projection_changed = self
+                .internal_shell
+                .as_mut()
+                .is_some_and(|shell| codex.sync_shell_projection(&self.internal_ui, shell));
             self.internal_codex = Some(codex);
             for surface in &opened {
                 self.register_internal_application(*surface);
             }
             self.refresh_internal_application_metadata();
-            if !changed.is_empty() || !opened.is_empty() {
+            if projection_changed {
+                self.sync_internal_shell();
+            }
+            if !changed.is_empty() || !opened.is_empty() || projection_changed {
                 self.schedule_internal_ui_frame();
             }
         }
@@ -1182,6 +1208,7 @@ impl NickelSession {
         let result = host.ensure_project_menu(&mut self.internal_ui, placement);
         self.internal_codex = Some(host);
         if let Ok(id) = result {
+            self.internal_ui.set_visible(id, true);
             self.focus_internal_surface(id);
         }
         result
