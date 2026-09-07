@@ -281,9 +281,17 @@ impl InternalShellCoordinator {
             outcome.visibility_changed = true;
             outcome.redraw.push(SurfaceRole::Screenshot);
         }
+        self.deadline_changes(&outcome, &visibility)
+    }
+
+    fn deadline_changes(
+        &self,
+        outcome: &crate::live_shell::ShellDeadlineOutcome,
+        visibility: &[bool],
+    ) -> Vec<InternalSurfaceId> {
         self.entries
             .iter()
-            .zip(visibility)
+            .zip(visibility.iter().copied())
             .filter(|(surface, was_visible)| {
                 self.shell.surface_visible(surface.role) != *was_visible
                     || outcome.redraw.contains(&surface.role)
@@ -1073,11 +1081,23 @@ mod tests {
                 .commands_copied
                 > 0
         );
-        assert!(
-            !coordinator
-                .poll(Instant::now() + std::time::Duration::from_secs(61))
-                .contains(&desktop)
+        // Exercise the production deadline-to-surface mapping separately from
+        // native desktop directory/icon polls, whose independent 250 ms
+        // deadlines can legitimately request a desktop repaint.
+        let visibility = coordinator
+            .entries
+            .iter()
+            .map(|surface| coordinator.visible(surface.id))
+            .collect::<Vec<_>>();
+        let changes = coordinator.deadline_changes(
+            &crate::live_shell::ShellDeadlineOutcome {
+                redraw: vec![SurfaceRole::Panel],
+                visibility_changed: true,
+                ..Default::default()
+            },
+            &visibility,
         );
+        assert_eq!(changes, vec![left_panel, right_panel]);
     }
 
     #[test]
