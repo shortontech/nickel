@@ -36,6 +36,16 @@ struct PresentedSurface {
     dirty: bool,
 }
 
+fn output_local_location(
+    geometry: (i32, i32, u32, u32),
+    output_origin: Point<i32, Logical>,
+) -> (f64, f64) {
+    (
+        f64::from(geometry.0 - output_origin.x),
+        f64::from(geometry.1 - output_origin.y),
+    )
+}
+
 /// Session-owned applications and their compositor presentation state.
 #[derive(Default)]
 pub struct InternalUiRuntime {
@@ -154,10 +164,7 @@ impl InternalUiRuntime {
                 let buffer = self.render_buffer(id)?;
                 MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
-                    (
-                        f64::from(placement.geometry.0 - output_origin.x),
-                        f64::from(placement.geometry.1 - output_origin.y),
-                    ),
+                    output_local_location(placement.geometry, output_origin),
                     &buffer,
                     None,
                     None,
@@ -218,5 +225,15 @@ mod tests {
         let id = runtime.insert(Label, placement(None), 1.0);
         assert_eq!(runtime.ids_for_output("DP-1").next(), Some(id));
         assert_eq!(runtime.ids_for_output("HDMI-A-1").next(), Some(id));
+    }
+
+    #[test]
+    fn global_placement_is_translated_to_output_local_logical_coordinates() {
+        let origin = Point::<i32, Logical>::from((1920, -120));
+
+        assert_eq!(
+            output_local_location((1936, -88, 480, 64), origin),
+            (16.0, 32.0)
+        );
     }
 }

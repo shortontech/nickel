@@ -2601,6 +2601,22 @@ impl NickelSession {
                 peek_elements.append(&mut elements);
                 elements = peek_elements;
             }
+            if let Some(output_geometry) = self.space.output_geometry(&output) {
+                // Internal Nickel surfaces use global logical placement, just
+                // like Space elements. Translate them to this output's local
+                // origin before handing them to the DRM compositor. DRM
+                // elements are front-to-back, so splice the internal overlay
+                // ahead of the Wayland scene (and its peek composition), as
+                // the nested backend's separate overlay pass does. Output
+                // scale is then applied by DrmOutput to these logical bounds;
+                // each memory buffer retains the scale used to rasterize it.
+                let internal_elements = self
+                    .internal_ui
+                    .render_elements(&mut renderer, &output.name(), output_geometry.loc)
+                    .into_iter()
+                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                elements.splice(0..0, internal_elements);
+            }
             if !self.locked && self.shell_recovery_visible() {
                 let recovery_size = output
                     .current_mode()
