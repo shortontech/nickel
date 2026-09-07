@@ -30,6 +30,7 @@ backend-udev = [
 [dependencies]
 image.workspace = true
 jiff.workspace = true
+sha2.workspace = true
 nickel-ui = { path = "../nickel-ui" }
 nickel-core = { path = "../nickel-core" }
 nickel-file = { path = "../nickel-file" }
@@ -105,7 +106,6 @@ windows = { workspace = true, features = [
 
 [dev-dependencies]
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
-sha2.workspace = true
 smithay-client-toolkit = "0.20.0"
 tempfile = "3.25.0"
 toml.workspace = true

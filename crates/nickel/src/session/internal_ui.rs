@@ -1,6 +1,10 @@
 //! Compositor ownership for Nickel UI applications which do not have a Wayland surface.
 
-use std::{collections::BTreeMap, time::Instant};
+use std::{
+    collections::{BTreeMap, HashMap},
+    hash::Hash,
+    time::Instant,
+};
 
 use nickel_ui::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
@@ -10,6 +14,7 @@ use nickel_ui::{
 };
 
 use super::backend::InternalUiRendererMode;
+use sha2::{Digest, Sha256};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -103,6 +108,25 @@ pub struct InternalUiRendererDiagnostics {
     pub fallback_primitive_count: usize,
     pub fallback_text_count: usize,
     pub fallback_image_count: usize,
+    /// Host-side texture buffers allocated for image resources.
+    pub image_allocations: u64,
+    /// Image buffers made available for a renderer upload. A cache hit reuses
+    /// the same Smithay buffer id and therefore does not increment this value.
+    pub image_uploads: u64,
+    pub image_cache_hits: u64,
+    pub image_cache_misses: u64,
+    pub image_cache_evictions: u64,
+    pub image_cache_entries: usize,
+    pub image_cache_bytes: usize,
+    /// Host-side texture buffers allocated for rasterized text resources.
+    pub text_allocations: u64,
+    /// Rasterized text buffers made available for a renderer upload.
+    pub text_uploads: u64,
+    pub text_cache_hits: u64,
+    pub text_cache_misses: u64,
+    pub text_cache_evictions: u64,
+    pub text_cache_entries: usize,
+    pub text_cache_bytes: usize,
 }
 
 /// Nickel display-list adapter for Smithay's renderer element API.
@@ -118,6 +142,125 @@ pub struct SmithayFrameRenderer {
     mode: InternalUiPresentationMode,
     diagnostics: InternalUiRendererDiagnostics,
     renderer_mode: InternalUiRendererMode,
+    image_cache: TextureCache<ImageTextureKey>,
+    text_cache: TextureCache<TextTextureKey>,
+}
+
+#[derive(Clone)]
+struct CachedTexture {
+    buffer: MemoryRenderBuffer,
+    width: u32,
+    height: u32,
+}
+
+struct TextureCacheEntry {
+    texture: CachedTexture,
+    bytes: usize,
+    last_used: u64,
+}
+
+struct TextureCache<K> {
+    entries: HashMap<K, TextureCacheEntry>,
+    bytes: usize,
+    clock: u64,
+    entry_limit: usize,
+    byte_limit: usize,
+}
+
+impl<K: Clone + Eq + Hash> TextureCache<K> {
+    fn new(entry_limit: usize, byte_limit: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            bytes: 0,
+            clock: 0,
+            entry_limit,
+            byte_limit,
+        }
+    }
+
+    fn get(&mut self, key: &K) -> Option<CachedTexture> {
+        self.clock = self.clock.saturating_add(1);
+        let entry = self.entries.get_mut(key)?;
+        entry.last_used = self.clock;
+        Some(entry.texture.clone())
+    }
+
+    /// Inserts a texture and returns the number of least-recently-used entries
+    /// evicted to honor both resource and byte bounds.
+    fn insert(&mut self, key: K, texture: CachedTexture, bytes: usize) -> u64 {
+        self.clock = self.clock.saturating_add(1);
+        if bytes > self.byte_limit {
+            return 0;
+        }
+        if let Some(replaced) = self.entries.remove(&key) {
+            self.bytes = self.bytes.saturating_sub(replaced.bytes);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.entries.insert(
+            key,
+            TextureCacheEntry {
+                texture,
+                bytes,
+                last_used: self.clock,
+            },
+        );
+        let mut evictions = 0_u64;
+        while self.entries.len() > self.entry_limit || self.bytes > self.byte_limit {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            let removed = self.entries.remove(&oldest);
+            self.bytes = self
+                .bytes
+                .saturating_sub(removed.map_or(0, |entry| entry.bytes));
+            evictions = evictions.saturating_add(1);
+        }
+        evictions
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ImageTextureKey {
+    id: u16,
+    generation: u64,
+    high_density: bool,
+    frame_scale: u32,
+    width: u32,
+    height: u32,
+    content_hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum TextTextureKind {
+    Plain {
+        text: String,
+        command_scale: u32,
+        color: u32,
+        align: u8,
+        bold: bool,
+        wrap: bool,
+    },
+    Styled {
+        text: String,
+        spans: Vec<nickel_ui::StyledTextSpan>,
+        command_scale: u32,
+        font_size: Option<u32>,
+        color: u32,
+        align: u8,
+    },
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TextTextureKey {
+    width: u32,
+    height: u32,
+    frame_scale: u32,
+    kind: TextTextureKind,
 }
 
 enum GpuPrimitive {
@@ -135,6 +278,10 @@ enum GpuPrimitive {
 // path as the default and fail over before a complex scene can monopolize the
 // compositor event loop.
 const MAX_GPU_ELEMENTS_PER_SURFACE: usize = 1_024;
+const IMAGE_CACHE_ENTRY_LIMIT: usize = 256;
+const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
+const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
+const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
 impl SmithayFrameRenderer {
     fn new(width: u32, height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
@@ -150,6 +297,8 @@ impl SmithayFrameRenderer {
             mode: InternalUiPresentationMode::RasterFallback,
             diagnostics: InternalUiRendererDiagnostics::default(),
             renderer_mode,
+            image_cache: TextureCache::new(IMAGE_CACHE_ENTRY_LIMIT, IMAGE_CACHE_BYTE_LIMIT),
+            text_cache: TextureCache::new(TEXT_CACHE_ENTRY_LIMIT, TEXT_CACHE_BYTE_LIMIT),
         }
     }
 
@@ -385,10 +534,13 @@ impl SmithayFrameRenderer {
                 }
                 PaintCommand::Image {
                     bounds,
+                    id,
+                    generation,
                     image,
                     high_density,
                     ..
                 } => {
+                    let selected_high_density = high_density.is_some() && frame.scale_factor >= 1.5;
                     let image = high_density
                         .as_ref()
                         .filter(|_| frame.scale_factor >= 1.5)
@@ -417,21 +569,54 @@ impl SmithayFrameRenderer {
                         )
                             .into(),
                     );
+                    let key = ImageTextureKey {
+                        id: *id,
+                        generation: *generation,
+                        high_density: selected_high_density,
+                        frame_scale: frame.scale_factor.to_bits(),
+                        width: image.width(),
+                        height: image.height(),
+                        content_hash: content_hash(image.as_raw()),
+                    };
+                    let texture = if let Some(texture) = self.image_cache.get(&key) {
+                        self.diagnostics.image_cache_hits =
+                            self.diagnostics.image_cache_hits.saturating_add(1);
+                        texture
+                    } else {
+                        self.diagnostics.image_cache_misses =
+                            self.diagnostics.image_cache_misses.saturating_add(1);
+                        self.diagnostics.image_allocations =
+                            self.diagnostics.image_allocations.saturating_add(1);
+                        self.diagnostics.image_uploads =
+                            self.diagnostics.image_uploads.saturating_add(1);
+                        let texture = CachedTexture {
+                            buffer: MemoryRenderBuffer::from_slice(
+                                image.as_raw(),
+                                Fourcc::Abgr8888,
+                                (image.width() as i32, image.height() as i32),
+                                1,
+                                Transform::Normal,
+                                None,
+                            ),
+                            width: image.width(),
+                            height: image.height(),
+                        };
+                        let bytes = texture_bytes(texture.width, texture.height);
+                        self.diagnostics.image_cache_evictions = self
+                            .diagnostics
+                            .image_cache_evictions
+                            .saturating_add(self.image_cache.insert(key, texture.clone(), bytes));
+                        texture
+                    };
                     self.primitives.push(GpuPrimitive::Texture {
                         rect,
                         source,
-                        buffer: MemoryRenderBuffer::from_slice(
-                            image.as_raw(),
-                            Fourcc::Abgr8888,
-                            (image.width() as i32, image.height() as i32),
-                            1,
-                            Transform::Normal,
-                            None,
-                        ),
+                        buffer: texture.buffer,
                     });
                 }
             }
         }
+        self.refresh_cache_diagnostics();
         self.raster = None;
     }
 
@@ -448,6 +633,18 @@ impl SmithayFrameRenderer {
         if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
             return;
         }
+        let key = text_texture_key(command, bounds, scale);
+        if let Some(texture) = self.text_cache.get(&key) {
+            self.diagnostics.text_cache_hits = self.diagnostics.text_cache_hits.saturating_add(1);
+            let source = text_source_rect(rect, bounds, scale);
+            self.primitives.push(GpuPrimitive::Texture {
+                rect,
+                source,
+                buffer: texture.buffer,
+            });
+            return;
+        }
+        self.diagnostics.text_cache_misses = self.diagnostics.text_cache_misses.saturating_add(1);
         let mut local = command.clone();
         match &mut local {
             PaintCommand::Text { bounds, .. } | PaintCommand::StyledText { bounds, .. } => {
@@ -465,21 +662,8 @@ impl SmithayFrameRenderer {
             bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
         }
         let (physical_width, physical_height) = self.text_software.size();
-        let source = Rectangle::new(
-            (
-                f64::from(rect.origin.x - bounds.origin.x) * f64::from(scale),
-                f64::from(rect.origin.y - bounds.origin.y) * f64::from(scale),
-            )
-                .into(),
-            (
-                f64::from(rect.size.width) * f64::from(scale),
-                f64::from(rect.size.height) * f64::from(scale),
-            )
-                .into(),
-        );
-        self.primitives.push(GpuPrimitive::Texture {
-            rect,
-            source,
+        let source = text_source_rect(rect, bounds, scale);
+        let texture = CachedTexture {
             buffer: MemoryRenderBuffer::from_slice(
                 &bytes,
                 Fourcc::Abgr8888,
@@ -488,7 +672,31 @@ impl SmithayFrameRenderer {
                 Transform::Normal,
                 None,
             ),
+            width: physical_width,
+            height: physical_height,
+        };
+        self.diagnostics.text_allocations = self.diagnostics.text_allocations.saturating_add(1);
+        self.diagnostics.text_uploads = self.diagnostics.text_uploads.saturating_add(1);
+        self.diagnostics.text_cache_evictions = self
+            .diagnostics
+            .text_cache_evictions
+            .saturating_add(self.text_cache.insert(
+                key,
+                texture.clone(),
+                texture_bytes(physical_width, physical_height),
+            ));
+        self.primitives.push(GpuPrimitive::Texture {
+            rect,
+            source,
+            buffer: texture.buffer,
         });
+    }
+
+    fn refresh_cache_diagnostics(&mut self) {
+        self.diagnostics.image_cache_entries = self.image_cache.entries.len();
+        self.diagnostics.image_cache_bytes = self.image_cache.bytes;
+        self.diagnostics.text_cache_entries = self.text_cache.entries.len();
+        self.diagnostics.text_cache_bytes = self.text_cache.bytes;
     }
 
     fn prepare_fallback(&mut self, frame: RenderFrame<'_>) -> DamageRegion {
@@ -638,6 +846,91 @@ impl FrameRenderer for SmithayFrameRenderer {
         };
         Ok(damage)
     }
+}
+
+fn content_hash(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn texture_bytes(width: u32, height: u32) -> usize {
+    (width as usize)
+        .saturating_mul(height as usize)
+        .saturating_mul(4)
+}
+
+fn text_align_key(align: nickel_ui::TextAlign) -> u8 {
+    match align {
+        nickel_ui::TextAlign::Start => 0,
+        nickel_ui::TextAlign::Center => 1,
+        nickel_ui::TextAlign::End => 2,
+    }
+}
+
+fn text_texture_key(
+    command: &PaintCommand,
+    bounds: nickel_ui::Rect,
+    frame_scale: f32,
+) -> TextTextureKey {
+    let kind = match command {
+        PaintCommand::Text {
+            text,
+            scale,
+            color,
+            align,
+            bold,
+            wrap,
+            ..
+        } => TextTextureKind::Plain {
+            text: text.clone(),
+            command_scale: scale.to_bits(),
+            color: *color,
+            align: text_align_key(*align),
+            bold: *bold,
+            wrap: *wrap,
+        },
+        PaintCommand::StyledText {
+            text,
+            spans,
+            scale,
+            font_size,
+            color,
+            align,
+            ..
+        } => TextTextureKind::Styled {
+            text: text.clone(),
+            spans: spans.clone(),
+            command_scale: scale.to_bits(),
+            font_size: font_size.map(f32::to_bits),
+            color: *color,
+            align: text_align_key(*align),
+        },
+        _ => unreachable!("text texture key receives a text command"),
+    };
+    TextTextureKey {
+        width: bounds.size.width.to_bits(),
+        height: bounds.size.height.to_bits(),
+        frame_scale: frame_scale.to_bits(),
+        kind,
+    }
+}
+
+fn text_source_rect(
+    rect: nickel_ui::Rect,
+    bounds: nickel_ui::Rect,
+    scale: f32,
+) -> Rectangle<f64, Logical> {
+    Rectangle::new(
+        (
+            f64::from(rect.origin.x - bounds.origin.x) * f64::from(scale),
+            f64::from(rect.origin.y - bounds.origin.y) * f64::from(scale),
+        )
+            .into(),
+        (
+            f64::from(rect.size.width) * f64::from(scale),
+            f64::from(rect.size.height) * f64::from(scale),
+        )
+            .into(),
+    )
 }
 
 fn intersect(left: nickel_ui::Rect, right: nickel_ui::Rect) -> Option<nickel_ui::Rect> {
@@ -1721,5 +2014,131 @@ mod tests {
         );
         assert!(renderer.raster.is_none());
         assert_eq!(renderer.diagnostics().fallback_image_count, 0);
+    }
+
+    #[test]
+    fn unchanged_text_and_image_frames_reuse_buffers_without_uploads() {
+        use std::sync::Arc;
+
+        let commands = [
+            PaintCommand::Text {
+                bounds: nickel_ui::Rect::new(0.0, 0.0, 30.0, 12.0),
+                text: "Nickel".into(),
+                scale: 1.0,
+                color: 0x336699,
+                align: nickel_ui::TextAlign::Start,
+                bold: false,
+                wrap: false,
+            },
+            PaintCommand::Image {
+                bounds: nickel_ui::Rect::new(30.0, 0.0, 8.0, 8.0),
+                id: 7,
+                generation: 3,
+                image: Arc::new(image::RgbaImage::from_pixel(
+                    8,
+                    8,
+                    image::Rgba([1, 2, 3, 255]),
+                )),
+                high_density: None,
+            },
+        ];
+        let mut renderer = SmithayFrameRenderer::new(40, 16, 1.0, InternalUiRendererMode::Gpu);
+        for generation in 1..=2 {
+            renderer
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (40, 16),
+                    scale_factor: 1.0,
+                    generation,
+                })
+                .unwrap();
+        }
+
+        let diagnostics = renderer.diagnostics();
+        assert_eq!(diagnostics.text_allocations, 1);
+        assert_eq!(diagnostics.text_uploads, 1);
+        assert_eq!(diagnostics.text_cache_misses, 1);
+        assert_eq!(diagnostics.text_cache_hits, 1);
+        assert_eq!(diagnostics.image_allocations, 1);
+        assert_eq!(diagnostics.image_uploads, 1);
+        assert_eq!(diagnostics.image_cache_misses, 1);
+        assert_eq!(diagnostics.image_cache_hits, 1);
+        assert_eq!(diagnostics.text_cache_entries, 1);
+        assert_eq!(diagnostics.image_cache_entries, 1);
+    }
+
+    #[test]
+    fn resource_cache_eviction_bounds_entry_and_byte_churn() {
+        fn texture(width: u32, height: u32) -> CachedTexture {
+            CachedTexture {
+                buffer: MemoryRenderBuffer::from_slice(
+                    &vec![0; texture_bytes(width, height)],
+                    Fourcc::Abgr8888,
+                    (width as i32, height as i32),
+                    1,
+                    Transform::Normal,
+                    None,
+                ),
+                width,
+                height,
+            }
+        }
+
+        let mut cache = TextureCache::new(2, 8);
+        assert_eq!(cache.insert(1_u8, texture(1, 1), 4), 0);
+        assert_eq!(cache.insert(2, texture(1, 1), 4), 0);
+        assert!(cache.get(&1).is_some(), "access updates LRU order");
+        assert_eq!(cache.insert(3, texture(1, 1), 4), 1);
+        assert!(cache.get(&2).is_none(), "least recently used entry evicted");
+        assert_eq!(cache.entries.len(), 2);
+        assert_eq!(cache.bytes, 8);
+
+        assert_eq!(cache.insert(4, texture(2, 1), 8), 2);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, 8);
+        assert!(cache.get(&4).is_some());
+
+        // Oversized resources remain usable for the current frame but cannot
+        // displace the bounded reusable working set.
+        assert_eq!(cache.insert(5, texture(3, 1), 12), 0);
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.bytes, 8);
+    }
+
+    #[test]
+    fn image_cache_key_rejects_same_identity_with_changed_content_or_scale() {
+        use std::sync::Arc;
+
+        let make = |value, scale| {
+            (
+                [PaintCommand::Image {
+                    bounds: nickel_ui::Rect::new(0.0, 0.0, 2.0, 2.0),
+                    id: 1,
+                    generation: 1,
+                    image: Arc::new(image::RgbaImage::from_pixel(
+                        2,
+                        2,
+                        image::Rgba([value, 0, 0, 255]),
+                    )),
+                    high_density: None,
+                }],
+                scale,
+            )
+        };
+        let mut renderer = SmithayFrameRenderer::new(4, 4, 1.0, InternalUiRendererMode::Gpu);
+        for (commands, scale) in [make(1, 1.0), make(2, 1.0), make(2, 2.0)] {
+            renderer
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (4, 4),
+                    scale_factor: scale,
+                    generation: 1,
+                })
+                .unwrap();
+        }
+        let diagnostics = renderer.diagnostics();
+        assert_eq!(diagnostics.image_cache_misses, 3);
+        assert_eq!(diagnostics.image_uploads, 3);
+        assert_eq!(diagnostics.image_cache_entries, 3);
     }
 }
