@@ -323,6 +323,27 @@ const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
 const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
+fn estimated_rounded_elements(rect: nickel_ui::Rect, radius: f32, top_only: bool) -> usize {
+    let rows = rect.size.height.ceil().max(1.0) as usize;
+    let radius = radius
+        .max(0.0)
+        .min(rect.size.width / 2.0)
+        .min(rect.size.height / 2.0);
+    if radius < 0.5 {
+        return 1;
+    }
+    let corner_rows = radius.ceil() as usize;
+    let corner_rows = if top_only {
+        corner_rows
+    } else {
+        corner_rows.saturating_mul(2)
+    };
+    // Corner strips plus the coalesced rectangular middle. This is a
+    // conservative upper bound because pixel-centre sampling can turn an
+    // edge row into part of the middle.
+    rows.min(corner_rows.saturating_add(1))
+}
+
 struct SharedTextureCaches {
     images: Rc<RefCell<TextureCache<ImageTextureKey>>>,
     text: Rc<RefCell<TextureCache<TextTextureKey>>>,
@@ -428,9 +449,11 @@ impl SmithayFrameRenderer {
                 | PaintCommand::Image { .. }
                 | PaintCommand::Text { .. }
                 | PaintCommand::StyledText { .. } => 1,
-                PaintCommand::TopRoundedFill { rect, .. }
-                | PaintCommand::RoundedFill { rect, .. } => {
-                    rect.size.height.ceil().max(1.0) as usize
+                PaintCommand::TopRoundedFill { rect, radius, .. } => {
+                    estimated_rounded_elements(*rect, *radius, true)
+                }
+                PaintCommand::RoundedFill { rect, radius, .. } => {
+                    estimated_rounded_elements(*rect, *radius, false)
                 }
                 PaintCommand::Gradient { rect, gradient } => match gradient.axis {
                     GradientAxis::Horizontal => rect.size.width.ceil().max(1.0) as usize,
@@ -473,9 +496,15 @@ impl SmithayFrameRenderer {
             self.push_solid(rect, color, clip);
             return;
         }
-        // One logical-pixel strip per row gives the same pixel-centre circle
-        // rule as SoftwareRenderer while keeping the result renderer-native.
+        // Only corner rows need individual strips. Coalesce the rectangular
+        // middle into one element so a large rounded launcher background does
+        // not exceed the GPU element budget merely because it is tall. That
+        // otherwise activates two full-output software fallback buffers and
+        // leaves the process allocator's resident high-water mark behind when
+        // the transient surface closes.
         let rows = rect.size.height.ceil().max(1.0) as u32;
+        let mut middle_start = None::<f32>;
+        let mut middle_end = 0.0_f32;
         for row in 0..rows {
             let y = row as f32;
             let height = (rect.size.height - y).clamp(0.0, 1.0);
@@ -493,12 +522,29 @@ impl SmithayFrameRenderer {
             let inset = corner_y
                 .map(|dy| radius - (radius * radius - dy * dy).max(0.0).sqrt())
                 .unwrap_or(0.0);
+            if inset == 0.0 {
+                middle_start.get_or_insert(y);
+                middle_end = y + height;
+                continue;
+            }
             self.push_solid(
                 nickel_ui::Rect::new(
                     rect.origin.x + inset,
                     rect.origin.y + y,
                     (rect.size.width - inset * 2.0).max(0.0),
                     height,
+                ),
+                color,
+                clip,
+            );
+        }
+        if let Some(y) = middle_start {
+            self.push_solid(
+                nickel_ui::Rect::new(
+                    rect.origin.x,
+                    rect.origin.y + y,
+                    rect.size.width,
+                    middle_end - y,
                 ),
                 color,
                 clip,
@@ -2438,18 +2484,18 @@ mod tests {
     }
 
     #[test]
-    fn rounded_fill_stays_on_gpu_as_scanline_solids() {
+    fn full_output_rounded_fill_coalesces_middle_and_stays_on_gpu() {
         let commands = [PaintCommand::RoundedFill {
-            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
+            rect: nickel_ui::Rect::new(0.0, 0.0, 1920.0, 1080.0),
             color: 0x336699,
-            radius: 4.0,
+            radius: 8.0,
         }];
-        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0, InternalUiRendererMode::Gpu);
+        let mut renderer = SmithayFrameRenderer::new(1920, 1080, 1.0, InternalUiRendererMode::Gpu);
 
         renderer
             .render_frame(RenderFrame {
                 commands: &commands,
-                logical_size: (20, 12),
+                logical_size: (1920, 1080),
                 scale_factor: 1.0,
                 generation: 1,
             })
@@ -2457,23 +2503,26 @@ mod tests {
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
         assert!(renderer.raster.is_none());
-        assert_eq!(renderer.primitives.len(), 12);
+        assert_eq!(renderer.primitives.len(), 17);
         let GpuPrimitive::Solid(first, _) = &renderer.primitives[0] else {
             panic!("rounded row should be a solid")
         };
-        let GpuPrimitive::Solid(middle, _) = &renderer.primitives[6] else {
-            panic!("rounded row should be a solid")
-        };
-        assert!(first.size.width < 20.0);
-        assert_eq!(middle.size.width, 20.0);
+        assert!(first.size.width < 1920.0);
+        assert!(renderer.primitives.iter().any(|primitive| matches!(
+            primitive,
+            GpuPrimitive::Solid(rect, _) if rect.size.width == 1920.0 && rect.size.height > 1.0
+        )));
     }
 
     #[test]
     fn element_heavy_scene_uses_bounded_fallback() {
-        let commands = [PaintCommand::RoundedFill {
+        let commands = [PaintCommand::Gradient {
             rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as f32),
-            color: 0x336699,
-            radius: 4.0,
+            gradient: LinearGradient {
+                start: 0xff336699,
+                end: 0xff112233,
+                axis: GradientAxis::Vertical,
+            },
         }];
         let mut renderer = SmithayFrameRenderer::new(
             20,
