@@ -160,10 +160,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     state.start_xwayland();
 
-    println!(
-        "nickel compatibility control listening on {}",
-        state.socket_name.to_string_lossy()
-    );
+    if arguments.test_control {
+        let control = std::env::var_os("NICKEL_SESSION_CONTROL")
+            .expect("explicit test control initialized without a socket path");
+        println!(
+            "nickel test control listening on {}",
+            control.to_string_lossy()
+        );
+    }
     // Publishing the test capability is also the readiness barrier for the
     // external acceptance harness. Do not expose it until every backend and
     // internal-shell source has been installed and the event loop can service

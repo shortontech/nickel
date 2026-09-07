@@ -140,8 +140,11 @@ Live compositor tests may add `--test-control` alongside `--backend winit`. This
 capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
 inject semantic keyboard and pointer events through the same Smithay input path as physical
 devices. The flag is rejected by the direct backend and is disabled by default.
+Ordinary nested and native sessions do not bind a compatibility control socket or export a
+capability token; compositor-owned shell and file UI use typed in-process authority instead.
 
-With the session-issued `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` environment variables,
+With the `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` variables issued only by an explicit
+`--test-control` session,
 `nickel-test-input` can inspect registered windows and inject individual production input events:
 
 ```bash

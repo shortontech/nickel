@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU8, AtomicU32, Ordering},
+        atomic::{AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -432,6 +432,13 @@ struct InternalShellTimer {
     counters: InternalShellTimerCounters,
 }
 
+struct CompatibilityControlState {
+    protocol_token: String,
+    authenticated_shell_pids: HashSet<u32>,
+    expected_shell_pid: u32,
+    socket_path: PathBuf,
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -503,15 +510,16 @@ pub struct NickelSession {
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
     pending_launch_observations: Vec<PendingLaunchObservation>,
-    protocol_token: String,
-    authenticated_shell_pids: HashSet<u32>,
+    /// Legacy datagram compatibility is absent from normal compositor-owned
+    /// sessions. It exists only when an explicit external-control mode asks
+    /// for it.
+    compatibility_control: Option<CompatibilityControlState>,
     shell_surface_identities: HashMap<String, ShellSurfaceIdentity>,
     registered_shell_role_slots: Vec<RegisteredShellRole>,
     last_logged_shell_readiness: Option<nickel_session_protocol::ShellReadinessSnapshot>,
     test_control_enabled: bool,
     #[cfg(target_os = "linux")]
     pub(crate) test_controller: Option<crate::session::test_input::TestController>,
-    expected_shell_pid: Arc<AtomicU32>,
     pub launcher_show_requested_at: Option<std::time::Instant>,
     pub desktop_windows: Vec<Window>,
     pub panel_windows: Vec<Window>,
@@ -578,7 +586,6 @@ pub struct NickelSession {
     pub output_capture_request_id: Option<u64>,
     pub shell_failure_count: u8,
     pub(crate) recovery_ui: crate::session::recovery_ui::RecoveryUi,
-    control_socket_path: PathBuf,
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
     deferred_focus_restore: channel::Sender<WindowId>,
@@ -1324,8 +1331,9 @@ impl NickelSession {
     }
 
     pub(crate) fn is_authenticated_shell_pid(&self, pid: u32) -> bool {
-        self.expected_shell_pid.load(Ordering::Acquire) == pid
-            && self.authenticated_shell_pids.contains(&pid)
+        self.compatibility_control.as_ref().is_some_and(|control| {
+            control.expected_shell_pid == pid && control.authenticated_shell_pids.contains(&pid)
+        })
     }
 
     pub fn new(
@@ -1399,18 +1407,18 @@ impl NickelSession {
         // Outputs become views of a part of the Space and can be rendered via Space::render_output.
         let space = Space::default();
 
-        let protocol_token = format!(
-            "{:x}-{:x}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos()
-        );
-        // SAFETY: session initialization is single-threaded and precedes shell launch.
-        unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
-        let control_socket_path = Self::init_control_socket(event_loop);
-        if test_control_enabled {
+        let compatibility_control = if test_control_enabled {
+            let protocol_token = format!(
+                "{:x}-{:x}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            // SAFETY: session initialization is single-threaded and precedes clients.
+            unsafe { std::env::set_var("NICKEL_SESSION_TOKEN", &protocol_token) };
+            let control_socket_path = Self::init_control_socket(event_loop);
             let control_socket_name = control_socket_path
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -1419,10 +1427,22 @@ impl NickelSession {
                 .with_file_name(format!("nickel-shell-test-{control_socket_name}"));
             // SAFETY: session initialization is single-threaded and precedes shell launch.
             unsafe { std::env::set_var("NICKEL_SHELL_TEST_CONTROL", shell_test_path) };
+            Some(CompatibilityControlState {
+                protocol_token,
+                authenticated_shell_pids: HashSet::new(),
+                expected_shell_pid: 0,
+                socket_path: control_socket_path,
+            })
         } else {
-            // SAFETY: session initialization is single-threaded and precedes shell launch.
-            unsafe { std::env::remove_var("NICKEL_SHELL_TEST_CONTROL") };
-        }
+            // Do not let inherited compatibility credentials accidentally
+            // become authority in a normal compositor-owned session.
+            unsafe {
+                std::env::remove_var("NICKEL_SESSION_CONTROL");
+                std::env::remove_var("NICKEL_SESSION_TOKEN");
+                std::env::remove_var("NICKEL_SHELL_TEST_CONTROL");
+            }
+            None
+        };
         let secure_storage_state = Arc::new(AtomicU8::new(
             crate::session::login_services::SecureStorageState::Starting as u8,
         ));
@@ -1511,15 +1531,13 @@ impl NickelSession {
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
             pending_launch_observations: Vec::new(),
-            protocol_token,
-            authenticated_shell_pids: HashSet::new(),
+            compatibility_control,
             shell_surface_identities: HashMap::new(),
             registered_shell_role_slots: Vec::new(),
             last_logged_shell_readiness: None,
             test_control_enabled,
             #[cfg(target_os = "linux")]
             test_controller: None,
-            expected_shell_pid: Arc::new(AtomicU32::new(0)),
             launcher_show_requested_at: None,
             desktop_windows: Vec::new(),
             panel_windows: Vec::new(),
@@ -1587,7 +1605,6 @@ impl NickelSession {
             output_capture_request_id: None,
             shell_failure_count: 0,
             recovery_ui: crate::session::recovery_ui::RecoveryUi::new(),
-            control_socket_path,
             secure_storage_state,
             secure_storage_retry,
             deferred_focus_restore,
@@ -5451,7 +5468,9 @@ fn restored_drag_content_geometry(
 
 impl Drop for NickelSession {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.control_socket_path);
+        if let Some(control) = &self.compatibility_control {
+            let _ = std::fs::remove_file(&control.socket_path);
+        }
     }
 }
 
@@ -5933,6 +5952,30 @@ mod protocol_tests {
         let after_idle = session.internal_shell_timer_counters();
         assert!(after_idle.polls.saturating_sub(settled.polls) <= 1);
         assert_eq!(after_idle.redraw_requests, settled.redraw_requests);
+    }
+
+    #[test]
+    fn ordinary_session_has_no_external_control_or_pid_authority() {
+        let mut event_loop = EventLoop::try_new().unwrap();
+        let display = Display::new().unwrap();
+        let session = super::NickelSession::new(&mut event_loop, display, false);
+
+        assert!(session.compatibility_control.is_none());
+        assert!(!session.is_authenticated_shell_pid(std::process::id()));
+    }
+
+    #[test]
+    fn explicit_test_control_owns_compatibility_pid_state() {
+        let (_event_loop, session) = preview_test_session();
+        let control = session
+            .compatibility_control
+            .as_ref()
+            .expect("test control should install the compatibility adapter");
+
+        assert_ne!(control.protocol_token, "");
+        assert_eq!(control.expected_shell_pid, 0);
+        assert!(control.authenticated_shell_pids.is_empty());
+        assert!(control.socket_path.exists());
     }
 
     #[test]

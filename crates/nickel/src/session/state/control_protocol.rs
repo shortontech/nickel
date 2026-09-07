@@ -111,12 +111,15 @@ impl NickelSession {
         peer_pid: u32,
     ) -> ServerMessage {
         let request_id = envelope.request_id;
-        if envelope.token != self.protocol_token {
+        let Some(control) = self.compatibility_control.as_ref() else {
+            return protocol_error(ErrorCode::Unauthorized, "external control is disabled");
+        };
+        if envelope.token != control.protocol_token {
             return protocol_error(ErrorCode::Unauthorized, "invalid session capability");
         }
         match envelope.request {
             Request::RegisterShell { pid } => {
-                let expected_pid = self.expected_shell_pid.load(Ordering::Acquire);
+                let expected_pid = control.expected_shell_pid;
                 if let Some(rejection) = shell_registration_rejection(
                     expected_pid,
                     pid,
@@ -137,11 +140,16 @@ impl NickelSession {
                         "shell process is outside the active user session",
                     );
                 }
-                if !self.authenticated_shell_pids.contains(&pid) {
+                let already_authenticated = control.authenticated_shell_pids.contains(&pid);
+                if !already_authenticated {
                     self.retire_shell_surface_roles();
                 }
-                self.authenticated_shell_pids.clear();
-                self.authenticated_shell_pids.insert(pid);
+                let control = self
+                    .compatibility_control
+                    .as_mut()
+                    .expect("control adapter exists while servicing its socket");
+                control.authenticated_shell_pids.clear();
+                control.authenticated_shell_pids.insert(pid);
                 self.shell_surface_identities.clear();
                 ServerMessage::Snapshot(self.protocol_snapshot())
             }
@@ -163,7 +171,7 @@ impl NickelSession {
             Request::Query(query) => self.handle_authority_request(query.into()),
             Request::Command(command) => {
                 if command_requires_shell_identity(&command)
-                    && !self.authenticated_shell_pids.contains(&peer_pid)
+                    && !control.authenticated_shell_pids.contains(&peer_pid)
                     && !(self.test_control_enabled && test_control_may_invoke(&command))
                 {
                     return protocol_error(
@@ -1213,11 +1221,18 @@ impl NickelSession {
                     && launchers == 1,
             };
         }
-        let expected_shell_pid = match self.expected_shell_pid.load(Ordering::Acquire) {
+        let expected_shell_pid = match self
+            .compatibility_control
+            .as_ref()
+            .map_or(0, |control| control.expected_shell_pid)
+        {
             0 => None,
             pid => Some(pid),
         };
-        let authenticated_shell_pid = self.authenticated_shell_pids.iter().copied().next();
+        let authenticated_shell_pid = self
+            .compatibility_control
+            .as_ref()
+            .and_then(|control| control.authenticated_shell_pids.iter().copied().next());
         let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
         let surfaces = self.protocol_shell_surfaces();
         let internal_surface_role = |role| {
