@@ -898,6 +898,14 @@ mod tests {
             .id;
         coordinator.scene(desktop);
         coordinator.scene(panel);
+        coordinator.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
+            crate::platform::AudioStatus {
+                available: false,
+                devices: Vec::new(),
+                volume_percent: 0,
+                muted: false,
+            },
+        ));
         let audio = crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
             available: true,
             devices: Vec::new(),
@@ -961,7 +969,7 @@ mod tests {
         coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
             windows: vec![nickel_session_protocol::WindowSnapshot {
                 id: nickel_session_protocol::WindowId(991),
-                application_id: "org.nickel.audit".into(),
+                application_id: "io.nickel.codex.audit".into(),
                 title: "Audit task".into(),
                 active: true,
                 minimized: false,
@@ -991,7 +999,7 @@ mod tests {
             .shell
             .resolve_semantic_target(
                 &nickel_session_protocol::ShellSemanticTarget::PanelApplication {
-                    application_id: "org.nickel.audit".into(),
+                    application_id: "io.nickel.codex.audit".into(),
                     output: Some("left".into()),
                     interaction: nickel_session_protocol::PointerInteraction::Hover,
                 },
