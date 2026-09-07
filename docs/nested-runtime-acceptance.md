@@ -9,13 +9,16 @@ cargo build -p nickel --no-default-features --features backend-winit \
 ```
 
 The harness creates a private `XDG_RUNTIME_DIR`, starts the unified `nickel`
-binary with the winit backend and explicit test control, waits for authenticated
-shell readiness, checks the compositor's shell-surface inventory, injects a Meta
-key press and release, samples runtime wakeup diagnostics across a two-second
-idle interval, and requests logout. Every phase has a deadline. On failure, the
-harness terminates its compositor child and removes its temporary runtime data.
+binary with the winit backend, explicit test control, and `--shell-process
+disabled`, then waits for compositor-owned shell readiness. It asserts that no
+shell PID is expected or authenticated and no `--role shell` child exists,
+checks the internal surface inventory, injects Meta and verifies that the
+internal launcher becomes visible, samples compositor CPU ticks across a
+two-second idle interval, and requests logout. Every phase has a deadline. On
+failure, the harness terminates its compositor child and removes its temporary
+runtime data.
 
 This is a live graphical acceptance check, so it requires a working host display.
-The reported idle wakeup delta is diagnostic rather than a fixed performance
-threshold: machine and renderer behavior differs, while an unbounded redraw bug
-remains immediately visible in repeated measurements and CPU profiles.
+The idle check allows up to one fully occupied CPU core across its two-second
+window (on the Linux 100 Hz process clock), a deliberately broad bound intended
+to catch an unbounded redraw loop without imposing a benchmark-grade threshold.

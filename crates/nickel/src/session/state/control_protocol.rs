@@ -1069,6 +1069,43 @@ impl NickelSession {
     }
 
     pub(crate) fn protocol_shell_surfaces(&self) -> Vec<ShellSurfaceSnapshot> {
+        if let Some(shell) = &self.internal_shell {
+            return shell
+                .surfaces()
+                .iter()
+                .filter_map(|surface| {
+                    let role = match surface.role {
+                        crate::winit_shell::SurfaceRole::Desktop => ShellRole::Desktop,
+                        crate::winit_shell::SurfaceRole::Panel => ShellRole::Panel,
+                        crate::winit_shell::SurfaceRole::Launcher => ShellRole::Launcher,
+                        crate::winit_shell::SurfaceRole::ControlCenter => ShellRole::ControlCenter,
+                        crate::winit_shell::SurfaceRole::Notification => ShellRole::Notification,
+                        crate::winit_shell::SurfaceRole::VolumeOsd => ShellRole::VolumeOsd,
+                        crate::winit_shell::SurfaceRole::WindowPreview => ShellRole::Preview,
+                        crate::winit_shell::SurfaceRole::WindowContextMenu => {
+                            ShellRole::ContextMenu
+                        }
+                        crate::winit_shell::SurfaceRole::CodexProjectMenu => ShellRole::ProjectMenu,
+                        crate::winit_shell::SurfaceRole::Lock => ShellRole::Lock,
+                        crate::winit_shell::SurfaceRole::Screenshot => ShellRole::Screenshot,
+                        crate::winit_shell::SurfaceRole::OnScreenKeyboard => {
+                            ShellRole::OnScreenKeyboard
+                        }
+                        crate::winit_shell::SurfaceRole::CodexChat => return None,
+                    };
+                    Some(ShellSurfaceSnapshot {
+                        role,
+                        geometry: shell.visible(surface.id).then_some(ProtocolGeometry {
+                            x: 0,
+                            y: 0,
+                            width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
+                            height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
+                        }),
+                        output: surface.output.clone(),
+                    })
+                })
+                .collect();
+        }
         let registry = self.windows.snapshot();
         let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         let output_names = outputs.iter().map(Output::name).collect::<Vec<_>>();
@@ -1146,6 +1183,40 @@ impl NickelSession {
     pub(crate) fn protocol_shell_readiness(
         &self,
     ) -> nickel_session_protocol::ShellReadinessSnapshot {
+        if let Some(shell) = &self.internal_shell {
+            let outputs = u16::try_from(self.space.outputs().count()).unwrap_or(u16::MAX);
+            let count = |role| {
+                u16::try_from(
+                    shell
+                        .surfaces()
+                        .iter()
+                        .filter(|surface| surface.role == role)
+                        .count(),
+                )
+                .unwrap_or(u16::MAX)
+            };
+            let desktops = count(crate::winit_shell::SurfaceRole::Desktop);
+            let panels = count(crate::winit_shell::SurfaceRole::Panel);
+            let locks = count(crate::winit_shell::SurfaceRole::Lock);
+            let launchers = count(crate::winit_shell::SurfaceRole::Launcher);
+            return nickel_session_protocol::ShellReadinessSnapshot {
+                expected_shell_pid: None,
+                authenticated_shell_pid: None,
+                outputs,
+                desktops,
+                panels,
+                locks,
+                launchers,
+                required_singletons_ready: true,
+                output_roles_ready: desktops == outputs && locks == outputs && panels > 0,
+                reserved_ordinary_windows: 0,
+                ready: outputs > 0
+                    && desktops == outputs
+                    && locks == outputs
+                    && panels > 0
+                    && launchers == 1,
+            };
+        }
         let expected_shell_pid = match self.expected_shell_pid.load(Ordering::Acquire) {
             0 => None,
             pid => Some(pid),

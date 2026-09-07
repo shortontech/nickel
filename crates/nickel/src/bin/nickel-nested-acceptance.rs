@@ -1,9 +1,9 @@
 //! Bounded live acceptance harness for Nickel's nested compositor.
 //!
 //! Build all three participating binaries, then run this binary from the same
-//! target directory. The harness uses an isolated runtime directory, captures
-//! the capability environment passed to the supervised shell, and always asks
-//! the compositor to log out before its deadline.
+//! target directory. The harness uses an isolated runtime directory, launches
+//! compositor-owned shell UI, and always asks the compositor to log out before
+//! its deadline.
 
 use std::{
     env, fs,
@@ -18,47 +18,10 @@ const DEADLINE: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 
 fn main() -> ExitCode {
-    let arguments = env::args_os().collect::<Vec<_>>();
-    if arguments
-        .get(1)
-        .is_some_and(|value| value == "--shell-bridge")
-    {
-        return bridge_shell(&arguments[2..]);
-    }
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("FAIL: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn bridge_shell(arguments: &[std::ffi::OsString]) -> ExitCode {
-    let [nickel, environment_file] = arguments else {
-        eprintln!("shell bridge requires NICKEL and ENVIRONMENT_FILE");
-        return ExitCode::FAILURE;
-    };
-    let variables = [
-        "XDG_RUNTIME_DIR",
-        "WAYLAND_DISPLAY",
-        "NICKEL_SESSION_CONTROL",
-        "NICKEL_SESSION_TOKEN",
-        "NICKEL_SHELL_TEST_CONTROL",
-        "NICKEL_SHELL_STARTUP_BARRIER",
-    ];
-    let contents = variables
-        .into_iter()
-        .filter_map(|name| env::var(name).ok().map(|value| format!("{name}={value}\n")))
-        .collect::<String>();
-    if let Err(error) = fs::write(environment_file, contents) {
-        eprintln!("could not publish nested capability environment: {error}");
-        return ExitCode::FAILURE;
-    }
-    match Command::new(nickel).args(["--role", "shell"]).status() {
-        Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
-        Err(error) => {
-            eprintln!("could not launch nested shell: {error}");
             ExitCode::FAILURE
         }
     }
@@ -85,12 +48,15 @@ fn run() -> Result<(), String> {
     let capability_file = runtime.join("shell-environment");
 
     let mut compositor = Command::new(&nickel)
-        .args(["--backend", "winit", "--test-control", "--command"])
-        .arg(&harness)
-        .arg("--shell-bridge")
-        .arg(&nickel)
-        .arg(&capability_file)
+        .args([
+            "--backend",
+            "winit",
+            "--test-control",
+            "--shell-process",
+            "disabled",
+        ])
         .env("XDG_RUNTIME_DIR", &runtime)
+        .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
         // Prefer the host X server when both host protocols are advertised.
         // This keeps the acceptance window independent of the Nickel session
@@ -174,6 +140,14 @@ fn exercise(
         thread::sleep(POLL);
     };
 
+    let readiness = checked(test_input, &environment, &["readiness"])?;
+    if !readiness.contains("expected_pid=None authenticated_pid=None") {
+        return Err(format!(
+            "internal runtime unexpectedly has shell PID authority: {readiness}"
+        ));
+    }
+    assert_no_shell_child(compositor.id())?;
+
     let surfaces = checked(test_input, &environment, &["surfaces"])?;
     for role in ["Desktop", "Panel", "Lock", "Launcher"] {
         if !surfaces.contains(role) {
@@ -182,31 +156,71 @@ fn exercise(
             ));
         }
     }
+    let before_ticks = process_ticks(compositor.id())?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
-
-    let before = diagnostics(test_input, &environment)?;
+    let toggled = checked(test_input, &environment, &["surfaces"])?;
+    let launcher = toggled
+        .lines()
+        .find(|line| line.starts_with("Launcher\t"))
+        .ok_or("internal launcher disappeared after injected Meta input")?;
+    if launcher.ends_with("hidden") {
+        return Err("injected Meta did not make the internal launcher visible".into());
+    }
     thread::sleep(Duration::from_secs(2));
-    let after = diagnostics(test_input, &environment)?;
-    let before_wakeups = json_u64(&before, "scheduled_wakeups")?;
-    let after_wakeups = json_u64(&after, "scheduled_wakeups")?;
+    let after_ticks = process_ticks(compositor.id())?;
+    let idle_ticks = after_ticks.saturating_sub(before_ticks);
     println!(
-        "idle diagnostic: scheduled_wakeups_delta={} over 2s",
-        after_wakeups.saturating_sub(before_wakeups)
+        "idle diagnostic: compositor_cpu_ticks={} over 2s",
+        idle_ticks
     );
+    if idle_ticks > 200 {
+        return Err(format!(
+            "internal runtime consumed {idle_ticks} CPU ticks during bounded idle"
+        ));
+    }
     Ok(())
 }
 
-fn diagnostics(test_input: &Path, environment: &[(String, String)]) -> Result<String, String> {
-    checked(test_input, environment, &["runtime-diagnostics"])
+fn process_ticks(pid: u32) -> Result<u64, String> {
+    let stat =
+        fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| error.to_string())?;
+    let fields = stat
+        .rsplit_once(") ")
+        .ok_or("malformed compositor process stat")?
+        .1
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let user = fields.get(11).ok_or("process stat omitted utime")?;
+    let system = fields.get(12).ok_or("process stat omitted stime")?;
+    Ok(user.parse::<u64>().map_err(|error| error.to_string())?
+        + system.parse::<u64>().map_err(|error| error.to_string())?)
 }
 
-fn json_u64(document: &str, key: &str) -> Result<u64, String> {
-    let value: serde_json::Value = serde_json::from_str(document.trim())
-        .map_err(|error| format!("invalid runtime diagnostics: {error}"))?;
-    value[key]
-        .as_u64()
-        .ok_or_else(|| format!("runtime diagnostics omitted {key}"))
+fn assert_no_shell_child(compositor: u32) -> Result<(), String> {
+    for entry in fs::read_dir("/proc").map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let is_child = status
+            .lines()
+            .any(|line| line == format!("PPid:\t{compositor}"));
+        if !is_child {
+            continue;
+        }
+        let command = fs::read(entry.path().join("cmdline")).unwrap_or_default();
+        let command = String::from_utf8_lossy(&command).replace('\0', " ");
+        if command.contains("--role shell") {
+            return Err(format!(
+                "disabled runtime spawned shell child {pid}: {command}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn checked(

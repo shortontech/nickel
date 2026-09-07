@@ -36,7 +36,7 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::io::Write;
 #[cfg(target_os = "linux")]
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "linux")]
 use std::os::unix::net::{UnixListener, UnixStream};
 #[cfg(target_os = "linux")]
@@ -81,6 +81,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    publish_test_control_environment(arguments.test_control)?;
     // Keep the typed internal command path live alongside the compatibility
     // socket. Compositor-hosted UI will receive this handle instead of the
     // platform transport when it is moved into `NickelSession`.
@@ -211,6 +212,33 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn publish_test_control_environment(enabled: bool) -> std::io::Result<()> {
+    let Some(path) = enabled
+        .then(|| std::env::var_os("NICKEL_TEST_CONTROL_ENV_FILE"))
+        .flatten()
+    else {
+        return Ok(());
+    };
+    let variables = [
+        "XDG_RUNTIME_DIR",
+        "WAYLAND_DISPLAY",
+        "NICKEL_SESSION_CONTROL",
+        "NICKEL_SESSION_TOKEN",
+        "NICKEL_SHELL_TEST_CONTROL",
+    ];
+    let contents = variables
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| format!("{name}={value}\n"))
+        })
+        .collect::<String>();
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    std::io::Write::write_all(&mut options.open(path)?, contents.as_bytes())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
