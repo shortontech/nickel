@@ -149,7 +149,23 @@ fn exercise(
         thread::sleep(POLL);
     };
 
-    let readiness = checked(test_input, &environment, &["readiness"])?;
+    // The capability file is published just before the datagram listener is
+    // fully dispatchable. Treat that narrow startup window as readiness still
+    // pending instead of failing the acceptance run on a transient EAGAIN.
+    let readiness = loop {
+        match checked(test_input, &environment, &["readiness"]) {
+            Ok(readiness) => break readiness,
+            Err(error) if Instant::now() < deadline => {
+                if let Some(status) = compositor.try_wait().map_err(|error| error.to_string())? {
+                    return Err(format!(
+                        "nested compositor exited while awaiting readiness: {status}: {error}"
+                    ));
+                }
+                thread::sleep(POLL);
+            }
+            Err(error) => return Err(format!("readiness failed before deadline: {error}")),
+        }
+    };
     if !readiness.contains("expected_pid=None authenticated_pid=None") {
         return Err(format!(
             "internal runtime unexpectedly has shell PID authority: {readiness}"
