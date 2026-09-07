@@ -77,6 +77,7 @@ pub(crate) struct InternalShellCoordinator {
     panel_edge: PanelEdge,
     file_windows: nickel_file::FileWindowCoordinator,
     file_requests: mpsc::Receiver<nickel_file::FileWindowRequest>,
+    file_actions: Vec<nickel_file::FileWindowAction>,
 }
 
 impl InternalShellCoordinator {
@@ -90,6 +91,7 @@ impl InternalShellCoordinator {
             panel_edge,
             file_windows: nickel_file::FileWindowCoordinator::new(),
             file_requests,
+            file_actions: Vec::new(),
         })
     }
 
@@ -200,10 +202,17 @@ impl InternalShellCoordinator {
     }
 
     fn apply_file_requests(&mut self) -> Vec<nickel_file::FileWindowAction> {
-        self.file_requests
+        let actions = self
+            .file_requests
             .try_iter()
             .map(|request| self.file_windows.handle(request))
-            .collect()
+            .collect::<Vec<_>>();
+        self.file_actions.extend(actions.iter().copied());
+        actions
+    }
+
+    pub fn drain_file_actions(&mut self) -> Vec<nickel_file::FileWindowAction> {
+        std::mem::take(&mut self.file_actions)
     }
 
     pub fn step_slot(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {

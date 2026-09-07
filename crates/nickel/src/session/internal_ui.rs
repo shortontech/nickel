@@ -493,6 +493,65 @@ pub struct InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    pub fn insert_boxed(
+        &mut self,
+        surface: Box<dyn nickel_ui::InternalUiSurface>,
+        placement: InternalSurfacePlacement,
+        scale: f32,
+    ) -> InternalSurfaceId {
+        let (_, _, width, height) = placement.geometry;
+        let id = self.surfaces.insert_boxed(surface);
+        self.presentation.insert(
+            id,
+            PresentedSurface {
+                placement,
+                renderer: SmithayFrameRenderer::new(width, height, scale),
+                dirty: true,
+                external_scene: None,
+                scale_factor: scale,
+            },
+        );
+        id
+    }
+
+    pub fn application<T: 'static>(&self, id: InternalSurfaceId) -> Option<&T> {
+        self.surfaces.get(id)?.application().downcast_ref()
+    }
+
+    pub fn update_scene(&mut self, id: InternalSurfaceId, commands: Vec<PaintCommand>) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        surface.external_scene = Some(commands);
+        surface.dirty = true;
+        true
+    }
+
+    pub fn focus_surface(&mut self, id: InternalSurfaceId) -> bool {
+        if !self.presentation.contains_key(&id) {
+            return false;
+        }
+        if self.focused != Some(id) {
+            if let Some(previous) = self.focused {
+                self.step(
+                    previous,
+                    HostBatch {
+                        window_focused: Some(false),
+                        ..Default::default()
+                    },
+                );
+            }
+            self.focused = Some(id);
+            self.step(
+                id,
+                HostBatch {
+                    window_focused: Some(true),
+                    ..Default::default()
+                },
+            );
+        }
+        true
+    }
     pub fn insert<A: Application + 'static>(
         &mut self,
         application: A,

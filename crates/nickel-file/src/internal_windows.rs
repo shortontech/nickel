@@ -71,6 +71,13 @@ impl FileWindowCoordinator {
             .downcast_mut::<FileApp>()
     }
 
+    pub fn take_surface(
+        &mut self,
+        id: InternalSurfaceId,
+    ) -> Option<Box<dyn nickel_ui::InternalUiSurface>> {
+        self.surfaces.remove(id)
+    }
+
     pub fn handle(&mut self, request: FileWindowRequest) -> FileWindowAction {
         match request {
             FileWindowRequest::Open(launch) => self.open(launch),
@@ -125,8 +132,8 @@ impl FileWindowCoordinator {
     }
 
     fn close(&mut self, id: InternalSurfaceId) -> FileWindowAction {
-        if self.surfaces.remove(id).is_some() {
-            self.launches.remove(&id);
+        if self.launches.remove(&id).is_some() {
+            self.surfaces.remove(id);
             FileWindowAction::Closed(id)
         } else {
             FileWindowAction::NotFound(id)
@@ -205,5 +212,28 @@ mod tests {
         };
 
         assert_ne!(properties, rename);
+    }
+
+    #[test]
+    fn compositor_can_take_application_without_losing_window_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let launch = FileLaunch::Browse(directory.path().to_path_buf());
+        let mut windows = FileWindowCoordinator::new();
+        let FileWindowAction::Opened(id) = windows.handle(FileWindowRequest::Open(launch.clone()))
+        else {
+            unreachable!()
+        };
+
+        let surface = windows.take_surface(id).expect("new window surface");
+        assert_eq!(surface.logical_size(), (860, 620));
+        assert_eq!(windows.launch(id), Some(&launch));
+        assert_eq!(
+            windows.handle(FileWindowRequest::Focus(id)),
+            FileWindowAction::Focused(id)
+        );
+        assert_eq!(
+            windows.handle(FileWindowRequest::Close(id)),
+            FileWindowAction::Closed(id)
+        );
     }
 }

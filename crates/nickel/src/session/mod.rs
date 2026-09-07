@@ -149,6 +149,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     if arguments.shell_process == backend::ShellProcessMode::Internal {
         state.enable_internal_shell(Arc::new(in_process_session_host.clone()))?;
+        event_loop.handle().insert_source(
+            Timer::from_duration(Duration::from_millis(16)),
+            |_, _, state| {
+                state.poll_internal_shell(Instant::now());
+                TimeoutAction::ToDuration(Duration::from_millis(16))
+            },
+        )?;
         tracing::info!(
             surfaces = state.internal_ui.len(),
             "compositor-owned Nickel shell initialized"

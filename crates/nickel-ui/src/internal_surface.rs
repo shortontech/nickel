@@ -180,6 +180,16 @@ impl InternalSurfaceSet {
         id
     }
 
+    pub fn insert_boxed(&mut self, surface: Box<dyn InternalUiSurface>) -> InternalSurfaceId {
+        let id = InternalSurfaceId(self.next_id);
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("internal surface ids exhausted");
+        self.surfaces.insert(id, surface);
+        id
+    }
+
     pub fn remove(&mut self, id: InternalSurfaceId) -> Option<Box<dyn InternalUiSurface>> {
         self.surfaces.remove(&id)
     }
