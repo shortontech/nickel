@@ -1,8 +1,10 @@
 //! Compositor ownership for Nickel UI applications which do not have a Wayland surface.
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
     hash::Hash,
+    rc::Rc,
     time::Instant,
 };
 
@@ -170,8 +172,8 @@ pub struct SmithayFrameRenderer {
     mode: InternalUiPresentationMode,
     diagnostics: InternalUiRendererDiagnostics,
     renderer_mode: InternalUiRendererMode,
-    image_cache: TextureCache<ImageTextureKey>,
-    text_cache: TextureCache<TextTextureKey>,
+    image_cache: Rc<RefCell<TextureCache<ImageTextureKey>>>,
+    text_cache: Rc<RefCell<TextureCache<TextTextureKey>>>,
     /// Retained until all renderer-specific texture imports succeed. Without
     /// this, an import error can only omit the affected icon from the frame.
     import_fallback: Option<ImportFallbackFrame>,
@@ -321,8 +323,37 @@ const IMAGE_CACHE_BYTE_LIMIT: usize = 32 * 1024 * 1024;
 const TEXT_CACHE_ENTRY_LIMIT: usize = 1_024;
 const TEXT_CACHE_BYTE_LIMIT: usize = 8 * 1024 * 1024;
 
+struct SharedTextureCaches {
+    images: Rc<RefCell<TextureCache<ImageTextureKey>>>,
+    text: Rc<RefCell<TextureCache<TextTextureKey>>>,
+}
+
+impl Default for SharedTextureCaches {
+    fn default() -> Self {
+        Self {
+            images: Rc::new(RefCell::new(TextureCache::new(
+                IMAGE_CACHE_ENTRY_LIMIT,
+                IMAGE_CACHE_BYTE_LIMIT,
+            ))),
+            text: Rc::new(RefCell::new(TextureCache::new(
+                TEXT_CACHE_ENTRY_LIMIT,
+                TEXT_CACHE_BYTE_LIMIT,
+            ))),
+        }
+    }
+}
+
 impl SmithayFrameRenderer {
+    #[cfg(test)]
     fn new(_width: u32, _height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
+        Self::with_caches(scale, renderer_mode, &SharedTextureCaches::default())
+    }
+
+    fn with_caches(
+        scale: f32,
+        renderer_mode: InternalUiRendererMode,
+        caches: &SharedTextureCaches,
+    ) -> Self {
         Self {
             // The healthy GPU path has no reason to commit a full-surface CPU
             // framebuffer. Software presentation remains available and is
@@ -338,8 +369,8 @@ impl SmithayFrameRenderer {
             mode: InternalUiPresentationMode::RasterFallback,
             diagnostics: InternalUiRendererDiagnostics::default(),
             renderer_mode,
-            image_cache: TextureCache::new(IMAGE_CACHE_ENTRY_LIMIT, IMAGE_CACHE_BYTE_LIMIT),
-            text_cache: TextureCache::new(TEXT_CACHE_ENTRY_LIMIT, TEXT_CACHE_BYTE_LIMIT),
+            image_cache: Rc::clone(&caches.images),
+            text_cache: Rc::clone(&caches.text),
             import_fallback: None,
         }
     }
@@ -625,7 +656,8 @@ impl SmithayFrameRenderer {
                         height: image.height(),
                         content_hash: content_hash(image.as_raw()),
                     };
-                    let texture = if let Some(texture) = self.image_cache.get(&key) {
+                    let cached = self.image_cache.borrow_mut().get(&key);
+                    let texture = if let Some(texture) = cached {
                         self.diagnostics.image_cache_hits =
                             self.diagnostics.image_cache_hits.saturating_add(1);
                         texture
@@ -650,10 +682,14 @@ impl SmithayFrameRenderer {
                             height: image.height(),
                         };
                         let bytes = texture_bytes(texture.width, texture.height);
+                        let evictions =
+                            self.image_cache
+                                .borrow_mut()
+                                .insert(key, texture.clone(), bytes);
                         self.diagnostics.image_cache_evictions = self
                             .diagnostics
                             .image_cache_evictions
-                            .saturating_add(self.image_cache.insert(key, texture.clone(), bytes));
+                            .saturating_add(evictions);
                         texture
                     };
                     self.primitives.push(GpuPrimitive::Texture {
@@ -682,7 +718,8 @@ impl SmithayFrameRenderer {
             return;
         }
         let key = text_texture_key(command, bounds, scale);
-        if let Some(texture) = self.text_cache.get(&key) {
+        let cached = self.text_cache.borrow_mut().get(&key);
+        if let Some(texture) = cached {
             self.diagnostics.text_cache_hits = self.diagnostics.text_cache_hits.saturating_add(1);
             let source = text_source_rect(rect, bounds, scale);
             self.primitives.push(GpuPrimitive::Texture {
@@ -725,14 +762,15 @@ impl SmithayFrameRenderer {
         };
         self.diagnostics.text_allocations = self.diagnostics.text_allocations.saturating_add(1);
         self.diagnostics.text_uploads = self.diagnostics.text_uploads.saturating_add(1);
+        let evictions = self.text_cache.borrow_mut().insert(
+            key,
+            texture.clone(),
+            texture_bytes(physical_width, physical_height),
+        );
         self.diagnostics.text_cache_evictions = self
             .diagnostics
             .text_cache_evictions
-            .saturating_add(self.text_cache.insert(
-                key,
-                texture.clone(),
-                texture_bytes(physical_width, physical_height),
-            ));
+            .saturating_add(evictions);
         self.primitives.push(GpuPrimitive::Texture {
             rect,
             source,
@@ -741,10 +779,12 @@ impl SmithayFrameRenderer {
     }
 
     fn refresh_cache_diagnostics(&mut self) {
-        self.diagnostics.image_cache_entries = self.image_cache.entries.len();
-        self.diagnostics.image_cache_bytes = self.image_cache.bytes;
-        self.diagnostics.text_cache_entries = self.text_cache.entries.len();
-        self.diagnostics.text_cache_bytes = self.text_cache.bytes;
+        let images = self.image_cache.borrow();
+        self.diagnostics.image_cache_entries = images.entries.len();
+        self.diagnostics.image_cache_bytes = images.bytes;
+        let text = self.text_cache.borrow();
+        self.diagnostics.text_cache_entries = text.entries.len();
+        self.diagnostics.text_cache_bytes = text.bytes;
     }
 
     fn prepare_fallback(&mut self, frame: RenderFrame<'_>) -> DamageRegion {
@@ -1125,6 +1165,7 @@ pub struct InternalUiRuntime {
     routed_events: Vec<(InternalSurfaceId, UiEvent)>,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
+    texture_caches: SharedTextureCaches,
 }
 
 impl Default for InternalUiRuntime {
@@ -1138,6 +1179,7 @@ impl Default for InternalUiRuntime {
             routed_events: Vec::new(),
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
+            texture_caches: SharedTextureCaches::default(),
         }
     }
 }
@@ -1149,14 +1191,17 @@ impl InternalUiRuntime {
         placement: InternalSurfacePlacement,
         scale: f32,
     ) -> InternalSurfaceId {
-        let (_, _, width, height) = placement.geometry;
         let id = self.surfaces.insert_boxed(surface);
         self.next_z_order = self.next_z_order.saturating_add(1);
         self.presentation.insert(
             id,
             PresentedSurface {
                 placement,
-                renderer: SmithayFrameRenderer::new(width, height, scale, self.renderer_mode),
+                renderer: SmithayFrameRenderer::with_caches(
+                    scale,
+                    self.renderer_mode,
+                    &self.texture_caches,
+                ),
                 dirty: true,
                 external_scene: None,
                 scale_factor: scale,
@@ -1250,17 +1295,14 @@ impl InternalUiRuntime {
         let (_, _, width, height) = placement.geometry;
         let id = self.surfaces.insert(application, width, height);
         self.next_z_order = self.next_z_order.saturating_add(1);
-        let physical_width = ((width as f32) * scale).round().max(1.0) as u32;
-        let physical_height = ((height as f32) * scale).round().max(1.0) as u32;
         self.presentation.insert(
             id,
             PresentedSurface {
                 placement,
-                renderer: SmithayFrameRenderer::new(
-                    physical_width,
-                    physical_height,
+                renderer: SmithayFrameRenderer::with_caches(
                     scale,
                     self.renderer_mode,
+                    &self.texture_caches,
                 ),
                 dirty: true,
                 external_scene: None,
@@ -1410,7 +1452,7 @@ impl InternalUiRuntime {
     }
 
     pub fn aggregate_renderer_diagnostics(&self) -> AggregateInternalUiRendererDiagnostics {
-        self.presentation.values().fold(
+        let mut total = self.presentation.values().fold(
             AggregateInternalUiRendererDiagnostics::default(),
             |mut total, surface| {
                 let item = surface.renderer.diagnostics();
@@ -1423,17 +1465,6 @@ impl InternalUiRuntime {
                 total.fallback_raster_bytes = total
                     .fallback_raster_bytes
                     .saturating_add(item.fallback_raster_bytes);
-                total.image_cache_entries = total
-                    .image_cache_entries
-                    .saturating_add(item.image_cache_entries);
-                total.image_cache_bytes = total
-                    .image_cache_bytes
-                    .saturating_add(item.image_cache_bytes);
-                total.text_cache_entries = total
-                    .text_cache_entries
-                    .saturating_add(item.text_cache_entries);
-                total.text_cache_bytes =
-                    total.text_cache_bytes.saturating_add(item.text_cache_bytes);
                 total.texture_import_failures = total
                     .texture_import_failures
                     .saturating_add(item.texture_import_failures);
@@ -1442,7 +1473,14 @@ impl InternalUiRuntime {
                     .saturating_add(item.fallback_import_failures);
                 total
             },
-        )
+        );
+        let images = self.texture_caches.images.borrow();
+        total.image_cache_entries = images.entries.len();
+        total.image_cache_bytes = images.bytes;
+        let text = self.texture_caches.text.borrow();
+        total.text_cache_entries = text.entries.len();
+        total.text_cache_bytes = text.bytes;
+        total
     }
 
     /// Force the compositor-owned UI renderer used by both native and nested backends.
@@ -2464,6 +2502,47 @@ mod tests {
         assert!(renderer.primitives.is_empty());
         assert_eq!(renderer.diagnostics().fallback_image_count, 1);
         assert_eq!(renderer.diagnostics().fallback_primitive_count, 2);
+    }
+
+    #[test]
+    fn compositor_surfaces_share_one_image_texture_cache() {
+        use std::sync::Arc;
+
+        let caches = SharedTextureCaches::default();
+        let image = Arc::new(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([20, 40, 60, 255]),
+        ));
+        let commands = [PaintCommand::Image {
+            bounds: nickel_ui::Rect::new(0.0, 0.0, 4.0, 4.0),
+            id: 7,
+            generation: 3,
+            image,
+            high_density: None,
+        }];
+        let mut desktop =
+            SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
+        let mut panel =
+            SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
+
+        for renderer in [&mut desktop, &mut panel] {
+            renderer
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (4, 4),
+                    scale_factor: 1.0,
+                    generation: 1,
+                })
+                .unwrap();
+        }
+
+        assert_eq!(desktop.diagnostics().image_cache_misses, 1);
+        assert_eq!(desktop.diagnostics().image_uploads, 1);
+        assert_eq!(panel.diagnostics().image_cache_hits, 1);
+        assert_eq!(panel.diagnostics().image_uploads, 0);
+        assert_eq!(caches.images.borrow().entries.len(), 1);
+        assert_eq!(caches.images.borrow().bytes, 4 * 4 * 4);
     }
 
     #[test]
