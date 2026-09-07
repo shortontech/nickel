@@ -19,8 +19,8 @@ use nickel_terminal_ui::{
 };
 use nickel_ui::{
     AdapterOutcome, Application, Column, Container, FrameOverlay, HostAdapter, HostServices,
-    OverlayAnchor, OverlayMenu, OverlayMenuItem, SemanticRole, Text, UiHost, UiId, View,
-    ViewContext,
+    Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, SemanticRole, Text, UiHost, UiId,
+    View, ViewContext,
 };
 use winit::event::WindowEvent;
 
@@ -28,6 +28,7 @@ const INITIAL_COLUMNS: u16 = 100;
 const INITIAL_LINES: u16 = 30;
 const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 19;
+const STATUS_HEIGHT: f32 = 40.0;
 
 fn next_poll_delay(previous: Duration, changed: bool) -> Duration {
     if changed {
@@ -46,6 +47,11 @@ fn exit_status(code: Option<i32>) -> String {
         Some(0) | None => "Process exited — press any key to exit".into(),
         Some(code) => format!("Process exited with status {code} — press any key to exit"),
     }
+}
+
+fn completed_command_key_dismisses(exit: &TerminalExit, input: &InputEvent) -> bool {
+    !matches!(exit, TerminalExit::Running)
+        && matches!(input, InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat)
 }
 
 fn deferred_window_suppressed(delay: Duration, app: &mut TerminalApp) -> bool {
@@ -279,7 +285,12 @@ impl TerminalApp {
     }
 
     fn resize(&mut self, width: u32, height: u32) -> bool {
-        let usable_height = height.saturating_sub(28) as f32;
+        let status_height = if self.status.is_some() {
+            STATUS_HEIGHT
+        } else {
+            0.0
+        };
+        let usable_height = (height as f32 - status_height).max(1.0);
         let (columns, lines) = self.metrics.dimensions(width as f32, usable_height);
         if (columns as usize, lines as usize) == (self.snapshot.columns, self.snapshot.lines) {
             return false;
@@ -364,7 +375,9 @@ impl Application for TerminalApp {
         if let Some(status) = status {
             root = root.child(
                 Container::new()
-                    .height(28.0)
+                    .height(STATUS_HEIGHT)
+                    .padding(Insets::horizontal(10.0))
+                    .justify_content(Justify::Center)
                     .semantic_role(SemanticRole::Status)
                     .accessibility_label(status)
                     .background(0xff2b2f38)
@@ -495,11 +508,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         input: &nickel_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
-        if !matches!(
-            host.application().session.exit_state(),
-            TerminalExit::Running
-        ) && matches!(input, InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat)
-        {
+        if completed_command_key_dismisses(host.application().session.exit_state(), input) {
             return Ok(AdapterOutcome {
                 changed: false,
                 consume: true,
@@ -679,6 +688,49 @@ mod tests {
             exit_status(Some(7)),
             "Process exited with status 7 — press any key to exit"
         );
+    }
+
+    #[test]
+    fn only_a_genuine_key_press_dismisses_a_completed_command() {
+        use nickel_input::{
+            DeviceId, EventOrder, KeyCode, KeyEvent, KeyLocation, LogicalKey, ModifierState,
+            PhysicalKey,
+        };
+
+        let key = |edge, repeat| {
+            InputEvent::Key(KeyEvent {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                physical: PhysicalKey::Code(KeyCode::KeyA),
+                logical: LogicalKey::Character("a".into()),
+                location: KeyLocation::Standard,
+                edge,
+                repeat,
+                modifiers: ModifierState::default(),
+            })
+        };
+        assert!(completed_command_key_dismisses(
+            &TerminalExit::Exited(Some(0)),
+            &key(KeyEdge::Pressed, false)
+        ));
+        assert!(!completed_command_key_dismisses(
+            &TerminalExit::Running,
+            &key(KeyEdge::Pressed, false)
+        ));
+        assert!(!completed_command_key_dismisses(
+            &TerminalExit::Exited(Some(0)),
+            &key(KeyEdge::Released, false)
+        ));
+        assert!(!completed_command_key_dismisses(
+            &TerminalExit::Exited(Some(0)),
+            &key(KeyEdge::Pressed, true)
+        ));
+        assert!(!completed_command_key_dismisses(
+            &TerminalExit::Exited(Some(0)),
+            &InputEvent::FocusGained {
+                order: EventOrder(2)
+            }
+        ));
     }
 
     #[test]
