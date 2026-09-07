@@ -8,7 +8,7 @@ use std::{
 };
 
 use nickel_core::terminal_settings::TerminalSettings;
-use nickel_input::{InputEvent, KeyEdge};
+use nickel_input::{AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey};
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
     TerminalSession, TerminalSnapshot,
@@ -18,9 +18,9 @@ use nickel_terminal_ui::{
     TerminalViewport, confirm_paste, prepare_paste, translate_input_with_modes,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, Column, Container, FrameOverlay, HostAdapter, HostServices,
-    Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, SemanticRole, Text, UiHost, UiId,
-    View, ViewContext,
+    AdapterOutcome, Application, Button, Column, Container, FrameOverlay, HostAdapter,
+    HostServices, Insets, Justify, OverlayAnchor, OverlayMenu, OverlayMenuItem, Row, SemanticRole,
+    Text, UiHost, UiId, View, ViewContext,
 };
 use winit::event::WindowEvent;
 
@@ -29,6 +29,8 @@ const INITIAL_LINES: u16 = 30;
 const CELL_WIDTH: u16 = 9;
 const CELL_HEIGHT: u16 = 19;
 const STATUS_HEIGHT: f32 = 40.0;
+const TAB_STRIP_HEIGHT: f32 = 36.0;
+const MAX_TABS: usize = 16;
 
 fn next_poll_delay(previous: Duration, changed: bool) -> Duration {
     if changed {
@@ -52,6 +54,32 @@ fn exit_status(code: Option<i32>) -> String {
 fn completed_command_key_dismisses(exit: &TerminalExit, input: &InputEvent) -> bool {
     !matches!(exit, TerminalExit::Running)
         && matches!(input, InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabShortcut {
+    New,
+    Close,
+    Next,
+    Previous,
+}
+
+fn tab_shortcut(input: &InputEvent) -> Option<TabShortcut> {
+    let InputEvent::Key(key) = input else {
+        return None;
+    };
+    if key.edge != KeyEdge::Pressed || key.repeat {
+        return None;
+    }
+    let control = key.modifiers.aggregate(AggregateModifier::Control);
+    let shift = key.modifiers.aggregate(AggregateModifier::Shift);
+    match (&key.physical, control, shift) {
+        (PhysicalKey::Code(KeyCode::KeyT), true, true) => Some(TabShortcut::New),
+        (PhysicalKey::Code(KeyCode::KeyW), true, true) => Some(TabShortcut::Close),
+        (PhysicalKey::Code(KeyCode::Tab), true, false) => Some(TabShortcut::Next),
+        (PhysicalKey::Code(KeyCode::Tab), true, true) => Some(TabShortcut::Previous),
+        _ => None,
+    }
 }
 
 fn deferred_window_suppressed(delay: Duration, app: &mut TerminalApp) -> bool {
@@ -83,7 +111,7 @@ fn await_deferred_decision(
     let deadline = Instant::now() + delay;
     loop {
         app.poll();
-        if !matches!(app.session.exit_state(), TerminalExit::Running) {
+        if !matches!(app.active().session.exit_state(), TerminalExit::Running) {
             return false;
         }
         let now = Instant::now();
@@ -96,7 +124,7 @@ fn await_deferred_decision(
         match receiver.recv_timeout(wait) {
             Ok(()) => {
                 app.poll();
-                return matches!(app.session.exit_state(), TerminalExit::Running);
+                return matches!(app.active().session.exit_state(), TerminalExit::Running);
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
@@ -123,22 +151,34 @@ fn supervise_hidden_session(session: &mut TerminalSession) {
     }
 }
 
-struct TerminalApp {
+struct TerminalTab {
+    id: u64,
     session: TerminalSession,
     snapshot: TerminalSnapshot,
-    palette: TerminalPalette,
-    metrics: CellMetrics,
     title: String,
     status: Option<String>,
-    paste_confirmation: Option<String>,
     resize_generation: u64,
+}
+
+struct TerminalApp {
+    tabs: Vec<TerminalTab>,
+    active_tab: usize,
+    next_tab_id: u64,
+    palette: TerminalPalette,
+    metrics: CellMetrics,
+    paste_confirmation: Option<String>,
     poll_delay: Duration,
     close_on_successful_exit: bool,
     exit_requested: bool,
+    settings: TerminalSettings,
+    viewport_size: (u32, u32),
 }
 
 #[derive(Clone)]
 enum Message {
+    NewTab,
+    ActivateTab(u64),
+    CloseTab(u64),
     ConfirmPaste,
     CancelPaste,
     OpenContextMenu,
@@ -149,11 +189,12 @@ enum Message {
 }
 
 impl TerminalApp {
-    fn new(
+    fn spawn_tab(
+        id: u64,
         program: Option<TerminalProgram>,
         cwd: Option<PathBuf>,
         settings: &TerminalSettings,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<TerminalTab, Box<dyn Error>> {
         let dimensions =
             TerminalDimensions::new(INITIAL_COLUMNS, INITIAL_LINES, CELL_WIDTH, CELL_HEIGHT)?;
         let program = program.or_else(|| {
@@ -173,6 +214,22 @@ impl TerminalApp {
             scrollback_lines: settings.scrollback_lines,
         })?;
         let snapshot = session.snapshot();
+        Ok(TerminalTab {
+            id,
+            session,
+            snapshot,
+            title: "Nickel Terminal".into(),
+            status: None,
+            resize_generation: 0,
+        })
+    }
+
+    fn new(
+        program: Option<TerminalProgram>,
+        cwd: Option<PathBuf>,
+        settings: &TerminalSettings,
+    ) -> Result<Self, Box<dyn Error>> {
+        let mut tab = Self::spawn_tab(1, program, cwd, settings)?;
         let resolved_font = nickel_render_assets::resolve_monospace_family(&settings.font_family);
         let font_fallback = !settings.font_family.eq_ignore_ascii_case("monospace")
             && !settings.font_family.trim().is_empty()
@@ -185,40 +242,120 @@ impl TerminalApp {
             ..TerminalPalette::default()
         };
         let metrics = CellMetrics::resolved(&palette.font_family, settings.font_size(), 1.0);
+        tab.status = font_fallback.then(|| {
+            "Configured terminal font is unavailable or not fixed-width; using system monospace"
+                .into()
+        });
         Ok(Self {
-            session,
-            snapshot,
+            tabs: vec![tab],
+            active_tab: 0,
+            next_tab_id: 2,
             palette,
             metrics,
-            title: "Nickel Terminal".into(),
-            status: font_fallback.then(|| {
-                "Configured terminal font is unavailable or not fixed-width; using system monospace"
-                    .into()
-            }),
             paste_confirmation: None,
-            resize_generation: 0,
             poll_delay: Duration::from_millis(16),
             close_on_successful_exit: settings.close_on_successful_exit,
             exit_requested: false,
+            settings: settings.clone(),
+            viewport_size: (900, 600),
         })
+    }
+
+    fn active(&self) -> &TerminalTab {
+        &self.tabs[self.active_tab]
+    }
+
+    fn active_mut(&mut self) -> &mut TerminalTab {
+        &mut self.tabs[self.active_tab]
+    }
+
+    fn add_tab(&mut self) -> bool {
+        if self.tabs.len() >= MAX_TABS {
+            self.active_mut().status = Some(format!("Terminal tab limit ({MAX_TABS}) reached"));
+            return true;
+        }
+        let id = self.next_tab_id;
+        self.next_tab_id = self.next_tab_id.saturating_add(1);
+        match Self::spawn_tab(id, None, None, &self.settings) {
+            Ok(tab) => {
+                self.active_mut().session.set_focus(false);
+                self.tabs.push(tab);
+                self.active_tab = self.tabs.len() - 1;
+                self.active_mut().session.set_focus(true);
+                let (width, height) = self.viewport_size;
+                self.resize(width, height);
+            }
+            Err(error) => self.active_mut().status = Some(format!("Could not open tab: {error}")),
+        }
+        true
+    }
+
+    fn activate_tab(&mut self, id: u64) -> bool {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        if index == self.active_tab {
+            return false;
+        }
+        self.active_mut().session.set_focus(false);
+        self.active_tab = index;
+        self.active_mut().session.set_focus(true);
+        let (width, height) = self.viewport_size;
+        self.resize(width, height);
+        true
+    }
+
+    fn cycle_tab(&mut self, reverse: bool) -> bool {
+        if self.tabs.len() < 2 {
+            return false;
+        }
+        let index = if reverse {
+            self.active_tab
+                .checked_sub(1)
+                .unwrap_or(self.tabs.len() - 1)
+        } else {
+            (self.active_tab + 1) % self.tabs.len()
+        };
+        let id = self.tabs[index].id;
+        self.activate_tab(id)
+    }
+
+    fn close_tab(&mut self, id: u64) -> bool {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        let _ = self.tabs[index].session.request_close();
+        self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.exit_requested = true;
+            return true;
+        }
+        if index < self.active_tab || self.active_tab == self.tabs.len() {
+            self.active_tab = self.active_tab.saturating_sub(1).min(self.tabs.len() - 1);
+        }
+        self.active_mut().session.set_focus(true);
+        let (width, height) = self.viewport_size;
+        self.resize(width, height);
+        true
     }
 
     fn apply_input(&mut self, command: TerminalInputCommand) -> bool {
         self.poll_delay = Duration::from_millis(16);
         let result = match command {
-            TerminalInputCommand::Write(bytes) => self.session.write(bytes),
+            TerminalInputCommand::Write(bytes) => self.active_mut().session.write(bytes),
             TerminalInputCommand::Scroll(scroll) => {
-                self.session.scroll(scroll);
+                self.active_mut().session.scroll(scroll);
                 return true;
             }
             TerminalInputCommand::Copy => {
-                if let Some(text) = self.session.selected_text() {
+                if let Some(text) = self.active().session.selected_text() {
                     match arboard::Clipboard::new()
                         .and_then(|mut clipboard| clipboard.set_text(text))
                     {
                         Ok(()) => return false,
                         Err(error) => {
-                            self.status = Some(format!("Could not copy selection: {error}"));
+                            self.active_mut().status =
+                                Some(format!("Could not copy selection: {error}"));
                             return true;
                         }
                     }
@@ -231,71 +368,78 @@ impl TerminalApp {
                 {
                     Ok(text) => text,
                     Err(error) => {
-                        self.status = Some(format!("Could not read clipboard: {error}"));
+                        self.active_mut().status =
+                            Some(format!("Could not read clipboard: {error}"));
                         return true;
                     }
                 };
-                match prepare_paste(text, self.snapshot.bracketed_paste) {
-                    PasteDecision::Ready(bytes) => self.session.write(bytes),
+                match prepare_paste(text, self.active().snapshot.bracketed_paste) {
+                    PasteDecision::Ready(bytes) => self.active_mut().session.write(bytes),
                     PasteDecision::ConfirmationRequired(text) => {
                         self.paste_confirmation = Some(text);
                         return true;
                     }
                     PasteDecision::RejectedTooLarge => {
-                        self.status = Some("Paste exceeds the 1 MiB safety limit".into());
+                        self.active_mut().status =
+                            Some("Paste exceeds the 1 MiB safety limit".into());
                         return true;
                     }
                 }
             }
             TerminalInputCommand::SelectAll => {
-                self.session.select_visible();
+                self.active_mut().session.select_visible();
                 return true;
             }
             TerminalInputCommand::ClearScrollback => {
-                self.session.clear_scrollback();
+                self.active_mut().session.clear_scrollback();
                 return true;
             }
             TerminalInputCommand::BeginSelection(kind, point) => {
-                self.session.begin_selection(kind, point);
+                self.active_mut().session.begin_selection(kind, point);
                 return true;
             }
             TerminalInputCommand::UpdateSelection(point) => {
-                self.session.update_selection(point);
+                self.active_mut().session.update_selection(point);
                 return true;
             }
             TerminalInputCommand::UpdateSelectionAndScroll(point, lines) => {
-                self.session
+                self.active_mut()
+                    .session
                     .scroll(nickel_terminal::TerminalScroll::Lines(lines));
-                self.session.update_selection(point);
+                self.active_mut().session.update_selection(point);
                 return true;
             }
             TerminalInputCommand::ClearSelection => {
-                self.session.clear_selection();
+                self.active_mut().session.clear_selection();
                 return true;
             }
             TerminalInputCommand::Focus(focused) => {
-                self.session.set_focus(focused);
+                self.active_mut().session.set_focus(focused);
                 return true;
             }
         };
         if let Err(error) = result {
-            self.status = Some(error.to_string());
+            self.active_mut().status = Some(error.to_string());
         }
         true
     }
 
     fn resize(&mut self, width: u32, height: u32) -> bool {
-        let status_height = if self.status.is_some() {
+        self.viewport_size = (width, height);
+        let status_height = if self.active().status.is_some() {
             STATUS_HEIGHT
         } else {
             0.0
         };
-        let usable_height = (height as f32 - status_height).max(1.0);
+        let usable_height = (height as f32 - TAB_STRIP_HEIGHT - status_height).max(1.0);
         let (columns, lines) = self.metrics.dimensions(width as f32, usable_height);
-        if (columns as usize, lines as usize) == (self.snapshot.columns, self.snapshot.lines) {
+        if (columns as usize, lines as usize)
+            == (self.active().snapshot.columns, self.active().snapshot.lines)
+        {
             return false;
         }
-        self.resize_generation = self.resize_generation.wrapping_add(1);
+        let generation = self.active().resize_generation.wrapping_add(1);
+        self.active_mut().resize_generation = generation;
         let dimensions = TerminalDimensions::new(
             columns,
             lines,
@@ -303,13 +447,14 @@ impl TerminalApp {
             self.metrics.height.round().max(1.0) as u16,
         );
         match dimensions.and_then(|dimensions| {
-            self.session
-                .resize(dimensions, self.resize_generation)
+            self.active_mut()
+                .session
+                .resize(dimensions, generation)
                 .map(|_| ())
         }) {
             Ok(()) => true,
             Err(error) => {
-                self.status = Some(error.to_string());
+                self.active_mut().status = Some(error.to_string());
                 true
             }
         }
@@ -321,13 +466,22 @@ impl Application for TerminalApp {
 
     fn update(&mut self, message: Message) {
         match message {
+            Message::NewTab => {
+                self.add_tab();
+            }
+            Message::ActivateTab(id) => {
+                self.activate_tab(id);
+            }
+            Message::CloseTab(id) => {
+                self.close_tab(id);
+            }
             Message::ConfirmPaste => {
                 if let Some(text) = self.paste_confirmation.take()
                     && let PasteDecision::Ready(bytes) =
-                        confirm_paste(text, self.snapshot.bracketed_paste)
-                    && let Err(error) = self.session.write(bytes)
+                        confirm_paste(text, self.active().snapshot.bracketed_paste)
+                    && let Err(error) = self.active_mut().session.write(bytes)
                 {
-                    self.status = Some(error.to_string());
+                    self.active_mut().status = Some(error.to_string());
                 }
             }
             Message::CancelPaste => self.paste_confirmation = None,
@@ -348,12 +502,14 @@ impl Application for TerminalApp {
     }
 
     fn view(&self, _: ViewContext) -> impl View<Self::Message> {
+        let active = self.active();
         let viewport =
-            TerminalViewport::new(&self.snapshot, &self.palette, self.metrics, &self.title).view();
-        let status = self
+            TerminalViewport::new(&active.snapshot, &self.palette, self.metrics, &active.title)
+                .view();
+        let status = active
             .status
             .as_deref()
-            .or_else(|| match self.session.exit_state() {
+            .or_else(|| match active.session.exit_state() {
                 TerminalExit::Running => None,
                 state => Some(match state {
                     TerminalExit::Exited(Some(0)) => "Process exited",
@@ -366,12 +522,53 @@ impl Application for TerminalApp {
                     TerminalExit::Running => unreachable!(),
                 }),
             });
-        let mut root = Column::new().gap(0.0).child(
-            Container::new()
-                .id("terminal-interaction")
-                .context_message(Message::OpenContextMenu)
-                .child(viewport),
-        );
+        let mut tabs = Row::new()
+            .height(TAB_STRIP_HEIGHT)
+            .gap(2.0)
+            .padding(Insets::symmetric(4.0, 3.0));
+        for (index, tab) in self.tabs.iter().enumerate() {
+            let title = tab.title.chars().take(28).collect::<String>();
+            let label = if index == self.active_tab {
+                format!("● {title}")
+            } else {
+                title
+            };
+            tabs = tabs
+                .child(
+                    Button::new(Message::ActivateTab(tab.id), label)
+                        .id(format!("terminal-tab-{}", tab.id))
+                        .height(30.0)
+                        .padding(Insets::horizontal(8.0)),
+                )
+                .child(
+                    Button::new(Message::CloseTab(tab.id), "×")
+                        .id(format!("terminal-tab-close-{}", tab.id))
+                        .height(30.0)
+                        .width(30.0),
+                );
+        }
+        if self.tabs.len() < MAX_TABS {
+            tabs = tabs.child(
+                Button::new(Message::NewTab, "+")
+                    .id("terminal-new-tab")
+                    .height(30.0)
+                    .width(34.0),
+            );
+        }
+        let mut root = Column::new()
+            .gap(0.0)
+            .child(
+                Container::new()
+                    .height(TAB_STRIP_HEIGHT)
+                    .background(0xff20242b)
+                    .child(tabs),
+            )
+            .child(
+                Container::new()
+                    .id("terminal-interaction")
+                    .context_message(Message::OpenContextMenu)
+                    .child(viewport),
+            );
         if let Some(status) = status {
             root = root.child(
                 Container::new()
@@ -396,7 +593,7 @@ impl Application for TerminalApp {
     }
 
     fn frame_overlays(&self, _: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
-        let copy = if self.session.selected_text().is_some() {
+        let copy = if self.active().session.selected_text().is_some() {
             OverlayMenuItem::action("copy", "Copy", Message::Copy).shortcut("Ctrl+Shift+C")
         } else {
             OverlayMenuItem::disabled_with_reason("copy", "Copy", "No text is selected")
@@ -427,30 +624,49 @@ impl Application for TerminalApp {
 
     fn poll(&mut self) -> bool {
         let mut changed = false;
-        while let Some(event) = self.session.try_event() {
-            match event {
-                TerminalEvent::Title(title) if !title.is_empty() => self.title = title,
-                TerminalEvent::ChildExited(code) => {
-                    self.status = Some(exit_status(code));
-                    self.exit_requested = close_after_exit(self.close_on_successful_exit, code);
-                }
-                TerminalEvent::ClipboardStore(text) => {
-                    if let Err(error) =
-                        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text))
-                    {
-                        self.status = Some(format!("Could not store terminal clipboard: {error}"));
+        let mut close = Vec::new();
+        let active_id = self.active().id;
+        let mut active_status_changed = false;
+        for tab in &mut self.tabs {
+            while let Some(event) = tab.session.try_event() {
+                match event {
+                    TerminalEvent::Title(title) if !title.is_empty() => {
+                        tab.title = title.chars().take(256).collect();
                     }
+                    TerminalEvent::ChildExited(code) => {
+                        tab.status = Some(exit_status(code));
+                        active_status_changed |= tab.id == active_id;
+                        if close_after_exit(self.close_on_successful_exit, code) {
+                            close.push(tab.id);
+                        }
+                    }
+                    TerminalEvent::ClipboardStore(text) => {
+                        if let Err(error) = arboard::Clipboard::new()
+                            .and_then(|mut clipboard| clipboard.set_text(text))
+                        {
+                            tab.status =
+                                Some(format!("Could not store terminal clipboard: {error}"));
+                        }
+                    }
+                    TerminalEvent::Bell
+                    | TerminalEvent::Changed
+                    | TerminalEvent::Closed
+                    | TerminalEvent::Title(_) => {}
                 }
-                TerminalEvent::Bell
-                | TerminalEvent::Changed
-                | TerminalEvent::Closed
-                | TerminalEvent::Title(_) => {}
+                changed = true;
             }
+            if tab.session.generation() != tab.snapshot.generation {
+                tab.snapshot = tab.session.snapshot();
+                changed = true;
+            }
+        }
+        for id in close {
+            self.close_tab(id);
             changed = true;
         }
-        if self.session.generation() != self.snapshot.generation {
-            self.snapshot = self.session.snapshot();
-            changed = true;
+        if active_status_changed && !self.tabs.is_empty() {
+            let (width, height) = self.viewport_size;
+            changed |= self.resize(width, height);
         }
         self.poll_delay = next_poll_delay(self.poll_delay, changed);
         changed
@@ -461,7 +677,7 @@ impl Application for TerminalApp {
     }
 
     fn title(&self) -> &str {
-        &self.title
+        &self.active().title
     }
 
     fn initial_size(&self) -> (u32, u32) {
@@ -508,21 +724,40 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         input: &nickel_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
-        if completed_command_key_dismisses(host.application().session.exit_state(), input) {
+        if let Some(shortcut) = tab_shortcut(input) {
+            let changed = match shortcut {
+                TabShortcut::New => host.application_mut().add_tab(),
+                TabShortcut::Close => {
+                    let id = host.application().active().id;
+                    host.application_mut().close_tab(id)
+                }
+                TabShortcut::Next => host.application_mut().cycle_tab(false),
+                TabShortcut::Previous => host.application_mut().cycle_tab(true),
+            };
             return Ok(AdapterOutcome {
-                changed: false,
+                changed,
                 consume: true,
-                exit: true,
+                exit: host.application().exit_requested,
+            });
+        }
+        if completed_command_key_dismisses(host.application().active().session.exit_state(), input)
+        {
+            let id = host.application().active().id;
+            let changed = host.application_mut().close_tab(id);
+            return Ok(AdapterOutcome {
+                changed,
+                consume: true,
+                exit: host.application().exit_requested,
             });
         }
         let pointer_command = self.pointer.translate(
             input,
-            &host.application().snapshot,
+            &host.application().active().snapshot,
             host.application().metrics,
             self.started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
         );
         let (application_cursor, application_keypad) = {
-            let snapshot = &host.application().snapshot;
+            let snapshot = &host.application().active().snapshot;
             (snapshot.application_cursor, snapshot.application_keypad)
         };
         let Some(command) = pointer_command
@@ -547,8 +782,10 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         let changed = match event {
             WindowEvent::Resized(size) => host.application_mut().resize(size.width, size.height),
             WindowEvent::CloseRequested => {
-                if let Err(error) = host.application_mut().session.request_close() {
-                    host.application_mut().status = Some(error.to_string());
+                for tab in &mut host.application_mut().tabs {
+                    if let Err(error) = tab.session.request_close() {
+                        tab.status = Some(error.to_string());
+                    }
                 }
                 // Let the shared runtime finish closing the native window after the graceful PTY
                 // shutdown request has crossed the session boundary.
@@ -607,7 +844,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(|started| deferred_window.saturating_sub(started.elapsed()))
         .unwrap_or_default();
     if !remaining.is_zero() && deferred_window_suppressed(remaining, &mut app) {
-        supervise_hidden_session(&mut app.session);
+        supervise_hidden_session(&mut app.active_mut().session);
         return Ok(());
     }
     nickel_ui::run_with_adapter(
@@ -622,6 +859,107 @@ fn main() -> Result<(), Box<dyn Error>> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
+
+    fn interactive_app() -> TerminalApp {
+        TerminalApp::new(
+            Some(TerminalProgram {
+                executable: "/bin/sh".into(),
+                arguments: Vec::new(),
+            }),
+            None,
+            &TerminalSettings::default(),
+        )
+        .expect("fixture PTY")
+    }
+
+    fn shortcut_key(code: KeyCode, shift: bool, repeat: bool) -> InputEvent {
+        use nickel_input::{DeviceId, EventOrder, KeyEvent, KeyLocation, LogicalKey, Modifier};
+
+        let mut sides = vec![Modifier::ControlLeft];
+        if shift {
+            sides.push(Modifier::ShiftLeft);
+        }
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            physical: PhysicalKey::Code(code),
+            logical: LogicalKey::Character(String::new()),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat,
+            modifiers: nickel_input::ModifierState::from_sides(sides),
+        })
+    }
+
+    #[test]
+    fn terminal_tabs_create_cycle_wrap_close_and_keep_stable_identity() {
+        let mut app = interactive_app();
+        let first = app.active().id;
+        assert!(app.add_tab());
+        let second = app.active().id;
+        assert_ne!(first, second);
+        app.tabs[0].title = "first".into();
+        app.tabs[1].title = "second".into();
+
+        assert!(app.cycle_tab(false));
+        assert_eq!(app.active().id, first);
+        assert_eq!(app.active().title, "first");
+        assert!(app.cycle_tab(true));
+        assert_eq!(app.active().id, second);
+        assert_eq!(app.active().title, "second");
+
+        assert!(app.close_tab(second));
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active().id, first);
+        assert!(!app.exit_requested);
+        assert!(app.close_tab(first));
+        assert!(app.exit_requested);
+    }
+
+    #[test]
+    fn tab_shortcuts_are_exact_and_repeats_are_not_actions() {
+        assert_eq!(
+            tab_shortcut(&shortcut_key(KeyCode::KeyT, true, false)),
+            Some(TabShortcut::New)
+        );
+        assert_eq!(
+            tab_shortcut(&shortcut_key(KeyCode::KeyW, true, false)),
+            Some(TabShortcut::Close)
+        );
+        assert_eq!(
+            tab_shortcut(&shortcut_key(KeyCode::Tab, false, false)),
+            Some(TabShortcut::Next)
+        );
+        assert_eq!(
+            tab_shortcut(&shortcut_key(KeyCode::Tab, true, false)),
+            Some(TabShortcut::Previous)
+        );
+        assert_eq!(tab_shortcut(&shortcut_key(KeyCode::KeyT, true, true)), None);
+        assert_eq!(
+            tab_shortcut(&shortcut_key(KeyCode::KeyT, false, false)),
+            None
+        );
+    }
+
+    #[test]
+    fn tab_strip_exposes_each_session_and_new_tab_semantically() {
+        let mut app = interactive_app();
+        app.tabs[0].title = "first shell".into();
+        app.add_tab();
+        app.tabs[1].title = "second shell".into();
+        let host = UiHost::new(app, 900, 600);
+        let names = host
+            .semantic_nodes()
+            .into_iter()
+            .filter_map(|node| node.name)
+            .collect::<Vec<_>>();
+        for expected in ["first shell", "● second shell", "+"] {
+            assert!(
+                names.iter().any(|name| name == expected),
+                "missing {expected}: {names:?}"
+            );
+        }
+    }
 
     #[test]
     fn context_menu_exposes_only_implemented_terminal_actions() {
@@ -762,6 +1100,9 @@ mod tests {
             started.elapsed() < Duration::from_secs(1),
             "child exit must not wait for the visibility deadline"
         );
-        assert!(matches!(app.session.exit_state(), TerminalExit::Exited(_)));
+        assert!(matches!(
+            app.active().session.exit_state(),
+            TerminalExit::Exited(_)
+        ));
     }
 }
