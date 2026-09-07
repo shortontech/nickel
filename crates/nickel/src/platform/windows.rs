@@ -3310,10 +3310,6 @@ impl WindowFeed {
         FeedState::Ready(windows)
     }
 
-    pub fn window_output(&self, _: WindowId) -> Option<String> {
-        None
-    }
-
     pub fn outputs(&self) -> Vec<String> {
         Vec::new()
     }

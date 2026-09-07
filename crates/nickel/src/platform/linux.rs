@@ -1652,10 +1652,6 @@ impl WindowFeed {
             .collect()
     }
 
-    pub fn window_output(&self, window: WindowId) -> Option<String> {
-        self.outputs.borrow().get(&window).cloned()
-    }
-
     pub fn outputs(&self) -> Vec<String> {
         self.available_outputs.borrow().clone()
     }
