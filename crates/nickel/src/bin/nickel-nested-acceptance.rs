@@ -68,6 +68,10 @@ fn run() -> Result<(), String> {
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
+        // This harness exercises compositor-owned UI, not the independent
+        // XWayland startup contract. Avoid letting a host X server delay the
+        // control and input assertions.
+        .env("NICKEL_DISABLE_XWAYLAND", "1")
         .stdin(Stdio::null());
     if let Some(host_wayland) = host_wayland {
         // Preserve the absolute host socket while isolating the nested
