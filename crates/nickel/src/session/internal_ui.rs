@@ -520,15 +520,6 @@ impl InternalUiRuntime {
         self.surfaces.get(id)?.application().downcast_ref()
     }
 
-    pub fn update_scene(&mut self, id: InternalSurfaceId, commands: Vec<PaintCommand>) -> bool {
-        let Some(surface) = self.presentation.get_mut(&id) else {
-            return false;
-        };
-        surface.external_scene = Some(commands);
-        surface.dirty = true;
-        true
-    }
-
     pub fn focus_surface(&mut self, id: InternalSurfaceId) -> bool {
         if !self.presentation.contains_key(&id) {
             return false;
