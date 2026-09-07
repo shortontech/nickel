@@ -208,10 +208,10 @@ impl InternalShellCoordinator {
 
     pub fn poll(&mut self, now: Instant) -> Vec<InternalSurfaceId> {
         self.apply_file_requests();
-        let changed = self.shell.poll_host_deadlines(now);
+        let outcome = self.shell.poll_deadlines(now);
         self.entries
             .iter()
-            .filter(|surface| changed.contains(&surface.role))
+            .filter(|surface| outcome.visibility_changed || outcome.redraw.contains(&surface.role))
             .map(|surface| surface.id)
             .collect()
     }
