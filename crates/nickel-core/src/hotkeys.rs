@@ -55,6 +55,7 @@ pub struct CompositorShortcutAdapter {
     actions: BTreeMap<HotkeyAction, RegistrationId>,
     bindings: BTreeMap<RegistrationId, Binding<RegistrationId>>,
     owned_keys: BTreeSet<KeyCode>,
+    consumed_super_releases: BTreeSet<KeyCode>,
     switch_active: bool,
     launcher_visible: bool,
     super_chorded: bool,
@@ -69,6 +70,7 @@ impl Default for CompositorShortcutAdapter {
             actions: BTreeMap::new(),
             bindings: BTreeMap::new(),
             owned_keys: BTreeSet::new(),
+            consumed_super_releases: BTreeSet::new(),
             switch_active: false,
             launcher_visible: false,
             super_chorded: false,
@@ -86,6 +88,14 @@ impl Default for CompositorShortcutAdapter {
 
 impl CompositorShortcutAdapter {
     pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
+        if edge == KeyEdge::Released && self.consumed_super_releases.remove(&key) {
+            self.owned_keys.remove(&key);
+            self.super_chorded = !self.consumed_super_releases.is_empty();
+            return HotkeyOutcome {
+                action: None,
+                suppress: true,
+            };
+        }
         let suppress_owned = self.event_is_owned(key) || self.owned_keys.contains(&key);
         if edge == KeyEdge::Pressed
             && !matches!(key, KeyCode::SuperLeft | KeyCode::SuperRight)
@@ -131,6 +141,15 @@ impl CompositorShortcutAdapter {
             && edge == KeyEdge::Released
             && self.engine.modifiers().aggregate(AggregateModifier::Super)
         {
+            self.consumed_super_releases.extend(
+                [KeyCode::SuperLeft, KeyCode::SuperRight]
+                    .into_iter()
+                    .filter(|key| {
+                        self.engine
+                            .pressed_keys(COMPOSITOR_KEYBOARD)
+                            .any(|pressed| pressed == &PhysicalKey::Code(*key))
+                    }),
+            );
             self.engine
                 .reconcile_modifier(COMPOSITOR_KEYBOARD, Modifier::SuperLeft, false);
             self.engine
@@ -243,6 +262,7 @@ impl CompositorShortcutAdapter {
         self.switch_active = false;
         self.super_chorded = false;
         self.owned_keys.clear();
+        self.consumed_super_releases.clear();
         self.registrations.reset_edges();
     }
 
@@ -931,6 +951,13 @@ mod tests {
             }
         );
         assert!(!controller.snapshot().super_held);
+        assert_eq!(
+            controller.handle(KeyCode::SuperLeft, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
         assert_eq!(
             controller.handle(KeyCode::KeyR, KeyEdge::Pressed),
             HotkeyOutcome::default()
