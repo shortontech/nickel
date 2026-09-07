@@ -54,6 +54,8 @@ use nickel_input::KeyCode;
 use zeroize::{Zeroize, Zeroizing};
 
 const RUN_COMMAND_LIMIT: usize = 4096;
+const RUN_SURFACE_WIDTH: u32 = 620;
+const RUN_SURFACE_HEIGHT: u32 = 180;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum RunAction {
@@ -125,7 +127,11 @@ impl UiApplication for RunApplication {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let content_width = (context.viewport.size.width - 36.0).max(0.0);
+        let content_height = (context.viewport.size.height - 36.0).max(0.0);
         let mut content = Column::new()
+            .width(content_width)
+            .height(content_height)
             .gap(10.0)
             .child(
                 Text::new("Run")
@@ -141,9 +147,15 @@ impl UiApplication for RunApplication {
                 )
                 .id("run-command")
                 .accessibility_label("Command")
+                .single_line_height(40.0)
                 .color(self.palette.text),
             )
-            .child(Button::new(RunAction::Submit, "Run").id("run-submit"));
+            .child(
+                Button::new(RunAction::Submit, "Run")
+                    .id("run-submit")
+                    .width(88.0)
+                    .height(36.0),
+            );
         if let Some(status) = &self.status {
             content = content.child(Text::new(status).color(self.palette.complement));
         }
@@ -1659,6 +1671,11 @@ impl LiveShell {
             SurfaceRole::OnScreenKeyboard => self.keyboard_visible,
             SurfaceRole::CodexChat => true,
         }
+    }
+
+    pub fn launcher_surface_size(&self) -> Option<(u32, u32)> {
+        self.run_visible
+            .then_some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT))
     }
 
     pub fn next_host_deadline(&self) -> Option<Instant> {
@@ -3526,11 +3543,9 @@ impl LiveShell {
                 application_changed: true,
                 ..HostBatch::default()
             });
-            if let Ok(field) =
-                self.run_host
-                    .query_unique(&nickel_ui::SemanticSelector::Id(nickel_ui::UiId::new(
-                        "run-command",
-                    )))
+            if let Ok(field) = self
+                .run_host
+                .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
             {
                 let _ = self.run_host.request_focus(field.id);
             }
@@ -5028,6 +5043,38 @@ mod run_application_tests {
         app.update(RunAction::SetCommand("   ".into()));
         assert!(app.shortcut(Shortcut::Submit));
         assert!(app.take_effects().is_empty());
+    }
+
+    #[test]
+    fn compact_run_surface_keeps_the_editor_and_submit_action_visible() {
+        let mut host = nickel_ui::UiHost::new(application(), RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT);
+        host.step(HostBatch {
+            application_changed: true,
+            surface_size: Some((RUN_SURFACE_WIDTH, RUN_SURFACE_HEIGHT)),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+
+        let field = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+            .expect("run command field");
+        let submit = host
+            .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Run".into(),
+            })
+            .expect("run submit button");
+        assert!(field.bounds.size.height > 0.0);
+        assert_eq!(submit.bounds.size.height, 36.0);
+        assert!(field.bounds.origin.y + field.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
+        assert!(submit.bounds.origin.y + submit.bounds.size.height <= RUN_SURFACE_HEIGHT as f32);
+        let focus = host.request_focus(field.id);
+        assert!(focus.changed && focus.failures.is_empty());
+        assert!(
+            host.query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+                .unwrap()
+                .focused
+        );
     }
 }
 

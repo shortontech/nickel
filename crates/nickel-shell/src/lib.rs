@@ -1279,6 +1279,7 @@ fn prewarm_role(
 }
 
 fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
+    shell.configure_launcher_surface(state.launcher_surface_size());
     let surfaces = shell
         .surfaces()
         .map(|surface| (surface.id(), surface.role()))

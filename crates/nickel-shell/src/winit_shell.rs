@@ -809,6 +809,29 @@ impl WinitShell {
         true
     }
 
+    pub fn configure_launcher_surface(&mut self, compact_size: Option<(u32, u32)>) {
+        let launchers = self
+            .surfaces
+            .iter()
+            .enumerate()
+            .filter_map(|(index, surface)| {
+                (surface.display_connected && surface.role == SurfaceRole::Launcher)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in launchers {
+            if let Some((width, height)) = compact_size {
+                if self.surfaces[index].window.size() != (width, height) {
+                    let _ = self.surfaces[index]
+                        .window
+                        .request_inner_size(LogicalSize::new(width, height));
+                }
+            } else {
+                self.relocate_to_active_output(index);
+            }
+        }
+    }
+
     fn active_output_index(&self) -> Option<usize> {
         preferred_output_index(
             &self.displays,
@@ -841,9 +864,11 @@ impl WinitShell {
         surface
             .window
             .set_outer_position(LogicalPosition::new(x, y));
-        let _ = surface
-            .window
-            .request_inner_size(LogicalSize::new(width, height));
+        if surface.window.size() != (width, height) {
+            let _ = surface
+                .window
+                .request_inner_size(LogicalSize::new(width, height));
+        }
     }
 
     fn retire_settled_output_surfaces(&mut self, output_names: &[String], now: Instant) {
