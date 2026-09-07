@@ -738,6 +738,12 @@ impl NickelSession {
             );
         }
         self.raise_panels();
+        // Toplevel creation publishes an intentionally unmapped registry
+        // entry. Publish again only after the first buffer has supplied
+        // metadata, mapping, and final focus so taskbars see one coherent
+        // live-window transition rather than retaining their pinned-only view.
+        self.notify_protocol_snapshot();
+        self.request_output_redraw();
         Some(window)
     }
 
@@ -767,6 +773,8 @@ impl NickelSession {
         self.restore_focus_after_window_removal(
             had_focus || registry_id.is_some_and(|id| self.windows.is_active(id)),
         );
+        self.notify_protocol_snapshot();
+        self.request_output_redraw();
         Some(window)
     }
 

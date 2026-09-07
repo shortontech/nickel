@@ -3283,6 +3283,11 @@ impl NickelSession {
     }
 
     pub(crate) fn notify_protocol_snapshot(&mut self) {
+        // The in-process shell consumes this same canonical snapshot on its
+        // event-loop deadline. State changes must wake it just as external
+        // subscribers are notified, otherwise the panel can retain stale
+        // focus and a pinned-only task list until an unrelated timer fires.
+        self.wake_internal_shell();
         if self.refresh_output_topology_generation() {
             self.notify_shell_behavior_snapshot(self.protocol_shell_behavior());
         }
@@ -6816,6 +6821,34 @@ mod protocol_tests {
         let after_idle = session.internal_shell_timer_counters();
         assert!(after_idle.polls.saturating_sub(settled.polls) <= 1);
         assert_eq!(after_idle.redraw_requests, settled.redraw_requests);
+    }
+
+    #[test]
+    fn protocol_snapshot_change_wakes_the_internal_bar_projection() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "test".into(),
+                logical_width: 1280,
+                logical_height: 720,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        session
+            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .expect("headless internal shell");
+        event_loop
+            .dispatch(Duration::from_millis(25), &mut session)
+            .unwrap();
+        let settled = session.internal_shell_timer_counters();
+
+        session.notify_protocol_snapshot();
+
+        let notified = session.internal_shell_timer_counters();
+        assert_eq!(notified.armed, settled.armed + 1);
+        assert_eq!(notified.cancelled, settled.cancelled + 1);
     }
 
     #[test]
