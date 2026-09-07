@@ -147,12 +147,7 @@ fn exercise(
             ));
         }
         if let Ok(environment) = read_environment(capability_file) {
-            let readiness = invoke(test_input, &environment, &["readiness"])?;
-            if readiness.status.success()
-                && String::from_utf8_lossy(&readiness.stdout).contains("ready=true")
-            {
-                break environment;
-            }
+            break environment;
         }
         if Instant::now() >= deadline {
             return Err("nested compositor did not become ready within 30 seconds".into());
@@ -166,8 +161,6 @@ fn exercise(
             "internal runtime unexpectedly has shell PID authority: {readiness}"
         ));
     }
-    assert_no_shell_child(compositor.id())?;
-
     let surfaces = checked(test_input, &environment, &["surfaces"])?;
     for role in ["Desktop", "Panel", "Lock", "Launcher"] {
         if !surfaces.contains(role) {
@@ -176,6 +169,7 @@ fn exercise(
             ));
         }
     }
+    assert_no_shell_child(compositor.id())?;
     let before_ticks = process_ticks(compositor.id())?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
