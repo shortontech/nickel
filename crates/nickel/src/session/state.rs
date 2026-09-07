@@ -228,7 +228,7 @@ mod internal_shell_placement_tests {
 use crate::session::{
     output_retirement::{DeferredRetirements, RetirementAction, capacity_available},
     shell_layout::{self, Geometry},
-    window_registry::{WindowId, WindowRegistry},
+    window_registry::{WindowAdmission, WindowId, WindowMetadataSource, WindowRegistry},
 };
 
 fn stable_output_identity(output: &Output) -> String {
@@ -667,6 +667,10 @@ pub struct NickelSession {
     pub(crate) on_screen_keyboard: crate::session::on_screen_keyboard::OnScreenKeyboardState,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
+    /// Stable canonical identities for application surfaces hosted in-process.
+    internal_surface_windows: HashMap<nickel_ui::InternalSurfaceId, WindowId>,
+    internal_window_surfaces: HashMap<WindowId, nickel_ui::InternalSurfaceId>,
+    internal_minimized_windows: HashSet<WindowId>,
     surface_effective_outputs: HashMap<ObjectId, String>,
     /// Live XDG protocol roles outlive their mapped compositor representation.
     pub(crate) xdg_toplevel_windows: HashMap<ObjectId, Window>,
@@ -1084,12 +1088,16 @@ impl NickelSession {
                     &outputs,
                     menu_output.as_deref().or(fallback.as_deref()),
                 );
-                if let Err(error) =
-                    host.open_project_by_id(&mut self.internal_ui, placement, &project_id)
-                {
-                    tracing::warn!(%error, %project_id, "could not open internal Codex project");
-                }
+                let opened = host.open_project_by_id(&mut self.internal_ui, placement, &project_id);
                 self.internal_codex = Some(host);
+                match opened {
+                    Ok(surface) => {
+                        self.register_internal_application(surface);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, %project_id, "could not open internal Codex project");
+                    }
+                }
             }
         }
         let chat_output = self
@@ -1111,6 +1119,10 @@ impl NickelSession {
                     Vec::new()
                 });
             self.internal_codex = Some(codex);
+            for surface in &opened {
+                self.register_internal_application(*surface);
+            }
+            self.refresh_internal_application_metadata();
             if !changed.is_empty() || !opened.is_empty() {
                 self.schedule_internal_ui_frame();
             }
@@ -1171,6 +1183,102 @@ impl NickelSession {
             }
         }
         result
+    }
+
+    /// Admit a compositor-hosted application into the same canonical window
+    /// model used by Wayland and X11 clients. Internal surface ids remain opaque
+    /// and are never reinterpreted as protocol window ids.
+    fn register_internal_application(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+    ) -> Option<WindowId> {
+        if let Some(id) = self.internal_surface_windows.get(&surface).copied() {
+            self.activate_window(id);
+            return Some(id);
+        }
+        let id = self.windows.insert(WindowAdmission::AuthenticatedShell)?;
+        let title = self
+            .internal_ui
+            .title(surface)
+            .unwrap_or("Nickel Codex")
+            .to_owned();
+        self.windows.update_metadata(
+            id,
+            WindowMetadataSource::Internal,
+            Some(title),
+            Some("nickel-codex".to_owned()),
+        );
+        self.internal_surface_windows.insert(surface, id);
+        self.internal_window_surfaces.insert(id, surface);
+        self.workspaces.add_window(id);
+        self.activate_window(id);
+        Some(id)
+    }
+
+    fn unregister_internal_application(&mut self, surface: nickel_ui::InternalSurfaceId) {
+        let Some(id) = self.internal_surface_windows.remove(&surface) else {
+            return;
+        };
+        self.internal_window_surfaces.remove(&id);
+        self.internal_minimized_windows.remove(&id);
+        self.workspaces.remove_window(&id);
+        self.remove_window_from_switcher(id);
+        self.windows.remove(id);
+        self.notify_protocol_snapshot();
+    }
+
+    fn refresh_internal_application_metadata(&mut self) {
+        let updates = self
+            .internal_surface_windows
+            .iter()
+            .filter_map(|(surface, window)| {
+                self.internal_ui
+                    .title(*surface)
+                    .map(|title| (*window, title.to_owned()))
+            })
+            .collect::<Vec<_>>();
+        let mut changed = false;
+        for (window, title) in updates {
+            if self.windows.title(window) != Some(title.as_str()) {
+                self.windows.update_metadata(
+                    window,
+                    WindowMetadataSource::Internal,
+                    Some(title),
+                    None,
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            self.notify_protocol_snapshot();
+        }
+    }
+
+    pub(crate) fn reconcile_internal_application_focus(&mut self) {
+        let Some(surface) = self.internal_ui.focused() else {
+            return;
+        };
+        let Some(window) = self.internal_window_for_surface(surface) else {
+            return;
+        };
+        self.internal_ui.raise(surface);
+        self.windows.raise(window);
+        self.workspaces.focused(&window);
+        self.notify_protocol_snapshot();
+    }
+
+    pub(crate) fn internal_surface_for_window(
+        &self,
+        window: WindowId,
+    ) -> Option<nickel_ui::InternalSurfaceId> {
+        self.internal_window_surfaces.get(&window).copied()
+    }
+
+    pub(crate) fn internal_window_for_surface(
+        &self,
+        surface: nickel_ui::InternalSurfaceId,
+    ) -> Option<WindowId> {
+        self.internal_surface_windows.get(&surface).copied()
     }
 
     fn apply_internal_file_action(&mut self, action: nickel_file::FileWindowAction) {
@@ -1895,6 +2003,9 @@ impl NickelSession {
             on_screen_keyboard: Default::default(),
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),
+            internal_surface_windows: HashMap::new(),
+            internal_window_surfaces: HashMap::new(),
+            internal_minimized_windows: HashSet::new(),
             surface_effective_outputs: HashMap::new(),
             xdg_toplevel_windows: HashMap::new(),
             mapped_xdg_toplevels: HashSet::new(),
@@ -4279,6 +4390,18 @@ impl NickelSession {
     }
 
     pub fn close_window(&mut self, id: WindowId) {
+        if let Some(surface) = self.internal_surface_for_window(id) {
+            if let Some(mut codex) = self.internal_codex.take() {
+                codex.close(&mut self.internal_ui, surface);
+                self.internal_codex = Some(codex);
+            } else {
+                self.internal_ui.remove(surface);
+            }
+            self.unregister_internal_application(surface);
+            self.hide_context_menu();
+            self.schedule_internal_ui_frame();
+            return;
+        }
         let surface_id = self
             .surface_windows
             .iter()
@@ -4319,6 +4442,32 @@ impl NickelSession {
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
+        if let Some(surface) = self.internal_surface_for_window(id) {
+            self.internal_minimized_windows.remove(&id);
+            self.internal_ui.set_visible(surface, true);
+            self.internal_ui.raise(surface);
+            self.internal_ui.focus_surface(surface);
+            self.windows.raise(id);
+            self.workspaces.focused(&id);
+            if let Some(output) = self
+                .internal_ui
+                .placement(surface)
+                .and_then(|placement| placement.output.clone())
+            {
+                self.last_interaction_output_name = Some(output);
+            }
+            self.space.elements().for_each(|window| {
+                window.set_activated(false);
+            });
+            self.seat.get_keyboard().unwrap().set_focus(
+                self,
+                Option::<crate::session::focus::KeyboardFocusTarget>::None,
+                SERIAL_COUNTER.next_serial(),
+            );
+            self.schedule_internal_ui_frame();
+            self.notify_protocol_snapshot();
+            return;
+        }
         if self
             .window_for_registry_id(id)
             .is_some_and(|window| self.is_on_screen_keyboard_window(&window))
@@ -4461,6 +4610,15 @@ impl NickelSession {
     }
 
     pub fn minimize_window(&mut self, id: WindowId) {
+        if let Some(surface) = self.internal_surface_for_window(id) {
+            self.internal_ui.set_visible(surface, false);
+            self.internal_minimized_windows.insert(id);
+            self.workspaces.unfocused(&id);
+            self.windows.deactivate_all();
+            self.schedule_internal_ui_frame();
+            self.notify_protocol_snapshot();
+            return;
+        }
         let Some(window) = self
             .space
             .elements()
@@ -6098,6 +6256,69 @@ mod protocol_tests {
         collections::{HashMap, HashSet},
         sync::Arc,
     };
+
+    struct InternalWindowTestApp;
+
+    impl nickel_ui::Application for InternalWindowTestApp {
+        type Message = ();
+
+        fn update(&mut self, (): ()) {}
+
+        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+            nickel_ui::Text::new("internal window")
+        }
+
+        fn title(&self) -> &str {
+            "Codex — Nickel"
+        }
+    }
+
+    #[test]
+    fn internal_application_has_canonical_window_lifecycle() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let surface = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("test".into()),
+            },
+            1.0,
+        );
+
+        let window = session.register_internal_application(surface).unwrap();
+        let snapshot = session
+            .protocol_windows()
+            .into_iter()
+            .find(|candidate| candidate.id.0 == window.0)
+            .unwrap();
+        assert_eq!(snapshot.title, "Codex — Nickel");
+        assert_eq!(snapshot.application_id, "nickel-codex");
+        let geometry = snapshot.geometry.unwrap();
+        assert_eq!((geometry.x, geometry.y), (80, 90));
+        assert!(session.workspaces.is_visible(&window));
+
+        session.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::SwitchNext);
+        assert!(session.task_switcher.candidates().contains(&window));
+
+        session.minimize_window(window);
+        assert!(!session.internal_ui.is_visible(surface));
+        assert!(
+            session
+                .protocol_windows()
+                .iter()
+                .any(|entry| entry.id.0 == window.0 && entry.minimized)
+        );
+
+        session.activate_window(window);
+        assert!(session.internal_ui.is_visible(surface));
+        assert_eq!(session.internal_ui.focused(), Some(surface));
+
+        session.close_window(window);
+        assert!(!session.windows.contains(window));
+        assert!(session.internal_ui.placement(surface).is_none());
+    }
 
     #[test]
     fn late_window_callback_leaves_expiry_owned_by_the_registered_timer() {

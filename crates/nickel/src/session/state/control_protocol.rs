@@ -779,7 +779,8 @@ impl NickelSession {
     }
 
     pub(super) fn registry_window_is_mapped(&self, id: WindowId) -> bool {
-        self.x11_windows.values().any(|candidate| *candidate == id)
+        self.internal_window_surfaces.contains_key(&id)
+            || self.x11_windows.values().any(|candidate| *candidate == id)
             || self.surface_windows.iter().any(|(surface, candidate)| {
                 *candidate == id && self.mapped_xdg_toplevels.contains(surface)
             })
@@ -809,13 +810,24 @@ impl NickelSession {
                     .iter()
                     .find_map(|(surface, id)| (*id == window.id).then_some(surface));
                 let geometry = self
-                    .window_for_registry_id(window.id)
-                    .and_then(|candidate| self.space.element_bbox(&candidate))
-                    .map(|bounds| ProtocolGeometry {
-                        x: bounds.loc.x,
-                        y: bounds.loc.y,
-                        width: bounds.size.w,
-                        height: bounds.size.h,
+                    .internal_window_surfaces
+                    .get(&window.id)
+                    .and_then(|surface| self.internal_ui.placement(*surface))
+                    .map(|placement| ProtocolGeometry {
+                        x: placement.geometry.0,
+                        y: placement.geometry.1,
+                        width: placement.geometry.2 as i32,
+                        height: placement.geometry.3 as i32,
+                    })
+                    .or_else(|| {
+                        self.window_for_registry_id(window.id)
+                            .and_then(|candidate| self.space.element_bbox(&candidate))
+                            .map(|bounds| ProtocolGeometry {
+                                x: bounds.loc.x,
+                                y: bounds.loc.y,
+                                width: bounds.size.w,
+                                height: bounds.size.h,
+                            })
                     })
                     .or_else(|| {
                         self.workspace_hidden_windows
@@ -848,7 +860,8 @@ impl NickelSession {
                     application_id: window.app_id.clone(),
                     title: window.title.clone(),
                     active: window.active,
-                    minimized: self.minimized_windows.contains_key(&window.id),
+                    minimized: self.minimized_windows.contains_key(&window.id)
+                        || self.internal_minimized_windows.contains(&window.id),
                     maximized: surface
                         .is_some_and(|surface| self.maximized_restore.contains_key(surface))
                         || self.space.elements().any(|candidate| {

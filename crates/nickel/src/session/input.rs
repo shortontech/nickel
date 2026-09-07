@@ -662,6 +662,9 @@ impl NickelSession {
                     client_present,
                 ) {
                     self.flush_internal_shell_input();
+                    if button_state == ButtonState::Pressed {
+                        self.reconcile_internal_application_focus();
+                    }
                     self.request_output_redraw();
                     return None;
                 }

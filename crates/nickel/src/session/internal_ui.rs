@@ -68,6 +68,8 @@ struct PresentedSurface {
     dirty: bool,
     external_scene: Option<Vec<PaintCommand>>,
     scale_factor: f32,
+    visible: bool,
+    z_order: u64,
 }
 
 struct SceneSlot;
@@ -1081,6 +1083,7 @@ pub struct InternalUiRuntime {
     touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
     routed_events: Vec<(InternalSurfaceId, UiEvent)>,
     renderer_mode: InternalUiRendererMode,
+    next_z_order: u64,
 }
 
 impl Default for InternalUiRuntime {
@@ -1093,6 +1096,7 @@ impl Default for InternalUiRuntime {
             touches: BTreeMap::new(),
             routed_events: Vec::new(),
             renderer_mode: InternalUiRendererMode::Gpu,
+            next_z_order: 0,
         }
     }
 }
@@ -1106,6 +1110,7 @@ impl InternalUiRuntime {
     ) -> InternalSurfaceId {
         let (_, _, width, height) = placement.geometry;
         let id = self.surfaces.insert_boxed(surface);
+        self.next_z_order = self.next_z_order.saturating_add(1);
         self.presentation.insert(
             id,
             PresentedSurface {
@@ -1114,6 +1119,8 @@ impl InternalUiRuntime {
                 dirty: true,
                 external_scene: None,
                 scale_factor: scale,
+                visible: true,
+                z_order: self.next_z_order,
             },
         );
         id
@@ -1121,6 +1128,11 @@ impl InternalUiRuntime {
 
     pub fn application<T: 'static>(&self, id: InternalSurfaceId) -> Option<&T> {
         self.surfaces.get(id)?.application().downcast_ref()
+    }
+
+    /// Current application-owned title for a compositor-hosted surface.
+    pub fn title(&self, id: InternalSurfaceId) -> Option<&str> {
+        self.surfaces.get(id).map(|surface| surface.title())
     }
 
     /// Mutably access an application hosted by the compositor.
@@ -1196,6 +1208,7 @@ impl InternalUiRuntime {
     ) -> InternalSurfaceId {
         let (_, _, width, height) = placement.geometry;
         let id = self.surfaces.insert(application, width, height);
+        self.next_z_order = self.next_z_order.saturating_add(1);
         let physical_width = ((width as f32) * scale).round().max(1.0) as u32;
         let physical_height = ((height as f32) * scale).round().max(1.0) as u32;
         self.presentation.insert(
@@ -1211,6 +1224,8 @@ impl InternalUiRuntime {
                 dirty: true,
                 external_scene: None,
                 scale_factor: scale,
+                visible: true,
+                z_order: self.next_z_order,
             },
         );
         id
@@ -1243,6 +1258,43 @@ impl InternalUiRuntime {
 
     pub fn placement(&self, id: InternalSurfaceId) -> Option<&InternalSurfacePlacement> {
         self.presentation.get(&id).map(|surface| &surface.placement)
+    }
+
+    /// Show or hide a hosted surface without destroying its application state.
+    pub fn set_visible(&mut self, id: InternalSurfaceId, visible: bool) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        let changed = surface.visible != visible;
+        surface.visible = visible;
+        if visible {
+            surface.dirty = true;
+        } else {
+            if self.focused == Some(id) {
+                self.focused = None;
+            }
+            if self.hovered == Some(id) {
+                self.hovered = None;
+            }
+            self.touches.retain(|_, (target, _)| *target != id);
+        }
+        changed
+    }
+
+    pub fn is_visible(&self, id: InternalSurfaceId) -> bool {
+        self.presentation
+            .get(&id)
+            .is_some_and(|surface| surface.visible)
+    }
+
+    /// Bring a compositor-hosted application to the front of its role layer.
+    pub fn raise(&mut self, id: InternalSurfaceId) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        self.next_z_order = self.next_z_order.saturating_add(1);
+        surface.z_order = self.next_z_order;
+        true
     }
 
     /// Move an existing surface in compositor-global logical coordinates.
@@ -1327,7 +1379,9 @@ impl InternalUiRuntime {
     }
 
     pub fn has_damage(&self) -> bool {
-        self.presentation.values().any(|surface| surface.dirty)
+        self.presentation
+            .values()
+            .any(|surface| surface.visible && surface.dirty)
     }
 
     pub fn focused(&self) -> Option<InternalSurfaceId> {
@@ -1366,7 +1420,8 @@ impl InternalUiRuntime {
             .iter()
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
-                (!(client_present && surface.placement.role == InternalSurfaceRole::Desktop)
+                (surface.visible
+                    && !(client_present && surface.placement.role == InternalSurfaceRole::Desktop)
                     && point.0 >= f64::from(x)
                     && point.1 >= f64::from(y)
                     && point.0 < f64::from(x) + f64::from(width)
@@ -1593,12 +1648,13 @@ impl InternalUiRuntime {
         output: &'a str,
     ) -> impl Iterator<Item = InternalSurfaceId> + 'a {
         self.presentation.iter().filter_map(move |(id, surface)| {
-            surface
-                .placement
-                .output
-                .as_deref()
-                .is_none_or(|name| name == output)
-                .then_some(*id)
+            (surface.visible
+                && surface
+                    .placement
+                    .output
+                    .as_deref()
+                    .is_none_or(|name| name == output))
+            .then_some(*id)
         })
     }
 
@@ -1618,10 +1674,10 @@ impl InternalUiRuntime {
             })
             .collect::<Vec<_>>();
         ids.sort_by_key(|id| {
-            let role = self.presentation.get(id).unwrap().placement.role;
+            let surface = self.presentation.get(id).unwrap();
             (
-                std::cmp::Reverse(Self::role_order(role)),
-                std::cmp::Reverse(*id),
+                std::cmp::Reverse(Self::role_order(surface.placement.role)),
+                std::cmp::Reverse(surface.z_order),
             )
         });
         ids

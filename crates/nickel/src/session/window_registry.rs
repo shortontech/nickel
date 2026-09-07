@@ -6,6 +6,7 @@ pub use nickel_session_protocol::{MAX_WINDOW_APP_ID_BYTES, MAX_WINDOW_TITLE_BYTE
 pub enum WindowMetadataSource {
     Xdg,
     X11,
+    Internal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
