@@ -71,6 +71,7 @@ use smithay::{
         },
         shm::ShmState,
         socket::ListeningSocketSource,
+        viewporter::ViewporterState,
         xdg_activation::XdgActivationState,
         xwayland_shell::XWaylandShellState,
     },
@@ -587,6 +588,10 @@ pub struct NickelSession {
     // Smithay State
     pub compositor_state: CompositorState,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
+    // Fractional-scale clients require wp_viewporter to submit buffers at the
+    // advertised non-integer scale. Without it they fall back to wl_output's
+    // ceil-rounded integer scale (125% therefore rendered as 200%).
+    pub viewporter_state: ViewporterState,
     pub xdg_shell_state: XdgShellState,
     pub xdg_dialog_state: XdgDialogState,
     pub activation_state: XdgActivationState,
@@ -1662,6 +1667,7 @@ impl NickelSession {
 
         let compositor_state = CompositorState::new::<Self>(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
+        let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
         let xdg_dialog_state = XdgDialogState::new::<Self>(&dh);
         let activation_state = XdgActivationState::new::<Self>(&dh);
@@ -1791,6 +1797,7 @@ impl NickelSession {
 
             compositor_state,
             fractional_scale_manager_state,
+            viewporter_state,
             xdg_shell_state,
             xdg_dialog_state,
             activation_state,
@@ -6476,6 +6483,19 @@ mod protocol_tests {
             let runtime = session.internal_shell_surfaces[&surface.id];
             assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
         }
+    }
+
+    #[test]
+    fn fractional_scale_is_published_with_required_viewporter_protocol() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, session) = preview_test_session();
+
+        // Retaining both global handles is the Smithay contract that keeps the
+        // paired protocols advertised for the session lifetime.
+        assert_ne!(
+            session.fractional_scale_manager_state.global(),
+            session.viewporter_state.global()
+        );
     }
 
     #[test]
