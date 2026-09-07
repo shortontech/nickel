@@ -796,6 +796,7 @@ impl NickelSession {
                             self.windows.raise(id);
                             self.workspaces.focused(&id);
                         }
+                        self.surrender_internal_focus();
                         keyboard.set_focus(
                             self,
                             crate::session::focus::KeyboardFocusTarget::for_window(&window),
@@ -1011,6 +1012,7 @@ impl NickelSession {
                                 self.space.elements().for_each(|candidate| {
                                     candidate.set_activated(candidate == &window);
                                 });
+                                self.surrender_internal_focus();
                                 keyboard.set_focus(
                                     self,
                                     crate::session::focus::KeyboardFocusTarget::for_window(&window),

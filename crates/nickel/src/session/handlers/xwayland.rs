@@ -274,16 +274,19 @@ impl NickelSession {
             if let Some(wl_surface) = surface.wl_surface() {
                 self.surface_windows.insert(wl_surface.id(), id);
             }
-            self.space.elements().for_each(|candidate| {
-                candidate.set_activated(candidate == &window);
-            });
-            self.raise_x11_surface(&surface);
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
-                Some(KeyboardFocusTarget::X11(surface.clone())),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-            );
-            self.workspaces.focused(&id);
+            if !self.locked {
+                self.space.elements().for_each(|candidate| {
+                    candidate.set_activated(candidate == &window);
+                });
+                self.raise_x11_surface(&surface);
+                self.surrender_internal_focus();
+                self.seat.get_keyboard().unwrap().set_focus(
+                    self,
+                    Some(KeyboardFocusTarget::X11(surface.clone())),
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                );
+                self.workspaces.focused(&id);
+            }
             if surface.is_maximized() {
                 self.apply_maximized_x11_geometry(&window, &surface, true);
             }

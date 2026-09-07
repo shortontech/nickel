@@ -99,8 +99,8 @@ fn unauthenticated_reserved_shell_role(
         .flatten()
 }
 
-fn new_toplevel_may_focus(current_focus_is_shell: Option<bool>, has_parent: bool) -> bool {
-    has_parent || current_focus_is_shell.unwrap_or(true)
+fn new_toplevel_may_focus(_current_focus_is_shell: Option<bool>, _has_parent: bool) -> bool {
+    true
 }
 
 fn parent_relative_dialog_location(
@@ -426,6 +426,7 @@ impl XdgDialogHandler for NickelSession {
             self.space.elements().for_each(|candidate| {
                 candidate.set_activated(candidate == &window);
             });
+            self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(KeyboardFocusTarget::Wayland(toplevel.wl_surface().clone())),
@@ -720,7 +721,8 @@ impl NickelSession {
         }
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(id) = registry_id.filter(|id| {
-            !self.shell_owned_windows.contains(id)
+            !self.locked
+                && !self.shell_owned_windows.contains(id)
                 && new_toplevel_may_focus(current_focus_is_shell, parent_window.is_some())
         }) {
             self.windows.raise(id);
@@ -728,6 +730,7 @@ impl NickelSession {
             self.space.elements().for_each(|candidate| {
                 candidate.set_activated(candidate == &window);
             });
+            self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(KeyboardFocusTarget::Wayland(surface.clone())),
@@ -980,6 +983,7 @@ impl NickelSession {
                 candidate
                     .set_activated(candidate.wl_surface().as_deref() == Some(surface.wl_surface()));
             });
+            self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
@@ -1167,11 +1171,12 @@ mod tests {
     }
 
     #[test]
-    fn background_toplevel_cannot_replace_application_focus() {
+    fn ordinary_toplevel_activates_over_an_existing_application() {
         assert!(new_toplevel_may_focus(None, false));
         assert!(new_toplevel_may_focus(Some(true), false));
-        assert!(!new_toplevel_may_focus(Some(false), false));
+        assert!(new_toplevel_may_focus(Some(false), false));
         assert!(new_toplevel_may_focus(Some(false), true));
+        assert!(new_toplevel_may_focus(Some(true), true));
     }
 
     #[test]

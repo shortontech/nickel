@@ -1170,17 +1170,10 @@ impl NickelSession {
             .internal_codex
             .take()
             .ok_or_else(|| "Codex integration is disabled".to_owned())?;
-        let previous = host
-            .project_menu()
-            .and_then(|id| self.internal_ui.placement(id).cloned());
         let result = host.ensure_project_menu(&mut self.internal_ui, placement);
         self.internal_codex = Some(host);
         if let Ok(id) = result {
-            let presentation_changed = previous.as_ref() != self.internal_ui.placement(id);
-            self.internal_ui.focus_surface(id);
-            if presentation_changed {
-                self.schedule_internal_ui_frame();
-            }
+            self.focus_internal_surface(id);
         }
         result
     }
@@ -1262,6 +1255,11 @@ impl NickelSession {
             return;
         };
         self.internal_ui.raise(surface);
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            Option::<crate::session::focus::KeyboardFocusTarget>::None,
+            SERIAL_COUNTER.next_serial(),
+        );
         self.windows.raise(window);
         self.workspaces.focused(&window);
         self.notify_protocol_snapshot();
@@ -1323,11 +1321,11 @@ impl NickelSession {
                     1.0,
                 );
                 self.internal_file_surfaces.insert(id, runtime);
-                self.internal_ui.focus_surface(runtime);
+                self.focus_internal_surface(runtime);
             }
             FileWindowAction::Focused(id) => {
                 if let Some(runtime) = self.internal_file_surfaces.get(&id).copied() {
-                    self.internal_ui.focus_surface(runtime);
+                    self.focus_internal_surface(runtime);
                 }
             }
             FileWindowAction::Closed(id) => {
@@ -1349,10 +1347,29 @@ impl NickelSession {
         };
         if !was_visible {
             self.launcher_output_name = self.resolve_interaction_output(InvocationSource::Keyboard);
+            if self.launcher_restore_window.is_none() {
+                self.launcher_restore_window = self
+                    .windows
+                    .snapshot()
+                    .into_iter()
+                    .find(|window| window.active)
+                    .map(|window| window.id);
+            }
         }
         let changed = self.internal_shell.as_mut().unwrap().toggle_launcher();
         if changed {
             self.sync_internal_shell();
+            if was_visible {
+                self.restore_launcher_focus();
+            } else if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            }) {
+                self.focus_internal_surface(runtime);
+            }
             self.wake_internal_shell();
         }
         changed
@@ -1409,9 +1426,31 @@ impl NickelSession {
         if !launcher_was_visible && launcher_is_visible {
             self.launcher_output_name =
                 self.resolve_interaction_output(InvocationSource::RecentInteraction);
+            if self.launcher_restore_window.is_none() {
+                self.launcher_restore_window = self
+                    .windows
+                    .snapshot()
+                    .into_iter()
+                    .find(|window| window.active)
+                    .map(|window| window.id);
+            }
         }
         if changed {
             self.sync_internal_shell();
+        }
+        if launcher_was_visible && !launcher_is_visible {
+            self.restore_launcher_focus();
+        } else if !launcher_was_visible
+            && launcher_is_visible
+            && let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            })
+        {
+            self.focus_internal_surface(runtime);
         }
         self.wake_internal_shell();
     }
@@ -3282,6 +3321,7 @@ impl NickelSession {
             }
             let surface = window.toplevel().unwrap().wl_surface().clone();
             let _request = self.launcher_focus.request(surface.id());
+            self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 Some(crate::session::focus::KeyboardFocusTarget::Wayland(surface)),
@@ -3365,6 +3405,7 @@ impl NickelSession {
             self.place_screenshot_surface(&target);
         }
         self.space.raise_element(&target, true);
+        self.surrender_internal_focus();
         self.seat.get_keyboard().unwrap().set_focus(
             self,
             crate::session::focus::KeyboardFocusTarget::for_window(&target),
@@ -3941,6 +3982,7 @@ impl NickelSession {
             let focus = window.wl_surface().map(|surface| {
                 crate::session::focus::KeyboardFocusTarget::Wayland(surface.into_owned())
             });
+            self.surrender_internal_focus();
             self.seat
                 .get_keyboard()
                 .unwrap()
@@ -4039,6 +4081,7 @@ impl NickelSession {
             .map(|surface| {
                 crate::session::focus::KeyboardFocusTarget::Wayland(surface.into_owned())
             });
+        self.surrender_internal_focus();
         self.seat
             .get_keyboard()
             .unwrap()
@@ -4204,6 +4247,7 @@ impl NickelSession {
             return;
         }
         if focus {
+            self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
                 crate::session::focus::KeyboardFocusTarget::for_window(&window),
@@ -4458,7 +4502,7 @@ impl NickelSession {
             self.internal_minimized_windows.remove(&id);
             self.internal_ui.set_visible(surface, true);
             self.internal_ui.raise(surface);
-            self.internal_ui.focus_surface(surface);
+            self.focus_internal_surface(surface);
             self.windows.raise(id);
             self.workspaces.focused(&id);
             if let Some(output) = self
@@ -4471,12 +4515,6 @@ impl NickelSession {
             self.space.elements().for_each(|window| {
                 window.set_activated(false);
             });
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
-                Option::<crate::session::focus::KeyboardFocusTarget>::None,
-                SERIAL_COUNTER.next_serial(),
-            );
-            self.schedule_internal_ui_frame();
             self.notify_protocol_snapshot();
             return;
         }
@@ -4513,6 +4551,7 @@ impl NickelSession {
         self.space.elements().for_each(|candidate| {
             candidate.set_activated(candidate == &window);
         });
+        self.surrender_internal_focus();
         self.seat.get_keyboard().unwrap().set_focus(
             self,
             crate::session::focus::KeyboardFocusTarget::for_window(&window),
@@ -4525,6 +4564,30 @@ impl NickelSession {
         });
         self.raise_panels();
         self.notify_protocol_snapshot();
+    }
+
+    /// Transfer keyboard ownership to one compositor-hosted focusable surface.
+    fn focus_internal_surface(&mut self, surface: nickel_ui::InternalSurfaceId) -> bool {
+        if !self.internal_ui.is_visible(surface) {
+            return false;
+        }
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            Option::<crate::session::focus::KeyboardFocusTarget>::None,
+            SERIAL_COUNTER.next_serial(),
+        );
+        if !self.internal_ui.focus_surface(surface) {
+            return false;
+        }
+        self.schedule_internal_ui_frame();
+        true
+    }
+
+    /// Blur a compositor-hosted owner before assigning a native seat target.
+    pub(crate) fn surrender_internal_focus(&mut self) {
+        if self.internal_ui.clear_focus().is_some() {
+            self.schedule_internal_ui_frame();
+        }
     }
 
     pub fn cycle_windows(&mut self, forward: bool) {
@@ -6753,6 +6816,51 @@ mod protocol_tests {
         let after_idle = session.internal_shell_timer_counters();
         assert!(after_idle.polls.saturating_sub(settled.polls) <= 1);
         assert_eq!(after_idle.redraw_requests, settled.redraw_requests);
+    }
+
+    #[test]
+    fn internal_launcher_owns_keyboard_until_it_is_hidden() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "test".into(),
+                logical_width: 1280,
+                logical_height: 720,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        session
+            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .expect("headless internal shell");
+        let application = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(application).unwrap();
+
+        assert!(session.toggle_internal_launcher());
+        let launcher = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+            .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
+            .copied()
+            .unwrap();
+        assert_eq!(session.internal_ui.focused(), Some(launcher));
+        assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), None);
+
+        assert!(session.toggle_internal_launcher());
+        assert_eq!(session.internal_ui.focused(), Some(application));
     }
 
     #[test]

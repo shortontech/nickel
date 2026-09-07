@@ -1326,6 +1326,22 @@ impl InternalUiRuntime {
         }
         true
     }
+
+    /// Relinquish compositor-owned keyboard focus.
+    ///
+    /// Native focus transitions call this before assigning the Smithay seat so
+    /// the hosted UI and protocol client cannot both believe they own input.
+    pub fn clear_focus(&mut self) -> Option<InternalSurfaceId> {
+        let previous = self.focused.take()?;
+        self.step(
+            previous,
+            HostBatch {
+                window_focused: Some(false),
+                ..Default::default()
+            },
+        );
+        Some(previous)
+    }
     pub fn insert<A: Application + 'static>(
         &mut self,
         application: A,
@@ -1367,11 +1383,11 @@ impl InternalUiRuntime {
     }
 
     pub fn remove(&mut self, id: InternalSurfaceId) -> bool {
+        if self.focused == Some(id) {
+            self.clear_focus();
+        }
         let removed = self.surfaces.remove(id).is_some();
         self.presentation.remove(&id);
-        if self.focused == Some(id) {
-            self.focused = None;
-        }
         if self.hovered == Some(id) {
             self.hovered = None;
         }
@@ -1385,17 +1401,22 @@ impl InternalUiRuntime {
 
     /// Show or hide a hosted surface without destroying its application state.
     pub fn set_visible(&mut self, id: InternalSurfaceId, visible: bool) -> bool {
-        let Some(surface) = self.presentation.get_mut(&id) else {
-            return false;
+        let changed = {
+            let Some(surface) = self.presentation.get_mut(&id) else {
+                return false;
+            };
+            let changed = surface.visible != visible;
+            surface.visible = visible;
+            if visible {
+                surface.dirty = true;
+            } else {
+                surface.renderer.suspend();
+            }
+            changed
         };
-        let changed = surface.visible != visible;
-        surface.visible = visible;
-        if visible {
-            surface.dirty = true;
-        } else {
-            surface.renderer.suspend();
+        if !visible {
             if self.focused == Some(id) {
-                self.focused = None;
+                self.clear_focus();
             }
             if self.hovered == Some(id) {
                 self.hovered = None;
@@ -1649,6 +1670,15 @@ impl InternalUiRuntime {
         )
     }
 
+    fn surface_accepts_keyboard_focus(&self, id: InternalSurfaceId) -> bool {
+        self.presentation.get(&id).is_some_and(|surface| {
+            matches!(
+                surface.placement.role,
+                InternalSurfaceRole::Overlay | InternalSurfaceRole::Application
+            )
+        })
+    }
+
     pub fn pointer_motion(&mut self, point: (f64, f64)) -> bool {
         self.pointer_motion_with_client(point, false)
     }
@@ -1692,7 +1722,7 @@ impl InternalUiRuntime {
             return false;
         };
         if pressed {
-            if self.focused != Some(id) {
+            if self.surface_accepts_keyboard_focus(id) && self.focused != Some(id) {
                 if let Some(previous) = self.focused {
                     self.step(
                         previous,
@@ -1770,7 +1800,7 @@ impl InternalUiRuntime {
                     return false;
                 };
                 self.touches.insert(contact, (id, local));
-                if self.focused != Some(id) {
+                if self.surface_accepts_keyboard_focus(id) && self.focused != Some(id) {
                     if let Some(previous) = self.focused {
                         self.step(
                             previous,
@@ -2120,6 +2150,8 @@ mod tests {
                 .0,
             1
         );
+        assert!(runtime.pointer_button((10.0, 10.0), true));
+        assert_eq!(runtime.focused(), Some(application));
         assert_eq!(
             runtime
                 .surfaces
@@ -2130,6 +2162,69 @@ mod tests {
                 .unwrap()
                 .0,
             0
+        );
+    }
+
+    #[test]
+    fn focus_transfer_and_hide_blur_the_previous_host() {
+        let mut runtime = InternalUiRuntime::default();
+        let placement = |x| InternalSurfacePlacement {
+            role: InternalSurfaceRole::Application,
+            geometry: (x, 0, 100, 100),
+            output: None,
+        };
+        let first = runtime.insert(Counter(0), placement(0), 1.0);
+        let second = runtime.insert(Counter(0), placement(100), 1.0);
+
+        assert!(runtime.focus_surface(first));
+        assert!(
+            runtime
+                .surfaces
+                .get(first)
+                .unwrap()
+                .inspect()
+                .window_focused
+        );
+
+        assert!(runtime.focus_surface(second));
+        assert!(
+            !runtime
+                .surfaces
+                .get(first)
+                .unwrap()
+                .inspect()
+                .window_focused
+        );
+        assert!(
+            runtime
+                .surfaces
+                .get(second)
+                .unwrap()
+                .inspect()
+                .window_focused
+        );
+
+        assert_eq!(runtime.clear_focus(), Some(second));
+        assert_eq!(runtime.focused(), None);
+        assert!(
+            !runtime
+                .surfaces
+                .get(second)
+                .unwrap()
+                .inspect()
+                .window_focused
+        );
+
+        assert!(runtime.focus_surface(first));
+        assert!(runtime.set_visible(first, false));
+        assert_eq!(runtime.focused(), None);
+        assert!(
+            !runtime
+                .surfaces
+                .get(first)
+                .unwrap()
+                .inspect()
+                .window_focused
         );
     }
 
