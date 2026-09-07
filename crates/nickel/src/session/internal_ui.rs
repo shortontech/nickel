@@ -668,15 +668,11 @@ impl SmithayFrameRenderer {
                             self.diagnostics.image_allocations.saturating_add(1);
                         self.diagnostics.image_uploads =
                             self.diagnostics.image_uploads.saturating_add(1);
-                        let pixels = premultiplied_rgba(image.as_raw());
                         let texture = CachedTexture {
-                            buffer: MemoryRenderBuffer::from_slice(
-                                &pixels,
-                                Fourcc::Abgr8888,
-                                (image.width() as i32, image.height() as i32),
-                                1,
-                                Transform::Normal,
-                                None,
+                            buffer: premultiplied_memory_buffer(
+                                image.as_raw(),
+                                image.width(),
+                                image.height(),
                             ),
                             width: image.width(),
                             height: image.height(),
@@ -799,19 +795,28 @@ impl SmithayFrameRenderer {
             .get_or_insert_with(|| SoftwareRenderer::new(width, height, frame.scale_factor));
         software.resize(width, height, frame.scale_factor);
         let damage = software.render(frame.commands);
-        let mut bytes = Vec::with_capacity(software.pixels().len() * 4);
-        for pixel in software.pixels() {
-            bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
-        }
         let (width, height) = software.size();
-        self.raster = Some(MemoryRenderBuffer::from_slice(
-            &bytes,
+        let mut buffer = MemoryRenderBuffer::new(
             Fourcc::Abgr8888,
             (width as i32, height as i32),
             1,
             Transform::Normal,
             None,
-        ));
+        );
+        buffer
+            .render()
+            .draw(|bytes| {
+                for (target, pixel) in bytes.chunks_exact_mut(4).zip(software.pixels()) {
+                    target.copy_from_slice(&premultiplied_pixel([
+                        pixel.r, pixel.g, pixel.b, pixel.a,
+                    ]));
+                }
+                Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(
+                    (width as i32, height as i32).into(),
+                )])
+            })
+            .unwrap();
+        self.raster = Some(buffer);
         self.primitives.clear();
         self.import_fallback = None;
         self.diagnostics.software_frame_bytes = texture_bytes(width, height);
@@ -1014,11 +1019,29 @@ fn content_hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn premultiplied_rgba(bytes: &[u8]) -> Vec<u8> {
-    bytes
-        .chunks_exact(4)
-        .flat_map(|pixel| premultiplied_pixel([pixel[0], pixel[1], pixel[2], pixel[3]]))
-        .collect()
+fn premultiplied_memory_buffer(bytes: &[u8], width: u32, height: u32) -> MemoryRenderBuffer {
+    debug_assert_eq!(bytes.len(), texture_bytes(width, height));
+    let mut buffer = MemoryRenderBuffer::new(
+        Fourcc::Abgr8888,
+        (width as i32, height as i32),
+        1,
+        Transform::Normal,
+        None,
+    );
+    buffer
+        .render()
+        .draw(|target| {
+            for (target, source) in target.chunks_exact_mut(4).zip(bytes.chunks_exact(4)) {
+                target.copy_from_slice(&premultiplied_pixel([
+                    source[0], source[1], source[2], source[3],
+                ]));
+            }
+            Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(
+                (width as i32, height as i32).into(),
+            )])
+        })
+        .unwrap();
+    buffer
 }
 
 fn premultiplied_pixel([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
