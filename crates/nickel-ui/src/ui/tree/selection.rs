@@ -77,13 +77,7 @@ pub(super) struct SelectionRegionBuilder {
 }
 
 pub(super) fn selection_document_generation(document: &SelectionDocument) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    for run in document.runs() {
-        run.id.hash(&mut hasher);
-        run.text.hash(&mut hasher);
-        (run.boundary_before as u8).hash(&mut hasher);
-    }
-    hasher.finish()
+    document.generation()
 }
 
 pub(super) fn document_selection_generation(selection: &crate::DocumentSelection) -> u64 {

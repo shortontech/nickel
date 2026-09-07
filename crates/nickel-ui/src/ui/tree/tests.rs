@@ -4076,6 +4076,50 @@ fn read_only_selection_uses_reduced_copy_and_select_all_menu() {
 }
 
 #[test]
+fn unselected_region_keeps_offscreen_document_lazy_until_copy() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider_calls = calls.clone();
+    let document = Arc::new(SelectionDocument::lazy(123, move || {
+        provider_calls.fetch_add(1, Ordering::SeqCst);
+        vec![
+            SelectionRun::block("visible", "Visible"),
+            SelectionRun::block("offscreen", "Offscreen 🦀"),
+        ]
+    }));
+    let mut state = UiStateStore::default();
+    let build = |state: &mut UiStateStore| {
+        UiFrame::<TestMessage>::layout_with_state(
+            SelectionRegion::new(document.clone())
+                .id("document")
+                .child(Text::new("Visible").selectable(true)),
+            Rect::new(0.0, 0.0, 240.0, 80.0),
+            state,
+        )
+    };
+    for _ in 0..10 {
+        let frame = build(&mut state);
+        let _ = frame.semantic_nodes();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    let region_id = UiId::from("root/document");
+    *state.document_selection_mut(region_id.clone()) = document.select_all();
+    state.set_selection_owner(Some(region_id.clone()));
+    let frame = build(&mut state);
+    frame.handle_event(&mut state, UiEvent::KeyboardContextMenu);
+    let menu = build(&mut state);
+    let copied = menu.handle_event(
+        &mut state,
+        UiEvent::AccessibilityActivate(region_id.scoped("text-context-menu").scoped("copy")),
+    );
+    assert_eq!(
+        copied.clipboard_text.as_deref(),
+        Some("Visible\nOffscreen 🦀")
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn multiline_text_field_hit_testing_and_caret_follow_explicit_lines() {
     fn query(value: String) -> TestMessage {
         TestMessage::Query(value)

@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, collections::HashMap, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    sync::{Arc, OnceLock},
+};
 
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -64,25 +69,109 @@ pub struct DocumentSelection {
     pub focus: Option<SelectionEndpoint>,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone)]
 pub struct SelectionDocument {
+    data: Arc<OnceLock<SelectionData>>,
+    generation: u64,
+    provider: Option<Arc<dyn Fn() -> Vec<SelectionRun> + Send + Sync>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SelectionData {
     runs: Vec<SelectionRun>,
     indexes: HashMap<String, usize>,
 }
 
+impl Default for SelectionDocument {
+    fn default() -> Self {
+        Self::new([])
+    }
+}
+
+impl std::fmt::Debug for SelectionDocument {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SelectionDocument")
+            .field("generation", &self.generation)
+            .field("materialized", &self.data.get())
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for SelectionDocument {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.provider, &other.provider) {
+            (Some(left), Some(right)) => {
+                self.generation == other.generation && Arc::ptr_eq(left, right)
+            }
+            (None, None) => self.data.get() == other.data.get(),
+            _ => false,
+        }
+    }
+}
+impl Eq for SelectionDocument {}
+
 impl SelectionDocument {
     pub fn new(runs: impl IntoIterator<Item = SelectionRun>) -> Self {
         let runs = runs.into_iter().collect::<Vec<_>>();
+        let mut hasher = DefaultHasher::new();
+        for run in &runs {
+            run.id.hash(&mut hasher);
+            run.text.hash(&mut hasher);
+            (run.boundary_before as u8).hash(&mut hasher);
+        }
+        Self {
+            data: Arc::new(OnceLock::from(Self::index(runs))),
+            generation: hasher.finish(),
+            provider: None,
+        }
+    }
+
+    /// Defer full logical-text construction until selection, copy, movement,
+    /// or accessibility reads consume it. Ordinary unselected layout and
+    /// generation checks do not invoke the provider.
+    ///
+    /// The provider must describe an immutable snapshot. Change `generation`
+    /// whenever run membership, ordering, or text changes, and replace the
+    /// document with that generation's provider. Capture shared immutable item
+    /// projections rather than an application/controller owner; dropping a
+    /// retired document then releases its private projections. A provider must
+    /// not recursively read this same document.
+    pub fn lazy(
+        generation: u64,
+        provider: impl Fn() -> Vec<SelectionRun> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            data: Arc::new(OnceLock::new()),
+            generation,
+            provider: Some(Arc::new(provider)),
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn is_materialized(&self) -> bool {
+        self.data.get().is_some()
+    }
+
+    fn data(&self) -> &SelectionData {
+        self.data
+            .get_or_init(|| Self::index(self.provider.as_ref().expect("lazy selection provider")()))
+    }
+
+    fn index(runs: Vec<SelectionRun>) -> SelectionData {
         let indexes = runs
             .iter()
             .enumerate()
             .map(|(index, run)| (run.id.clone(), index))
             .collect();
-        Self { runs, indexes }
+        SelectionData { runs, indexes }
     }
 
     pub fn runs(&self) -> &[SelectionRun] {
-        &self.runs
+        &self.data().runs
     }
 
     pub fn endpoint(&self, run_id: impl Into<String>, offset: usize) -> Option<SelectionEndpoint> {
@@ -95,10 +184,10 @@ impl SelectionDocument {
     }
 
     pub fn select_all(&self) -> DocumentSelection {
-        let Some(first) = self.runs.first() else {
+        let Some(first) = self.data().runs.first() else {
             return DocumentSelection::default();
         };
-        let last = self.runs.last().expect("first run exists");
+        let last = self.data().runs.last().expect("first run exists");
         DocumentSelection {
             anchor: Some(SelectionEndpoint::new(first.id.clone(), 0)),
             focus: Some(SelectionEndpoint {
@@ -127,11 +216,11 @@ impl SelectionDocument {
         if start == end {
             return None;
         }
-        let start_index = *self.indexes.get(&start.run_id)?;
-        let end_index = *self.indexes.get(&end.run_id)?;
+        let start_index = *self.data().indexes.get(&start.run_id)?;
+        let end_index = *self.data().indexes.get(&end.run_id)?;
         let mut output = String::new();
         for index in start_index..=end_index {
-            let run = &self.runs[index];
+            let run = &self.data().runs[index];
             let from = if index == start_index {
                 start.offset
             } else {
@@ -156,13 +245,13 @@ impl SelectionDocument {
         run_id: &str,
     ) -> Option<std::ops::Range<usize>> {
         let (start, end) = self.normalized(selection)?;
-        let index = *self.indexes.get(run_id)?;
-        let start_index = *self.indexes.get(&start.run_id)?;
-        let end_index = *self.indexes.get(&end.run_id)?;
+        let index = *self.data().indexes.get(run_id)?;
+        let start_index = *self.data().indexes.get(&start.run_id)?;
+        let end_index = *self.data().indexes.get(&end.run_id)?;
         if index < start_index || index > end_index {
             return None;
         }
-        let run = &self.runs[index];
+        let run = &self.data().runs[index];
         let from = if index == start_index {
             start.offset
         } else {
@@ -203,8 +292,8 @@ impl SelectionDocument {
         direction: isize,
     ) -> Option<SelectionEndpoint> {
         let endpoint = self.clamp_endpoint(endpoint)?;
-        let index = *self.indexes.get(&endpoint.run_id)?;
-        let run = &self.runs[index];
+        let index = *self.data().indexes.get(&endpoint.run_id)?;
+        let run = &self.data().runs[index];
         if direction.is_negative() {
             if endpoint.offset > 0 {
                 return Some(SelectionEndpoint::new(
@@ -214,7 +303,7 @@ impl SelectionDocument {
             }
             let previous = index
                 .checked_sub(1)
-                .and_then(|index| self.runs.get(index))?;
+                .and_then(|index| self.data().runs.get(index))?;
             Some(SelectionEndpoint::new(
                 previous.id.clone(),
                 previous.text.len(),
@@ -226,7 +315,7 @@ impl SelectionDocument {
                     next_grapheme_boundary(&run.text, endpoint.offset),
                 ));
             }
-            let next = self.runs.get(index + 1)?;
+            let next = self.data().runs.get(index + 1)?;
             Some(SelectionEndpoint::new(next.id.clone(), 0))
         }
     }
@@ -265,9 +354,9 @@ impl SelectionDocument {
 
     pub fn document_boundary(&self, end: bool) -> Option<SelectionEndpoint> {
         let run = if end {
-            self.runs.last()?
+            self.data().runs.last()?
         } else {
-            self.runs.first()?
+            self.data().runs.first()?
         };
         Some(SelectionEndpoint::new(
             run.id.clone(),
@@ -276,7 +365,10 @@ impl SelectionDocument {
     }
 
     fn run(&self, id: &str) -> Option<&SelectionRun> {
-        self.indexes.get(id).and_then(|index| self.runs.get(*index))
+        self.data()
+            .indexes
+            .get(id)
+            .and_then(|index| self.data().runs.get(*index))
     }
 
     fn clamp_endpoint(&self, endpoint: &SelectionEndpoint) -> Option<SelectionEndpoint> {
@@ -304,10 +396,16 @@ impl SelectionDocument {
             }
             return Some(reconciled);
         }
-        let old_index = previous.indexes.get(&endpoint.run_id).copied().unwrap_or(0);
+        let old_index = previous
+            .data()
+            .indexes
+            .get(&endpoint.run_id)
+            .copied()
+            .unwrap_or(0);
         let fallback = self
+            .data()
             .runs
-            .get(old_index.min(self.runs.len().saturating_sub(1)))?;
+            .get(old_index.min(self.data().runs.len().saturating_sub(1)))?;
         let offset = match endpoint.affinity {
             SelectionAffinity::Before => 0,
             SelectionAffinity::After => fallback.text.len(),
@@ -320,8 +418,8 @@ impl SelectionDocument {
     }
 
     fn compare(&self, left: &SelectionEndpoint, right: &SelectionEndpoint) -> Option<Ordering> {
-        let left_index = self.indexes.get(&left.run_id)?;
-        let right_index = self.indexes.get(&right.run_id)?;
+        let left_index = self.data().indexes.get(&left.run_id)?;
+        let right_index = self.data().indexes.get(&right.run_id)?;
         Some(
             left_index
                 .cmp(right_index)
@@ -378,6 +476,70 @@ fn next_grapheme_boundary(text: &str, offset: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_document_only_materializes_when_logical_text_is_consumed() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = calls.clone();
+        let document = SelectionDocument::lazy(17, move || {
+            provider_calls.fetch_add(1, Ordering::SeqCst);
+            vec![
+                SelectionRun::block("visible", "Visible"),
+                SelectionRun::block("offscreen", "Offscreen 🦀"),
+            ]
+        });
+        assert_eq!(document.generation(), 17);
+        assert!(!document.is_materialized());
+        let mut selection = DocumentSelection::default();
+        document.reconcile(&mut selection);
+        document.reconcile_from(&SelectionDocument::default(), &mut selection);
+        assert_eq!(document.selected_text(&selection), None);
+        assert_eq!(document.selected_range_in(&selection, "visible"), None);
+        assert_eq!(document, document.clone());
+        let _ = format!("{document:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let clone = document.clone();
+        let selected = document.select_all();
+        assert_eq!(
+            document.selected_text(&selected).as_deref(),
+            Some("Visible\nOffscreen 🦀")
+        );
+        assert_eq!(document.runs().len(), 2);
+        assert_eq!(clone.runs().len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retiring_lazy_document_releases_unconsumed_snapshot() {
+        let snapshot = Arc::new("retired transcript".to_owned());
+        let weak = Arc::downgrade(&snapshot);
+        let document = SelectionDocument::lazy(1, move || {
+            vec![SelectionRun::block("old", snapshot.as_str())]
+        });
+        assert!(weak.upgrade().is_some());
+        drop(document);
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn lazy_replacement_reconciles_removed_runs_and_end_affinity() {
+        let previous = SelectionDocument::lazy(1, || {
+            vec![
+                SelectionRun::block("gone", "old"),
+                SelectionRun::block("live", "now"),
+            ]
+        });
+        let mut selection = previous.select_all();
+        let current =
+            SelectionDocument::lazy(2, || vec![SelectionRun::block("live", "now appended")]);
+        current.reconcile_from(&previous, &mut selection);
+        assert_eq!(
+            current.selected_text(&selection).as_deref(),
+            Some("now appended")
+        );
+        assert_ne!(current.generation(), previous.generation());
+    }
 
     fn document() -> SelectionDocument {
         SelectionDocument::new([
