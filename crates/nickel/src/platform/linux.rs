@@ -1460,62 +1460,85 @@ impl WindowFeed {
         }
     }
 
+    /// Construct a feed whose state is supplied directly by the compositor.
+    /// This deliberately creates no PID-derived reply socket.
+    pub(crate) fn internal() -> Self {
+        Self {
+            socket: None,
+            path: PathBuf::new(),
+            outputs: RefCell::new(HashMap::new()),
+            available_outputs: RefCell::new(Vec::new()),
+            primary_output: RefCell::new(None),
+        }
+    }
+
+    pub(crate) fn apply_internal_snapshot(
+        &self,
+        snapshot: nickel_session_protocol::Snapshot,
+        launcher: &Launcher,
+    ) -> Vec<OpenWindow> {
+        self.windows_from_snapshot(snapshot, launcher)
+    }
+
     pub fn snapshot(&self, launcher: &Launcher) -> FeedState<Vec<OpenWindow>> {
         let Some(socket) = self.socket.as_ref() else {
             return FeedState::Disconnected;
         };
         match session_request_on(socket, SessionRequest::Query(SessionQuery::Snapshot)) {
             Ok(ServerMessage::Snapshot(snapshot)) => {
-                let mut outputs = self.outputs.borrow_mut();
-                outputs.clear();
-                *self.available_outputs.borrow_mut() = snapshot
-                    .outputs
-                    .iter()
-                    .map(|output| output.name.clone())
-                    .collect();
-                *self.primary_output.borrow_mut() = snapshot
-                    .outputs
-                    .iter()
-                    .find(|output| output.primary)
-                    .map(|output| output.name.clone());
-                for window in &snapshot.windows {
-                    if let Some(output) = owning_output(window.geometry, &snapshot.outputs) {
-                        outputs.insert(WindowId(window.id.0), output);
-                    }
-                }
-                let multiple_outputs = snapshot.outputs.len() > 1;
-                FeedState::Ready(
-                    snapshot
-                        .windows
-                        .into_iter()
-                        .map(|window| OpenWindow {
-                            state: crate::model::WindowState {
-                                minimized: window.minimized,
-                                maximized: window.maximized,
-                                fullscreen: window.fullscreen,
-                                workspace: Some(window.workspace.0),
-                                output: outputs.get(&WindowId(window.id.0)).cloned(),
-                                capabilities: crate::model::WindowCapabilities {
-                                    fullscreen: true,
-                                    move_workspace: true,
-                                    move_display: multiple_outputs,
-                                    ..crate::model::WindowCapabilities::default()
-                                },
-                            },
-                            id: WindowId(window.id.0),
-                            application_id: resolve_application_id(
-                                &window.application_id,
-                                launcher,
-                            ),
-                            active: window.active,
-                            title: window.title,
-                        })
-                        .collect(),
-                )
+                FeedState::Ready(self.windows_from_snapshot(snapshot, launcher))
             }
             Ok(_) => FeedState::Failed,
             Err(error) => session_error_feed_state(error),
         }
+    }
+
+    fn windows_from_snapshot(
+        &self,
+        snapshot: nickel_session_protocol::Snapshot,
+        launcher: &Launcher,
+    ) -> Vec<OpenWindow> {
+        let mut outputs = self.outputs.borrow_mut();
+        outputs.clear();
+        *self.available_outputs.borrow_mut() = snapshot
+            .outputs
+            .iter()
+            .map(|output| output.name.clone())
+            .collect();
+        *self.primary_output.borrow_mut() = snapshot
+            .outputs
+            .iter()
+            .find(|output| output.primary)
+            .map(|output| output.name.clone());
+        for window in &snapshot.windows {
+            if let Some(output) = owning_output(window.geometry, &snapshot.outputs) {
+                outputs.insert(WindowId(window.id.0), output);
+            }
+        }
+        let multiple_outputs = snapshot.outputs.len() > 1;
+        snapshot
+            .windows
+            .into_iter()
+            .map(|window| OpenWindow {
+                state: crate::model::WindowState {
+                    minimized: window.minimized,
+                    maximized: window.maximized,
+                    fullscreen: window.fullscreen,
+                    workspace: Some(window.workspace.0),
+                    output: outputs.get(&WindowId(window.id.0)).cloned(),
+                    capabilities: crate::model::WindowCapabilities {
+                        fullscreen: true,
+                        move_workspace: true,
+                        move_display: multiple_outputs,
+                        ..crate::model::WindowCapabilities::default()
+                    },
+                },
+                id: WindowId(window.id.0),
+                application_id: resolve_application_id(&window.application_id, launcher),
+                active: window.active,
+                title: window.title,
+            })
+            .collect()
     }
 
     pub fn window_output(&self, window: WindowId) -> Option<String> {
@@ -1567,7 +1590,7 @@ impl WindowFeed {
     }
 
     pub fn supports_previews(&self) -> bool {
-        true
+        self.socket.is_some()
     }
 
     pub fn icon(&self, _: WindowId) -> Option<image::RgbaImage> {
@@ -2155,7 +2178,9 @@ pub fn application_icon(_: &str) -> Option<image::RgbaImage> {
 
 impl Drop for WindowFeed {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        if !self.path.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -2199,7 +2224,7 @@ mod tests {
 
     use super::{
         MAX_PROTOCOL_ERROR_MESSAGE_CHARS, PENDING_LAUNCH_RELAYS, PendingLaunchSignal,
-        SubscriptionState, bounded_notification_text, capture_active_window,
+        SubscriptionState, WindowFeed, bounded_notification_text, capture_active_window,
         capture_active_window_to_file, command_response, crop_output_geometry,
         deliver_pending_launch_expiry, deliver_pending_launch_observation, logical_rect,
         notification_actions, notification_name_owned, owning_output, parse_window, pixmap_to_rgba,
@@ -2207,6 +2232,15 @@ mod tests {
         secure_storage_retry_response, session_receive_error, shell_command_payload,
         subscription_shortcut, tray_retry_delay,
     };
+
+    #[test]
+    fn internal_window_feed_has_no_pid_derived_transport() {
+        let feed = WindowFeed::internal();
+
+        assert!(feed.socket.is_none());
+        assert!(feed.path.as_os_str().is_empty());
+        assert!(!feed.supports_previews());
+    }
 
     #[test]
     fn window_output_uses_largest_intersection_and_primary_tie_break() {

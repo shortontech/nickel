@@ -8,7 +8,7 @@ mod focus;
 mod grabs;
 mod input;
 mod internal_ui;
-mod login_services;
+pub(crate) mod login_services;
 mod on_screen_keyboard;
 mod output_retirement;
 mod recovery_ui;
@@ -73,8 +73,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the typed internal command path live alongside the compatibility
     // socket. Compositor-hosted UI will receive this handle instead of the
     // platform transport when it is moved into `NickelSession`.
-    let in_process_session_host =
-        crate::session_host::install_in_process_session_host(&event_loop.handle())?;
+    let in_process_session_host = crate::session_host::install_in_process_session_host(
+        &event_loop.handle(),
+        state.secure_storage_state_handle(),
+        state.secure_storage_retry_handle(),
+    )?;
     let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
     let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));
     let monitor_secure_storage_state = state.secure_storage_state_handle();

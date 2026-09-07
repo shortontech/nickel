@@ -46,6 +46,16 @@ fn injected_session_host_receives_shell_commands_without_platform_transport() {
             self.0.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<SecureStorageState, crate::platform::SessionRequestError> {
+            Ok(SecureStorageState::Ready)
+        }
+
+        fn request_secure_storage_retry(&self) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
     }
 
     let host = Arc::new(RecordingHost(AtomicUsize::new(0)));

@@ -84,7 +84,7 @@ impl InternalShellCoordinator {
     pub fn new(session_host: Arc<dyn SessionHost>, panel_edge: PanelEdge) -> Result<Self, String> {
         let (file_window_host, file_requests) = internal_file_window_channel();
         Ok(Self {
-            shell: LiveShell::new_with_hosts(session_host, file_window_host)?,
+            shell: LiveShell::new_with_internal_hosts(session_host, file_window_host)?,
             surfaces: InternalSurfaceSet::new(),
             entries: Vec::new(),
             indices: HashMap::new(),
@@ -208,6 +208,10 @@ impl InternalShellCoordinator {
             .collect()
     }
 
+    pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) {
+        self.shell.apply_internal_session_snapshot(snapshot);
+    }
+
     pub fn file_windows(&self) -> &nickel_file::FileWindowCoordinator {
         &self.file_windows
     }
@@ -284,6 +288,16 @@ mod tests {
 
     impl SessionHost for TestHost {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
+            Ok(())
+        }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<crate::platform::SecureStorageState, SessionRequestError> {
+            Ok(crate::platform::SecureStorageState::Ready)
+        }
+
+        fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
             Ok(())
         }
     }

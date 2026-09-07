@@ -677,9 +677,12 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
-        let Some(shell) = self.internal_shell.as_mut() else {
+        if self.internal_shell.is_none() {
             return;
-        };
+        }
+        let snapshot = self.protocol_snapshot();
+        let shell = self.internal_shell.as_mut().unwrap();
+        shell.apply_session_snapshot(snapshot);
         let changed = shell.poll(now);
         let actions = shell.drain_file_actions();
         let shell_changed = !changed.is_empty();

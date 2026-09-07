@@ -463,6 +463,10 @@ pub struct LiveShell {
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
+    #[cfg(target_os = "linux")]
+    internal_session_snapshot: Option<nickel_session_protocol::Snapshot>,
+    #[cfg(target_os = "linux")]
+    internal_workspaces: Option<Vec<platform::WorkspaceSummary>>,
     tray_feed: TrayFeed,
     notification_feed: NotificationFeed,
     windows: Vec<OpenWindow>,
@@ -701,6 +705,22 @@ impl LiveShell {
         session_host: Arc<dyn SessionHost>,
         file_window_host: Arc<dyn FileWindowHost>,
     ) -> Result<Self, String> {
+        Self::new_with_hosts_and_transport(session_host, file_window_host, true)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn new_with_internal_hosts(
+        session_host: Arc<dyn SessionHost>,
+        file_window_host: Arc<dyn FileWindowHost>,
+    ) -> Result<Self, String> {
+        Self::new_with_hosts_and_transport(session_host, file_window_host, false)
+    }
+
+    fn new_with_hosts_and_transport(
+        session_host: Arc<dyn SessionHost>,
+        file_window_host: Arc<dyn FileWindowHost>,
+        external_session_transport: bool,
+    ) -> Result<Self, String> {
         let shell_settings = ShellSettings::load_default();
         let application_discovery = platform::application_discovery();
         let application_status = application_discovery_status_label(application_discovery.status());
@@ -761,7 +781,17 @@ impl LiveShell {
         .map(|icon| tint_panel_icon(icon, palette.text))
         .map(Arc::new)
         .expect("embedded Nickel chat icon remains valid");
-        let window_feed = WindowFeed::new();
+        #[cfg(target_os = "linux")]
+        let window_feed = if external_session_transport {
+            WindowFeed::new()
+        } else {
+            WindowFeed::internal()
+        };
+        #[cfg(not(target_os = "linux"))]
+        let window_feed = {
+            let _ = external_session_transport;
+            WindowFeed::new()
+        };
         let tray_feed = TrayFeed::new();
         let notification_feed = NotificationFeed::new()?;
         let windows = Vec::new();
@@ -782,7 +812,7 @@ impl LiveShell {
         );
         #[cfg(target_os = "linux")]
         let (secure_storage_state, secure_storage_query_error) =
-            match platform::secure_storage_state() {
+            match session_host.secure_storage_state() {
                 Ok(state) => (state, None),
                 Err(error) => {
                     tracing::warn!(%error, "secure-storage query failed during shell startup");
@@ -862,6 +892,10 @@ impl LiveShell {
             host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
+            #[cfg(target_os = "linux")]
+            internal_session_snapshot: None,
+            #[cfg(target_os = "linux")]
+            internal_workspaces: None,
             tray_feed,
             notification_feed,
             windows,
@@ -982,6 +1016,25 @@ impl LiveShell {
         fast || system
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn apply_internal_session_snapshot(
+        &mut self,
+        snapshot: nickel_session_protocol::Snapshot,
+    ) {
+        self.internal_workspaces = Some(
+            snapshot
+                .workspaces
+                .ordered
+                .iter()
+                .map(|workspace| platform::WorkspaceSummary {
+                    id: workspace.id.0,
+                    active: workspace.id == snapshot.workspaces.active,
+                })
+                .collect(),
+        );
+        self.internal_session_snapshot = Some(snapshot);
+    }
+
     pub fn image_cache_diagnostics(&self) -> ShellImageCacheDiagnostics {
         let launcher = self.launcher_icons.diagnostics();
         let wallpaper_bytes = self
@@ -1011,6 +1064,17 @@ impl LiveShell {
 
     pub fn refresh_fast(&mut self) -> bool {
         let mut changed = false;
+        #[cfg(target_os = "linux")]
+        let windows = self.internal_session_snapshot.take().map_or_else(
+            || self.window_feed.snapshot(&self.launcher),
+            |snapshot| {
+                FeedState::Ready(
+                    self.window_feed
+                        .apply_internal_snapshot(snapshot, &self.launcher),
+                )
+            },
+        );
+        #[cfg(not(target_os = "linux"))]
         let windows = self.window_feed.snapshot(&self.launcher);
         if update_feed_status(&mut self.window_feed_status, windows.status(), "windows") {
             changed = true;
@@ -1068,6 +1132,12 @@ impl LiveShell {
                 changed = true;
             }
         }
+        #[cfg(target_os = "linux")]
+        let workspaces = self
+            .internal_workspaces
+            .take()
+            .map_or_else(|| self.window_feed.workspaces(), FeedState::Ready);
+        #[cfg(not(target_os = "linux"))]
         let workspaces = self.window_feed.workspaces();
         if update_feed_status(
             &mut self.workspace_feed_status,
@@ -1157,7 +1227,7 @@ impl LiveShell {
         let mut changed = false;
         #[cfg(target_os = "linux")]
         {
-            let secure_storage_state = match platform::secure_storage_state() {
+            let secure_storage_state = match self.session_host.secure_storage_state() {
                 Ok(state) => {
                     if self.secure_storage_query_error.take().is_some() {
                         tracing::info!("secure-storage session query recovered");
@@ -3989,13 +4059,17 @@ impl LiveShell {
         }
         #[cfg(target_os = "linux")]
         if platform::application_requires_secure_storage(&application)
-            && platform::secure_storage_state().unwrap_or_else(|error| {
-                tracing::warn!(%error, "secure-storage query failed before application launch");
-                platform::SecureStorageState::ControlUnavailable
-            }) != platform::SecureStorageState::Ready
+            && self
+                .session_host
+                .secure_storage_state()
+                .unwrap_or_else(|error| {
+                    tracing::warn!(%error, "secure-storage query failed before application launch");
+                    platform::SecureStorageState::ControlUnavailable
+                })
+                != platform::SecureStorageState::Ready
             && self.secure_storage_override.as_deref() != Some(application.id())
         {
-            if let Err(error) = platform::request_secure_storage_retry() {
+            if let Err(error) = self.session_host.request_secure_storage_retry() {
                 tracing::warn!(%error, "secure-storage retry command failed");
             }
             self.secure_storage_override = Some(application.id().to_owned());
