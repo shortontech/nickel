@@ -8,6 +8,7 @@ use std::{
 };
 
 use nickel_core::terminal_settings::TerminalSettings;
+use nickel_input::{InputEvent, KeyEdge};
 use nickel_terminal::{
     TerminalDimensions, TerminalEvent, TerminalExit, TerminalOptions, TerminalProgram,
     TerminalSession, TerminalSnapshot,
@@ -38,6 +39,13 @@ fn next_poll_delay(previous: Duration, changed: bool) -> Duration {
 
 fn close_after_exit(enabled: bool, code: Option<i32>) -> bool {
     enabled && code == Some(0)
+}
+
+fn exit_status(code: Option<i32>) -> String {
+    match code {
+        Some(0) | None => "Process exited — press any key to exit".into(),
+        Some(code) => format!("Process exited with status {code} — press any key to exit"),
+    }
 }
 
 fn deferred_window_suppressed(delay: Duration, app: &mut TerminalApp) -> bool {
@@ -410,11 +418,7 @@ impl Application for TerminalApp {
             match event {
                 TerminalEvent::Title(title) if !title.is_empty() => self.title = title,
                 TerminalEvent::ChildExited(code) => {
-                    self.status = Some(match code {
-                        Some(0) => "Process exited".into(),
-                        Some(code) => format!("Process exited with status {code}"),
-                        None => "Process exited".into(),
-                    });
+                    self.status = Some(exit_status(code));
                     self.exit_requested = close_after_exit(self.close_on_successful_exit, code);
                 }
                 TerminalEvent::ClipboardStore(text) => {
@@ -491,6 +495,17 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         input: &nickel_input::InputEvent,
         _: HostServices<'_>,
     ) -> Result<AdapterOutcome, Box<dyn Error>> {
+        if !matches!(
+            host.application().session.exit_state(),
+            TerminalExit::Running
+        ) && matches!(input, InputEvent::Key(key) if key.edge == KeyEdge::Pressed && !key.repeat)
+        {
+            return Ok(AdapterOutcome {
+                changed: false,
+                consume: true,
+                exit: true,
+            });
+        }
         let pointer_command = self.pointer.translate(
             input,
             &host.application().snapshot,
@@ -652,6 +667,18 @@ mod tests {
         assert!(!close_after_exit(false, Some(0)));
         assert!(!close_after_exit(true, Some(1)));
         assert!(!close_after_exit(true, None));
+    }
+
+    #[test]
+    fn exit_status_invites_keyboard_dismissal() {
+        assert_eq!(
+            exit_status(Some(0)),
+            "Process exited — press any key to exit"
+        );
+        assert_eq!(
+            exit_status(Some(7)),
+            "Process exited with status 7 — press any key to exit"
+        );
     }
 
     #[test]
