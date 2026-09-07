@@ -725,9 +725,8 @@ impl NickelSession {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
         let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
-        // Include the seeded platform snapshot in the initial scenes. Later
-        // transitions remain calloop-driven; forwarded startup duplicates are
-        // state-equal no-ops and cannot create a delayed idle redraw.
+        // Apply updates that were already available without delaying shell
+        // construction. Later transitions remain calloop-driven.
         for update in platform_updates.try_iter() {
             let _ = shell.apply_system_status_update(update);
         }
