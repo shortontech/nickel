@@ -5888,6 +5888,16 @@ mod protocol_tests {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
             Ok(())
         }
+
+        fn secure_storage_state(
+            &self,
+        ) -> Result<crate::platform::SecureStorageState, SessionRequestError> {
+            Ok(crate::platform::SecureStorageState::Ready)
+        }
+
+        fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
+            Ok(())
+        }
     }
 
     #[test]
