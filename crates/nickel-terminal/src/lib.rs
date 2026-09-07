@@ -213,6 +213,7 @@ pub struct TerminalCell {
     pub bold: bool,
     pub dim: bool,
     pub italic: bool,
+    pub strikethrough: bool,
     pub underline: TerminalUnderline,
     pub inverse: bool,
     pub concealed: bool,
@@ -978,11 +979,12 @@ fn snapshot(
                 combining: cell.zerowidth().unwrap_or_default().to_vec(),
                 foreground: color(cell.fg),
                 background: color(cell.bg),
-                bold: cell
-                    .flags
-                    .intersects(Flags::BOLD | Flags::BOLD_ITALIC | Flags::DIM_BOLD),
-                dim: cell.flags.intersects(Flags::DIM | Flags::DIM_BOLD),
-                italic: cell.flags.intersects(Flags::ITALIC | Flags::BOLD_ITALIC),
+                // Composite upstream aliases share the underlying BOLD/ITALIC/DIM bits. Testing
+                // them with `intersects` makes a plain bold cell appear both dim and italic.
+                bold: cell.flags.contains(Flags::BOLD),
+                dim: cell.flags.contains(Flags::DIM),
+                italic: cell.flags.contains(Flags::ITALIC),
+                strikethrough: cell.flags.contains(Flags::STRIKEOUT),
                 underline: if cell.flags.contains(Flags::DOUBLE_UNDERLINE) {
                     TerminalUnderline::Double
                 } else if cell.flags.contains(Flags::UNDERCURL) {
@@ -1143,6 +1145,22 @@ mod tests {
                 TerminalUnderline::Dashed,
             ]
         );
+    }
+
+    #[test]
+    fn independent_sgr_attributes_do_not_alias_composite_flag_bits() {
+        let mut engine = TerminalEngine::new(dimensions(8, 1), 0).unwrap();
+        engine.process(b"\x1b[1mB\x1b[0m\x1b[2mD\x1b[0m\x1b[3mI\x1b[0m\x1b[9mS");
+        let snapshot = engine.snapshot();
+        let cells = &snapshot.cells;
+        assert!(cells[0].bold);
+        assert!(!cells[0].dim && !cells[0].italic && !cells[0].strikethrough);
+        assert!(cells[1].dim);
+        assert!(!cells[1].bold && !cells[1].italic && !cells[1].strikethrough);
+        assert!(cells[2].italic);
+        assert!(!cells[2].bold && !cells[2].dim && !cells[2].strikethrough);
+        assert!(cells[3].strikethrough);
+        assert!(!cells[3].bold && !cells[3].dim && !cells[3].italic);
     }
 
     #[test]

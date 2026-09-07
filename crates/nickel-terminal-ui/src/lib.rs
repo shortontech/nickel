@@ -573,6 +573,7 @@ pub struct TerminalPalette {
     pub cursor: u32,
     pub selection: u32,
     pub indexed: [u32; 16],
+    pub bold_is_bright: bool,
     pub cursor_style: nickel_core::terminal_settings::TerminalCursorStyle,
     pub font_family: std::sync::Arc<str>,
 }
@@ -589,6 +590,7 @@ impl Default for TerminalPalette {
                 0xffe5e9f0, 0xff4c566a, 0xffd08770, 0xffb8d8a8, 0xffffdf9b, 0xff9cc1e6, 0xffd5a5d2,
                 0xff8fdbdf, 0xffffffff,
             ],
+            bold_is_bright: true,
             cursor_style: nickel_core::terminal_settings::TerminalCursorStyle::Block,
             font_family: std::sync::Arc::from("monospace"),
         }
@@ -693,7 +695,7 @@ impl<'a> TerminalViewport<'a> {
         let cursor = self.snapshot.cursor.visible
             && index / self.snapshot.columns == self.snapshot.cursor.line
             && index % self.snapshot.columns == self.snapshot.cursor.column;
-        let mut foreground = resolve_color(&cell.foreground, self.palette, true);
+        let mut foreground = resolve_foreground(cell, self.palette);
         let mut background = resolve_color(&cell.background, self.palette, false);
         if cell.inverse {
             std::mem::swap(&mut foreground, &mut background);
@@ -746,7 +748,7 @@ impl<'a> TerminalViewport<'a> {
                     italic: cell.italic,
                     monospace: true,
                     font_family: Some(std::sync::Arc::clone(&self.palette.font_family)),
-                    strikethrough: false,
+                    strikethrough: cell.strikethrough,
                     underline: match cell.underline {
                         TerminalUnderline::None => nickel_ui::TextUnderlineStyle::None,
                         TerminalUnderline::Single => nickel_ui::TextUnderlineStyle::Single,
@@ -869,6 +871,17 @@ fn resolve_color(color: &TerminalColor, palette: &TerminalPalette, foreground: b
     }
 }
 
+fn resolve_foreground(cell: &TerminalCell, palette: &TerminalPalette) -> u32 {
+    if cell.bold
+        && palette.bold_is_bright
+        && let TerminalColor::Named(name) = cell.foreground
+        && let Some(index @ 0..=7) = named_index(name)
+    {
+        return palette.indexed[index + 8];
+    }
+    resolve_color(&cell.foreground, palette, true)
+}
+
 fn named_index(name: TerminalNamedColor) -> Option<usize> {
     Some(match name {
         TerminalNamedColor::Black | TerminalNamedColor::DimBlack => 0,
@@ -958,6 +971,39 @@ mod tests {
             frame.commands().len() <= 100,
             "visible work stays bounded by the grid"
         );
+    }
+
+    #[test]
+    fn ls_colors_bold_blue_is_bright_upright_and_explicit_italic_stays_italic() {
+        let snapshot = snapshot(b"\x1b[1;34mD\x1b[0m\x1b[3;34mI\x1b[0m\x1b[1;38;5;4mX");
+        let palette = TerminalPalette::default();
+        let commands = TerminalViewport::new(
+            &snapshot,
+            &palette,
+            CellMetrics::integral(14.0, 1.0),
+            "LS_COLORS fixture",
+        )
+        .paint_commands();
+        let style = |needle: &str| {
+            commands.iter().find_map(|command| match command {
+                PaintCommand::StyledText { text, spans, .. } if text == needle => spans.first(),
+                _ => None,
+            })
+        };
+        let directory = style("D").expect("bold directory paint");
+        assert!(directory.bold);
+        assert!(!directory.italic);
+        assert_eq!(directory.color, Some(palette.indexed[12]));
+
+        let italic = style("I").expect("explicit italic paint");
+        assert!(!italic.bold);
+        assert!(italic.italic);
+        assert_eq!(italic.color, Some(palette.indexed[4]));
+
+        let explicit_index = style("X").expect("explicit indexed paint");
+        assert!(explicit_index.bold);
+        assert!(!explicit_index.italic);
+        assert_eq!(explicit_index.color, Some(palette.indexed[4]));
     }
 
     #[test]
