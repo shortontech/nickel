@@ -41,7 +41,7 @@ fn bound_text(text: &mut String) {
 }
 
 fn append_bounded(text: &mut String, delta: &str) {
-    if text.ends_with(OMISSION_MARKER) {
+    if text.len() >= MAX_ITEM_TEXT_BYTES - 3 && text.ends_with(OMISSION_MARKER) {
         return;
     }
     let mut end = delta
@@ -1298,6 +1298,13 @@ mod tests {
                 .iter()
                 .any(|run| run.text.contains("Further output omitted"))
         );
+    }
+
+    #[test]
+    fn ordinary_output_can_quote_the_local_omission_marker() {
+        let mut text = OMISSION_MARKER.to_owned();
+        append_bounded(&mut text, " followed by more output");
+        assert!(text.ends_with(" followed by more output"));
     }
 
     #[test]

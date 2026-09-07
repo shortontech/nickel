@@ -74,16 +74,18 @@ cargo test -p nickel-codex-ui --release streaming_projection_measurement -- --ig
 ```
 
 The predeclared target is at least 75% less elapsed parsing work than rebuilding
-after every delta, with `ceil(deltas / 128)` rebuilds. On the integration host before
-the lazy full-document follow-up:
+after every delta, with `ceil(deltas / 128)` rebuilds. With lazy full-document
+selection explicitly consumed after each batch:
 
 | Body bytes / deltas | Previous rebuild pattern | Batched pattern | Retained body + projection |
 | --- | --- | --- | --- |
-| 4,080 / 60 | 60 parses, 1,529 µs | 1 parse, 55 µs | 69,279 B |
-| 32,708 / 481 | 481 parses, 96,186 µs | 4 parses, 797 µs | 550,411 B |
-| 131,036 / 1,927 | 1,927 parses, 2,050,538 µs | 16 parses, 13,517 µs | 2,201,971 B |
+| 4,080 / 60 | 60 parses, 1,337 µs | 1 parse, 59 µs | 69,279 B |
+| 32,708 / 481 | 481 parses, 85,362 µs | 4 parses, 982 µs | 550,411 B |
+| 131,036 / 1,927 | 1,927 parses, 2,373,030 µs | 16 parses, 26,556 µs | 2,201,971 B |
 
-This compares the previous per-delta algorithm inside a repeatable test; it is not
+The retained column excludes the immutable source snapshot and full selection
+document's index, whose budgets are described above. This compares the previous
+per-delta algorithm inside a repeatable test; it is not
 a before/after end-to-end desktop benchmark. Real long-session retained/peak RSS,
 allocator bytes, input/frame latency, reconnect against live authoritative history,
 and platform interaction testing remain acceptance measurements for the user test
