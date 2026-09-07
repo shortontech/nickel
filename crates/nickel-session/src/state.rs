@@ -4526,6 +4526,10 @@ impl NickelSession {
         self.resolve_interaction_output(InvocationSource::Pointer)
     }
 
+    pub(crate) fn keyboard_interaction_output_name(&self) -> Option<String> {
+        self.resolve_interaction_output(InvocationSource::Keyboard)
+    }
+
     fn focused_surface_output_name(&self) -> Option<String> {
         let id = self
             .windows

@@ -2652,8 +2652,11 @@ impl NickelSession {
                 .primary_output_name
                 .as_deref()
                 .is_none_or(|name| name == output.name());
+            let owns_switcher = self
+                .keyboard_interaction_output_name()
+                .is_some_and(|name| name == output.name());
             let mode_size = output.current_mode().map(|mode| mode.size);
-            let switcher = (!self.locked && is_primary)
+            let switcher = (!self.locked && owns_switcher)
                 .then_some(mode_size)
                 .flatten()
                 .and_then(|mode_size| {
