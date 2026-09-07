@@ -1,5 +1,10 @@
 #[cfg(target_os = "linux")]
-use std::{env, os::unix::process::CommandExt, path::PathBuf, process::Command};
+use std::{
+    env, fs,
+    os::unix::process::CommandExt,
+    path::{Path as LinuxPath, PathBuf},
+    process::Command,
+};
 
 #[cfg(any(target_os = "linux", test))]
 use std::path::Path;
@@ -8,6 +13,10 @@ use std::path::Path;
 const CURRENT_DESKTOP: &str = "Nickel:KDE";
 #[cfg(any(target_os = "linux", test))]
 const KDE_SESSION_VERSION: &str = "6";
+#[cfg(target_os = "linux")]
+const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
+#[cfg(target_os = "linux")]
+const NVIDIA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
 #[cfg(any(target_os = "linux", test))]
 const XDG_HOME_DEFAULTS: [(&str, &str); 4] = [
     ("XDG_CONFIG_HOME", ".config"),
@@ -53,9 +62,54 @@ fn prepare_login_environment() -> Result<(), Box<dyn std::error::Error>> {
                 env::set_var(variable, directory);
             }
         }
+        configure_nvidia_egl_vendor(
+            LinuxPath::new("/sys/class/drm"),
+            LinuxPath::new(NVIDIA_EGL_VENDOR_MANIFEST),
+        );
     }
 
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn configure_nvidia_egl_vendor(sysfs_drm: &LinuxPath, manifest: &LinuxPath) {
+    if env::var_os(EGL_VENDOR_FILENAMES).is_some()
+        || !manifest.is_file()
+        || !nvidia_only_render_host(sysfs_drm)
+    {
+        return;
+    }
+    // SAFETY: nickel-login is single-threaded and has not launched the compositor child.
+    unsafe { env::set_var(EGL_VENDOR_FILENAMES, manifest) };
+}
+
+#[cfg(target_os = "linux")]
+fn nvidia_only_render_host(sysfs_drm: &LinuxPath) -> bool {
+    let Ok(entries) = fs::read_dir(sysfs_drm) else {
+        return false;
+    };
+    let mut found_nvidia = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let Some(driver) = fs::read_link(entry.path().join("device/driver"))
+            .ok()
+            .and_then(|path| path.file_name().map(|name| name.to_owned()))
+        else {
+            return false;
+        };
+        if driver == "evdi" {
+            continue;
+        }
+        if driver != "nvidia" {
+            return false;
+        }
+        found_nvidia = true;
+    }
+    found_nvidia
 }
 
 #[cfg(any(target_os = "linux", test))]
@@ -99,5 +153,26 @@ mod tests {
         let directory =
             std::env::temp_dir().join(format!("nickel-login-test-missing-{}", std::process::id()));
         assert!(sibling_binary(&directory, "nickel").is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn egl_vendor_can_be_restricted_only_for_nvidia_plus_evdi() {
+        use std::os::unix::fs::symlink;
+
+        fn card(root: &std::path::Path, name: &str, driver: &str) {
+            let device = root.join(name).join("device");
+            std::fs::create_dir_all(&device).unwrap();
+            symlink(format!("/drivers/{driver}"), device.join("driver")).unwrap();
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        card(fixture.path(), "card0", "evdi");
+        card(fixture.path(), "card1", "nvidia");
+        std::fs::create_dir_all(fixture.path().join("card1-DP-3")).unwrap();
+        assert!(super::nvidia_only_render_host(fixture.path()));
+
+        card(fixture.path(), "card2", "amdgpu");
+        assert!(!super::nvidia_only_render_host(fixture.path()));
     }
 }
