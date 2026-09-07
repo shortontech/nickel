@@ -101,7 +101,6 @@ use winit_shell::{
 
 const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
 const PANEL_TOP_FLAG: &str = "--panel-top";
-const INTERNAL_ROLE_FLAG: &str = "--role";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CommandLineOptions {
@@ -120,14 +119,6 @@ impl CommandLineOptions {
             match argument.as_str() {
                 NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
                 PANEL_TOP_FLAG => options.panel_top = true,
-                INTERNAL_ROLE_FLAG => {
-                    let role = arguments
-                        .next()
-                        .ok_or_else(|| "--role requires an internal role".to_string())?;
-                    if role != "shell" {
-                        return Err(format!("unknown internal Nickel role {role:?}"));
-                    }
-                }
                 _ => {
                     return Err(format!(
                         "unknown Nickel shell argument {argument:?}; supported acceptance flags: \
@@ -347,11 +338,6 @@ mod allocation_summary_tests {
         );
     }
 }
-
-#[cfg(target_os = "linux")]
-const SHELL_STARTUP_BARRIER_ENV: &str = "NICKEL_SHELL_STARTUP_BARRIER";
-#[cfg(target_os = "linux")]
-const SHELL_STARTUP_BARRIER_MAGIC: &[u8; 8] = b"NIKREADY";
 
 struct CodexSurfaces {
     enabled: bool,
@@ -2030,41 +2016,6 @@ fn handle_controller_action(
 }
 
 #[cfg(target_os = "linux")]
-fn validate_supervisor_token(token: &[u8], pid: u32) -> Result<(), String> {
-    if token.len() != SHELL_STARTUP_BARRIER_MAGIC.len() + 4
-        || &token[..SHELL_STARTUP_BARRIER_MAGIC.len()] != SHELL_STARTUP_BARRIER_MAGIC
-    {
-        return Err("Nickel shell startup barrier token is invalid".to_owned());
-    }
-    let expected_pid = u32::from_ne_bytes(
-        token[SHELL_STARTUP_BARRIER_MAGIC.len()..]
-            .try_into()
-            .expect("startup barrier token has a fixed PID field"),
-    );
-    if expected_pid != pid {
-        return Err(format!(
-            "Nickel shell startup barrier belongs to PID {expected_pid}, not this shell"
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_supervisor_readiness() -> Result<(), String> {
-    use std::{io::Read, os::unix::net::UnixStream};
-
-    let path = std::env::var_os(SHELL_STARTUP_BARRIER_ENV)
-        .ok_or_else(|| "Nickel shell startup barrier is missing".to_owned())?;
-    let mut stream = UnixStream::connect(&path)
-        .map_err(|error| format!("could not connect to Nickel shell startup barrier: {error}"))?;
-    let mut token = [0_u8; SHELL_STARTUP_BARRIER_MAGIC.len() + 4];
-    stream
-        .read_exact(&mut token)
-        .map_err(|error| format!("Nickel shell startup barrier was not released: {error}"))?;
-    validate_supervisor_token(&token, std::process::id())
-}
-
-#[cfg(target_os = "linux")]
 fn validate_shell_readiness(
     readiness: &nickel_session_protocol::ShellReadinessSnapshot,
 ) -> Result<(), String> {
@@ -2178,13 +2129,6 @@ pub fn run() -> Result<(), String> {
     platform::prepare_audio_environment();
     let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;
     nickel_logging::init("nickel-shell").map_err(|error| error.to_string())?;
-    // The supervisor publishes its expected child PID and releases this
-    // barrier before the shell attempts registration. Creating any Wayland
-    // surfaces before authentication is unsafe: Linux shell surfaces are
-    // initially visible so winit can obtain their first configure, and an
-    // unauthenticated surface is classified as an ordinary movable window.
-    #[cfg(target_os = "linux")]
-    wait_for_supervisor_readiness()?;
     #[cfg(target_os = "linux")]
     platform::register_session_shell().map_err(|error| {
         format!("Nickel shell could not authenticate with the session protocol: {error}")
@@ -3320,26 +3264,6 @@ mod tests {
             ..HostBatch::default()
         });
         embedded
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn stale_startup_barrier_token_cannot_authorize_a_new_shell() {
-        let mut token = Vec::from(*super::SHELL_STARTUP_BARRIER_MAGIC);
-        token.extend_from_slice(&42_u32.to_ne_bytes());
-        assert!(super::validate_supervisor_token(&token, 42).is_ok());
-        let error = super::validate_supervisor_token(&token, 43).unwrap_err();
-        assert!(error.contains("PID 42"));
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn startup_barrier_token_requires_the_supervisor_magic() {
-        let token = [0_u8; super::SHELL_STARTUP_BARRIER_MAGIC.len() + 4];
-        assert_eq!(
-            super::validate_supervisor_token(&token, 42).unwrap_err(),
-            "Nickel shell startup barrier token is invalid"
-        );
     }
 
     #[cfg(target_os = "linux")]

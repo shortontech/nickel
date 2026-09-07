@@ -165,7 +165,7 @@ pub fn init_winit(
                     state.relayout_shell_surfaces();
                     let _ = display.flush_clients();
                     backend.window().request_redraw();
-                    eprintln!("nickel-session: output resized to {}x{}", size.w, size.h);
+                    eprintln!("nickel: output resized to {}x{}", size.w, size.h);
                 }
                 WinitEvent::Input(event) => {
                     let _ = state.process_input_event(event);

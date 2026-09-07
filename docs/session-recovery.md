@@ -4,36 +4,16 @@ The `nickel` executable owns both the Linux compositor session and the user-faci
 `nickel --backend udev` and `nickel --backend winit` launches host shell surfaces inside the
 compositor process and communicate through typed in-process authority.
 
-`--shell-process supervised` is a temporary rollback mode. It starts the private
-`nickel --role shell` child used by the previous architecture; `--command PROGRAM` also selects
-this mode explicitly. In supervised mode, an unexpected role exit does not close application
-clients or end the login session. Restarts use a bounded one-to-four-second delay; a role that
-remains healthy for thirty seconds clears the consecutive failure count.
-
-After three consecutive failures in supervised rollback mode, the compositor presents its own recovery panel on every output.
-This panel is not a shell client and remains available when the internal shell role cannot start.
-While it is visible, ordinary keyboard, pointer, and touch input is withheld from application
-clients. `Enter` requests an immediate supervised restart and `Escape` terminates the compositor
-session cleanly so the display manager can return to its greeter. System virtual-terminal chords
-remain available.
+There is no independently restartable shell process, PID registration barrier, or `--role shell`
+recovery path. Restarting the shell therefore means restarting the session. The compositor retains
+its own recovery panel for fatal internal runtime failures and safe logout. This panel is not a
+Wayland client and remains available when normal shell presentation cannot be drawn. System
+virtual-terminal chords remain available.
 
 XWayland is supervised separately. A failed XWayland process is torn down and restarted without
 ending the Wayland compositor or its native clients. Optional login services publish explicit
 readiness states; failure is reported to the shell and retried without silently replacing the
 configured provider.
 
-## Recorded nested acceptance
-
-On 2026-08-29, a native Wayland KCalc client remained mapped while the supervised XWayland process
-was killed with `SIGKILL` and restarted on the same display number. Killing the shell role
-preserved the same compositor and KCalc process. Three shell failures inside the 30-second health window produced
-the compositor-owned recovery panel over an opaque output; semantic Enter replaced the shell and
-cleared recovery without restarting the compositor. A second recovery run used semantic Escape;
-the compositor exited normally and reaped the replacement shell, XWayland, and native test client.
-This is development evidence only; the same failure matrix still requires an SDDM-launched session.
-
-On 2026-08-30, recovery pointer acceptance used the compositor's production panel layout rather
-than copied coordinates. After three `SIGKILL` shell-role failures, clicking Retry replaced shell PID
-`1309903` with `1311200` and restored all nine registered shell surfaces. A second three-failure
-cycle clicked Log out safely; the nested compositor, shell, and XWayland PIDs all exited. Recovery
-pointer motion remained compositor-owned and was never forwarded to an application client.
+Historical shell-child recovery evidence predates the unified runtime and no longer describes a
+supported execution mode. XWayland recovery remains independently testable.

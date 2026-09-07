@@ -115,10 +115,6 @@ name = "nickel"
 path = "src/bin/nickel.rs"
 
 [[bin]]
-name = "nickel-session"
-path = "src/bin/nickel-session.rs"
-
-[[bin]]
 name = "nickel-login"
 path = "src/bin/nickel-login.rs"
 

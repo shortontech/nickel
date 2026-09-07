@@ -513,21 +513,10 @@ impl NickelSession {
             SessionCommand::LogOut => self.loop_signal.stop(),
             SessionCommand::SessionAction { action } => match action {
                 nickel_session_protocol::SessionAction::RestartShell => {
-                    let Some(supervisor) = &self.shell_supervisor else {
-                        return protocol_error(
-                            ErrorCode::InvalidRequest,
-                            "shell supervisor is unavailable",
-                        );
-                    };
-                    if supervisor
-                        .send(crate::session::ShellSupervisorCommand::Restart)
-                        .is_err()
-                    {
-                        return protocol_error(
-                            ErrorCode::InvalidRequest,
-                            "shell supervisor stopped",
-                        );
-                    }
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "the compositor-owned shell cannot be restarted independently",
+                    );
                 }
                 nickel_session_protocol::SessionAction::Lock => {
                     self.lock_session();

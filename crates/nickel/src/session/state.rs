@@ -564,7 +564,6 @@ pub struct NickelSession {
     secure_storage_state: Arc<AtomicU8>,
     secure_storage_retry: Arc<std::sync::atomic::AtomicBool>,
     deferred_focus_restore: channel::Sender<WindowId>,
-    shell_supervisor: Option<std::sync::mpsc::Sender<crate::session::ShellSupervisorCommand>>,
     #[cfg(feature = "backend-winit")]
     winit_redraw_window: Option<*const dyn smithay::reexports::winit::window::Window>,
 }
@@ -1304,7 +1303,7 @@ impl NickelSession {
             let control_socket_name = control_socket_path
                 .file_name()
                 .and_then(|name| name.to_str())
-                .unwrap_or("nickel-session");
+                .unwrap_or("nickel");
             let shell_test_path = control_socket_path
                 .with_file_name(format!("nickel-shell-test-{control_socket_name}"));
             // SAFETY: session initialization is single-threaded and precedes shell launch.
@@ -1480,7 +1479,6 @@ impl NickelSession {
             secure_storage_state,
             secure_storage_retry,
             deferred_focus_restore,
-            shell_supervisor: None,
             #[cfg(feature = "backend-winit")]
             winit_redraw_window: None,
         }
@@ -1524,17 +1522,6 @@ impl NickelSession {
         )
     }
 
-    pub fn expected_shell_pid_handle(&self) -> Arc<AtomicU32> {
-        self.expected_shell_pid.clone()
-    }
-
-    pub(crate) fn set_shell_supervisor(
-        &mut self,
-        supervisor: std::sync::mpsc::Sender<crate::session::ShellSupervisorCommand>,
-    ) {
-        self.shell_supervisor = Some(supervisor);
-    }
-
     pub fn shell_recovery_visible(&self) -> bool {
         crate::session::shell_recovery_visible_for(self.shell_failure_count)
     }
@@ -1543,18 +1530,7 @@ impl NickelSession {
         if !self.shell_recovery_visible() {
             return false;
         }
-        let Some(supervisor) = &self.shell_supervisor else {
-            return false;
-        };
-        if supervisor
-            .send(crate::session::ShellSupervisorCommand::Restart)
-            .is_err()
-        {
-            return false;
-        }
-        self.shell_failure_count = 0;
-        self.request_output_redraw();
-        true
+        false
     }
 
     pub(crate) fn exit_from_recovery(&mut self) -> bool {
@@ -2672,7 +2648,7 @@ impl NickelSession {
             self.space.unmap_elem(&window);
         }
         eprintln!(
-            "nickel-session: launcher {}",
+            "nickel: launcher {}",
             if visible { "shown" } else { "hidden" }
         );
     }
@@ -3592,7 +3568,7 @@ impl NickelSession {
         });
         self.space.raise_element(&window, focus);
         self.raise_panels();
-        eprintln!("nickel-session: {label} shown at {x},{y}");
+        eprintln!("nickel: {label} shown at {x},{y}");
     }
 
     pub fn hide_context_menu(&mut self) {
@@ -3600,7 +3576,7 @@ impl NickelSession {
             self.space.unmap_elem(&window);
         }
         self.preview_highlight = None;
-        eprintln!("nickel-session: context menu hidden");
+        eprintln!("nickel: context menu hidden");
     }
 
     pub fn hide_overlays(&mut self) {
@@ -3612,7 +3588,7 @@ impl NickelSession {
         }
         self.preview_highlight = None;
         self.clear_overlay_preview_interest();
-        eprintln!("nickel-session: transient overlays hidden");
+        eprintln!("nickel: transient overlays hidden");
     }
 
     pub(crate) fn set_shell_role_visible(&mut self, role: ShellRole, visible: bool) {

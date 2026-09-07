@@ -86,7 +86,7 @@ impl WindowRegistry {
         );
         self.ordinary_entries += usize::from(admission == WindowAdmission::Ordinary);
         self.stacking_order.push(id);
-        eprintln!("nickel-session: mapped window {}", id.0);
+        eprintln!("nickel: mapped window {}", id.0);
         Some(id)
     }
 
@@ -131,7 +131,7 @@ impl WindowRegistry {
                 .peak_app_id_bytes
                 .max(self.metadata_diagnostics.app_id_bytes);
             eprintln!(
-                "nickel-session: window {} [{}] {}",
+                "nickel: window {} [{}] {}",
                 id.0, window.app_id, window.title
             );
         }
@@ -172,7 +172,7 @@ impl WindowRegistry {
                 .saturating_sub(window.app_id.len());
         }
         self.stacking_order.retain(|candidate| *candidate != id);
-        eprintln!("nickel-session: unmapped window {}", id.0);
+        eprintln!("nickel: unmapped window {}", id.0);
     }
 
     pub fn snapshot(&self) -> Vec<&WindowInfo> {

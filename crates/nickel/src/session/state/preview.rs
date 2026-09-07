@@ -233,10 +233,6 @@ impl NickelSession {
         self.reconcile_preview_admission();
     }
 
-    pub(crate) fn retire_shell_preview_memory(&mut self) {
-        self.clear_all_previews();
-    }
-
     pub(crate) fn reassociate_preview_surface(&mut self, id: WindowId) {
         if self.preview_admitted.contains(&id) {
             self.preview_frames.remove(&id);

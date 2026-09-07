@@ -58,13 +58,7 @@ fn run() -> Result<(), String> {
 
     let mut command = Command::new(&nickel);
     command
-        .args([
-            "--backend",
-            "winit",
-            "--test-control",
-            "--shell-process",
-            "disabled",
-        ])
+        .args(["--backend", "winit", "--test-control"])
         .env("XDG_RUNTIME_DIR", &runtime)
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_NESTED_SIZE", "960x640")
@@ -230,7 +224,7 @@ fn assert_no_shell_child(compositor: u32) -> Result<(), String> {
         let command = String::from_utf8_lossy(&command).replace('\0', " ");
         if command.contains("--role shell") {
             return Err(format!(
-                "disabled runtime spawned shell child {pid}: {command}"
+                "unified runtime spawned shell child {pid}: {command}"
             ));
         }
     }

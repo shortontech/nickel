@@ -1,5 +1,3 @@
-use std::ffi::OsString;
-
 use thiserror::Error;
 
 #[cfg(feature = "backend-udev")]
@@ -22,22 +20,7 @@ pub enum BackendKind {
     Udev,
 }
 
-/// Selects whether the compositor starts the transitional out-of-process shell.
-///
-/// `Internal` hosts shell UI in the compositor. `Supervised` retains the
-/// transitional child process as an explicit rollback path.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum ShellProcessMode {
-    Supervised,
-    #[default]
-    Internal,
-}
-
 /// Selects how compositor-owned Nickel UI is presented.
-///
-/// GPU is the normal path. Software is an explicit diagnostic and
-/// compatibility fallback which rasterizes complete internal surfaces before
-/// importing them into the active Smithay backend.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InternalUiRendererMode {
     #[default]
@@ -76,14 +59,12 @@ pub enum BackendSelectionError {
 pub struct SessionArguments {
     pub backend: BackendKind,
     pub test_control: bool,
-    pub command: Option<(OsString, Vec<OsString>)>,
-    pub shell_process: ShellProcessMode,
     pub ui_renderer: InternalUiRendererMode,
 }
 
 impl SessionArguments {
     pub fn parse(
-        args: impl IntoIterator<Item = OsString>,
+        args: impl IntoIterator<Item = std::ffi::OsString>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut args = args.into_iter().peekable();
         let mut backend = if cfg!(feature = "backend-udev") {
@@ -92,11 +73,7 @@ impl SessionArguments {
             BackendKind::Winit
         };
         let mut test_control = false;
-        let mut command = None;
-        let mut shell_process = ShellProcessMode::Internal;
-        let mut shell_process_explicit = false;
         let mut ui_renderer = InternalUiRendererMode::Gpu;
-
         while let Some(argument) = args.next() {
             match argument.to_str() {
                 Some("--backend") => {
@@ -107,24 +84,7 @@ impl SessionArguments {
                             .ok_or_else(|| "backend name is not valid UTF-8".to_owned())?,
                     )?;
                 }
-                Some("-c" | "--command") => {
-                    let program = args
-                        .next()
-                        .ok_or_else(|| "--command requires a program".to_owned())?;
-                    command = Some((program, args.collect()));
-                    break;
-                }
-                Some("--shell-process") => {
-                    let value = args.next().ok_or_else(|| {
-                        "--shell-process requires internal or supervised".to_owned()
-                    })?;
-                    shell_process = match value.to_str() {
-                        Some("supervised") => ShellProcessMode::Supervised,
-                        Some("internal" | "disabled") => ShellProcessMode::Internal,
-                        _ => return Err("--shell-process expects internal or supervised".into()),
-                    };
-                    shell_process_explicit = true;
-                }
+                Some("--test-control") => test_control = true,
                 Some("--ui-renderer") => {
                     let value = args
                         .next()
@@ -135,10 +95,9 @@ impl SessionArguments {
                         _ => return Err("--ui-renderer expects gpu or software".into()),
                     };
                 }
-                Some("--test-control") => test_control = true,
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--shell-process internal|supervised] [--ui-renderer gpu|software] [--command PROGRAM [ARG ...]]",
+                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--ui-renderer gpu|software]",
                         argument.to_string_lossy()
                     )
                     .into());
@@ -148,13 +107,6 @@ impl SessionArguments {
 
         if test_control && backend != BackendKind::Winit {
             return Err("--test-control is available only with the nested backend".into());
-        }
-
-        if command.is_some() {
-            if shell_process_explicit && shell_process == ShellProcessMode::Internal {
-                return Err("--command cannot be combined with --shell-process internal".into());
-            }
-            shell_process = ShellProcessMode::Supervised;
         }
 
         if !backend.available() {
@@ -168,8 +120,6 @@ impl SessionArguments {
         Ok(Self {
             backend,
             test_control,
-            command,
-            shell_process,
             ui_renderer,
         })
     }
@@ -179,7 +129,7 @@ impl SessionArguments {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{BackendKind, InternalUiRendererMode, SessionArguments, ShellProcessMode};
+    use super::{BackendKind, InternalUiRendererMode, SessionArguments};
 
     #[cfg(feature = "backend-winit")]
     #[test]
@@ -198,25 +148,6 @@ mod tests {
         assert_eq!(arguments.backend, BackendKind::Udev);
     }
 
-    #[test]
-    fn command_consumes_remaining_arguments() {
-        let arguments = SessionArguments::parse([
-            OsString::from("--command"),
-            OsString::from("nickel"),
-            OsString::from("--example"),
-        ])
-        .expect("command should parse");
-        let (program, arguments) = arguments.command.expect("command should be present");
-        assert_eq!(program, "nickel");
-        assert_eq!(arguments, [OsString::from("--example")]);
-        assert_eq!(
-            SessionArguments::parse([])
-                .expect("default arguments should parse")
-                .shell_process,
-            ShellProcessMode::Internal
-        );
-    }
-
     #[cfg(feature = "backend-winit")]
     #[test]
     fn internal_shell_is_default_and_keeps_test_control_available() {
@@ -227,8 +158,6 @@ mod tests {
         ])
         .expect("external test control is independent of shell supervision");
         assert!(arguments.test_control);
-        assert_eq!(arguments.shell_process, ShellProcessMode::Internal);
-        assert!(arguments.command.is_none());
         assert_eq!(arguments.ui_renderer, InternalUiRendererMode::Gpu);
     }
 
@@ -260,23 +189,13 @@ mod tests {
     }
 
     #[test]
-    fn explicit_internal_shell_rejects_a_child_command() {
+    fn legacy_shell_process_options_are_rejected() {
         let error = SessionArguments::parse([
             OsString::from("--shell-process"),
-            OsString::from("internal"),
-            OsString::from("--command"),
-            OsString::from("nickel"),
+            OsString::from("supervised"),
         ])
-        .expect_err("disabled supervision cannot accept a child command");
-        assert!(error.to_string().contains("cannot be combined"));
-    }
-
-    #[test]
-    fn command_is_an_explicit_supervised_shell_rollback() {
-        let arguments =
-            SessionArguments::parse([OsString::from("--command"), OsString::from("nickel")])
-                .expect("an explicit child command selects supervised mode");
-        assert_eq!(arguments.shell_process, ShellProcessMode::Supervised);
+        .expect_err("the out-of-process shell is retired");
+        assert!(error.to_string().contains("unexpected argument"));
     }
 
     #[cfg(feature = "backend-winit")]
