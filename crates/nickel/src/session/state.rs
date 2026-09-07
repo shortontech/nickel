@@ -3196,6 +3196,7 @@ impl NickelSession {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn show_transient(
         &mut self,
         window: Option<Window>,

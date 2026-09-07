@@ -112,7 +112,7 @@ toml.workspace = true
 
 [[bin]]
 name = "nickel"
-path = "src/bin/nickel-shell.rs"
+path = "src/bin/nickel.rs"
 
 [[bin]]
 name = "nickel-session"
