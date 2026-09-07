@@ -1586,8 +1586,12 @@ mod tests {
             color: 0x336699,
             radius: 4.0,
         }];
-        let mut renderer =
-            SmithayFrameRenderer::new(20, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as u32, 1.0);
+        let mut renderer = SmithayFrameRenderer::new(
+            20,
+            (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as u32,
+            1.0,
+            InternalUiRendererMode::Gpu,
+        );
 
         renderer
             .render_frame(RenderFrame {
