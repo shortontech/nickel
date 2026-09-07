@@ -361,7 +361,8 @@ impl SoftwareRenderer {
     }
 
     pub fn invalidate(&mut self) {
-        self.previous_commands.clear();
+        // Framebuffer invalidation does not change command identity. Retain
+        // raster hits and oversized-admission decisions across full repaints.
         self.framebuffer_valid = false;
     }
 
@@ -428,6 +429,10 @@ impl SoftwareRenderer {
             self.previous_commands.extend_from_slice(commands);
         }
         self.framebuffer_valid = true;
+        self.raster_stats.known_cache_peak_bytes = self
+            .raster_stats
+            .known_cache_peak_bytes
+            .max(self.cache_diagnostics().live_bytes);
         damage
     }
 
@@ -791,6 +796,18 @@ impl SoftwareRenderer {
                         .raster_stats
                         .glyph_peak_bytes
                         .max(self.glyph_bytes.saturating_add(bytes));
+                    let candidate_bytes = candidate.as_ref().map_or(0, |pixels| {
+                        pixels
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<(i32, i32, TextColor)>())
+                    });
+                    self.raster_stats.known_cache_peak_bytes =
+                        self.raster_stats.known_cache_peak_bytes.max(
+                            other_bytes
+                                .saturating_add(candidate_bytes)
+                                .saturating_add(self.glyph_bytes)
+                                .saturating_add(bytes),
+                        );
                     if self.glyph_bytes.saturating_add(bytes) > SOFTWARE_GLYPH_BYTE_BUDGET
                         || self
                             .swash_cache
@@ -908,20 +925,26 @@ impl SoftwareRenderer {
                 pixels.push((x, y, color));
             }
         }
-        let sample = Rect::new(
-            physical.origin.x.round() + x as f32,
-            physical.origin.y.round() + y as f32,
-            1.0,
-            1.0,
-        );
-        if let Some(sample) = intersection(sample, clip) {
-            self.for_pixels(sample, |renderer, x, y| {
-                renderer.blend(
-                    x,
-                    y,
-                    Pixel::rgba(color.r(), color.g(), color.b(), color.a()),
-                )
-            });
+        // Samples are integral physical pixels. Testing their overlap directly
+        // preserves fractional clipping without a rectangle scan per sample.
+        let x = physical.origin.x.round() + x as f32;
+        let y = physical.origin.y.round() + y as f32;
+        if x >= 0.0
+            && y >= 0.0
+            && x < self.width as f32
+            && y < self.height as f32
+            && clip.size.width > 0.0
+            && clip.size.height > 0.0
+            && x + 1.0 > clip.origin.x
+            && y + 1.0 > clip.origin.y
+            && x < clip.origin.x + clip.size.width
+            && y < clip.origin.y + clip.size.height
+        {
+            self.blend(
+                x as u32,
+                y as u32,
+                Pixel::rgba(color.r(), color.g(), color.b(), color.a()),
+            );
         }
     }
 
@@ -1366,6 +1389,47 @@ mod tests {
         assert_eq!(renderer.pixels(), fresh.pixels());
     }
 
+    #[test]
+    fn styled_decorations_and_raster_identity_survive_full_repaints() {
+        for underline in [
+            super::TextUnderlineStyle::Single,
+            super::TextUnderlineStyle::Double,
+            super::TextUnderlineStyle::Curly,
+            super::TextUnderlineStyle::Dotted,
+            super::TextUnderlineStyle::Dashed,
+        ] {
+            let mut command = label(true, 1.0);
+            if let PaintCommand::StyledText { spans, .. } = &mut command {
+                spans.push(super::StyledTextSpan {
+                    range: 0..5,
+                    bold: true,
+                    italic: true,
+                    monospace: true,
+                    font_family: None,
+                    strikethrough: true,
+                    underline,
+                    color: Some(0xff9900),
+                    background: None,
+                });
+            }
+            let mut renderer = SoftwareRenderer::new(160, 80, 1.25);
+            renderer.render(std::slice::from_ref(&command));
+            let cold = renderer.pixels().to_vec();
+            let allocated = renderer.raster_stats.candidate_allocated_bytes;
+            assert!(
+                !renderer.text_rasters[0]
+                    .as_ref()
+                    .unwrap()
+                    .strikes
+                    .is_empty()
+            );
+            renderer.invalidate();
+            assert!(!renderer.render(std::slice::from_ref(&command)).is_empty());
+            assert_eq!(renderer.pixels(), cold);
+            assert_eq!(renderer.raster_stats.candidate_allocated_bytes, allocated);
+        }
+    }
+
     // Repeatable release microbenchmark. Targets chosen before implementation:
     // 40% less sample payload, <=2 MiB candidates, <=25% cold regression.
     // Timings are observations, not flaky CI assertions.
@@ -1408,6 +1472,75 @@ mod tests {
             capacity * 12,
             renderer.software_raster_diagnostics(),
             renderer.cache_diagnostics()
+        );
+        // Compare the old 20-byte tuple collection/drawing algorithm with the
+        // compact admission path using identical already-shaped text and warm
+        // glyph caches. This excludes shared font loading and shaping.
+        use cosmic_text::{Attrs, Buffer, Color, Metrics, Shaping, SwashCache};
+        let font_owner = nickel_render_assets::ProcessFontSystem::new();
+        let mut fonts = font_owner.lock();
+        let mut buffer = Buffer::new(&mut fonts, Metrics::new(15.0, 19.5));
+        buffer.set_size(Some(640.0), Some(200.0));
+        buffer.set_text(
+            "The quick brown fox 世界 🦀",
+            &Attrs::new(),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fonts, false);
+        let bounds = Rect::new(0.0, 0.0, 640.0, 200.0);
+        let mut legacy = SoftwareRenderer::new(640, 200, 1.0);
+        let mut glyph_cache = SwashCache::new();
+        let mut legacy_samples = Vec::new();
+        let baseline = Instant::now();
+        for _ in 0..1000 {
+            let mut samples = Vec::new();
+            buffer.draw(
+                &mut fonts,
+                &mut glyph_cache,
+                Color::rgb(250, 240, 230),
+                |x, y, w, h, color| samples.push((x, y, w, h, color)),
+            );
+            legacy.pixels.fill(Pixel::TRANSPARENT);
+            for &(x, y, w, h, color) in &samples {
+                if let Some(rect) =
+                    super::intersection(Rect::new(x as f32, y as f32, w as f32, h as f32), bounds)
+                {
+                    legacy.for_pixels(rect, |renderer, x, y| {
+                        renderer.blend(
+                            x,
+                            y,
+                            Pixel::rgba(color.r(), color.g(), color.b(), color.a()),
+                        )
+                    });
+                }
+            }
+            legacy_samples = samples;
+        }
+        let baseline = baseline.elapsed();
+        let mut compact = SoftwareRenderer::new(640, 200, 1.0);
+        compact.text_rasters = vec![None];
+        let optimized = Instant::now();
+        for _ in 0..1000 {
+            compact.text_rasters[0] = None;
+            compact.pixels.fill(Pixel::TRANSPARENT);
+            compact.raster_text(
+                0,
+                &buffer,
+                &mut fonts,
+                Color::rgb(250, 240, 230),
+                bounds,
+                bounds,
+                Vec::new(),
+            );
+        }
+        let optimized = optimized.elapsed();
+        assert_eq!(legacy.pixels(), compact.pixels());
+        eprintln!(
+            "pre-shaped uncached-label1000: legacy={baseline:?} compact={optimized:?} ratio={:.3}; legacy_capacity={} compact_capacity={}",
+            optimized.as_secs_f64() / baseline.as_secs_f64(),
+            legacy_samples.capacity() * 20,
+            compact.text_rasters[0].as_ref().unwrap().retained_bytes()
         );
     }
 
@@ -1553,7 +1686,7 @@ mod tests {
                 let mut command = label(mode == 1 || mode == 2 && iteration % 2 == 0, 1.0);
                 match &mut command {
                     PaintCommand::Text { text, .. } | PaintCommand::StyledText { text, .. } => {
-                        *text = "Ab".into();
+                        *text = format!("Ab{iteration}");
                     }
                     _ => unreachable!(),
                 }
