@@ -1292,7 +1292,7 @@ fn command_response(response: ServerMessage) -> Result<(), SessionRequestError> 
     }
 }
 
-fn shell_command_payload(command: ShellCommand) -> SessionCommand {
+pub(crate) fn shell_command_payload(command: ShellCommand) -> SessionCommand {
     match command {
         ShellCommand::Show => SessionCommand::SetLauncherVisible { visible: true },
         ShellCommand::ShowFromController => {

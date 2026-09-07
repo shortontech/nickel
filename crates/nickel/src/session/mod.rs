@@ -77,6 +77,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    // Keep the typed internal command path live alongside the compatibility
+    // socket. Compositor-hosted UI will receive this handle instead of the
+    // platform transport when it is moved into `NickelSession`.
+    let _in_process_session_host =
+        crate::session_host::install_in_process_session_host(&event_loop.handle())?;
     let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
     let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));
     let secure_storage_started = Instant::now();
