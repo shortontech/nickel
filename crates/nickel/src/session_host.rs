@@ -171,9 +171,9 @@ impl SessionHost for InProcessSessionHost {
 
 /// Install the in-process authority bridge into the compositor event loop.
 ///
-/// The returned host is intended to be injected into `LiveShell` once the
-/// shell is compositor-owned. Until then `PlatformSessionHost` remains the
-/// default for the supervised external shell role.
+/// Linux injects the returned host into its compositor-owned `LiveShell`.
+/// `PlatformSessionHost` remains the standalone adapter for non-compositor
+/// platforms and compatibility clients.
 #[cfg(target_os = "linux")]
 pub(crate) fn install_in_process_session_host(
     loop_handle: &smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
