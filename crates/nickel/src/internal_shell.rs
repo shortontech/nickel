@@ -301,6 +301,10 @@ impl InternalShellCoordinator {
         self.shell.request_launcher_toggle()
     }
 
+    pub fn launcher_visible(&self) -> bool {
+        self.shell.surface_visible(SurfaceRole::Launcher)
+    }
+
     #[cfg(test)]
     fn shell_mut(&mut self) -> &mut LiveShell {
         &mut self.shell

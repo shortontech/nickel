@@ -83,6 +83,72 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
     [0.035, 0.043, 0.055, alpha]
 }
 
+#[cfg(test)]
+mod internal_shell_placement_tests {
+    use super::internal_shell_surface_placement;
+    use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
+
+    fn outputs() -> Vec<(InternalOutput, i32, i32)> {
+        vec![
+            (
+                InternalOutput {
+                    name: "left".into(),
+                    width: 1920,
+                    height: 1080,
+                },
+                -1920,
+                -120,
+            ),
+            (
+                InternalOutput {
+                    name: "right".into(),
+                    width: 2560,
+                    height: 1440,
+                },
+                0,
+                240,
+            ),
+        ]
+    }
+
+    #[test]
+    fn launcher_uses_active_output_global_origin() {
+        let placement = internal_shell_surface_placement(
+            SurfaceRole::Launcher,
+            None,
+            (960, 720),
+            &outputs(),
+            Some("right"),
+        );
+
+        assert_eq!(placement.output.as_deref(), Some("right"));
+        assert_eq!(placement.geometry, (18, 896, 960, 720));
+    }
+
+    #[test]
+    fn switching_active_output_relocates_one_launcher_to_negative_origin() {
+        let right = internal_shell_surface_placement(
+            SurfaceRole::Launcher,
+            None,
+            (960, 720),
+            &outputs(),
+            Some("right"),
+        );
+        let left = internal_shell_surface_placement(
+            SurfaceRole::Launcher,
+            None,
+            (960, 720),
+            &outputs(),
+            Some("left"),
+        );
+
+        assert_eq!(right.output.as_deref(), Some("right"));
+        assert_eq!(left.output.as_deref(), Some("left"));
+        assert_eq!(left.geometry, (-1902, 176, 960, 720));
+        assert_ne!(right.geometry, left.geometry);
+    }
+}
+
 use crate::session::{
     output_retirement::{DeferredRetirements, RetirementAction, capacity_available},
     shell_layout::{self, Geometry},
@@ -792,10 +858,6 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
-        use crate::{
-            session::{InternalSurfacePlacement, InternalSurfaceRole},
-            winit_shell::{PANEL_HEIGHT, SurfaceRole},
-        };
         let outputs = self.internal_outputs();
         for id in self
             .internal_shell_surfaces
@@ -819,34 +881,17 @@ impl NickelSession {
             if !shell.visible(surface.id) {
                 continue;
             }
-            let (origin_x, origin_y, output_height) = surface
-                .output
-                .as_deref()
-                .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
-                .map(|(output, x, y)| (*x, *y, output.height))
-                .unwrap_or((0, 0, surface.size.1));
-            let y = if surface.role == SurfaceRole::Panel {
-                origin_y + output_height.saturating_sub(PANEL_HEIGHT) as i32
-            } else {
-                origin_y
-            };
-            let role = match surface.role {
-                SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
-                SurfaceRole::Panel => InternalSurfaceRole::Panel,
-                _ => InternalSurfaceRole::Overlay,
-            };
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
-            let runtime_id = self.internal_ui.insert_scene(
-                scene,
-                InternalSurfacePlacement {
-                    role,
-                    geometry: (origin_x, y, surface.size.0, surface.size.1),
-                    output: surface.output.clone(),
-                },
-                1.0,
+            let placement = internal_shell_surface_placement(
+                surface.role,
+                surface.output.as_deref(),
+                surface.size,
+                &outputs,
+                self.launcher_output_name.as_deref(),
             );
+            let runtime_id = self.internal_ui.insert_scene(scene, placement, 1.0);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         self.schedule_internal_ui_frame();
@@ -1017,10 +1062,17 @@ impl NickelSession {
     }
 
     pub(crate) fn toggle_internal_launcher(&mut self) -> bool {
-        let Some(shell) = self.internal_shell.as_mut() else {
+        let Some(was_visible) = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::launcher_visible)
+        else {
             return false;
         };
-        let changed = shell.toggle_launcher();
+        if !was_visible {
+            self.launcher_output_name = self.resolve_interaction_output(InvocationSource::Keyboard);
+        }
+        let changed = self.internal_shell.as_mut().unwrap().toggle_launcher();
         if changed {
             self.sync_internal_shell();
             self.wake_internal_shell();
@@ -1038,6 +1090,10 @@ impl NickelSession {
             .iter()
             .map(|(shell, runtime)| (*runtime, *shell))
             .collect::<HashMap<_, _>>();
+        let launcher_was_visible = self
+            .internal_shell
+            .as_ref()
+            .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
         let shell = self.internal_shell.as_mut().unwrap();
         let mut changed = false;
         for (runtime_id, event) in events {
@@ -1051,6 +1107,12 @@ impl NickelSession {
                     ..Default::default()
                 },
             );
+        }
+        let launcher_is_visible = shell.launcher_visible();
+        let _ = shell;
+        if !launcher_was_visible && launcher_is_visible {
+            self.launcher_output_name =
+                self.resolve_interaction_output(InvocationSource::RecentInteraction);
         }
         if changed {
             self.sync_internal_shell();
@@ -1083,45 +1145,19 @@ impl NickelSession {
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
+            let placement = internal_shell_surface_placement(
+                surface.role,
+                surface.output.as_deref(),
+                surface.size,
+                &self.internal_outputs(),
+                self.launcher_output_name.as_deref(),
+            );
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
                 self.internal_ui.update_scene(runtime_id, scene);
+                self.internal_ui.relocate(runtime_id, placement);
                 continue;
             }
-            let output_geometry = surface.output.as_deref().and_then(|name| {
-                self.space
-                    .outputs()
-                    .find(|output| output.name() == name)
-                    .and_then(|output| self.space.output_geometry(output))
-            });
-            let origin = output_geometry
-                .map(|geometry| geometry.loc)
-                .unwrap_or_default();
-            let output_height = output_geometry
-                .map(|geometry| geometry.size.h.max(0) as u32)
-                .unwrap_or(surface.size.1);
-            let y = if surface.role == crate::winit_shell::SurfaceRole::Panel {
-                origin.y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32
-            } else {
-                origin.y
-            };
-            let role = match surface.role {
-                crate::winit_shell::SurfaceRole::Desktop => {
-                    crate::session::InternalSurfaceRole::Desktop
-                }
-                crate::winit_shell::SurfaceRole::Panel => {
-                    crate::session::InternalSurfaceRole::Panel
-                }
-                _ => crate::session::InternalSurfaceRole::Overlay,
-            };
-            let runtime_id = self.internal_ui.insert_scene(
-                scene,
-                crate::session::InternalSurfacePlacement {
-                    role,
-                    geometry: (origin.x, y, surface.size.0, surface.size.1),
-                    output: surface.output.clone(),
-                },
-                1.0,
-            );
+            let runtime_id = self.internal_ui.insert_scene(scene, placement, 1.0);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         self.internal_shell = Some(shell);
@@ -5513,6 +5549,63 @@ impl NickelSession {
                         (target, (origin + location).to_f64())
                     })
             })
+    }
+}
+
+fn internal_shell_surface_placement(
+    surface_role: crate::winit_shell::SurfaceRole,
+    surface_output: Option<&str>,
+    surface_size: (u32, u32),
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+    launcher_output: Option<&str>,
+) -> crate::session::InternalSurfacePlacement {
+    use crate::{session::InternalSurfaceRole, winit_shell::SurfaceRole};
+
+    let requested_output = if surface_role == SurfaceRole::Launcher {
+        launcher_output
+    } else {
+        surface_output
+    };
+    let selected = requested_output
+        .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+        .or_else(|| outputs.first());
+    let (output_name, origin_x, origin_y, output_width, output_height) = selected
+        .map(|(output, x, y)| {
+            (
+                Some(output.name.clone()),
+                *x,
+                *y,
+                output.width,
+                output.height,
+            )
+        })
+        .unwrap_or((None, 0, 0, surface_size.0, surface_size.1));
+
+    let (x, y) = match surface_role {
+        SurfaceRole::Panel => (
+            origin_x,
+            origin_y + output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT) as i32,
+        ),
+        SurfaceRole::Launcher => {
+            let work_height = output_height.saturating_sub(crate::winit_shell::PANEL_HEIGHT);
+            let x_margin = 18.min(output_width.saturating_sub(surface_size.0)) as i32;
+            let y_margin = 8.min(work_height.saturating_sub(surface_size.1)) as i32;
+            (
+                origin_x + x_margin,
+                origin_y + work_height.saturating_sub(surface_size.1) as i32 - y_margin,
+            )
+        }
+        _ => (origin_x, origin_y),
+    };
+    let role = match surface_role {
+        SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
+        SurfaceRole::Panel => InternalSurfaceRole::Panel,
+        _ => InternalSurfaceRole::Overlay,
+    };
+    crate::session::InternalSurfacePlacement {
+        role,
+        geometry: (x, y, surface_size.0, surface_size.1),
+        output: output_name,
     }
 }
 

@@ -1153,6 +1153,25 @@ impl InternalUiRuntime {
         self.presentation.get(&id).map(|surface| &surface.placement)
     }
 
+    /// Move an existing surface in compositor-global logical coordinates.
+    ///
+    /// Shell overlays retain their identity while their invoking output changes.
+    /// A size change still requires reinsertion because it also resizes the UI host
+    /// and renderer; callers use this method for relocation-only updates.
+    pub fn relocate(&mut self, id: InternalSurfaceId, placement: InternalSurfacePlacement) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        if surface.placement.geometry.2 != placement.geometry.2
+            || surface.placement.geometry.3 != placement.geometry.3
+        {
+            return false;
+        }
+        let changed = surface.placement != placement;
+        surface.placement = placement;
+        changed
+    }
+
     pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;
@@ -1650,6 +1669,25 @@ mod tests {
         let id = runtime.insert(Label, placement(None), 1.0);
         assert_eq!(runtime.ids_for_output("DP-1").next(), Some(id));
         assert_eq!(runtime.ids_for_output("HDMI-A-1").next(), Some(id));
+    }
+
+    #[test]
+    fn relocation_preserves_surface_identity_across_outputs() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(Label, placement(Some("DP-1")), 1.0);
+        let moved = InternalSurfacePlacement {
+            role: InternalSurfaceRole::Panel,
+            geometry: (-1910, 220, 120, 32),
+            output: Some("HDMI-A-1".into()),
+        };
+
+        assert!(runtime.relocate(id, moved.clone()));
+        assert_eq!(runtime.placement(id), Some(&moved));
+        assert_eq!(
+            runtime.ids_for_output("HDMI-A-1").collect::<Vec<_>>(),
+            vec![id]
+        );
+        assert!(runtime.ids_for_output("DP-1").next().is_none());
     }
 
     #[test]
