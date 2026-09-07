@@ -1,4 +1,8 @@
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::Path,
+    sync::{Arc, OnceLock},
+};
 
 use image::{DynamicImage, RgbaImage};
 
@@ -35,24 +39,34 @@ pub fn resized(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
     output
 }
 
-pub fn nickel_application(name: &str) -> Option<(u16, RgbaImage)> {
-    let (id, bytes): (u16, &[u8]) = if name.starts_with("Nickel Settings") {
-        (
-            0x3000,
-            include_bytes!("../../../assets/icons/nickel-settings.png"),
-        )
-    } else if name.starts_with("Nickel File") {
-        (
-            0x3001,
-            include_bytes!("../../../assets/icons/nickel-file.png"),
-        )
-    } else {
-        return None;
-    };
-    image::load_from_memory(bytes)
-        .ok()
-        .map(DynamicImage::into_rgba8)
-        .map(|image| (id, image))
+pub fn nickel_application(name: &str) -> Option<(u16, Arc<RgbaImage>)> {
+    static SETTINGS: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
+    static FILE: OnceLock<Option<Arc<RgbaImage>>> = OnceLock::new();
+    let (id, bytes, cache): (u16, &[u8], &OnceLock<Option<Arc<RgbaImage>>>) =
+        if name.starts_with("Nickel Settings") {
+            (
+                0x3000,
+                include_bytes!("../../../assets/icons/nickel-settings.png"),
+                &SETTINGS,
+            )
+        } else if name.starts_with("Nickel File") {
+            (
+                0x3001,
+                include_bytes!("../../../assets/icons/nickel-file.png"),
+                &FILE,
+            )
+        } else {
+            return None;
+        };
+    cache
+        .get_or_init(|| {
+            image::load_from_memory(bytes)
+                .ok()
+                .map(DynamicImage::into_rgba8)
+                .map(Arc::new)
+        })
+        .as_ref()
+        .map(|image| (id, Arc::clone(image)))
 }
 
 fn load_svg(path: &Path) -> Option<RgbaImage> {
@@ -113,6 +127,14 @@ mod tests {
         assert_ne!(settings_id, file_id);
         assert!(settings.pixels().any(|pixel| pixel.0[3] != 0));
         assert!(file.pixels().any(|pixel| pixel.0[3] != 0));
+        assert!(std::sync::Arc::ptr_eq(
+            &settings,
+            &nickel_application("Nickel Settings — Display").unwrap().1
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &file,
+            &nickel_application("Nickel File — Home").unwrap().1
+        ));
         assert!(nickel_application("Other application").is_none());
     }
 

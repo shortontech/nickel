@@ -31,6 +31,7 @@ impl AsRef<str> for Candidate<'_> {
 
 #[derive(Clone, Debug)]
 pub struct Launcher {
+    taskbar_revision: std::sync::Arc<()>,
     query: String,
     preedit: String,
     search_open: bool,
@@ -267,6 +268,7 @@ impl Launcher {
 
     pub fn new(applications: Vec<Application>) -> Self {
         let mut launcher = Self {
+            taskbar_revision: std::sync::Arc::new(()),
             query: String::new(),
             preedit: String::new(),
             search_open: false,
@@ -334,6 +336,7 @@ impl Launcher {
     }
 
     pub fn set_places(&mut self, places: Vec<Application>) {
+        self.taskbar_revision = std::sync::Arc::new(());
         self.applications
             .retain(|application| !self.place_ids.contains(application.id()));
         self.place_ids.clear();
@@ -387,6 +390,9 @@ impl Launcher {
     }
 
     pub fn set_preferences(&mut self, preferences: LauncherPreferences) {
+        if self.preferences != preferences {
+            self.taskbar_revision = std::sync::Arc::new(());
+        }
         self.preferences = preferences;
         self.refresh();
     }
@@ -535,6 +541,11 @@ impl Launcher {
         groups
     }
 
+    /// Identity changes only when catalog or taskbar preferences change.
+    pub(super) fn taskbar_revision(&self) -> &std::sync::Arc<()> {
+        &self.taskbar_revision
+    }
+
     pub fn taskbar_applications(&self, windows: &[OpenWindow]) -> Vec<TaskbarApplication> {
         let mut grouped = self.group_windows(windows);
         let mut tasks = Vec::new();
@@ -588,6 +599,7 @@ impl Launcher {
     }
 
     pub fn toggle_pin(&mut self, application_id: &str) {
+        self.taskbar_revision = std::sync::Arc::new(());
         let identity = self
             .pinned_preference_id(application_id)
             .unwrap_or_else(|| self.canonical_application_id(application_id))
@@ -603,6 +615,7 @@ impl Launcher {
             .to_owned();
         let changed = self.preferences.move_favorite(&identity, direction);
         if changed {
+            self.taskbar_revision = std::sync::Arc::new(());
             self.refresh();
         }
         changed
@@ -632,6 +645,7 @@ impl Launcher {
     }
 
     pub fn set_pins(&mut self, mut pins: Vec<(String, u64)>) {
+        self.taskbar_revision = std::sync::Arc::new(());
         pins.sort_by_key(|(_, order)| *order);
         self.preferences
             .replace_favorites(pins.into_iter().map(|(id, _)| id));

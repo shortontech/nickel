@@ -1061,7 +1061,15 @@ impl NickelSession {
                     shell
                         .surfaces()
                         .iter()
-                        .filter(|surface| surface.role == crate::winit_shell::SurfaceRole::Panel)
+                        .filter(|surface| {
+                            matches!(
+                                surface.role,
+                                crate::winit_shell::SurfaceRole::Panel
+                                    | crate::winit_shell::SurfaceRole::Launcher
+                                    | crate::winit_shell::SurfaceRole::WindowPreview
+                                    | crate::winit_shell::SurfaceRole::WindowContextMenu
+                            )
+                        })
                         .map(|surface| surface.id),
                 );
             }
@@ -1089,7 +1097,7 @@ impl NickelSession {
                 .map(str::to_owned);
             let fallback = self.resolve_interaction_output(InvocationSource::RecentInteraction);
             if shell_changed {
-                self.sync_internal_shell();
+                self.sync_internal_shell_changes(Some(&changed));
             }
             for action in actions {
                 self.apply_internal_file_action(action);
@@ -1190,9 +1198,10 @@ impl NickelSession {
         let changed = self
             .internal_shell
             .as_mut()
-            .is_some_and(|shell| !shell.refresh_system().is_empty());
-        if changed {
-            self.sync_internal_shell();
+            .map(|shell| shell.refresh_system())
+            .unwrap_or_default();
+        if !changed.is_empty() {
+            self.sync_internal_shell_changes(Some(&changed));
         }
         self.schedule_internal_shell_deadline();
     }
@@ -1455,7 +1464,7 @@ impl NickelSession {
             .as_ref()
             .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
         let shell = self.internal_shell.as_mut().unwrap();
-        let mut changed = false;
+        let mut changed = Vec::new();
         for (runtime_id, event) in events {
             let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
@@ -1466,13 +1475,13 @@ impl NickelSession {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
                 shell.set_panel_context(output, origin);
             }
-            changed |= shell.step_slot(
+            changed.extend(shell.step_slot_changes(
                 shell_id,
                 nickel_ui::HostBatch {
                     events: vec![nickel_ui::HostEvent::Ui(event)],
                     ..Default::default()
                 },
-            );
+            ));
         }
         let launcher_is_visible = shell.launcher_visible();
         let _ = shell;
@@ -1488,8 +1497,8 @@ impl NickelSession {
                     .map(|window| window.id);
             }
         }
-        if changed {
-            self.sync_internal_shell();
+        if !changed.is_empty() {
+            self.sync_internal_shell_changes(Some(&changed));
         }
         if launcher_was_visible && !launcher_is_visible {
             self.restore_launcher_focus();
@@ -1509,6 +1518,13 @@ impl NickelSession {
     }
 
     pub(crate) fn sync_internal_shell(&mut self) {
+        self.sync_internal_shell_changes(None);
+    }
+
+    /// `None` is an explicit global dependency change (theme, locale, wallpaper,
+    /// topology, scale or application replacement). Local service/input updates
+    /// carry identities; visibility and placement are reconciled independently.
+    fn sync_internal_shell_changes(&mut self, changed: Option<&[nickel_ui::InternalSurfaceId]>) {
         let Some(mut shell) = self.internal_shell.take() else {
             return;
         };
@@ -1530,9 +1546,6 @@ impl NickelSession {
                 }
                 continue;
             }
-            let Some(scene) = shell.scene(surface.id) else {
-                continue;
-            };
             let placement = internal_shell_surface_placement(
                 surface.role,
                 surface.output.as_deref(),
@@ -1541,10 +1554,18 @@ impl NickelSession {
                 self.launcher_output_name.as_deref(),
             );
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
-                self.internal_ui.update_scene(runtime_id, scene);
+                if changed.is_none_or(|ids| ids.contains(&surface.id))
+                    && let Some(scene) = shell.scene(surface.id)
+                {
+                    tracing::trace!(surface = ?surface.id, role = ?surface.role, reason = if changed.is_none() { "global" } else { "content" }, "rebuild internal shell scene");
+                    self.internal_ui.update_scene(runtime_id, scene);
+                }
                 self.internal_ui.relocate(runtime_id, placement);
                 continue;
             }
+            let Some(scene) = shell.scene(surface.id) else {
+                continue;
+            };
             let output_scale = surface
                 .output
                 .as_deref()

@@ -1,4 +1,57 @@
     #[test]
+    fn warm_panel_hover_reuses_task_projection_and_builtin_images() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new((0..10_000).map(|index| crate::model::Application::new(format!("app.{index}"), format!("App {index}"), None, None, None)).collect());
+        shell.windows = vec![OpenWindow { id: WindowId(77), application_id: None, active: true, title: "Nickel Settings".into(), state: Default::default() }];
+        shell.scene(SurfaceRole::Panel, 1280, 56);
+        let groups = Arc::clone(&shell.panel_host.application().groups);
+        let image = Arc::clone(&shell.panel_host.application().task_icons[0].as_ref().unwrap().1);
+        let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
+        for _ in 0..20 {
+            shell.panel_pointer_moved(target.bounds.origin.x + target.bounds.size.width / 2.0, 1280);
+            shell.scene(SurfaceRole::Panel, 1280, 56);
+            assert!(Arc::ptr_eq(&groups, &shell.panel_host.application().groups));
+            assert!(Arc::ptr_eq(&image, &shell.panel_host.application().task_icons[0].as_ref().unwrap().1));
+            assert!(!shell.sync_panel_host());
+        }
+        shell.launcher.toggle_pin("app.1");
+        assert!(shell.sync_panel_host());
+        assert!(!Arc::ptr_eq(&groups, &shell.panel_host.application().groups));
+        assert!(shell.panel_host.application().groups[0].pinned);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn panel_render_context_preserves_input_output_and_reuses_each_output_projection() {
+        use nickel_session_protocol::{Geometry, OutputSnapshot, OutputTransform, Snapshot, WindowSnapshot, WorkspaceId};
+        let output = |name: &str, x| OutputSnapshot { name: name.into(), model: name.into(), geometry: Geometry { x, y: 0, width: 1000, height: 800 }, work_area: Geometry { x, y: 0, width: 1000, height: 744 }, scale_120: 120, transform: OutputTransform::Normal, physical_width_mm: 1, physical_height_mm: 1, primary: x == 0, enabled: true };
+        let window = |id, x, title: &str| WindowSnapshot { id: nickel_session_protocol::WindowId(id), application_id: format!("app.{id}"), title: title.into(), active: id == 1, minimized: false, maximized: false, fullscreen: false, geometry: Some(Geometry { x, y: 0, width: 400, height: 400 }), workspace: WorkspaceId(1) };
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        shell.all_windows_on_every_bar = false;
+        shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 0, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
+        shell.refresh_fast();
+        shell.set_panel_output("left");
+        shell.panel_scene_for_output(Some("right"), 1000, 56);
+        assert_eq!(shell.panel_output.as_deref(), Some("left"));
+        assert_eq!(shell.panel_host.application().groups[0].application_name, "Right task");
+        let right = Arc::clone(&shell.panel_host.application().groups);
+        shell.panel_scene_for_output(Some("left"), 1000, 56);
+        assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
+        shell.panel_scene_for_output(Some("right"), 1000, 56);
+        assert!(Arc::ptr_eq(&right, &shell.panel_host.application().groups));
+        shell.panel_host_ui(UiEvent::PointerMoved(Point { x: 0.0, y: 0.0 }), 1000);
+        assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
+        shell.all_windows_on_every_bar = true;
+        shell.panel_scene_for_output(Some("left"), 1000, 56);
+        assert_eq!(shell.panel_host.application().groups.len(), 2);
+        shell.panel_scene_for_output(Some("right"), 1000, 56);
+        assert_eq!(shell.panel_host.application().groups.len(), 2);
+        shell.retain_panel_outputs(&[]);
+        assert!(shell.panel_projections.is_empty());
+    }
+
+    #[test]
     fn right_panel_cluster_is_compact_and_grouped() {
         let layout = panel_status_layout(1920, 3, true);
         assert_eq!(layout.control_start, 1816.0);

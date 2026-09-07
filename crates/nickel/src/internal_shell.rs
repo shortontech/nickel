@@ -39,6 +39,8 @@ pub(crate) struct InternalShellSurface {
     pub role: SurfaceRole,
     pub output: Option<String>,
     pub size: (u32, u32),
+    pub scene_generation: u64,
+    pub commands_copied: u64,
 }
 
 /// A presentation slot in [`InternalSurfaceSet`].
@@ -136,6 +138,7 @@ impl InternalShellCoordinator {
     }
 
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
+        self.shell.retain_panel_outputs(outputs);
         let mut desired = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
@@ -209,6 +212,8 @@ impl InternalShellCoordinator {
             role,
             output,
             size,
+            scene_generation: 0,
+            commands_copied: 0,
         });
     }
 
@@ -235,11 +240,23 @@ impl InternalShellCoordinator {
     }
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
-        let surface = self.entries.iter().find(|surface| surface.id == id)?;
-        Some(
+        let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
+        let commands = if surface.role == SurfaceRole::Panel {
+            self.shell.panel_scene_for_output(
+                surface.output.as_deref(),
+                surface.size.0,
+                surface.size.1,
+            )
+        } else {
             self.shell
-                .scene(surface.role, surface.size.0, surface.size.1),
-        )
+                .scene(surface.role, surface.size.0, surface.size.1)
+        };
+        surface.scene_generation = surface.scene_generation.saturating_add(1);
+        surface.commands_copied = surface
+            .commands_copied
+            .saturating_add(commands.len() as u64);
+        tracing::trace!(surface = ?id, generation = surface.scene_generation, commands_copied = surface.commands_copied, "internal shell scene counters");
+        Some(commands)
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
@@ -254,6 +271,11 @@ impl InternalShellCoordinator {
 
     pub fn poll(&mut self, now: Instant) -> Vec<InternalSurfaceId> {
         self.apply_file_requests();
+        let visibility = self
+            .entries
+            .iter()
+            .map(|surface| self.shell.surface_visible(surface.role))
+            .collect::<Vec<_>>();
         let mut outcome = self.shell.poll_deadlines(now);
         if outcome.capture_screenshot && self.shell.capture_screenshot() {
             outcome.visibility_changed = true;
@@ -261,8 +283,13 @@ impl InternalShellCoordinator {
         }
         self.entries
             .iter()
-            .filter(|surface| outcome.visibility_changed || outcome.redraw.contains(&surface.role))
-            .map(|surface| surface.id)
+            .zip(visibility)
+            .filter(|(surface, was_visible)| {
+                self.shell.surface_visible(surface.role) != *was_visible
+                    || outcome.redraw.contains(&surface.role)
+                    || (outcome.visibility_changed && surface.role == SurfaceRole::Panel)
+            })
+            .map(|(surface, _)| surface.id)
             .collect()
     }
 
@@ -321,20 +348,90 @@ impl InternalShellCoordinator {
         std::mem::take(&mut self.file_actions)
     }
 
+    #[cfg(test)]
     pub fn step_slot(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
+        !self.step_slot_changes(id, batch).is_empty()
+    }
+
+    pub fn step_slot_changes(
+        &mut self,
+        id: InternalSurfaceId,
+        batch: HostBatch,
+    ) -> Vec<InternalSurfaceId> {
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
-            return false;
+            return Vec::new();
         };
+        let visibility = self
+            .entries
+            .iter()
+            .map(|surface| self.shell.surface_visible(surface.role))
+            .collect::<Vec<_>>();
         let mut changed = false;
+        let mut dependent_roles = Vec::new();
         for event in batch.events {
             let nickel_ui::HostEvent::Ui(event) = event else {
                 continue;
             };
+            // Pointer-only panel/launcher navigation cannot change sibling
+            // content. Actions and control drags can update an already-visible
+            // popover or OSD even when its visibility stays unchanged.
+            let action = matches!(
+                event,
+                nickel_ui::UiEvent::PointerPressed(_)
+                    | nickel_ui::UiEvent::PointerReleased(_)
+                    | nickel_ui::UiEvent::PointerContext(_)
+                    | nickel_ui::UiEvent::TouchLongPress(_)
+                    | nickel_ui::UiEvent::KeyboardActivate
+                    | nickel_ui::UiEvent::KeyboardNavigateActivate
+                    | nickel_ui::UiEvent::ActivateFocused
+                    | nickel_ui::UiEvent::ControllerActivate
+                    | nickel_ui::UiEvent::ControllerContextMenu
+                    | nickel_ui::UiEvent::KeyboardContextMenu
+                    | nickel_ui::UiEvent::ControllerBack
+                    | nickel_ui::UiEvent::KeyboardNavigateBack
+            );
+            match entry.role {
+                SurfaceRole::Panel if action => dependent_roles.extend([
+                    SurfaceRole::Panel,
+                    SurfaceRole::WindowPreview,
+                    SurfaceRole::WindowContextMenu,
+                ]),
+                SurfaceRole::ControlCenter => dependent_roles.extend([
+                    SurfaceRole::Panel,
+                    SurfaceRole::VolumeOsd,
+                    SurfaceRole::OnScreenKeyboard,
+                ]),
+                SurfaceRole::WindowPreview => {
+                    dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu])
+                }
+                SurfaceRole::WindowContextMenu => {
+                    dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview])
+                }
+                SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Panel),
+                _ => {}
+            }
             changed |= self
                 .shell
                 .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1);
         }
-        changed
+        let mut changes = Vec::new();
+        if changed {
+            changes.push(id);
+        }
+        let visibility_changed = self
+            .entries
+            .iter()
+            .zip(&visibility)
+            .any(|(surface, was_visible)| self.shell.surface_visible(surface.role) != *was_visible);
+        for (surface, was_visible) in self.entries.iter().zip(visibility) {
+            if self.shell.surface_visible(surface.role) != was_visible
+                || (visibility_changed && surface.role == SurfaceRole::Panel)
+                || (changed && dependent_roles.contains(&surface.role))
+            {
+                changes.push(surface.id);
+            }
+        }
+        changes
     }
 
     pub fn toggle_launcher(&mut self) -> bool {

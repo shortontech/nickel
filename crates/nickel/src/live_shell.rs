@@ -458,6 +458,12 @@ pub struct ShellDeadlineOutcome {
     pub visibility_changed: bool,
 }
 
+struct PanelTaskProjection {
+    revision: Arc<()>,
+    windows: Vec<OpenWindow>,
+    groups: Arc<Vec<crate::launcher::TaskbarApplication>>,
+}
+
 pub struct LiveShell {
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
@@ -516,6 +522,7 @@ pub struct LiveShell {
     panel_hover: Option<PanelHover>,
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<PanelApplication>,
+    panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
     panel_output: Option<String>,
@@ -873,8 +880,8 @@ impl LiveShell {
             PanelApplication {
                 keyboard_enabled: false,
                 keyboard_visible: false,
-                launcher: launcher.clone(),
-                windows: windows.clone(),
+                groups: Arc::new(launcher.taskbar_applications(&windows)),
+                codex_available: launcher.codex_available(),
                 tray: tray.clone(),
                 tray_icons: tray_icons.clone(),
                 panel_icon: Arc::clone(&panel_icon),
@@ -947,6 +954,7 @@ impl LiveShell {
             panel_hover: None,
             panel_hover_output: None,
             panel_host,
+            panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
             panel_output: None,
@@ -1183,9 +1191,7 @@ impl LiveShell {
             changed = true;
         }
         let preview_group = self.preview_group.and_then(|index| {
-            let panel_windows = self.panel_windows();
-            self.launcher
-                .taskbar_applications(&panel_windows)
+            self.panel_groups()
                 .get(index)
                 .map(|task| task.window_group())
         });
@@ -2211,7 +2217,7 @@ impl LiveShell {
     }
 
     pub fn panel_click(&mut self, x: f32, width: u32, secondary: bool) -> bool {
-        self.sync_panel_host();
+        let application_changed = self.sync_panel_host();
         let events = if secondary {
             vec![HostEvent::Ui(UiEvent::PointerContext(Point { x, y: 28.0 }))]
         } else {
@@ -2221,6 +2227,7 @@ impl LiveShell {
             ]
         };
         let outcome = self.panel_host.step(HostBatch {
+            application_changed,
             surface_size: Some((width, 56)),
             events,
             ..HostBatch::default()
@@ -2231,8 +2238,9 @@ impl LiveShell {
     }
 
     pub fn panel_controller(&mut self, action: ControllerAction, width: u32) -> bool {
-        self.sync_panel_host();
+        let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
+            application_changed,
             surface_size: Some((width, 56)),
             events: vec![HostEvent::Controller(action)],
             ..HostBatch::default()
@@ -2244,8 +2252,9 @@ impl LiveShell {
     }
 
     pub(crate) fn panel_host_ui(&mut self, event: UiEvent, width: u32) -> bool {
-        self.sync_panel_host();
+        let application_changed = self.sync_panel_host();
         let outcome = self.panel_host.step(HostBatch {
+            application_changed,
             surface_size: Some((width, 56)),
             events: vec![HostEvent::Ui(event)],
             ..HostBatch::default()
@@ -2431,8 +2440,7 @@ impl LiveShell {
                 self.set_keyboard_visible(!self.keyboard_visible);
             }
             PanelAction::Task(index) => {
-                let panel_windows = self.panel_windows();
-                let groups = self.launcher.taskbar_applications(&panel_windows);
+                let groups = self.panel_groups();
                 if groups
                     .get(index)
                     .is_some_and(|group| group.windows.len() > 1)
@@ -2459,8 +2467,7 @@ impl LiveShell {
                 }
             }
             PanelAction::TaskContext(index) => {
-                let panel_windows = self.panel_windows();
-                let groups = self.launcher.taskbar_applications(&panel_windows);
+                let groups = self.panel_groups();
                 let Some(group) = groups.get(index) else {
                     return;
                 };
@@ -2606,7 +2613,12 @@ impl LiveShell {
                 output,
                 interaction,
             } => {
-                let groups = self.launcher.taskbar_applications(&self.windows);
+                let groups = self
+                    .panel_projections
+                    .get(output)
+                    .map_or(&self.panel_host.application().groups, |projection| {
+                        &projection.groups
+                    });
                 let index = groups.iter().take(12).position(|group| {
                     group
                         .application_id
@@ -2697,8 +2709,9 @@ impl LiveShell {
     }
 
     pub fn panel_pointer_moved(&mut self, x: f32, width: u32) -> bool {
-        self.sync_panel_host();
+        let application_changed = self.sync_panel_host();
         self.panel_host.step(HostBatch {
+            application_changed,
             surface_size: Some((width, 56)),
             events: vec![HostEvent::Ui(UiEvent::PointerMoved(Point { x, y: 28.0 }))],
             ..HostBatch::default()
@@ -2768,6 +2781,20 @@ impl LiveShell {
         self.panel_output = Some(output.into());
     }
 
+    /// Render a concrete output without transferring popover/input ownership.
+    pub fn panel_scene_for_output(
+        &mut self,
+        output: Option<&str>,
+        width: u32,
+        height: u32,
+    ) -> Vec<PaintCommand> {
+        let input_output = self.panel_output.take();
+        self.panel_output = output.map(str::to_owned);
+        let scene = self.panel_scene(width, height);
+        self.panel_output = input_output;
+        scene
+    }
+
     fn visible_panel_hover(&self) -> Option<PanelHover> {
         (self.panel_hover_output == self.panel_output)
             .then_some(self.panel_hover)
@@ -2803,23 +2830,22 @@ impl LiveShell {
     }
 
     fn panel_windows(&self) -> Vec<OpenWindow> {
-        if self.all_windows_on_every_bar {
-            return self.windows.clone();
-        }
-        let Some(output) = self.panel_output.as_deref() else {
-            return self.windows.clone();
-        };
-        self.windows
-            .iter()
-            .filter(|window| {
-                window_belongs_to_panel(
-                    false,
-                    Some(output),
-                    self.window_feed.window_output(window.id).as_deref(),
-                )
-            })
-            .cloned()
-            .collect()
+        self.panel_window_iter().cloned().collect()
+    }
+
+    fn panel_window_iter(&self) -> impl Iterator<Item = &OpenWindow> {
+        self.windows.iter().filter(|window| {
+            window_belongs_to_panel(
+                self.all_windows_on_every_bar,
+                self.panel_output.as_deref(),
+                if self.all_windows_on_every_bar {
+                    None
+                } else {
+                    self.window_feed.window_output(window.id)
+                }
+                .as_deref(),
+            )
+        })
     }
 
     #[cfg(test)]
@@ -2958,8 +2984,7 @@ impl LiveShell {
                 let x = self
                     .preview_group
                     .and_then(|index| {
-                        let panel_windows = self.panel_windows();
-                        let groups = self.launcher.taskbar_applications(&panel_windows);
+                        let groups = self.panel_groups();
                         let group = groups.get(index)?;
                         let (width, _) = preview_dimensions(group.windows.len());
                         let preview_origin = self.preview_origin_x(index, width);
@@ -3360,8 +3385,7 @@ impl LiveShell {
                 },
             );
         } else if let Some(index) = self.preview_group {
-            let panel_windows = self.panel_windows();
-            let groups = self.launcher.taskbar_applications(&panel_windows);
+            let groups = self.panel_groups();
             if let Some(group) = groups.get(index) {
                 let windows = group
                     .windows
@@ -3454,8 +3478,7 @@ impl LiveShell {
             self.preview_pending = None;
             return;
         }
-        let panel_windows = self.panel_windows();
-        let groups = self.launcher.taskbar_applications(&panel_windows);
+        let groups = self.panel_groups();
         if groups
             .get(index)
             .is_none_or(|group| group.windows.is_empty())
@@ -4445,9 +4468,7 @@ impl LiveShell {
     fn window_preview_scene(&mut self) -> Vec<PaintCommand> {
         let group = self.task_switcher_group.clone().or_else(|| {
             self.preview_group.and_then(|index| {
-                let panel_windows = self.panel_windows();
-                self.launcher
-                    .taskbar_applications(&panel_windows)
+                self.panel_groups()
                     .get(index)
                     .map(|task| task.window_group())
             })
@@ -4630,9 +4651,54 @@ impl LiveShell {
         self.panel_host.commands().to_vec()
     }
 
+    fn panel_groups(&mut self) -> Arc<Vec<crate::launcher::TaskbarApplication>> {
+        self.panel_projections.retain(|_, projection| {
+            Arc::ptr_eq(self.launcher.taskbar_revision(), &projection.revision)
+        });
+        let current = self
+            .panel_projections
+            .get(&self.panel_output)
+            .is_some_and(|projection| {
+                Arc::ptr_eq(self.launcher.taskbar_revision(), &projection.revision)
+                    && self.panel_window_iter().eq(projection.windows.iter())
+            });
+        if !current {
+            // A corrupt or unbounded stream of native output names cannot
+            // retain an unbounded history of task projections.
+            if self.panel_projections.len() >= 32
+                && !self.panel_projections.contains_key(&self.panel_output)
+            {
+                self.panel_projections.clear();
+            }
+            let windows = self.panel_windows();
+            let groups = Arc::new(self.launcher.taskbar_applications(&windows));
+            self.panel_projections.insert(
+                self.panel_output.clone(),
+                PanelTaskProjection {
+                    windows,
+                    groups,
+                    revision: Arc::clone(self.launcher.taskbar_revision()),
+                },
+            );
+        }
+        Arc::clone(&self.panel_projections[&self.panel_output].groups)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn retain_panel_outputs(
+        &mut self,
+        outputs: &[crate::internal_shell::InternalOutput],
+    ) {
+        self.panel_projections.retain(|output, _| {
+            output
+                .as_ref()
+                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
+        });
+    }
+
     fn sync_panel_host(&mut self) -> bool {
-        let panel_windows = self.panel_windows();
-        let groups = self.launcher.taskbar_applications(&panel_windows);
+        let groups = self.panel_groups();
+        let tasks_changed = !Arc::ptr_eq(&groups, &self.panel_host.application().groups);
         let task_icons: Vec<Option<(u16, Arc<image::RgbaImage>)>> = groups
             .iter()
             .take(12)
@@ -4649,10 +4715,7 @@ impl LiveShell {
                             .is_some_and(|id| id.as_str().starts_with("io.nickel.codex.project."))
                             .then(|| (0x3002, Arc::clone(&self.codex_icon)))
                     })
-                    .or_else(|| {
-                        crate::icons::nickel_application(&group.application_name)
-                            .map(|(id, image)| (id, Arc::new(image)))
-                    })
+                    .or_else(|| crate::icons::nickel_application(&group.application_name))
                     .or_else(|| {
                         group.windows.first().and_then(|window| {
                             self.window_icons.get(&window.id).cloned().map(|icon| {
@@ -4681,19 +4744,20 @@ impl LiveShell {
                     _ => true,
                 });
         let application_changed = application.palette != self.palette
-            || application.windows != panel_windows
+            || tasks_changed
             || application.tray != self.tray
             || application.panel_hover != visible_panel_hover
             || application.launcher_visible != self.launcher_visible
             || application.codex_project_menu_visible != self.codex_project_menu_visible
             || application.control_visible != self.control_visible
-            || application.launcher.codex_available() != self.launcher.codex_available()
-            || application.launcher.preferences() != self.launcher.preferences()
+            || application.codex_available != self.launcher.codex_available()
             || task_icons_changed
             || keyboard_changed;
-        application.launcher.clone_from(&self.launcher);
-        application.windows = panel_windows;
-        application.tray.clone_from(&self.tray);
+        application.codex_available = self.launcher.codex_available();
+        application.groups = groups;
+        if application.tray != self.tray {
+            application.tray.clone_from(&self.tray);
+        }
         application.tray_icons.clone_from(&self.tray_icons);
         application.panel_icon = Arc::clone(&self.panel_icon);
         application.codex_icon = Arc::clone(&self.codex_icon);

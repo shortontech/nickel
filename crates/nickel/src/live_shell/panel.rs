@@ -18,10 +18,10 @@ use super::{
     PANEL_CLOCK_WIDTH, PANEL_CODEX_ICON_SIZE, PANEL_CODEX_WIDTH, PANEL_ITEM_WIDTH,
     PANEL_TRAY_ICON_SIZE, PANEL_TRAY_WIDTH,
 };
-use crate::{
-    launcher::Launcher,
-    model::{OpenWindow, TrayItem},
-};
+use crate::{launcher::TaskbarApplication, model::TrayItem};
+
+#[cfg(any(test, feature = "workbench-fixtures"))]
+use crate::{launcher::Launcher, model::OpenWindow};
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,8 +92,8 @@ pub enum PanelAction {
 pub struct PanelApplication {
     pub(super) keyboard_enabled: bool,
     pub(super) keyboard_visible: bool,
-    pub(super) launcher: Launcher,
-    pub(super) windows: Vec<OpenWindow>,
+    pub(super) groups: Arc<Vec<TaskbarApplication>>,
+    pub(super) codex_available: bool,
     pub(super) tray: Vec<TrayItem>,
     pub(super) tray_icons: Vec<Arc<image::RgbaImage>>,
     pub(super) panel_icon: Arc<image::RgbaImage>,
@@ -140,8 +140,7 @@ impl nickel_ui::Application for PanelApplication {
                         .or((direction != 0).then_some((index, direction)));
                     if let Some((index, direction)) = pending
                         && let Some(id) = self
-                            .launcher
-                            .taskbar_applications(&self.windows)
+                            .groups
                             .get(index)
                             .filter(|task| task.pinned)
                             .and_then(|task| task.application_id.as_ref())
@@ -165,7 +164,7 @@ impl nickel_ui::Application for PanelApplication {
     }
 
     fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
-        let tasks = self.launcher.taskbar_applications(&self.windows);
+        let tasks = &self.groups;
         let pinned_count = tasks.iter().take_while(|task| task.pinned).count();
         tasks
             .iter()
@@ -242,8 +241,8 @@ impl PanelApplication {
         Self {
             keyboard_enabled: false,
             keyboard_visible: false,
-            launcher,
-            windows: Vec::new(),
+            groups: Arc::new(launcher.taskbar_applications(&[])),
+            codex_available: launcher.codex_available(),
             tray: Vec::new(),
             tray_icons: Vec::new(),
             panel_icon: Arc::clone(&icon),
@@ -264,8 +263,8 @@ impl PanelApplication {
     #[allow(dead_code)] // Used by the library workbench fixture, not the shell binary.
     pub fn populated_fixture(mut launcher: Launcher, palette: ThemePalette) -> Self {
         launcher.set_codex_available(true);
-        let mut application = Self::fixture(launcher, palette);
-        application.windows = vec![
+        let mut application = Self::fixture(launcher.clone(), palette);
+        let windows = vec![
             OpenWindow {
                 id: crate::model::WindowId(101),
                 application_id: Some(crate::model::ApplicationId::new("fixture.browser")),
@@ -281,6 +280,7 @@ impl PanelApplication {
                 state: crate::model::WindowState::default(),
             },
         ];
+        application.groups = Arc::new(launcher.taskbar_applications(&windows));
         application.task_icons = [
             image::Rgba([40, 140, 240, 255]),
             image::Rgba([220, 90, 120, 255]),
@@ -357,7 +357,7 @@ impl PanelApplication {
                         .height(32.0),
                 ),
         );
-        let groups = self.launcher.taskbar_applications(&self.windows);
+        let groups = &self.groups;
         for (index, group) in groups.iter().take(12).enumerate() {
             let hovered = self.panel_hover == Some(PanelHover::Task(index));
             let icon = self.task_icons.get(index).cloned().flatten();
@@ -456,7 +456,7 @@ impl PanelApplication {
                     .child(Text::new("⌨").scale(24.0).color(self.palette.text)),
             );
         }
-        if self.launcher.codex_available() {
+        if self.codex_available {
             row = row.child(
                 Container::new()
                     .id("panel-codex")
