@@ -2603,20 +2603,31 @@ impl NickelSession {
                 elements = peek_elements;
             }
             if let Some(output_geometry) = self.space.output_geometry(&output) {
-                // Internal Nickel surfaces use global logical placement, just
-                // like Space elements. Translate them to this output's local
-                // origin before handing them to the DRM compositor. DRM
-                // elements are front-to-back, so splice the internal overlay
-                // ahead of the Wayland scene (and its peek composition), as
-                // the nested backend's separate overlay pass does. Output
-                // scale is then applied by DrmOutput to these logical bounds;
-                // each memory buffer retains the scale used to rasterize it.
-                let internal_elements = self
+                // DRM elements are front-to-back. Desktop surfaces belong
+                // behind the client scene; panels, applications, and overlays
+                // belong in front. Keep this boundary identical to nested.
+                let background_elements = self
                     .internal_ui
-                    .render_elements(&mut renderer, &output.name(), output_geometry.loc)
+                    .render_elements_for_layer(
+                        &mut renderer,
+                        &output.name(),
+                        output_geometry.loc,
+                        Some(crate::session::InternalSurfaceLayer::Background),
+                    )
                     .into_iter()
                     .map(|element| NativeElement::from(NativeCustomElement::from(element)));
-                elements.splice(0..0, internal_elements);
+                elements.extend(background_elements);
+                let overlay_elements = self
+                    .internal_ui
+                    .render_elements_for_layer(
+                        &mut renderer,
+                        &output.name(),
+                        output_geometry.loc,
+                        Some(crate::session::InternalSurfaceLayer::Overlay),
+                    )
+                    .into_iter()
+                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                elements.splice(0..0, overlay_elements);
             }
             if !self.locked && self.shell_recovery_visible() {
                 let recovery_size = output

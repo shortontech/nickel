@@ -21,7 +21,10 @@ use smithay::{
         },
         winit::{self, WinitEvent},
     },
-    desktop::Window,
+    desktop::{
+        Window,
+        space::{SpaceRenderElements, space_render_elements},
+    },
     output::{Mode, Output, PhysicalProperties, Subpixel},
     reexports::{calloop::EventLoop, wayland_server::Resource},
     utils::{Buffer, Rectangle, Scale, Transform},
@@ -53,6 +56,12 @@ smithay::backend::renderer::element::render_elements! {
     Surface=WaylandSurfaceRenderElement<R>,
     Memory=MemoryRenderBufferRenderElement<R>,
     Solid=SolidColorRenderElement,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
+}
+
+smithay::backend::renderer::element::render_elements! {
+    WinitBaseElement<R, E> where R: ImportAll + ImportMem;
+    Space=SpaceRenderElements<R, E>,
     Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
 }
 
@@ -208,23 +217,37 @@ pub fn init_winit(
 
                     let captured_frame = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
-                        smithay::desktop::space::render_output::<
+                        let background_elements = state
+                            .internal_ui
+                            .render_elements_for_layer(
+                                renderer,
+                                &output.name(),
+                                (0, 0).into(),
+                                Some(crate::session::InternalSurfaceLayer::Background),
+                            )
+                            .into_iter();
+                        let space_elements = space_render_elements::<
                             _,
-                            WaylandSurfaceRenderElement<GlesRenderer>,
+                            Window,
                             _,
-                            _,
-                        >(
-                            &output,
-                            renderer,
-                            &mut framebuffer,
-                            1.0,
-                            0,
-                            [&state.space],
-                            &[],
-                            &mut damage_tracker,
-                            [0.1, 0.1, 0.1, 1.0],
-                        )
+                        >(renderer, [&state.space], &output, 1.0)
                         .unwrap();
+                        // Output render elements are front-to-back: the Space
+                        // client scene precedes compositor-owned desktops.
+                        let mut base_elements = space_elements
+                            .into_iter()
+                            .map(WinitBaseElement::from)
+                            .collect::<Vec<_>>();
+                        base_elements.extend(background_elements.map(WinitBaseElement::from));
+                        damage_tracker
+                            .render_output(
+                                renderer,
+                                &mut framebuffer,
+                                0,
+                                &base_elements,
+                                [0.1, 0.1, 0.1, 1.0],
+                            )
+                            .unwrap();
 
                         let frame_palette = ThemePalette::from_appearance(
                             ShellSettings::load_default().resolve_appearance(Appearance::default()),
@@ -240,7 +263,12 @@ pub fn init_winit(
                         overlay_elements.extend(
                             state
                                 .internal_ui
-                                .render_elements(renderer, &output.name(), (0, 0).into())
+                                .render_elements_for_layer(
+                                    renderer,
+                                    &output.name(),
+                                    (0, 0).into(),
+                                    Some(crate::session::InternalSurfaceLayer::Overlay),
+                                )
                                 .into_iter()
                                 .map(WinitFrameElement::from),
                         );

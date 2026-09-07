@@ -44,7 +44,8 @@ use std::sync::{Condvar, Mutex, atomic::AtomicU64};
 
 pub use authority::{SessionAuthority, SessionAuthorityRequest};
 pub use internal_ui::{
-    InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime, TouchPhase,
+    InternalSurfaceLayer, InternalSurfacePlacement, InternalSurfaceRole, InternalUiRuntime,
+    TouchPhase,
 };
 use smithay::reexports::{
     calloop::{

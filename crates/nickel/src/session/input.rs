@@ -63,7 +63,10 @@ impl NickelSession {
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
     ) -> bool {
-        let handled = self.internal_ui.pointer_motion((position.x, position.y));
+        let client_present = self.surface_under(position).is_some();
+        let handled = self
+            .internal_ui
+            .pointer_motion_with_client((position.x, position.y), client_present);
         if handled {
             self.flush_internal_shell_input();
             self.request_output_redraw();
@@ -650,9 +653,12 @@ impl NickelSession {
 
                 let button_state = event.state();
 
-                if self.internal_ui.pointer_button(
-                    (pointer.current_location().x, pointer.current_location().y),
+                let location = pointer.current_location();
+                let client_present = self.surface_under(location).is_some();
+                if self.internal_ui.pointer_button_with_client(
+                    (location.x, location.y),
                     button_state == ButtonState::Pressed,
+                    client_present,
                 ) {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();
@@ -1096,10 +1102,12 @@ impl NickelSession {
                     axis_amount(event.amount(Axis::Vertical), vertical_amount_discrete);
 
                 let location = pointer.current_location();
-                if self.internal_ui.scroll(
+                let client_present = self.surface_under(location).is_some();
+                if self.internal_ui.scroll_with_client(
                     (location.x, location.y),
                     horizontal_amount as f32,
                     vertical_amount as f32,
+                    client_present,
                 ) {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();
@@ -1136,10 +1144,12 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                if self.internal_ui.touch(
+                let client_present = self.surface_under(location).is_some();
+                if self.internal_ui.touch_with_client(
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),
                     crate::session::TouchPhase::Started,
+                    client_present,
                 ) {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();

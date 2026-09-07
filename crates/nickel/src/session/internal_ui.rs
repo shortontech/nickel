@@ -38,6 +38,16 @@ pub enum InternalSurfaceRole {
     Application,
 }
 
+/// The compositor scene boundary an internal surface occupies.
+///
+/// Background surfaces are composed behind every Wayland client. Overlay
+/// surfaces are composed in front of the client scene.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalSurfaceLayer {
+    Background,
+    Overlay,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InternalSurfacePlacement {
     pub role: InternalSurfaceRole,
@@ -659,12 +669,31 @@ impl InternalUiRuntime {
         }
     }
 
-    pub fn surface_at(&self, point: (f64, f64)) -> Option<(InternalSurfaceId, UiPoint)> {
+    fn role_layer(role: InternalSurfaceRole) -> InternalSurfaceLayer {
+        match role {
+            InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
+            InternalSurfaceRole::Application
+            | InternalSurfaceRole::Panel
+            | InternalSurfaceRole::Overlay => InternalSurfaceLayer::Overlay,
+        }
+    }
+
+    /// Return the foremost internal surface at `point`.
+    ///
+    /// A desktop is below the Wayland client scene, so it is excluded when a
+    /// client occupies the point. Other internal roles are compositor-owned
+    /// foreground surfaces and retain priority over clients.
+    pub fn surface_at(
+        &self,
+        point: (f64, f64),
+        client_present: bool,
+    ) -> Option<(InternalSurfaceId, UiPoint)> {
         self.presentation
             .iter()
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
-                (point.0 >= f64::from(x)
+                (!(client_present && surface.placement.role == InternalSurfaceRole::Desktop)
+                    && point.0 >= f64::from(x)
                     && point.1 >= f64::from(y)
                     && point.0 < f64::from(x) + f64::from(width)
                     && point.1 < f64::from(y) + f64::from(height))
@@ -703,7 +732,11 @@ impl InternalUiRuntime {
     }
 
     pub fn pointer_motion(&mut self, point: (f64, f64)) -> bool {
-        let target = self.surface_at(point);
+        self.pointer_motion_with_client(point, false)
+    }
+
+    pub fn pointer_motion_with_client(&mut self, point: (f64, f64), client_present: bool) -> bool {
+        let target = self.surface_at(point, client_present);
         if self.hovered != target.map(|(id, _)| id) {
             if let Some(previous) = self.hovered {
                 self.dispatch_ui(previous, UiEvent::PointerCancelled);
@@ -719,7 +752,16 @@ impl InternalUiRuntime {
     }
 
     pub fn pointer_button(&mut self, point: (f64, f64), pressed: bool) -> bool {
-        let Some((id, local)) = self.surface_at(point) else {
+        self.pointer_button_with_client(point, pressed, false)
+    }
+
+    pub fn pointer_button_with_client(
+        &mut self,
+        point: (f64, f64),
+        pressed: bool,
+        client_present: bool,
+    ) -> bool {
+        let Some((id, local)) = self.surface_at(point, client_present) else {
             if pressed && let Some(previous) = self.focused.take() {
                 self.step(
                     previous,
@@ -759,7 +801,17 @@ impl InternalUiRuntime {
     }
 
     pub fn scroll(&mut self, point: (f64, f64), horizontal: f32, vertical: f32) -> bool {
-        let Some((id, local)) = self.surface_at(point) else {
+        self.scroll_with_client(point, horizontal, vertical, false)
+    }
+
+    pub fn scroll_with_client(
+        &mut self,
+        point: (f64, f64),
+        horizontal: f32,
+        vertical: f32,
+        client_present: bool,
+    ) -> bool {
+        let Some((id, local)) = self.surface_at(point, client_present) else {
             return false;
         };
         if horizontal != 0.0 {
@@ -784,9 +836,19 @@ impl InternalUiRuntime {
     }
 
     pub fn touch(&mut self, contact: u64, point: (f64, f64), phase: TouchPhase) -> bool {
+        self.touch_with_client(contact, point, phase, false)
+    }
+
+    pub fn touch_with_client(
+        &mut self,
+        contact: u64,
+        point: (f64, f64),
+        phase: TouchPhase,
+        client_present: bool,
+    ) -> bool {
         match phase {
             TouchPhase::Started => {
-                let Some((id, local)) = self.surface_at(point) else {
+                let Some((id, local)) = self.surface_at(point, client_present) else {
                     return false;
                 };
                 self.touches.insert(contact, (id, local));
@@ -866,6 +928,31 @@ impl InternalUiRuntime {
         })
     }
 
+    fn ordered_ids_for_layer(
+        &self,
+        output: &str,
+        layer: Option<InternalSurfaceLayer>,
+    ) -> Vec<InternalSurfaceId> {
+        let mut ids = self
+            .ids_for_output(output)
+            .filter(|id| {
+                layer.is_none_or(|layer| {
+                    self.presentation
+                        .get(id)
+                        .is_some_and(|surface| Self::role_layer(surface.placement.role) == layer)
+                })
+            })
+            .collect::<Vec<_>>();
+        ids.sort_by_key(|id| {
+            let role = self.presentation.get(id).unwrap().placement.role;
+            (
+                std::cmp::Reverse(Self::role_order(role)),
+                std::cmp::Reverse(*id),
+            )
+        });
+        ids
+    }
+
     /// Prepare a dirty surface and return its Smithay-importable fallback buffer.
     ///
     /// `None` after preparation means the frame is represented by GPU-native
@@ -900,8 +987,22 @@ impl InternalUiRuntime {
     where
         R::TextureId: Send + Clone + 'static,
     {
-        let ids = self.ids_for_output(output).collect::<Vec<_>>();
-        ids.into_iter()
+        self.render_elements_for_layer(renderer, output, output_origin, None)
+    }
+
+    /// Build front-to-back render elements for one compositor scene layer.
+    pub fn render_elements_for_layer<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+        layer: Option<InternalSurfaceLayer>,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        self.ordered_ids_for_layer(output, layer)
+            .into_iter()
             .filter_map(|id| {
                 let placement = self.presentation.get(&id)?.placement.clone();
                 if self.presentation.get(&id)?.dirty {
@@ -1035,7 +1136,7 @@ mod tests {
         );
 
         assert_eq!(
-            runtime.surface_at((10.0, 10.0)).map(|hit| hit.0),
+            runtime.surface_at((10.0, 10.0), false).map(|hit| hit.0),
             Some(panel)
         );
         assert!(runtime.pointer_button((10.0, 60.0), true));
@@ -1063,6 +1164,84 @@ mod tests {
                 .0,
             0
         );
+    }
+
+    #[test]
+    fn desktop_is_below_clients_but_system_surfaces_remain_above_them() {
+        let mut runtime = InternalUiRuntime::default();
+        let desktop = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Desktop,
+                geometry: (0, 0, 200, 200),
+                output: None,
+            },
+            1.0,
+        );
+        let panel = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (0, 0, 200, 32),
+                output: None,
+            },
+            1.0,
+        );
+
+        assert_eq!(runtime.surface_at((50.0, 80.0), false).unwrap().0, desktop);
+        assert!(runtime.surface_at((50.0, 80.0), true).is_none());
+        assert_eq!(runtime.surface_at((50.0, 16.0), true).unwrap().0, panel);
+    }
+
+    #[test]
+    fn render_layers_are_front_to_back_and_match_hit_test_roles() {
+        let mut runtime = InternalUiRuntime::default();
+        let desktop = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Desktop,
+                geometry: (0, 0, 100, 100),
+                output: Some("nested".into()),
+            },
+            1.0,
+        );
+        let application = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (0, 0, 100, 100),
+                output: Some("nested".into()),
+            },
+            1.0,
+        );
+        let panel = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (0, 0, 100, 100),
+                output: Some("nested".into()),
+            },
+            1.0,
+        );
+        let overlay = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Overlay,
+                geometry: (0, 0, 100, 100),
+                output: Some("nested".into()),
+            },
+            1.0,
+        );
+
+        assert_eq!(
+            runtime.ordered_ids_for_layer("nested", Some(InternalSurfaceLayer::Background)),
+            vec![desktop]
+        );
+        assert_eq!(
+            runtime.ordered_ids_for_layer("nested", Some(InternalSurfaceLayer::Overlay)),
+            vec![overlay, panel, application]
+        );
+        assert_eq!(runtime.surface_at((10.0, 10.0), true).unwrap().0, overlay);
     }
 
     #[test]
