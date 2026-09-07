@@ -267,7 +267,12 @@ fn serve_app_server() -> ExitCode {
                 json!({"thread":{"id":"fixture-thread","name":"Fixture thread","cwd":"/fixture"}})
             }
             "thread/resume" => {
-                json!({"thread":{"id":request["params"]["threadId"],"name":"Fixture thread","cwd":"/fixture","turns":[]}})
+                let turns = if mode.trim() == "flood-overflow" {
+                    json!([{"id":"fixture-turn","status":"completed","items":[{"id":"command-flood","type":"commandExecution","aggregatedOutput":"x".repeat(1500)}]}])
+                } else {
+                    json!([])
+                };
+                json!({"thread":{"id":request["params"]["threadId"],"name":"Fixture thread","cwd":"/fixture","turns":turns}})
             }
             "turn/start" => {
                 write_json(
@@ -282,7 +287,7 @@ fn serve_app_server() -> ExitCode {
                     &mut stdout,
                     &json!({"method":"item/agentMessage/delta","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"message-1","delta":"hello"}}),
                 );
-                if mode.trim() == "flood" {
+                if matches!(mode.trim(), "flood" | "flood-overflow") {
                     write_json(
                         &mut stdout,
                         &json!({"method":"item/started","params":{"threadId":"fixture-thread","turnId":"fixture-turn","item":{"id":"command-flood","type":"commandExecution"}}}),
@@ -292,7 +297,19 @@ fn serve_app_server() -> ExitCode {
                             &mut stdout,
                             &json!({"method":"item/commandExecution/outputDelta","params":{"threadId":"fixture-thread","turnId":"fixture-turn","itemId":"command-flood","delta":"x"}}),
                         );
+                        if mode.trim() == "flood-overflow" {
+                            // Control events prohibit adjacent-delta coalescing and force
+                            // a stalled subscriber across its finite entry budget.
+                            write_json(
+                                &mut stdout,
+                                &json!({"method":"account/updated","params":{}}),
+                            );
+                        }
                     }
+                    write_json(
+                        &mut stdout,
+                        &json!({"method":"item/completed","params":{"item":{"id":"command-flood","type":"commandExecution"}}}),
+                    );
                 }
                 write_json(
                     &mut stdout,

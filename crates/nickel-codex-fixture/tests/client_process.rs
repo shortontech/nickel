@@ -106,8 +106,15 @@ fn real_stdio_process_supports_typed_lifecycle_and_streaming() {
         EventKind::TurnCompleted { thread_id, turn_id, status }
             if thread_id.0 == "fixture-thread" && turn_id.0 == "fixture-turn" && status == "completed"
     ));
-    assert_eq!(client.projection().active_turn, None);
-    assert_eq!(client.projection().items["message-1"].text, "hello");
+    let projection = client.projection();
+    assert_eq!(projection.active_turn, None);
+    assert_eq!(projection.items["message-1"].item_type, "agentMessage");
+    assert!(projection.items["message-1"].text.is_empty());
+    assert_eq!(
+        projection.threads[&thread.id].terminal_turns,
+        vec![turn.id.clone()]
+    );
+    assert!(projection.retained_capacity() <= 2 * 1024 * 1024);
     assert!(
         client
             .respond(
@@ -409,12 +416,12 @@ fn out_of_order_responses_never_cross_request_ids() {
 }
 
 #[test]
-fn slow_consumer_is_bounded_and_projected_state_remains_complete() {
+fn slow_consumer_coalesces_losslessly_and_retains_only_lifecycle_metadata() {
     let executable = Path::new(env!("CARGO_BIN_EXE_nickel-codex-fixture"));
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("fixture-mode"), "flood").unwrap();
     let client = CodexClient::spawn(executable, directory.path()).unwrap();
-    let _events = client.subscribe();
+    let events = client.subscribe();
     client
         .start_turn(StartTurn {
             thread_id: ThreadId("fixture-thread".into()),
@@ -425,19 +432,104 @@ fn slow_consumer_is_bounded_and_projected_state_remains_complete() {
             approval_policy: ApprovalPolicy::OnRequest,
         })
         .unwrap();
-    for _ in 0..50 {
-        if client
-            .projection()
-            .items
-            .get("command-flood")
-            .is_some_and(|item| item.text.len() == 1500)
-        {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(client.projection().items["command-flood"].text.len(), 1500);
-    assert!(client.dropped_event_count() > 0);
+    // The turn response follows all fixture notifications, so the queue was stalled
+    // for the entire burst; no timing sleeps are needed to observe its final state.
+    let metrics = events.metrics();
+    assert_eq!(metrics.overflows, 0);
+    assert_eq!(metrics.coalesced, 1499);
+    assert!(metrics.high_water_bytes <= nickel_codex::delivery::QUEUE_BYTES);
+    assert!(metrics.high_water_entries <= nickel_codex::delivery::QUEUE_ENTRIES);
+    let received: Vec<_> = std::iter::from_fn(|| events.try_recv().ok()).collect();
+    let text: String = received
+        .iter()
+        .filter_map(|event| match &event.kind {
+            EventKind::CommandOutputDelta { item_id, delta } if item_id == "command-flood" => {
+                Some(delta.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(text, "x".repeat(1500));
+    let position = |predicate: fn(&EventKind) -> bool| {
+        received
+            .iter()
+            .position(|event| predicate(&event.kind))
+            .unwrap()
+    };
+    let started = position(
+        |kind| matches!(kind, EventKind::ItemStarted { item_id, .. } if item_id == "command-flood"),
+    );
+    let delta = position(|kind| matches!(kind, EventKind::CommandOutputDelta { .. }));
+    let completed = position(
+        |kind| matches!(kind, EventKind::ItemCompleted { item_id } if item_id == "command-flood"),
+    );
+    let approval = position(|kind| matches!(kind, EventKind::ApprovalRequested { .. }));
+    let terminal = position(|kind| matches!(kind, EventKind::TurnCompleted { .. }));
+    assert!(started < delta && delta < completed && completed < approval && approval < terminal);
+    let projection = client.projection();
+    assert!(projection.items["command-flood"].text.is_empty());
+    assert!(projection.items["command-flood"].completed);
+    assert_eq!(projection.active_turn, None);
+    assert!(projection.retained_capacity() <= 2 * 1024 * 1024);
+    assert_eq!(client.dropped_event_count(), 0);
+    client.shutdown();
+}
+
+#[test]
+fn stalled_noncoalescible_delivery_fails_explicitly_and_history_can_be_reloaded() {
+    let executable = Path::new(env!("CARGO_BIN_EXE_nickel-codex-fixture"));
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(directory.path().join("fixture-mode"), "flood-overflow").unwrap();
+    let client = CodexClient::spawn(executable, directory.path()).unwrap();
+    let events = client.subscribe();
+    client
+        .start_turn(StartTurn {
+            thread_id: ThreadId("fixture-thread".into()),
+            text: "flood".into(),
+            images: Vec::new(),
+            model: None,
+            reasoning_effort: None,
+            approval_policy: ApprovalPolicy::OnRequest,
+        })
+        .unwrap();
+    let metrics = events.metrics();
+    assert_eq!(metrics.overflows, 1);
+    assert_eq!(metrics.entries, 1);
+    assert!(metrics.high_water_bytes <= nickel_codex::delivery::QUEUE_BYTES);
+    assert_eq!(
+        metrics.high_water_entries,
+        nickel_codex::delivery::QUEUE_ENTRIES
+    );
+    assert!(
+        matches!(events.try_recv().unwrap().kind, EventKind::Connection { state } if state.starts_with("failed: event delivery overflow"))
+    );
+    assert!(matches!(
+        events.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    ));
+    let projection = client.projection();
+    assert!(projection.items["command-flood"].completed);
+    assert!(projection.items["command-flood"].text.is_empty());
+    assert!(projection.retained_capacity() <= 2 * 1024 * 1024);
+    let history = client
+        .resume_thread(ThreadId("fixture-thread".into()))
+        .unwrap();
+    assert_eq!(history.turns[0].items[0].text, "x".repeat(1500));
+    // Existing response correlation remains usable even though this subscription failed.
+    client
+        .respond(
+            ServerRequestId("71".into()),
+            InteractionResponse::CommandApproval {
+                decision: nickel_codex::CommandDecision::Decline,
+            },
+        )
+        .unwrap();
+    client
+        .interrupt_turn(
+            ThreadId("fixture-thread".into()),
+            nickel_codex::TurnId("fixture-turn".into()),
+        )
+        .unwrap();
     client.shutdown();
 }
 
