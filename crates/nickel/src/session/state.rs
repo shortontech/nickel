@@ -344,7 +344,8 @@ fn command_requires_shell_identity(command: &SessionCommand) -> bool {
 fn test_control_may_invoke(command: &SessionCommand) -> bool {
     matches!(
         command,
-        SessionCommand::Unlock
+        SessionCommand::LogOut
+            | SessionCommand::Unlock
             | SessionCommand::SessionAction {
                 action: nickel_session_protocol::SessionAction::Lock
             }
@@ -6557,7 +6558,8 @@ mod protocol_tests {
     }
 
     #[test]
-    fn explicit_nested_test_control_can_only_cross_lock_boundaries() {
+    fn explicit_nested_test_control_can_cross_lock_and_logout_boundaries() {
+        assert!(test_control_may_invoke(&Command::LogOut));
         assert!(test_control_may_invoke(&Command::Unlock));
         assert!(test_control_may_invoke(&Command::SessionAction {
             action: SessionAction::Lock,
