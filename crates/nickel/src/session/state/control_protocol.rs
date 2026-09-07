@@ -39,15 +39,19 @@ impl NickelSession {
                         recv_control_frame(socket.as_ref(), &mut frame)
                     {
                         let request = decode::<ClientEnvelope>(&frame[..length]);
-                        let (request_id, message) = match request {
+                        let (request_id, message, request_redraw) = match request {
                             Ok(envelope) => {
                                 let request_id = envelope.request_id;
+                                let request_redraw = matches!(
+                                    &envelope.request,
+                                    Request::RegisterShell { .. } | Request::Command(_)
+                                );
                                 let message = data.handle_protocol_request(
                                     envelope,
                                     source.as_deref(),
                                     peer_pid,
                                 );
-                                (request_id, message)
+                                (request_id, message, request_redraw)
                             }
                             Err(error) => (
                                 0,
@@ -55,6 +59,7 @@ impl NickelSession {
                                     code: ErrorCode::IncompatibleVersion,
                                     message: error.to_string(),
                                 },
+                                false,
                             ),
                         };
                         if let Some(path) = source.as_deref() {
@@ -88,7 +93,9 @@ impl NickelSession {
                             }
                         }
                         data.windows.finish_snapshot();
-                        data.request_output_redraw();
+                        if request_redraw {
+                            data.request_output_redraw();
+                        }
                     }
                     Ok(PostAction::Continue)
                 },
