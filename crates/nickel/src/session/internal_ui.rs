@@ -2,7 +2,10 @@
 
 use std::collections::BTreeMap;
 
-use nickel_ui::{Application, HostBatch, InternalSurfaceId, InternalSurfaceSet, SoftwareRenderer};
+use nickel_ui::{
+    Application, HostBatch, InternalSurfaceId, InternalSurfaceSet, SoftwareRenderer, Text, View,
+    ViewContext, backend::PaintCommand,
+};
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -34,6 +37,17 @@ struct PresentedSurface {
     renderer: SoftwareRenderer,
     buffer: Option<MemoryRenderBuffer>,
     dirty: bool,
+    external_scene: Option<Vec<PaintCommand>>,
+}
+
+struct SceneSlot;
+
+impl Application for SceneSlot {
+    type Message = ();
+    fn update(&mut self, (): ()) {}
+    fn view(&self, _: ViewContext) -> impl View<Self::Message> {
+        Text::new("")
+    }
 }
 
 fn output_local_location(
@@ -71,8 +85,21 @@ impl InternalUiRuntime {
                 renderer: SoftwareRenderer::new(physical_width, physical_height, scale),
                 buffer: None,
                 dirty: true,
+                external_scene: None,
             },
         );
+        id
+    }
+
+    /// Insert a renderer-neutral scene produced by compositor-owned shell state.
+    pub fn insert_scene(
+        &mut self,
+        commands: Vec<PaintCommand>,
+        placement: InternalSurfacePlacement,
+        scale: f32,
+    ) -> InternalSurfaceId {
+        let id = self.insert(SceneSlot, placement, scale);
+        self.presentation.get_mut(&id).unwrap().external_scene = Some(commands);
         id
     }
 
@@ -125,8 +152,13 @@ impl InternalUiRuntime {
     pub fn render_buffer(&mut self, id: InternalSurfaceId) -> Option<MemoryRenderBuffer> {
         let presentation = self.presentation.get_mut(&id)?;
         if presentation.dirty {
-            let surface = self.surfaces.get(id)?;
-            let damage = surface.render_software(&mut presentation.renderer);
+            let damage = if let Some(commands) = &presentation.external_scene {
+                presentation.renderer.render(commands)
+            } else {
+                self.surfaces
+                    .get(id)?
+                    .render_software(&mut presentation.renderer)
+            };
             if !damage.is_empty() || presentation.buffer.is_none() {
                 let mut bytes = Vec::with_capacity(presentation.renderer.pixels().len() * 4);
                 for pixel in presentation.renderer.pixels() {
@@ -235,5 +267,14 @@ mod tests {
             output_local_location((1936, -88, 480, 64), origin),
             (16.0, 32.0)
         );
+    }
+
+    #[test]
+    fn renderer_neutral_scene_uses_the_same_presentation_lifecycle() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert_scene(Vec::new(), placement(Some("nested")), 1.0);
+        assert!(runtime.has_damage());
+        assert!(runtime.render_buffer(id).is_some());
+        assert!(!runtime.has_damage());
     }
 }

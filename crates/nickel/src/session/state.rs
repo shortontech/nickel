@@ -425,6 +425,8 @@ pub struct NickelSession {
     pub space: Space<Window>,
     /// UI applications hosted directly by the compositor, without a Wayland client.
     pub internal_ui: crate::session::InternalUiRuntime,
+    /// Built-in shell state when no supervised shell client is requested.
+    pub(crate) internal_shell: Option<crate::internal_shell::InternalShellCoordinator>,
     pub loop_signal: LoopSignal,
 
     // Smithay State
@@ -580,6 +582,78 @@ use preview::{
     admitted_preview_ids, advance_preview_content_generation, record_preview_capture_attempt,
 };
 impl NickelSession {
+    pub(crate) fn enable_internal_shell(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+    ) -> Result<(), String> {
+        use crate::{
+            internal_shell::{InternalOutput, InternalShellCoordinator},
+            session::{InternalSurfacePlacement, InternalSurfaceRole},
+            winit_shell::{PANEL_HEIGHT, PanelEdge, SurfaceRole},
+        };
+
+        let outputs = self
+            .space
+            .outputs()
+            .filter_map(|output| {
+                let geometry = self.space.output_geometry(output)?;
+                Some((
+                    InternalOutput {
+                        name: output.name(),
+                        width: geometry.size.w.max(0) as u32,
+                        height: geometry.size.h.max(0) as u32,
+                    },
+                    geometry.loc.x,
+                    geometry.loc.y,
+                ))
+            })
+            .collect::<Vec<_>>();
+        let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        shell.set_outputs(
+            &outputs
+                .iter()
+                .map(|(output, _, _)| output.clone())
+                .collect::<Vec<_>>(),
+        );
+
+        for surface in shell.surfaces().to_vec() {
+            if !shell.visible(surface.id) {
+                continue;
+            }
+            let (origin_x, origin_y, output_height) = surface
+                .output
+                .as_deref()
+                .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+                .map(|(output, x, y)| (*x, *y, output.height))
+                .unwrap_or((0, 0, surface.size.1));
+            let y = if surface.role == SurfaceRole::Panel {
+                origin_y + output_height.saturating_sub(PANEL_HEIGHT) as i32
+            } else {
+                origin_y
+            };
+            let role = match surface.role {
+                SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
+                SurfaceRole::Panel => InternalSurfaceRole::Panel,
+                _ => InternalSurfaceRole::Overlay,
+            };
+            let Some(scene) = shell.scene(surface.id) else {
+                continue;
+            };
+            self.internal_ui.insert_scene(
+                scene,
+                InternalSurfacePlacement {
+                    role,
+                    geometry: (origin_x, y, surface.size.0, surface.size.1),
+                    output: surface.output.clone(),
+                },
+                1.0,
+            );
+        }
+        self.internal_shell = Some(shell);
+        self.schedule_internal_ui_frame();
+        Ok(())
+    }
+
     pub fn insert_internal_surface<A: nickel_ui::Application + 'static>(
         &mut self,
         application: A,
@@ -1063,6 +1137,7 @@ impl NickelSession {
 
             space,
             internal_ui: Default::default(),
+            internal_shell: None,
             loop_signal,
             socket_name,
 
