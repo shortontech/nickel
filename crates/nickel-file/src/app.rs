@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     ffi::OsString,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
@@ -72,7 +72,6 @@ pub(crate) fn drop_target_id(prefix: &str, path: &std::path::Path) -> String {
     format!("file-drop-{prefix}-{:016x}", hasher.finish())
 }
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
-type SidebarResult = (PathBuf, Result<Vec<(String, PathBuf)>, String>);
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
 type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
 type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
@@ -266,13 +265,9 @@ pub struct FileApp {
     pub(crate) artwork_scale_milli: u16,
     pub(crate) next_icon_id: u16,
     pub(crate) sidebar_width: f32,
-    pub(crate) expanded_folders: HashSet<PathBuf>,
+    pub(crate) sidebar: crate::sidebar::Sidebar,
     pub(crate) location_groups: Vec<LocationGroup>,
     location_groups_rx: Option<Receiver<Vec<LocationGroup>>>,
-    pub(crate) sidebar_children: HashMap<PathBuf, Vec<(String, PathBuf)>>,
-    sidebar_loading: HashSet<PathBuf>,
-    sidebar_sender: mpsc::Sender<SidebarResult>,
-    sidebar_receiver: Receiver<SidebarResult>,
     pub(crate) collapsed_location_groups: HashSet<String>,
     pub(crate) control_down: bool,
     pub(crate) shift_down: bool,
@@ -387,6 +382,7 @@ impl FileApp {
     /// Requests closure when lifecycle ownership belongs to an embedding host.
     pub fn request_close(&mut self) {
         self.exit_requested = true;
+        self.sidebar = crate::sidebar::Sidebar::default();
     }
 
     pub(crate) fn selected_index(&self) -> Option<usize> {
@@ -443,68 +439,16 @@ impl FileApp {
     }
 
     fn toggle_sidebar_folder(&mut self, path: PathBuf) {
-        if self.expanded_folders.remove(&path) {
-            return;
-        }
-        self.expanded_folders.insert(path.clone());
-        if self.sidebar_children.contains_key(&path) || !self.sidebar_loading.insert(path.clone()) {
-            return;
-        }
-        let sender = self.sidebar_sender.clone();
-        let _ = std::thread::Builder::new()
-            .name("nickel-file-sidebar".into())
-            .spawn(move || {
-                let result = std::fs::read_dir(&path)
-                    .map_err(|error| error.to_string())
-                    .map(|entries| {
-                        let mut children = entries
-                            .filter_map(Result::ok)
-                            .filter_map(|entry| {
-                                entry
-                                    .file_type()
-                                    .ok()
-                                    .filter(|kind| kind.is_dir())
-                                    .map(|_| {
-                                        (
-                                            entry.file_name().to_string_lossy().into_owned(),
-                                            entry.path(),
-                                        )
-                                    })
-                            })
-                            .collect::<Vec<_>>();
-                        children.sort_by(|left, right| {
-                            left.0.to_lowercase().cmp(&right.0.to_lowercase())
-                        });
-                        children
-                    });
-                let _ = sender.send((path, result));
-            });
+        self.sidebar.toggle(path);
+        self.refresh_icons();
     }
 
     fn poll_sidebar_children(&mut self) -> bool {
-        let mut changed = false;
-        let mut artwork_changed = false;
-        loop {
-            match self.sidebar_receiver.try_recv() {
-                Ok((path, Ok(children))) => {
-                    self.sidebar_loading.remove(&path);
-                    self.sidebar_children.insert(path, children);
-                    changed = true;
-                    artwork_changed = true;
-                }
-                Ok((path, Err(error))) => {
-                    self.sidebar_loading.remove(&path);
-                    self.status = format!("Could not expand {}: {error}", path.display());
-                    changed = true;
-                }
-                Err(TryRecvError::Empty | TryRecvError::Disconnected) => {
-                    if artwork_changed {
-                        self.refresh_icons();
-                    }
-                    return changed;
-                }
-            }
+        let changed = self.sidebar.poll();
+        if changed {
+            self.refresh_icons();
         }
+        changed
     }
 
     pub(crate) fn resize_details_column_to(&mut self, pointer_x: f32) {
@@ -612,7 +556,6 @@ impl FileApp {
 
     fn with_browser(browser: DirectoryBrowser, status: String) -> Self {
         let settings = ShellSettings::load_default();
-        let (sidebar_sender, sidebar_receiver) = mpsc::channel();
         let resolved_location_groups = location_groups();
         let icon_appearance = settings
             .resolve_appearance(nickel_platform::appearance())
@@ -681,13 +624,9 @@ impl FileApp {
             artwork_scale_milli: 1_000,
             next_icon_id: 1,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
-            expanded_folders: HashSet::new(),
+            sidebar: crate::sidebar::Sidebar::default(),
             location_groups: resolved_location_groups,
             location_groups_rx: None,
-            sidebar_children: HashMap::new(),
-            sidebar_loading: HashSet::new(),
-            sidebar_sender,
-            sidebar_receiver,
             collapsed_location_groups: HashSet::new(),
             control_down: false,
             shift_down: false,
@@ -869,7 +808,7 @@ impl FileApp {
             return;
         }
         if self.tabs.len() == 1 {
-            self.exit_requested = true;
+            self.request_close();
             return;
         }
         if index != self.active_tab {
@@ -1104,6 +1043,12 @@ impl FileApp {
                     return false;
                 }
                 self.location_groups = groups;
+                self.sidebar.retain_visible_roots(
+                    self.location_groups
+                        .iter()
+                        .filter(|group| !self.collapsed_location_groups.contains(group.id))
+                        .flat_map(|group| group.entries.iter().map(|(_, path)| path)),
+                );
                 self.refresh_icons();
                 true
             }
@@ -1495,7 +1440,8 @@ impl FileApp {
             }
         }
         for path in self
-            .sidebar_children
+            .sidebar
+            .children
             .values()
             .flatten()
             .map(|(_, path)| path.clone())
@@ -2185,6 +2131,7 @@ impl FileApp {
             }
             FileMessage::PropertiesScroll(offset) => self.properties_scroll = offset.max(0.0),
             FileMessage::ContextRefresh => {
+                self.sidebar.refresh();
                 self.refresh_directory(self.browser.show_hidden());
             }
             FileMessage::ContextSelectAll => {
@@ -2243,7 +2190,15 @@ impl FileApp {
             }
             FileMessage::ToggleLocationGroup(group) => {
                 if !self.collapsed_location_groups.remove(&group) {
+                    if let Some(location_group) =
+                        self.location_groups.iter().find(|entry| entry.id == group)
+                    {
+                        for (_, path) in &location_group.entries {
+                            self.sidebar.collapse(path);
+                        }
+                    }
                     self.collapsed_location_groups.insert(group);
+                    self.refresh_icons();
                 }
             }
             FileMessage::TogglePlaces => self.places_open = !self.places_open,
@@ -2252,6 +2207,7 @@ impl FileApp {
             FileMessage::Forward => self.go_forward(),
             FileMessage::Up => self.go_up(),
             FileMessage::Refresh => {
+                self.sidebar.refresh();
                 self.refresh_directory(nickel_platform::show_hidden_files());
             }
             FileMessage::SetViewMode(mode) => {
@@ -3158,7 +3114,7 @@ impl Application for FileApp {
             self.native_drop_hover_started.as_ref().map(|(_, started)| {
                 (*started + Duration::from_millis(700)).saturating_duration_since(Instant::now())
             }),
-            (!self.sidebar_loading.is_empty()).then_some(Duration::from_millis(16)),
+            self.sidebar.poll_interval(),
             self.location_groups_rx
                 .as_ref()
                 .map(|_| Duration::from_millis(16)),

@@ -145,7 +145,8 @@ fn drop_destination_at(
         .iter()
         .flat_map(|group| group.entries.iter().map(|(_, path)| path.clone()))
         .chain(
-            app.sidebar_children
+            app.sidebar
+                .children
                 .values()
                 .flat_map(|children| children.iter().map(|(_, path)| path.clone())),
         )

@@ -142,15 +142,28 @@ impl DirectoryWatch {
             .lock()
             .map_err(|_| "directory watch registry is unavailable".to_owned())?;
         registry.watches.retain(|_, watch| watch.strong_count() > 0);
-        let shared = if let Some(shared) = registry.watches.get(&path).and_then(Weak::upgrade) {
+        let shared = if let Some(shared) = registry
+            .watches
+            .get(&path)
+            .and_then(Weak::upgrade)
+            .filter(|shared| {
+                shared
+                    .state
+                    .lock()
+                    .is_ok_and(|state| state.failure.is_none())
+            }) {
             shared
         } else {
-            if registry.watches.len() >= MAX_SHARED_WATCHES {
+            if registry.watches.len() >= MAX_SHARED_WATCHES && !registry.watches.contains_key(&path)
+            {
                 return Err(format!(
                     "live directory watch limit ({MAX_SHARED_WATCHES}) reached"
                 ));
             }
             let shared = SharedWatch::start(path.clone())?;
+            // Existing subscribers can still read their failure and retire in
+            // their own turn. Retrying must not reattach to a failed backend and
+            // replay its retained error forever while another owner holds it.
             registry.watches.insert(path, Arc::downgrade(&shared));
             shared
         };
@@ -340,5 +353,26 @@ mod tests {
         assert!(watch.take_invalidation());
         assert_eq!(watch.take_failure().as_deref(), Some("queue overflow"));
         assert_eq!(watch.take_failure(), None);
+    }
+
+    #[test]
+    fn retry_replaces_failed_shared_backend_while_old_subscribers_are_alive() {
+        let directory = tempfile::tempdir().unwrap();
+        let browser = DirectoryWatch::start(directory.path()).unwrap();
+        let sidebar = DirectoryWatch::start(directory.path()).unwrap();
+        assert!(browser.shares_backend_with(&sidebar));
+        browser.inject_failure("backend stopped");
+        assert!(sidebar.take_failure().is_some());
+        let recovered_sidebar = DirectoryWatch::start(directory.path()).unwrap();
+        assert!(!browser.shares_backend_with(&recovered_sidebar));
+        assert!(recovered_sidebar.take_failure().is_none());
+        assert!(browser.take_failure().is_some());
+        let recovered_browser = DirectoryWatch::start(directory.path()).unwrap();
+        assert!(recovered_sidebar.shares_backend_with(&recovered_browser));
+        assert!(recovered_sidebar.take_invalidation());
+        fs::create_dir(directory.path().join("after-recovery")).unwrap();
+        wait_for_invalidation(&recovered_sidebar);
+        assert!(recovered_browser.take_invalidation());
+        assert!(recovered_sidebar.take_failure().is_none());
     }
 }

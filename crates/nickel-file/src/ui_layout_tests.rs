@@ -1007,9 +1007,9 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
 
     app.update_message(FileMessage::ToggleFolder(root_path.clone()));
 
-    assert!(app.expanded_folders.contains(&root_path));
-    assert!(app.sidebar_loading.contains(&root_path));
-    assert!(!app.sidebar_children.contains_key(&root_path));
+    assert!(app.sidebar.expanded.contains(&root_path));
+    assert!(app.sidebar.loading(&root_path));
+    assert!(!app.sidebar.children.contains_key(&root_path));
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while std::time::Instant::now() < deadline {
@@ -1018,15 +1018,29 @@ fn sidebar_expansion_enumerates_children_asynchronously() {
         }
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
-    assert!(!app.sidebar_loading.contains(&root_path));
+    assert!(!app.sidebar.loading(&root_path));
     assert_eq!(
-        app.sidebar_children.get(&root_path),
+        app.sidebar.children.get(&root_path),
         Some(&vec![("Child".to_owned(), child.clone())])
     );
     assert!(
         app.icons.get(&child).is_some(),
         "published sidebar children must receive immediate fallback artwork"
     );
+}
+
+#[test]
+fn close_request_retires_sidebar_before_host_drops_application() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("Child")).unwrap();
+    let mut app = FileApp::new(root.path().to_path_buf());
+    app.update_message(FileMessage::ToggleFolder(root.path().to_path_buf()));
+    assert!(app.sidebar.loading(root.path()));
+    app.request_close();
+    assert!(app.sidebar.expanded.is_empty());
+    assert!(app.sidebar.children.is_empty());
+    assert!(app.sidebar.poll_interval().is_none());
+    assert!(!app.poll_sidebar_children());
 }
 
 #[test]

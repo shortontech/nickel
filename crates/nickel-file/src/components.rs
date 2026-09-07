@@ -511,6 +511,13 @@ fn command_query_message(query: String) -> FileMessage {
 }
 
 pub(crate) fn status_text(app: &FileApp) -> String {
+    if let Some(warning) = app.sidebar.warning() {
+        return if app.status.is_empty() {
+            warning.to_owned()
+        } else {
+            format!("{} · {warning}", app.status)
+        };
+    }
     if !app.status.is_empty() {
         return app.status.clone();
     }
@@ -534,7 +541,8 @@ pub(crate) fn status_text(app: &FileApp) -> String {
 }
 
 pub(crate) fn status_accessibility_text(app: &FileApp) -> String {
-    if !app.status.is_empty() || app.selected_entries.is_empty() {
+    if !app.status.is_empty() || app.selected_entries.is_empty() || app.sidebar.warning().is_some()
+    {
         return status_text(app);
     }
     let summary = app.selection_summary().accessible_label(&app.localizer);

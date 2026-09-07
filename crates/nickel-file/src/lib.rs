@@ -21,6 +21,7 @@ pub mod operations;
 pub(crate) mod platform;
 pub mod properties;
 pub mod selection_summary;
+mod sidebar;
 pub mod watch;
 
 #[cfg(feature = "workbench-fixtures")]

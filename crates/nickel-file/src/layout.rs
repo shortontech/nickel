@@ -51,11 +51,11 @@ pub(crate) fn build_view(
         .map(|group| {
             let rows = sidebar_folder_elements(
                 &group.entries,
-                &app.expanded_folders,
+                &app.sidebar.expanded,
                 app.browser.current(),
                 None,
                 &app.icons,
-                &app.sidebar_children,
+                &app.sidebar.children,
                 palette,
             );
             components::location_group(
