@@ -164,7 +164,6 @@ fn exercise(
         }
     }
     assert_no_shell_child(compositor.id())?;
-    let before_ticks = process_ticks(compositor.id())?;
     checked(test_input, &environment, &["key", "meta", "pressed"])?;
     checked(test_input, &environment, &["key", "meta", "released"])?;
     let toggled = checked(test_input, &environment, &["surfaces"])?;
@@ -175,6 +174,10 @@ fn exercise(
     if launcher.ends_with("hidden") {
         return Err("injected Meta did not make the internal launcher visible".into());
     }
+    // Launcher construction and its first GPU upload are interaction work, not
+    // idle work. Let that frame settle before sampling the unchanged runtime.
+    thread::sleep(Duration::from_millis(500));
+    let before_ticks = process_ticks(compositor.id())?;
     thread::sleep(Duration::from_secs(2));
     let after_ticks = process_ticks(compositor.id())?;
     let idle_ticks = after_ticks.saturating_sub(before_ticks);
