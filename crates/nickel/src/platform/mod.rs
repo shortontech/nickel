@@ -91,6 +91,27 @@ pub struct AudioStatus {
     pub muted: bool,
 }
 
+/// A platform-owned state transition consumed directly by the in-process shell.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemStatusUpdate {
+    Network(NetworkStatus),
+    Bluetooth(BluetoothStatus),
+    Audio(AudioStatus),
+    ShellSettingsChanged,
+}
+
+pub fn system_status_receiver() -> std::sync::mpsc::Receiver<SystemStatusUpdate> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::system_status_receiver()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        receiver
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchError {
     EmptyCommand,

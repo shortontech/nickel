@@ -236,6 +236,13 @@ impl InternalShellCoordinator {
         self.shell.apply_internal_session_snapshot(snapshot);
     }
 
+    pub fn apply_system_status_update(
+        &mut self,
+        update: crate::platform::SystemStatusUpdate,
+    ) -> bool {
+        self.shell.apply_system_status_update(update)
+    }
+
     pub fn file_windows(&self) -> &nickel_file::FileWindowCoordinator {
         &self.file_windows
     }

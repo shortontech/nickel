@@ -10,7 +10,9 @@ use zbus::{
     zvariant::{OwnedObjectPath, OwnedValue},
 };
 
-use super::super::{BluetoothDeviceStatus, BluetoothStatus, NetworkStatus, WifiNetworkStatus};
+use super::super::{
+    BluetoothDeviceStatus, BluetoothStatus, NetworkStatus, SystemStatusUpdate, WifiNetworkStatus,
+};
 use nickel_session_protocol::ConsumerControl;
 
 const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
@@ -34,6 +36,7 @@ struct ControlBackend {
     network: Arc<RwLock<NetworkStatus>>,
     bluetooth: Arc<RwLock<BluetoothStatus>>,
     commands: mpsc::Sender<Command>,
+    subscribers: Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
 }
 
 static BACKEND: OnceLock<ControlBackend> = OnceLock::new();
@@ -299,6 +302,21 @@ pub fn bluetooth_status() -> BluetoothStatus {
         .unwrap_or_default()
 }
 
+pub fn subscribe() -> mpsc::Receiver<SystemStatusUpdate> {
+    let backend = backend();
+    let (sender, receiver) = mpsc::channel();
+    if let Ok(mut subscribers) = backend.subscribers.lock() {
+        subscribers.push(sender.clone());
+    }
+    if let Ok(status) = backend.network.read() {
+        let _ = sender.send(SystemStatusUpdate::Network(status.clone()));
+    }
+    if let Ok(status) = backend.bluetooth.read() {
+        let _ = sender.send(SystemStatusUpdate::Bluetooth(status.clone()));
+    }
+    receiver
+}
+
 pub fn set_wifi_enabled(enabled: bool) -> bool {
     backend()
         .commands
@@ -339,15 +357,20 @@ fn backend() -> &'static ControlBackend {
         let network = Arc::new(RwLock::new(NetworkStatus::default()));
         let bluetooth = Arc::new(RwLock::new(BluetoothStatus::default()));
         let (commands, receiver) = mpsc::channel();
+        let subscribers = Arc::new(Mutex::new(Vec::new()));
         let worker_network = network.clone();
         let worker_bluetooth = bluetooth.clone();
         let _ = thread::Builder::new()
             .name("nickel-linux-control".into())
-            .spawn(move || worker(worker_network, worker_bluetooth, receiver));
+            .spawn({
+                let subscribers = subscribers.clone();
+                move || worker(worker_network, worker_bluetooth, subscribers, receiver)
+            });
         ControlBackend {
             network,
             bluetooth,
             commands,
+            subscribers,
         }
     })
 }
@@ -355,13 +378,14 @@ fn backend() -> &'static ControlBackend {
 fn worker(
     network: Arc<RwLock<NetworkStatus>>,
     bluetooth: Arc<RwLock<BluetoothStatus>>,
+    subscribers: Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
     commands: mpsc::Receiver<Command>,
 ) {
     let system = Connection::system().ok();
     let mut next_refresh = Instant::now();
     loop {
         let timeout = next_refresh.saturating_duration_since(Instant::now());
-        match commands.recv_timeout(timeout.min(Duration::from_millis(250))) {
+        match commands.recv_timeout(timeout) {
             Ok(command) => {
                 if let Some(connection) = system.as_ref()
                     && let Err(error) = apply_command(connection, command)
@@ -385,13 +409,31 @@ fn worker(
             .as_ref()
             .and_then(|connection| read_bluetooth_status(connection).ok())
             .unwrap_or_default();
-        if let Ok(mut current) = network.write() {
-            *current = network_snapshot;
+        if let Ok(mut current) = network.write()
+            && *current != network_snapshot
+        {
+            current.clone_from(&network_snapshot);
+            publish(&subscribers, SystemStatusUpdate::Network(network_snapshot));
         }
-        if let Ok(mut current) = bluetooth.write() {
-            *current = bluetooth_snapshot;
+        if let Ok(mut current) = bluetooth.write()
+            && *current != bluetooth_snapshot
+        {
+            current.clone_from(&bluetooth_snapshot);
+            publish(
+                &subscribers,
+                SystemStatusUpdate::Bluetooth(bluetooth_snapshot),
+            );
         }
         next_refresh = Instant::now() + Duration::from_secs(2);
+    }
+}
+
+fn publish(
+    subscribers: &Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
+    update: SystemStatusUpdate,
+) {
+    if let Ok(mut subscribers) = subscribers.lock() {
+        subscribers.retain(|subscriber| subscriber.send(update.clone()).is_ok());
     }
 }
 

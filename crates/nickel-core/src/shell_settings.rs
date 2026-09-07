@@ -261,7 +261,8 @@ fn format_timeout(timeout: Option<u32>) -> String {
     timeout.map_or_else(|| "off".to_owned(), |seconds| seconds.to_string())
 }
 
-fn settings_path() -> io::Result<PathBuf> {
+/// Canonical path watched by the compositor-owned shell for live settings reloads.
+pub fn settings_path() -> io::Result<PathBuf> {
     config_path("shell-settings")
 }
 

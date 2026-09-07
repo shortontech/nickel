@@ -345,6 +345,70 @@ pub fn audio_status() -> super::AudioStatus {
     linux_audio::status()
 }
 
+/// Subscribe the compositor-owned shell to platform state without a socket or
+/// a frame-rate polling loop. Backend workers publish only actual transitions.
+pub fn system_status_receiver() -> mpsc::Receiver<super::SystemStatusUpdate> {
+    use notify::{RecursiveMode, Watcher};
+
+    let (sender, receiver) = mpsc::channel();
+    let control = linux_control::subscribe();
+    let control_sender = sender.clone();
+    let _ = thread::Builder::new()
+        .name("nickel-system-control-feed".into())
+        .spawn(move || {
+            while let Ok(update) = control.recv() {
+                if control_sender.send(update).is_err() {
+                    break;
+                }
+            }
+        });
+    let audio = linux_audio::subscribe();
+    let audio_sender = sender.clone();
+    let _ = thread::Builder::new()
+        .name("nickel-system-audio-feed".into())
+        .spawn(move || {
+            while let Ok(status) = audio.recv() {
+                if audio_sender
+                    .send(super::SystemStatusUpdate::Audio(status))
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+    let settings_sender = sender;
+    let _ = thread::Builder::new()
+        .name("nickel-shell-settings-feed".into())
+        .spawn(move || {
+            let Ok(path) = nickel_core::shell_settings::settings_path() else {
+                return;
+            };
+            let Some(parent) = path.parent() else {
+                return;
+            };
+            let watched_path = path.clone();
+            let Ok(mut watcher) =
+                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                    let Ok(event) = event else { return };
+                    if event.paths.iter().any(|changed| changed == &watched_path) {
+                        let _ =
+                            settings_sender.send(super::SystemStatusUpdate::ShellSettingsChanged);
+                    }
+                })
+            else {
+                return;
+            };
+            if watcher.watch(parent, RecursiveMode::NonRecursive).is_err() {
+                return;
+            }
+            loop {
+                thread::park();
+            }
+        });
+    receiver
+}
+
 pub fn set_audio_volume(_volume_percent: u8) -> bool {
     linux_audio::set_volume(_volume_percent)
 }

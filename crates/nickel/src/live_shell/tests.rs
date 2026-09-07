@@ -21,7 +21,10 @@ use nickel_ui_testkit::{Scenario, Selector};
 use super::{
     ControlAction, HostRuntimeSamples, LiveShell, desktop_label_foreground, initial_wallpaper,
     panel_status_layout, panel_tray_icons,
-    platform::{AudioStatus, FeedState, FeedStatus, GlobalShortcut, SecureStorageState},
+    platform::{
+        AudioStatus, BluetoothStatus, FeedState, FeedStatus, GlobalShortcut, NetworkStatus,
+        SecureStorageState, SystemStatusUpdate,
+    },
     preview_refresh_due, retain_unchanged_desktop_icons, secure_storage_status_label,
     semantic_theme_from_palette, session_feed_status_label, shortcut_capability_status,
     visible_tray_item, window_belongs_to_panel,
@@ -31,6 +34,73 @@ include!("tests/wallpaper.rs");
 include!("tests/shell_flows.rs");
 include!("tests/panel_and_cache.rs");
 include!("tests/desktop_interactions.rs");
+
+#[test]
+fn in_process_system_feed_propagates_audio_network_and_bluetooth() {
+    let mut shell = LiveShell::new().expect("live shell");
+    let network = NetworkStatus {
+        available: true,
+        enabled: true,
+        connected: true,
+        name: "Nickel Lab".into(),
+        signal_percent: 82,
+        networks: Vec::new(),
+    };
+    let bluetooth = BluetoothStatus {
+        available: true,
+        powered: true,
+        discovering: false,
+        devices: Vec::new(),
+    };
+    let audio = AudioStatus {
+        available: true,
+        devices: Vec::new(),
+        volume_percent: 64,
+        muted: false,
+    };
+
+    assert!(shell.apply_system_status_update(SystemStatusUpdate::Network(network.clone())));
+    assert!(shell.apply_system_status_update(SystemStatusUpdate::Bluetooth(bluetooth.clone())));
+    assert!(shell.apply_system_status_update(SystemStatusUpdate::Audio(audio.clone())));
+    assert_eq!(shell.network, network);
+    assert_eq!(shell.bluetooth, bluetooth);
+    assert_eq!(shell.audio, audio);
+}
+
+#[test]
+fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
+    let mut shell = LiveShell::new().expect("live shell");
+    let status = shell.audio.clone();
+    let before = shell.next_host_deadline();
+
+    assert!(!shell.apply_system_status_update(SystemStatusUpdate::Audio(status)));
+    assert_eq!(shell.next_host_deadline(), before);
+}
+
+#[test]
+fn settings_transition_reprojects_light_and_dark_appearance() {
+    use nickel_core::{shell_settings::ThemePreference, theme::ThemePalette};
+
+    let mut shell = LiveShell::new().expect("live shell");
+    let mut settings = nickel_core::shell_settings::ShellSettings {
+        theme: ThemePreference::Light,
+        ..Default::default()
+    };
+    assert!(shell.apply_shell_settings(settings.clone()));
+    let light = shell.palette;
+    assert_eq!(
+        light,
+        ThemePalette::from_appearance(settings.resolve_appearance(Default::default()))
+    );
+
+    settings.theme = ThemePreference::Dark;
+    assert!(shell.apply_shell_settings(settings.clone()));
+    assert_ne!(shell.palette, light);
+    assert_eq!(
+        shell.palette,
+        ThemePalette::from_appearance(settings.resolve_appearance(Default::default()))
+    );
+}
 
 #[test]
 fn injected_session_host_receives_shell_commands_without_platform_transport() {

@@ -100,7 +100,10 @@ pub fn subscribe() -> mpsc::Receiver<AudioStatus> {
     let backend = backend();
     let (sender, receiver) = mpsc::channel();
     if let Ok(mut subscribers) = backend.subscribers.lock() {
-        subscribers.push(sender);
+        subscribers.push(sender.clone());
+    }
+    if let Ok(status) = backend.snapshot.read() {
+        let _ = sender.send(status.clone());
     }
     receiver
 }

@@ -628,6 +628,33 @@ impl NickelSession {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
         let shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        let platform_updates = crate::platform::system_status_receiver();
+        let (platform_update_tx, platform_update_rx) =
+            smithay::reexports::calloop::channel::channel();
+        std::thread::Builder::new()
+            .name("nickel-internal-system-feed".into())
+            .spawn(move || {
+                while let Ok(update) = platform_updates.recv() {
+                    if platform_update_tx.send(update).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|error| format!("could not start internal system feed: {error}"))?;
+        self.event_loop_handle
+            .insert_source(platform_update_rx, |event, _, state| {
+                if let smithay::reexports::calloop::channel::Event::Msg(update) = event {
+                    let changed = state
+                        .internal_shell
+                        .as_mut()
+                        .is_some_and(|shell| shell.apply_system_status_update(update));
+                    if changed {
+                        state.sync_internal_shell();
+                        state.request_output_redraw();
+                    }
+                }
+            })
+            .map_err(|error| format!("could not register internal system feed: {error}"))?;
         let feature_settings =
             nickel_core::optional_features::OptionalFeatureSettings::load_default();
         self.internal_codex = feature_settings.effective_codex_enabled().then(|| {

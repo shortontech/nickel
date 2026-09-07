@@ -1272,6 +1272,27 @@ impl LiveShell {
         if self.refresh_configured_wallpaper(wallpaper_settings.image) {
             changed = true;
         }
+        changed |= self.apply_shell_settings(shell_settings);
+        let network = platform::network_status();
+        if network != self.network {
+            self.network = network;
+            changed = true;
+        }
+        let bluetooth = platform::bluetooth_status();
+        if bluetooth != self.bluetooth {
+            self.bluetooth = bluetooth;
+            changed = true;
+        }
+        let audio = platform::audio_status();
+        if audio != self.audio {
+            self.audio = audio;
+            changed = true;
+        }
+        changed
+    }
+
+    fn apply_shell_settings(&mut self, shell_settings: ShellSettings) -> bool {
+        let mut changed = false;
         self.launcher.set_places(crate::places::applications(
             shell_settings.preferred_file_manager.as_deref(),
         ));
@@ -1299,22 +1320,42 @@ impl LiveShell {
             }
             changed = true;
         }
-        let network = platform::network_status();
-        if network != self.network {
-            self.network = network;
-            changed = true;
-        }
-        let bluetooth = platform::bluetooth_status();
-        if bluetooth != self.bluetooth {
-            self.bluetooth = bluetooth;
-            changed = true;
-        }
-        let audio = platform::audio_status();
-        if audio != self.audio {
-            self.audio = audio;
-            changed = true;
-        }
         changed
+    }
+
+    /// Apply a platform transition delivered by the compositor event loop.
+    /// This avoids waiting for the retired client shell's subscription pump.
+    pub(crate) fn apply_system_status_update(
+        &mut self,
+        update: platform::SystemStatusUpdate,
+    ) -> bool {
+        match update {
+            platform::SystemStatusUpdate::Network(status) => {
+                if self.network == status {
+                    false
+                } else {
+                    self.network = status;
+                    true
+                }
+            }
+            platform::SystemStatusUpdate::Bluetooth(status) => {
+                if self.bluetooth == status {
+                    false
+                } else {
+                    self.bluetooth = status;
+                    true
+                }
+            }
+            platform::SystemStatusUpdate::Audio(status) => {
+                if self.audio == status {
+                    false
+                } else {
+                    self.audio = status;
+                    true
+                }
+            }
+            platform::SystemStatusUpdate::ShellSettingsChanged => self.refresh_system(),
+        }
     }
 
     fn refresh_configured_wallpaper(
