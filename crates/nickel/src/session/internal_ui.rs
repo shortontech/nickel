@@ -32,6 +32,9 @@ use smithay::{
     utils::{Logical, Point, Rectangle, Transform},
 };
 
+#[cfg(test)]
+mod memory_test_renderer;
+
 smithay::backend::renderer::element::render_elements! {
     /// Smithay elements emitted by the compositor-owned Nickel UI presenter.
     pub InternalUiRenderElement<R> where R: Renderer + ImportMem;
@@ -3027,14 +3030,11 @@ mod tests {
 
     #[test]
     fn fallback_reuses_storage_and_preserves_imported_snapshot_pixels() {
-        use smithay::backend::renderer::{
-            element::{Element, RenderElement, UnderlyingStorage},
-            test::DummyRenderer,
-        };
+        use smithay::backend::renderer::element::{Element, RenderElement, UnderlyingStorage};
 
         let mut renderer =
             SmithayFrameRenderer::new(80, 60, 1.25, InternalUiRendererMode::Software);
-        let mut backend = DummyRenderer;
+        let mut backend = memory_test_renderer::MemoryTestRenderer::default();
         let mut commands = vec![
             PaintCommand::Fill {
                 rect: nickel_ui::Rect::new(0.0, 0.0, 80.0, 60.0),
@@ -3075,6 +3075,19 @@ mod tests {
             before.fallback_converted_bytes
         );
         assert_eq!(renderer.diagnostics().fallback_buffer_creations, 1);
+        let unchanged = MemoryRenderBufferRenderElement::from_buffer(
+            &mut backend,
+            (0.0, 0.0),
+            renderer.raster.as_ref().unwrap(),
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .unwrap();
+        assert_eq!(snapshot.id(), unchanged.id());
+        assert_eq!(backend.imports, 1);
+        assert!(backend.updates.is_empty(), "unchanged frames do not upload");
         for step in 0..12 {
             commands[1] = PaintCommand::Fill {
                 rect: nickel_ui::Rect::new(2.25 + step as f32, 3.5, 4.5, 5.25),
@@ -3120,6 +3133,25 @@ mod tests {
         }
         assert_eq!(renderer.diagnostics().fallback_buffer_creations, 1);
         assert_eq!(renderer.diagnostics().fallback_buffer_reuses, 12);
+        assert_eq!(backend.imports, 1);
+        assert_eq!(backend.updates.len(), 1);
+        let mut replacement = memory_test_renderer::MemoryTestRenderer::default();
+        let replaced = MemoryRenderBufferRenderElement::from_buffer(
+            &mut replacement,
+            (0.0, 0.0),
+            renderer.raster.as_ref().unwrap(),
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .unwrap();
+        assert_eq!(replaced.id(), updated.id());
+        assert_eq!(
+            replacement.imports, 1,
+            "replacement context imports complete current pixels"
+        );
+        assert!(replacement.updates.is_empty());
         assert_eq!(renderer.diagnostics().fallback_partial_repaints, 12);
         assert!(
             renderer.diagnostics().fallback_converted_bytes < before.fallback_converted_bytes * 2

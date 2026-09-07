@@ -111,7 +111,6 @@ tempfile = "3.25.0"
 toml.workspace = true
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-smithay = { workspace = true, features = ["renderer_test"] }
 smithay-client-toolkit = "0.20.0"
 
 [[bin]]
