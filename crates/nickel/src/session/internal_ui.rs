@@ -142,6 +142,16 @@ pub struct InternalUiRendererDiagnostics {
     pub software_frame_bytes: usize,
     /// Full-surface CPU pixels currently retained by the importable fallback buffer.
     pub fallback_raster_bytes: usize,
+    pub fallback_buffer_creations: u64,
+    pub fallback_buffer_reuses: u64,
+    pub fallback_converted_bytes: u64,
+    /// Bounding damage submitted to Smithay, excluding context-specific initial
+    /// uploads and opaque driver storage. Smithay may combine pending damage.
+    pub fallback_upload_damage_bytes: u64,
+    pub fallback_full_repaints: u64,
+    pub fallback_partial_repaints: u64,
+    pub text_scratch_bytes: usize,
+    pub text_private_cache_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -151,6 +161,14 @@ pub struct AggregateInternalUiRendererDiagnostics {
     pub fallback_frames: u64,
     pub software_frame_bytes: usize,
     pub fallback_raster_bytes: usize,
+    pub fallback_buffer_creations: u64,
+    pub fallback_buffer_reuses: u64,
+    pub fallback_converted_bytes: u64,
+    pub fallback_upload_damage_bytes: u64,
+    pub fallback_full_repaints: u64,
+    pub fallback_partial_repaints: u64,
+    pub text_scratch_bytes: usize,
+    pub text_private_cache_bytes: usize,
     pub image_cache_entries: usize,
     pub image_cache_bytes: usize,
     pub text_cache_entries: usize,
@@ -169,6 +187,7 @@ pub struct SmithayFrameRenderer {
     text_software: SoftwareRenderer,
     primitives: Vec<GpuPrimitive>,
     raster: Option<MemoryRenderBuffer>,
+    raster_configuration: Option<(u32, u32, u32)>,
     mode: InternalUiPresentationMode,
     diagnostics: InternalUiRendererDiagnostics,
     renderer_mode: InternalUiRendererMode,
@@ -269,7 +288,6 @@ struct ImageTextureKey {
     id: u16,
     generation: u64,
     high_density: bool,
-    frame_scale: u32,
     width: u32,
     height: u32,
     content_hash: [u8; 32],
@@ -387,6 +405,7 @@ impl SmithayFrameRenderer {
             text_software: SoftwareRenderer::new(1, 1, scale),
             primitives: Vec::new(),
             raster: None,
+            raster_configuration: None,
             mode: InternalUiPresentationMode::RasterFallback,
             diagnostics: InternalUiRendererDiagnostics::default(),
             renderer_mode,
@@ -401,16 +420,22 @@ impl SmithayFrameRenderer {
     }
 
     pub fn diagnostics(&self) -> InternalUiRendererDiagnostics {
-        self.diagnostics
+        InternalUiRendererDiagnostics {
+            text_scratch_bytes: self.text_software.pixel_capacity_bytes(),
+            text_private_cache_bytes: self.text_software.cache_diagnostics().live_bytes,
+            ..self.diagnostics
+        }
     }
 
     /// Release regenerable frame-sized state while the owning surface cannot
     /// be presented. Shared texture caches remain available to other surfaces.
     fn suspend(&mut self) {
+        self.text_software.suspend();
         if let Some(mut software) = self.software.take() {
             software.suspend();
         }
         self.raster = None;
+        self.raster_configuration = None;
         self.primitives.clear();
         self.import_fallback = None;
         self.mode = InternalUiPresentationMode::GpuSolid;
@@ -714,7 +739,6 @@ impl SmithayFrameRenderer {
                         id: *id,
                         generation: *generation,
                         high_density: selected_high_density,
-                        frame_scale: frame.scale_factor.to_bits(),
                         width: image.width(),
                         height: image.height(),
                         content_hash: content_hash(image.as_raw()),
@@ -819,6 +843,12 @@ impl SmithayFrameRenderer {
             height: physical_height,
         };
         let source = text_source_rect(rect, bounds, texture.width, texture.height);
+        // Large one-off labels must not pin a peak-sized private framebuffer
+        // for the remaining lifetime of a visible host. Shared textures own
+        // their pixels independently and remain valid after suspension.
+        if self.text_software.pixel_capacity_bytes() > 8 * 1024 * 1024 {
+            self.text_software.suspend();
+        }
         self.diagnostics.text_allocations = self.diagnostics.text_allocations.saturating_add(1);
         self.diagnostics.text_uploads = self.diagnostics.text_uploads.saturating_add(1);
         let evictions = self.text_cache.borrow_mut().insert(
@@ -853,37 +883,95 @@ impl SmithayFrameRenderer {
         let height = ((frame.logical_size.1 as f32) * frame.scale_factor)
             .round()
             .max(1.0) as u32;
+        let configuration = (width, height, frame.scale_factor.to_bits());
+        let full_repaint =
+            self.raster.is_none() || self.raster_configuration != Some(configuration);
         let software = self
             .software
             .get_or_insert_with(|| SoftwareRenderer::new(width, height, frame.scale_factor));
         software.resize(width, height, frame.scale_factor);
-        let damage = software.render(frame.commands);
+        if full_repaint {
+            software.invalidate();
+        }
+        let mut damage = software.render(frame.commands);
         let (width, height) = software.size();
-        let mut buffer = MemoryRenderBuffer::new(
-            Fourcc::Abgr8888,
-            (width as i32, height as i32),
-            1,
-            Transform::Normal,
-            None,
-        );
-        buffer
-            .render()
-            .draw(|bytes| {
-                for (target, pixel) in bytes.chunks_exact_mut(4).zip(software.pixels()) {
-                    target.copy_from_slice(&premultiplied_pixel([
-                        pixel.r, pixel.g, pixel.b, pixel.a,
-                    ]));
-                }
-                Ok::<_, std::convert::Infallible>(vec![Rectangle::from_size(
-                    (width as i32, height as i32).into(),
-                )])
-            })
-            .unwrap();
-        self.raster = Some(buffer);
+        if full_repaint {
+            self.raster = Some(MemoryRenderBuffer::new(
+                Fourcc::Abgr8888,
+                (width as i32, height as i32),
+                1,
+                Transform::Normal,
+                None,
+            ));
+            self.raster_configuration = Some(configuration);
+            self.diagnostics.fallback_buffer_creations =
+                self.diagnostics.fallback_buffer_creations.saturating_add(1);
+            damage.rects.clear();
+            damage
+                .rects
+                .push(nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32));
+        }
         self.primitives.clear();
         self.import_fallback = None;
-        self.diagnostics.software_frame_bytes = texture_bytes(width, height);
+        self.diagnostics.software_frame_bytes = software.pixel_capacity_bytes();
         self.diagnostics.fallback_raster_bytes = texture_bytes(width, height);
+        if damage.is_empty() {
+            return damage;
+        }
+        let regions = fallback_damage_regions(&damage, width, height);
+        let full = Rectangle::from_size((width as i32, height as i32).into());
+        if regions.contains(&full) {
+            self.diagnostics.fallback_full_repaints =
+                self.diagnostics.fallback_full_repaints.saturating_add(1);
+        } else {
+            self.diagnostics.fallback_partial_repaints =
+                self.diagnostics.fallback_partial_repaints.saturating_add(1);
+        }
+        if !full_repaint {
+            self.diagnostics.fallback_buffer_reuses =
+                self.diagnostics.fallback_buffer_reuses.saturating_add(1);
+        }
+        let converted = regions
+            .iter()
+            .map(|rect| rect.size.w as u64 * rect.size.h as u64 * 4)
+            .sum::<u64>();
+        let upload_damage = regions.iter().copied().reduce(|a, b| a.merge(b));
+        self.diagnostics.fallback_converted_bytes = self
+            .diagnostics
+            .fallback_converted_bytes
+            .saturating_add(converted);
+        self.diagnostics.fallback_upload_damage_bytes = self
+            .diagnostics
+            .fallback_upload_damage_bytes
+            .saturating_add(
+                upload_damage.map_or(0, |rect| rect.size.w as u64 * rect.size.h as u64 * 4),
+            );
+        // Smithay serializes access and gives retained render elements immutable
+        // CPU snapshots through Arc::make_mut. Reusing this handle preserves its
+        // per-renderer texture imports and damage history. Snapshot lifetimes and
+        // driver allocations are Smithay-owned, not a second private buffer pool.
+        self.raster
+            .as_mut()
+            .expect("fallback buffer initialized")
+            .render()
+            .draw(|bytes| {
+                for region in &regions {
+                    for y in region.loc.y..region.loc.y + region.size.h {
+                        let start = y as usize * width as usize + region.loc.x as usize;
+                        let end = start + region.size.w as usize;
+                        for (target, pixel) in bytes[start * 4..end * 4]
+                            .chunks_exact_mut(4)
+                            .zip(&software.pixels()[start..end])
+                        {
+                            target.copy_from_slice(&premultiplied_pixel([
+                                pixel.r, pixel.g, pixel.b, pixel.a,
+                            ]));
+                        }
+                    }
+                }
+                Ok::<_, std::convert::Infallible>(regions)
+            })
+            .unwrap();
         damage
     }
 
@@ -1111,6 +1199,29 @@ fn premultiplied_pixel([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
     let scale = u16::from(alpha);
     let channel = |value: u8| ((u16::from(value) * scale + 127) / 255) as u8;
     [channel(red), channel(green), channel(blue), alpha]
+}
+
+fn fallback_damage_regions(
+    damage: &DamageRegion,
+    width: u32,
+    height: u32,
+) -> Vec<Rectangle<i32, smithay::utils::Buffer>> {
+    damage
+        .rects
+        .iter()
+        .filter_map(|rect| {
+            let left = rect.origin.x.floor().clamp(0.0, width as f32) as i32;
+            let top = rect.origin.y.floor().clamp(0.0, height as f32) as i32;
+            let right = (rect.origin.x + rect.size.width)
+                .ceil()
+                .clamp(0.0, width as f32) as i32;
+            let bottom = (rect.origin.y + rect.size.height)
+                .ceil()
+                .clamp(0.0, height as f32) as i32;
+            (right > left && bottom > top)
+                .then(|| Rectangle::new((left, top).into(), (right - left, bottom - top).into()))
+        })
+        .collect()
 }
 
 fn texture_bytes(width: u32, height: u32) -> usize {
@@ -1583,6 +1694,30 @@ impl InternalUiRuntime {
                 total.fallback_raster_bytes = total
                     .fallback_raster_bytes
                     .saturating_add(item.fallback_raster_bytes);
+                total.fallback_buffer_creations = total
+                    .fallback_buffer_creations
+                    .saturating_add(item.fallback_buffer_creations);
+                total.fallback_buffer_reuses = total
+                    .fallback_buffer_reuses
+                    .saturating_add(item.fallback_buffer_reuses);
+                total.fallback_converted_bytes = total
+                    .fallback_converted_bytes
+                    .saturating_add(item.fallback_converted_bytes);
+                total.fallback_upload_damage_bytes = total
+                    .fallback_upload_damage_bytes
+                    .saturating_add(item.fallback_upload_damage_bytes);
+                total.fallback_full_repaints = total
+                    .fallback_full_repaints
+                    .saturating_add(item.fallback_full_repaints);
+                total.fallback_partial_repaints = total
+                    .fallback_partial_repaints
+                    .saturating_add(item.fallback_partial_repaints);
+                total.text_scratch_bytes = total
+                    .text_scratch_bytes
+                    .saturating_add(item.text_scratch_bytes);
+                total.text_private_cache_bytes = total
+                    .text_private_cache_bytes
+                    .saturating_add(item.text_private_cache_bytes);
                 total.texture_import_failures = total
                     .texture_import_failures
                     .saturating_add(item.texture_import_failures);
@@ -2853,7 +2988,7 @@ mod tests {
     }
 
     #[test]
-    fn image_cache_key_rejects_same_identity_with_changed_content_or_scale() {
+    fn image_cache_key_rejects_changed_content_but_shares_destination_scales() {
         use std::sync::Arc;
 
         let make = |value, scale| {
@@ -2873,7 +3008,7 @@ mod tests {
             )
         };
         let mut renderer = SmithayFrameRenderer::new(4, 4, 1.0, InternalUiRendererMode::Gpu);
-        for (commands, scale) in [make(1, 1.0), make(2, 1.0), make(2, 2.0)] {
+        for (commands, scale) in [make(1, 1.0), make(2, 1.0), make(2, 1.25), make(2, 2.0)] {
             renderer
                 .render_frame(RenderFrame {
                     commands: &commands,
@@ -2884,8 +3019,242 @@ mod tests {
                 .unwrap();
         }
         let diagnostics = renderer.diagnostics();
-        assert_eq!(diagnostics.image_cache_misses, 3);
-        assert_eq!(diagnostics.image_uploads, 3);
-        assert_eq!(diagnostics.image_cache_entries, 3);
+        assert_eq!(diagnostics.image_cache_misses, 2);
+        assert_eq!(diagnostics.image_uploads, 2);
+        assert_eq!(diagnostics.image_cache_entries, 2);
+        assert_eq!(diagnostics.image_cache_hits, 2);
+    }
+
+    #[test]
+    fn fallback_reuses_storage_and_preserves_imported_snapshot_pixels() {
+        use smithay::backend::renderer::{
+            element::{Element, RenderElement, UnderlyingStorage},
+            test::DummyRenderer,
+        };
+
+        let mut renderer =
+            SmithayFrameRenderer::new(80, 60, 1.25, InternalUiRendererMode::Software);
+        let mut backend = DummyRenderer;
+        let mut commands = vec![
+            PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(0.0, 0.0, 80.0, 60.0),
+                color: 0xff112233,
+            },
+            PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(2.25, 3.5, 4.5, 5.25),
+                color: 0x80446688,
+            },
+        ];
+        fn frame(commands: &[PaintCommand]) -> RenderFrame<'_> {
+            RenderFrame {
+                commands,
+                logical_size: (80, 60),
+                scale_factor: 1.25,
+                generation: 1,
+            }
+        }
+        renderer.prepare_fallback(frame(&commands));
+        let snapshot = MemoryRenderBufferRenderElement::from_buffer(
+            &mut backend,
+            (0.0, 0.0),
+            renderer.raster.as_ref().unwrap(),
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .unwrap();
+        let original = match snapshot.underlying_storage(&mut backend).unwrap() {
+            UnderlyingStorage::Memory(bytes) => bytes.to_vec(),
+            _ => panic!("expected CPU snapshot"),
+        };
+        let before = renderer.diagnostics();
+        assert!(renderer.prepare_fallback(frame(&commands)).is_empty());
+        assert_eq!(
+            renderer.diagnostics().fallback_converted_bytes,
+            before.fallback_converted_bytes
+        );
+        assert_eq!(renderer.diagnostics().fallback_buffer_creations, 1);
+        for step in 0..12 {
+            commands[1] = PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(2.25 + step as f32, 3.5, 4.5, 5.25),
+                color: 0x40336699 + step,
+            };
+            renderer.prepare_fallback(frame(&commands));
+            let mut reference = SoftwareRenderer::new(100, 75, 1.25);
+            reference.render(&commands);
+            let expected: Vec<_> = reference
+                .pixels()
+                .iter()
+                .flat_map(|pixel| premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]))
+                .collect();
+            renderer
+                .raster
+                .as_mut()
+                .unwrap()
+                .render()
+                .draw(|bytes| {
+                    assert_eq!(bytes, expected.as_slice());
+                    Ok::<_, std::convert::Infallible>(Vec::new())
+                })
+                .unwrap();
+        }
+        let updated = MemoryRenderBufferRenderElement::from_buffer(
+            &mut backend,
+            (0.0, 0.0),
+            renderer.raster.as_ref().unwrap(),
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .unwrap();
+        assert_eq!(
+            snapshot.id(),
+            updated.id(),
+            "same import resource survives partial updates"
+        );
+        match snapshot.underlying_storage(&mut backend).unwrap() {
+            UnderlyingStorage::Memory(bytes) => assert_eq!(&**bytes, original.as_slice()),
+            _ => panic!("expected CPU snapshot"),
+        }
+        assert_eq!(renderer.diagnostics().fallback_buffer_creations, 1);
+        assert_eq!(renderer.diagnostics().fallback_buffer_reuses, 12);
+        assert_eq!(renderer.diagnostics().fallback_partial_repaints, 12);
+        assert!(
+            renderer.diagnostics().fallback_converted_bytes < before.fallback_converted_bytes * 2
+        );
+    }
+
+    #[test]
+    fn fallback_damage_clips_and_rounds_disjoint_regions_outward() {
+        let damage = DamageRegion {
+            rects: [
+                nickel_ui::Rect::new(-1.2, 2.2, 4.4, 2.1),
+                nickel_ui::Rect::new(8.5, 7.2, 5.0, 5.0),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        assert_eq!(
+            fallback_damage_regions(&damage, 10, 10),
+            vec![
+                Rectangle::new((0, 2).into(), (4, 3).into()),
+                Rectangle::new((8, 7).into(), (2, 3).into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn fallback_scale_resize_and_suspend_require_complete_repaint() {
+        let commands = [PaintCommand::Fill {
+            rect: nickel_ui::Rect::new(1.0, 1.0, 2.0, 2.0),
+            color: 0x804488cc,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(10, 10, 1.0, InternalUiRendererMode::Software);
+        for (size, scale) in [((10, 10), 1.0), ((5, 5), 2.0), ((20, 20), 2.0)] {
+            renderer.prepare_fallback(RenderFrame {
+                commands: &commands,
+                logical_size: size,
+                scale_factor: scale,
+                generation: 1,
+            });
+        }
+        assert_eq!(renderer.diagnostics().fallback_buffer_creations, 3);
+        assert_eq!(renderer.diagnostics().fallback_full_repaints, 3);
+        renderer.suspend();
+        assert_eq!(renderer.diagnostics().fallback_raster_bytes, 0);
+        renderer.prepare_fallback(RenderFrame {
+            commands: &commands,
+            logical_size: (20, 20),
+            scale_factor: 2.0,
+            generation: 1,
+        });
+        assert_eq!(renderer.diagnostics().fallback_full_repaints, 4);
+    }
+
+    #[test]
+    fn hiding_text_owner_releases_private_scratch_and_preserves_shared_textures() {
+        let caches = SharedTextureCaches::default();
+        let mut owner =
+            SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
+        let mut peer = SmithayFrameRenderer::with_caches(1.0, InternalUiRendererMode::Gpu, &caches);
+        let commands = [PaintCommand::Text {
+            bounds: nickel_ui::Rect::new(0.0, 0.0, 1024.0, 256.0),
+            text: "A persistent menu".into(),
+            scale: 1.0,
+            color: 0xffffffff,
+            align: nickel_ui::TextAlign::Start,
+            bold: false,
+            wrap: false,
+        }];
+        for _ in 0..8 {
+            owner
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (1024, 256),
+                    scale_factor: 1.0,
+                    generation: 1,
+                })
+                .unwrap();
+            peer.render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (1024, 256),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+            assert!(!peer.primitives.is_empty());
+            let shared_bytes = caches.text.borrow().bytes;
+            owner.suspend();
+            assert_eq!(owner.diagnostics().text_scratch_bytes, 4);
+            assert_eq!(owner.diagnostics().text_private_cache_bytes, 0);
+            assert_eq!(caches.text.borrow().bytes, shared_bytes);
+            assert!(!peer.primitives.is_empty());
+        }
+        assert_eq!(peer.diagnostics().text_uploads, 0);
+    }
+
+    #[test]
+    #[ignore = "release workload measurement; run with --release --ignored --nocapture"]
+    fn measure_fallback_damage_workloads() {
+        for (width, height) in [(1920, 1080), (3840, 2160)] {
+            let mut renderer =
+                SmithayFrameRenderer::new(width, height, 1.0, InternalUiRendererMode::Software);
+            let mut commands = [
+                PaintCommand::Fill {
+                    rect: nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                    color: 0xff112233,
+                },
+                PaintCommand::Fill {
+                    rect: nickel_ui::Rect::new(10.0, 10.0, 16.0, 16.0),
+                    color: 0xff445566,
+                },
+            ];
+            for full in [false, true] {
+                let start = std::time::Instant::now();
+                let before = renderer.diagnostics();
+                for index in 0..120 {
+                    if let PaintCommand::Fill { color, .. } = &mut commands[usize::from(!full)] {
+                        *color = 0xff112200 + index;
+                    }
+                    renderer.prepare_fallback(RenderFrame {
+                        commands: &commands,
+                        logical_size: (width, height),
+                        scale_factor: 1.0,
+                        generation: index as u64,
+                    });
+                }
+                let after = renderer.diagnostics();
+                eprintln!(
+                    "{width}x{height} full={full} frames=120 elapsed={:?} owned_cpu_bytes={} creations={} converted_bytes={} submitted_damage_bytes={}",
+                    start.elapsed(),
+                    after.software_frame_bytes + after.fallback_raster_bytes,
+                    after.fallback_buffer_creations - before.fallback_buffer_creations,
+                    after.fallback_converted_bytes - before.fallback_converted_bytes,
+                    after.fallback_upload_damage_bytes - before.fallback_upload_damage_bytes
+                );
+            }
+        }
     }
 }
