@@ -3111,6 +3111,25 @@ mod tests {
                     Ok::<_, std::convert::Infallible>(Vec::new())
                 })
                 .unwrap();
+            let presented = MemoryRenderBufferRenderElement::from_buffer(
+                &mut backend,
+                (0.0, 0.0),
+                renderer.raster.as_ref().unwrap(),
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .unwrap();
+            assert_eq!(presented.id(), snapshot.id());
+            let upload = backend
+                .updates
+                .last()
+                .expect("changed frame updates texture");
+            assert!(
+                upload.size.w * upload.size.h < 100 * 75,
+                "partial frames avoid full texture uploads"
+            );
         }
         let updated = MemoryRenderBufferRenderElement::from_buffer(
             &mut backend,
@@ -3134,7 +3153,7 @@ mod tests {
         assert_eq!(renderer.diagnostics().fallback_buffer_creations, 1);
         assert_eq!(renderer.diagnostics().fallback_buffer_reuses, 12);
         assert_eq!(backend.imports, 1);
-        assert_eq!(backend.updates.len(), 1);
+        assert_eq!(backend.updates.len(), 12);
         let mut replacement = memory_test_renderer::MemoryTestRenderer::default();
         let replaced = MemoryRenderBufferRenderElement::from_buffer(
             &mut replacement,
