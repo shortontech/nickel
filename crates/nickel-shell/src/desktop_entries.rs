@@ -236,7 +236,14 @@ fn application_from_entry_result(
         icon_path,
         (!launch_command.is_empty()).then_some(launch_command),
     )
-    .with_launch_policy(launch_class, entry.path().map(PathBuf::from));
+    .with_launch_policy(
+        launch_class,
+        entry
+            .path()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from),
+    );
     if let Some(startup_wm_class) = entry.startup_wm_class() {
         application = application.with_identity_alias(startup_wm_class);
     }
@@ -368,6 +375,15 @@ mod tests {
                 .as_slice()
             )
         );
+    }
+
+    #[test]
+    fn empty_desktop_working_directory_uses_the_launch_environment_default() {
+        let entry = parse(
+            "[Desktop Entry]\nType=Application\nName=Browser\nExec=/usr/bin/browser\nPath=\n",
+        );
+        let application = application_from_entry(&entry, &[], &[], "hicolor").unwrap();
+        assert_eq!(application.working_directory(), None);
     }
 
     #[test]
