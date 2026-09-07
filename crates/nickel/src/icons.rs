@@ -72,7 +72,22 @@ pub fn load_svg_bytes(data: &[u8], raster_size: u32) -> Option<RgbaImage> {
         resvg::tiny_skia::Transform::from_scale(scale, scale),
         &mut pixmap.as_mut(),
     );
-    RgbaImage::from_raw(width, height, pixmap.data().to_vec())
+    // tiny-skia stores premultiplied RGBA, while `RgbaImage` and every Nickel
+    // UI image API use straight-alpha pixels. Keeping the two representations
+    // distinct matters when an icon is tinted and later premultiplied for a
+    // Smithay texture upload.
+    let mut pixels = pixmap.data().to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]);
+        if alpha == 0 {
+            pixel[..3].fill(0);
+        } else if alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
+    RgbaImage::from_raw(width, height, pixels)
 }
 
 #[cfg(test)]
@@ -109,5 +124,19 @@ mod tests {
         assert_eq!(icon.dimensions(), (24, 24));
         assert!(icon.pixels().any(|pixel| pixel.0[3] == 0));
         assert!(icon.pixels().any(|pixel| pixel.0[3] != 0));
+    }
+
+    #[test]
+    fn svg_loader_exposes_straight_alpha_pixels() {
+        let icon = load_svg_bytes(
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#c86432" fill-opacity="0.5"/></svg>"##,
+            2,
+        )
+        .unwrap();
+        let [red, green, blue, alpha] = icon.get_pixel(0, 0).0;
+        assert!((red as i16 - 200).abs() <= 2, "red={red}");
+        assert!((green as i16 - 100).abs() <= 2, "green={green}");
+        assert!((blue as i16 - 50).abs() <= 2, "blue={blue}");
+        assert!((alpha as i16 - 128).abs() <= 1, "alpha={alpha}");
     }
 }

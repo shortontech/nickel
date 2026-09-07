@@ -127,6 +127,11 @@ pub struct InternalUiRendererDiagnostics {
     pub text_cache_evictions: u64,
     pub text_cache_entries: usize,
     pub text_cache_bytes: usize,
+    /// Individual GPU texture imports which failed and forced the complete
+    /// surface through the software compatibility path.
+    pub texture_import_failures: u64,
+    /// Full-surface compatibility buffers which also failed to import.
+    pub fallback_import_failures: u64,
 }
 
 /// Nickel display-list adapter for Smithay's renderer element API.
@@ -144,6 +149,16 @@ pub struct SmithayFrameRenderer {
     renderer_mode: InternalUiRendererMode,
     image_cache: TextureCache<ImageTextureKey>,
     text_cache: TextureCache<TextTextureKey>,
+    /// Retained until all renderer-specific texture imports succeed. Without
+    /// this, an import error can only omit the affected icon from the frame.
+    import_fallback: Option<ImportFallbackFrame>,
+}
+
+#[derive(Clone)]
+struct ImportFallbackFrame {
+    commands: Vec<PaintCommand>,
+    logical_size: (u32, u32),
+    scale_factor: f32,
 }
 
 #[derive(Clone)]
@@ -299,6 +314,7 @@ impl SmithayFrameRenderer {
             renderer_mode,
             image_cache: TextureCache::new(IMAGE_CACHE_ENTRY_LIMIT, IMAGE_CACHE_BYTE_LIMIT),
             text_cache: TextureCache::new(TEXT_CACHE_ENTRY_LIMIT, TEXT_CACHE_BYTE_LIMIT),
+            import_fallback: None,
         }
     }
 
@@ -454,6 +470,11 @@ impl SmithayFrameRenderer {
     }
 
     fn prepare_gpu(&mut self, frame: RenderFrame<'_>) {
+        self.import_fallback = Some(ImportFallbackFrame {
+            commands: frame.commands.to_vec(),
+            logical_size: frame.logical_size,
+            scale_factor: frame.scale_factor,
+        });
         self.primitives.clear();
         let viewport = nickel_ui::Rect::new(
             0.0,
@@ -589,9 +610,10 @@ impl SmithayFrameRenderer {
                             self.diagnostics.image_allocations.saturating_add(1);
                         self.diagnostics.image_uploads =
                             self.diagnostics.image_uploads.saturating_add(1);
+                        let pixels = premultiplied_rgba(image.as_raw());
                         let texture = CachedTexture {
                             buffer: MemoryRenderBuffer::from_slice(
-                                image.as_raw(),
+                                &pixels,
                                 Fourcc::Abgr8888,
                                 (image.width() as i32, image.height() as i32),
                                 1,
@@ -659,7 +681,7 @@ impl SmithayFrameRenderer {
         self.text_software.render(&[local]);
         let mut bytes = Vec::with_capacity(self.text_software.pixels().len() * 4);
         for pixel in self.text_software.pixels() {
-            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+            bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
         }
         let (physical_width, physical_height) = self.text_software.size();
         let source = text_source_rect(rect, bounds, scale);
@@ -703,7 +725,7 @@ impl SmithayFrameRenderer {
         let damage = self.software.render(frame.commands);
         let mut bytes = Vec::with_capacity(self.software.pixels().len() * 4);
         for pixel in self.software.pixels() {
-            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+            bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
         }
         let (width, height) = self.software.size();
         self.raster = Some(MemoryRenderBuffer::from_slice(
@@ -715,11 +737,43 @@ impl SmithayFrameRenderer {
             None,
         ));
         self.primitives.clear();
+        self.import_fallback = None;
         damage
     }
 
+    fn activate_import_fallback(&mut self) -> bool {
+        let Some(frame) = self.import_fallback.take() else {
+            return false;
+        };
+        self.mode = InternalUiPresentationMode::RasterFallback;
+        self.diagnostics.fallback_frames = self.diagnostics.fallback_frames.saturating_add(1);
+        self.diagnostics.fallback_text_count = frame
+            .commands
+            .iter()
+            .filter(|command| {
+                matches!(
+                    command,
+                    PaintCommand::Text { .. } | PaintCommand::StyledText { .. }
+                )
+            })
+            .count();
+        self.diagnostics.fallback_image_count = frame
+            .commands
+            .iter()
+            .filter(|command| matches!(command, PaintCommand::Image { .. }))
+            .count();
+        self.diagnostics.fallback_primitive_count = frame.commands.len();
+        self.prepare_fallback(RenderFrame {
+            commands: &frame.commands,
+            logical_size: frame.logical_size,
+            scale_factor: frame.scale_factor,
+            generation: 0,
+        });
+        true
+    }
+
     fn elements<R: Renderer + ImportMem>(
-        &self,
+        &mut self,
         renderer: &mut R,
         location: Point<i32, Logical>,
         logical_size: (u32, u32),
@@ -727,12 +781,11 @@ impl SmithayFrameRenderer {
     where
         R::TextureId: Send + Clone + 'static,
     {
-        match self.mode {
-            InternalUiPresentationMode::GpuSolid => self
-                .primitives
-                .iter()
-                .rev()
-                .filter_map(|primitive| match primitive {
+        if self.mode == InternalUiPresentationMode::GpuSolid {
+            let mut elements = Vec::with_capacity(self.primitives.len());
+            let mut import_failed = false;
+            for primitive in self.primitives.iter().rev() {
+                let element = match primitive {
                     GpuPrimitive::Solid(rect, buffer) => Some(
                         SolidColorRenderElement::from_buffer(
                             buffer,
@@ -750,7 +803,7 @@ impl SmithayFrameRenderer {
                         rect,
                         source,
                         buffer,
-                    } => MemoryRenderBufferRenderElement::from_buffer(
+                    } => match MemoryRenderBufferRenderElement::from_buffer(
                         renderer,
                         (
                             f64::from(location.x) + f64::from(rect.origin.x),
@@ -767,28 +820,54 @@ impl SmithayFrameRenderer {
                                 .into(),
                         ),
                         Kind::Unspecified,
-                    )
-                    .ok()
-                    .map(Into::into),
-                })
-                .collect(),
-            InternalUiPresentationMode::RasterFallback => self
-                .raster
-                .as_ref()
-                .and_then(|buffer| {
-                    MemoryRenderBufferRenderElement::from_buffer(
-                        renderer,
-                        (f64::from(location.x), f64::from(location.y)),
-                        buffer,
-                        None,
-                        None,
-                        Some((logical_size.0 as i32, logical_size.1 as i32).into()),
-                        Kind::Unspecified,
-                    )
-                    .ok()
-                })
-                .map(|element| vec![element.into()])
-                .unwrap_or_default(),
+                    ) {
+                        Ok(element) => Some(element.into()),
+                        Err(error) => {
+                            tracing::warn!(
+                                ?error,
+                                "failed to import compositor-owned UI texture; falling back to the complete software surface"
+                            );
+                            None
+                        }
+                    },
+                };
+                if let Some(element) = element {
+                    elements.push(element);
+                } else {
+                    import_failed = true;
+                    break;
+                }
+            }
+            if !import_failed {
+                return elements;
+            }
+            self.diagnostics.texture_import_failures =
+                self.diagnostics.texture_import_failures.saturating_add(1);
+            let _ = self.activate_import_fallback();
+        }
+
+        let Some(buffer) = self.raster.as_ref() else {
+            return Vec::new();
+        };
+        match MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            (f64::from(location.x), f64::from(location.y)),
+            buffer,
+            None,
+            None,
+            Some((logical_size.0 as i32, logical_size.1 as i32).into()),
+            Kind::Unspecified,
+        ) {
+            Ok(element) => vec![element.into()],
+            Err(error) => {
+                self.diagnostics.fallback_import_failures =
+                    self.diagnostics.fallback_import_failures.saturating_add(1);
+                tracing::error!(
+                    ?error,
+                    "failed to import compositor-owned UI software fallback"
+                );
+                Vec::new()
+            }
         }
     }
 }
@@ -850,6 +929,19 @@ impl FrameRenderer for SmithayFrameRenderer {
 
 fn content_hash(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
+}
+
+fn premultiplied_rgba(bytes: &[u8]) -> Vec<u8> {
+    bytes
+        .chunks_exact(4)
+        .flat_map(|pixel| premultiplied_pixel([pixel[0], pixel[1], pixel[2], pixel[3]]))
+        .collect()
+}
+
+fn premultiplied_pixel([red, green, blue, alpha]: [u8; 4]) -> [u8; 4] {
+    let scale = u16::from(alpha);
+    let channel = |value: u8| ((u16::from(value) * scale + 127) / 255) as u8;
+    [channel(red), channel(green), channel(blue), alpha]
 }
 
 fn texture_bytes(width: u32, height: u32) -> usize {
@@ -1596,7 +1688,7 @@ impl InternalUiRuntime {
                     }
                     presentation.dirty = false;
                 }
-                let presentation = self.presentation.get(&id)?;
+                let presentation = self.presentation.get_mut(&id)?;
                 let local = output_local_location(placement.geometry, output_origin);
                 Some(presentation.renderer.elements(
                     renderer,
@@ -2106,6 +2198,54 @@ mod tests {
         assert_eq!(diagnostics.image_cache_hits, 1);
         assert_eq!(diagnostics.text_cache_entries, 1);
         assert_eq!(diagnostics.image_cache_entries, 1);
+    }
+
+    #[test]
+    fn failed_gpu_texture_import_can_restore_the_complete_image_frame() {
+        use std::sync::Arc;
+
+        let image = Arc::new(image::RgbaImage::from_pixel(
+            4,
+            4,
+            image::Rgba([220, 70, 40, 255]),
+        ));
+        let commands = [
+            PaintCommand::Fill {
+                rect: nickel_ui::Rect::new(0.0, 0.0, 12.0, 12.0),
+                color: 0x101010,
+            },
+            PaintCommand::Image {
+                bounds: nickel_ui::Rect::new(4.0, 4.0, 4.0, 4.0),
+                id: 99,
+                generation: 1,
+                image,
+                high_density: None,
+            },
+        ];
+        let mut renderer = SmithayFrameRenderer::new(12, 12, 1.0, InternalUiRendererMode::Gpu);
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (12, 12),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert!(renderer.activate_import_fallback());
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert!(renderer.raster.is_some());
+        assert!(renderer.primitives.is_empty());
+        assert_eq!(renderer.diagnostics().fallback_image_count, 1);
+        assert_eq!(renderer.diagnostics().fallback_primitive_count, 2);
+    }
+
+    #[test]
+    fn smithay_texture_pixels_are_premultiplied_without_changing_alpha() {
+        assert_eq!(premultiplied_pixel([200, 100, 50, 128]), [100, 50, 25, 128]);
+        assert_eq!(premultiplied_pixel([20, 30, 40, 0]), [0, 0, 0, 0]);
+        assert_eq!(premultiplied_pixel([20, 30, 40, 255]), [20, 30, 40, 255]);
     }
 
     #[test]
