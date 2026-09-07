@@ -82,6 +82,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    state.internal_ui.set_renderer_mode(arguments.ui_renderer);
+    tracing::info!(
+        renderer = ?arguments.ui_renderer,
+        "compositor-owned UI renderer selected"
+    );
     // Keep the typed internal command path live alongside the compatibility
     // socket. Compositor-hosted UI will receive this handle instead of the
     // platform transport when it is moved into `NickelSession`.

@@ -10,6 +10,8 @@ fn main() -> Result<(), String> {
             if argument == std::ffi::OsStr::new("--backend")
                 || argument == std::ffi::OsStr::new("--available-backends")
                 || argument == std::ffi::OsStr::new("--test-control")
+                || argument == std::ffi::OsStr::new("--shell-process")
+                || argument == std::ffi::OsStr::new("--ui-renderer")
     ) {
         return nickel_shell::session::run().map_err(|error| error.to_string());
     }

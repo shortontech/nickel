@@ -8,6 +8,8 @@ use nickel_ui::{
     ViewContext,
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
+
+use super::backend::InternalUiRendererMode;
 use smithay::{
     backend::{
         allocator::Fourcc,
@@ -114,6 +116,7 @@ pub struct SmithayFrameRenderer {
     raster: Option<MemoryRenderBuffer>,
     mode: InternalUiPresentationMode,
     diagnostics: InternalUiRendererDiagnostics,
+    renderer_mode: InternalUiRendererMode,
 }
 
 enum GpuPrimitive {
@@ -126,13 +129,14 @@ enum GpuPrimitive {
 }
 
 impl SmithayFrameRenderer {
-    fn new(width: u32, height: u32, scale: f32) -> Self {
+    fn new(width: u32, height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
         Self {
             software: SoftwareRenderer::new(width, height, scale),
             primitives: Vec::new(),
             raster: None,
             mode: InternalUiPresentationMode::RasterFallback,
             diagnostics: InternalUiRendererDiagnostics::default(),
+            renderer_mode,
         }
     }
 
@@ -548,7 +552,9 @@ impl FrameRenderer for SmithayFrameRenderer {
     type Error = std::convert::Infallible;
 
     fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
-        let damage = if Self::supports_gpu(frame.commands) {
+        let damage = if self.renderer_mode == InternalUiRendererMode::Gpu
+            && Self::supports_gpu(frame.commands)
+        {
             self.mode = InternalUiPresentationMode::GpuSolid;
             self.diagnostics.gpu_frames += 1;
             self.diagnostics.fallback_primitive_count = 0;
@@ -639,7 +645,6 @@ fn interpolate_color(start: u32, end: u32, progress: f32) -> u32 {
 }
 
 /// Session-owned applications and their compositor presentation state.
-#[derive(Default)]
 pub struct InternalUiRuntime {
     surfaces: InternalSurfaceSet,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
@@ -647,6 +652,21 @@ pub struct InternalUiRuntime {
     hovered: Option<InternalSurfaceId>,
     touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
     routed_events: Vec<(InternalSurfaceId, UiEvent)>,
+    renderer_mode: InternalUiRendererMode,
+}
+
+impl Default for InternalUiRuntime {
+    fn default() -> Self {
+        Self {
+            surfaces: InternalSurfaceSet::default(),
+            presentation: BTreeMap::new(),
+            focused: None,
+            hovered: None,
+            touches: BTreeMap::new(),
+            routed_events: Vec::new(),
+            renderer_mode: InternalUiRendererMode::Gpu,
+        }
+    }
 }
 
 impl InternalUiRuntime {
@@ -662,7 +682,7 @@ impl InternalUiRuntime {
             id,
             PresentedSurface {
                 placement,
-                renderer: SmithayFrameRenderer::new(width, height, scale),
+                renderer: SmithayFrameRenderer::new(width, height, scale, self.renderer_mode),
                 dirty: true,
                 external_scene: None,
                 scale_factor: scale,
@@ -714,7 +734,12 @@ impl InternalUiRuntime {
             id,
             PresentedSurface {
                 placement,
-                renderer: SmithayFrameRenderer::new(physical_width, physical_height, scale),
+                renderer: SmithayFrameRenderer::new(
+                    physical_width,
+                    physical_height,
+                    scale,
+                    self.renderer_mode,
+                ),
                 dirty: true,
                 external_scene: None,
                 scale_factor: scale,
@@ -795,6 +820,16 @@ impl InternalUiRuntime {
         self.presentation
             .get(&id)
             .map(|surface| surface.renderer.diagnostics())
+    }
+
+    /// Force the compositor-owned UI renderer used by both native and nested backends.
+    /// Existing surfaces are invalidated so the new mode is visible on the next frame.
+    pub fn set_renderer_mode(&mut self, mode: InternalUiRendererMode) {
+        self.renderer_mode = mode;
+        for surface in self.presentation.values_mut() {
+            surface.renderer.renderer_mode = mode;
+            surface.dirty = true;
+        }
     }
 
     pub fn has_damage(&self) -> bool {
@@ -1425,7 +1460,7 @@ mod tests {
             },
             PaintCommand::PopClip,
         ];
-        let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0);
+        let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0, InternalUiRendererMode::Gpu);
 
         renderer
             .render_frame(RenderFrame {
@@ -1447,13 +1482,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_software_mode_rasterizes_a_gpu_supported_frame() {
+        let commands = [PaintCommand::Fill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 40.0, 30.0),
+            color: 0xff336699,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(40, 30, 1.0, InternalUiRendererMode::Software);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (40, 30),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert!(renderer.primitives.is_empty());
+        assert!(renderer.raster.is_some());
+        assert_eq!(renderer.diagnostics().gpu_frames, 0);
+        assert_eq!(renderer.diagnostics().fallback_frames, 1);
+    }
+
+    #[test]
     fn rounded_fill_stays_on_gpu_as_scanline_solids() {
         let commands = [PaintCommand::RoundedFill {
             rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
             color: 0x336699,
             radius: 4.0,
         }];
-        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0);
+        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0, InternalUiRendererMode::Gpu);
 
         renderer
             .render_frame(RenderFrame {
@@ -1488,7 +1547,7 @@ mod tests {
             bold: false,
             wrap: false,
         }];
-        let mut renderer = SmithayFrameRenderer::new(40, 24, 2.0);
+        let mut renderer = SmithayFrameRenderer::new(40, 24, 2.0, InternalUiRendererMode::Gpu);
 
         renderer
             .render_frame(RenderFrame {
@@ -1525,7 +1584,7 @@ mod tests {
             },
             PaintCommand::PopClip,
         ];
-        let mut renderer = SmithayFrameRenderer::new(40, 20, 1.0);
+        let mut renderer = SmithayFrameRenderer::new(40, 20, 1.0, InternalUiRendererMode::Gpu);
         renderer
             .render_frame(RenderFrame {
                 commands: &commands,

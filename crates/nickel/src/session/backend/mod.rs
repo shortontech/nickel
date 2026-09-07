@@ -33,6 +33,18 @@ pub enum ShellProcessMode {
     Internal,
 }
 
+/// Selects how compositor-owned Nickel UI is presented.
+///
+/// GPU is the normal path. Software is an explicit diagnostic and
+/// compatibility fallback which rasterizes complete internal surfaces before
+/// importing them into the active Smithay backend.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum InternalUiRendererMode {
+    #[default]
+    Gpu,
+    Software,
+}
+
 impl BackendKind {
     pub fn parse(value: &str) -> Result<Self, BackendSelectionError> {
         match value {
@@ -66,6 +78,7 @@ pub struct SessionArguments {
     pub test_control: bool,
     pub command: Option<(OsString, Vec<OsString>)>,
     pub shell_process: ShellProcessMode,
+    pub ui_renderer: InternalUiRendererMode,
 }
 
 impl SessionArguments {
@@ -82,6 +95,7 @@ impl SessionArguments {
         let mut command = None;
         let mut shell_process = ShellProcessMode::Internal;
         let mut shell_process_explicit = false;
+        let mut ui_renderer = InternalUiRendererMode::Gpu;
 
         while let Some(argument) = args.next() {
             match argument.to_str() {
@@ -111,10 +125,20 @@ impl SessionArguments {
                     };
                     shell_process_explicit = true;
                 }
+                Some("--ui-renderer") => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--ui-renderer requires gpu or software".to_owned())?;
+                    ui_renderer = match value.to_str() {
+                        Some("gpu") => InternalUiRendererMode::Gpu,
+                        Some("software") => InternalUiRendererMode::Software,
+                        _ => return Err("--ui-renderer expects gpu or software".into()),
+                    };
+                }
                 Some("--test-control") => test_control = true,
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--shell-process internal|supervised] [--command PROGRAM [ARG ...]]",
+                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--shell-process internal|supervised] [--ui-renderer gpu|software] [--command PROGRAM [ARG ...]]",
                         argument.to_string_lossy()
                     )
                     .into());
@@ -146,6 +170,7 @@ impl SessionArguments {
             test_control,
             command,
             shell_process,
+            ui_renderer,
         })
     }
 }
@@ -154,7 +179,7 @@ impl SessionArguments {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{BackendKind, SessionArguments, ShellProcessMode};
+    use super::{BackendKind, InternalUiRendererMode, SessionArguments, ShellProcessMode};
 
     #[cfg(feature = "backend-winit")]
     #[test]
@@ -204,6 +229,34 @@ mod tests {
         assert!(arguments.test_control);
         assert_eq!(arguments.shell_process, ShellProcessMode::Internal);
         assert!(arguments.command.is_none());
+        assert_eq!(arguments.ui_renderer, InternalUiRendererMode::Gpu);
+    }
+
+    #[cfg(feature = "backend-winit")]
+    #[test]
+    fn software_ui_renderer_is_an_explicit_backend_independent_override() {
+        let arguments = SessionArguments::parse([
+            OsString::from("--backend"),
+            OsString::from("nested"),
+            OsString::from("--ui-renderer"),
+            OsString::from("software"),
+        ])
+        .expect("software fallback should be accepted by the nested backend");
+        assert_eq!(arguments.ui_renderer, InternalUiRendererMode::Software);
+    }
+
+    #[cfg(feature = "backend-udev")]
+    #[test]
+    fn software_ui_renderer_is_accepted_by_the_native_backend() {
+        let arguments = SessionArguments::parse([
+            OsString::from("--backend"),
+            OsString::from("udev"),
+            OsString::from("--ui-renderer"),
+            OsString::from("software"),
+        ])
+        .expect("software fallback should be accepted by the native backend");
+        assert_eq!(arguments.backend, BackendKind::Udev);
+        assert_eq!(arguments.ui_renderer, InternalUiRendererMode::Software);
     }
 
     #[test]
