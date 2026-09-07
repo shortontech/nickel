@@ -102,6 +102,7 @@ impl<Id: Clone + Eq> TaskSwitcher<Id> {
                 SwitchDirection::Previous,
             ),
             HotkeyAction::CommitSwitch => self.commit(),
+            HotkeyAction::CancelSwitch => self.cancel(),
             _ => Vec::new(),
         }
     }
@@ -201,6 +202,16 @@ impl<Id: Clone + Eq> TaskSwitcher<Id> {
             effects.push(TaskSwitchEffect::ActivateWindow(selected));
         }
         effects
+    }
+
+    fn cancel(&mut self) -> Vec<TaskSwitchEffect<Id>> {
+        let Some(session) = self.session.take() else {
+            return Vec::new();
+        };
+        self.scope = None;
+        self.candidates.clear();
+        self.selected = 0;
+        vec![TaskSwitchEffect::HideFlip { session }]
     }
 }
 

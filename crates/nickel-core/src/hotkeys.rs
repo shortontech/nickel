@@ -35,6 +35,7 @@ pub enum HotkeyAction {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
+    CancelSwitch,
     CaptureActiveWindow,
     CaptureActiveWindowToFile,
     ShowScreenshotTool,
@@ -97,6 +98,8 @@ impl CompositorShortcutAdapter {
             };
         }
         let suppress_owned = self.event_is_owned(key) || self.owned_keys.contains(&key);
+        let cancel_switch =
+            key == KeyCode::Escape && edge == KeyEdge::Pressed && self.switch_active;
         if edge == KeyEdge::Pressed
             && !matches!(key, KeyCode::SuperLeft | KeyCode::SuperRight)
             && self.engine.modifiers().aggregate(AggregateModifier::Super)
@@ -112,7 +115,7 @@ impl CompositorShortcutAdapter {
         ));
         let recognized = self.engine.handle(&event);
         let suppress = suppress_owned || recognized.iter().any(|outcome| outcome.suppress);
-        let action = recognized.into_iter().find_map(|outcome| {
+        let mut action = recognized.into_iter().find_map(|outcome| {
             let id = outcome.action;
             let candidate = self
                 .registrations
@@ -137,6 +140,11 @@ impl CompositorShortcutAdapter {
             }
             delivered
         });
+        if cancel_switch {
+            self.switch_active = false;
+            action = Some(HotkeyAction::CancelSwitch);
+        }
+        let suppress = suppress || cancel_switch;
         if key == KeyCode::KeyR
             && edge == KeyEdge::Released
             && self.engine.modifiers().aggregate(AggregateModifier::Super)
@@ -1112,6 +1120,29 @@ mod tests {
                 suppress: true,
             }
         );
+    }
+
+    #[test]
+    fn escape_cancels_active_switch_and_owns_both_edges() {
+        let mut controller = CompositorShortcutAdapter::default();
+        controller.handle(KeyCode::AltLeft, KeyEdge::Pressed);
+        controller.handle(KeyCode::Tab, KeyEdge::Pressed);
+
+        assert_eq!(
+            controller.handle(KeyCode::Escape, KeyEdge::Pressed),
+            HotkeyOutcome {
+                action: Some(HotkeyAction::CancelSwitch),
+                suppress: true,
+            }
+        );
+        assert_eq!(
+            controller.handle(KeyCode::Escape, KeyEdge::Released),
+            HotkeyOutcome {
+                action: None,
+                suppress: true,
+            }
+        );
+        assert!(!controller.snapshot().switch_active);
     }
 
     #[test]

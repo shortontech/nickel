@@ -441,7 +441,8 @@ impl NickelSession {
                                     | HotkeyAction::SwitchPrevious
                                     | HotkeyAction::SwitchGroupNext
                                     | HotkeyAction::SwitchGroupPrevious
-                                    | HotkeyAction::CommitSwitch),
+                                    | HotkeyAction::CommitSwitch
+                                    | HotkeyAction::CancelSwitch),
                                 ) => session.apply_task_switch_action(action),
                                 Some(HotkeyAction::SwitchWorkspacePrevious) => session
                                     .switch_workspace_direction(
@@ -1319,6 +1320,7 @@ fn key_code_from_keysym(sym: Keysym) -> Option<KeyCode> {
         value if value == Keysym::new(keysyms::KEY_Up) => Some(KeyCode::ArrowUp),
         value if value == Keysym::new(keysyms::KEY_Down) => Some(KeyCode::ArrowDown),
         value if value == Keysym::new(keysyms::KEY_space) => Some(KeyCode::Space),
+        value if value == Keysym::new(keysyms::KEY_Escape) => Some(KeyCode::Escape),
         value if value == Keysym::new(keysyms::KEY_F4) => Some(KeyCode::F4),
         value if value == Keysym::new(keysyms::KEY_0) => Some(KeyCode::Digit0),
         value if value == Keysym::new(keysyms::KEY_1) => Some(KeyCode::Digit1),

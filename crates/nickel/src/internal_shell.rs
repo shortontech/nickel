@@ -224,7 +224,11 @@ impl InternalShellCoordinator {
 
     pub fn poll(&mut self, now: Instant) -> Vec<InternalSurfaceId> {
         self.apply_file_requests();
-        let outcome = self.shell.poll_deadlines(now);
+        let mut outcome = self.shell.poll_deadlines(now);
+        if outcome.capture_screenshot && self.shell.capture_screenshot() {
+            outcome.visibility_changed = true;
+            outcome.redraw.push(SurfaceRole::Screenshot);
+        }
         self.entries
             .iter()
             .filter(|surface| outcome.visibility_changed || outcome.redraw.contains(&surface.role))
@@ -305,6 +309,37 @@ impl InternalShellCoordinator {
         self.shell.surface_visible(SurfaceRole::Launcher)
     }
 
+    /// Deliver a compositor-owned shortcut directly to the in-process shell.
+    ///
+    /// The native input reducer already owns suppression and key-repeat
+    /// semantics.  Keeping this final hop typed avoids depending on the legacy
+    /// subscriber datagram, which does not exist in a unified session.
+    pub fn global_shortcut(&mut self, action: nickel_session_protocol::ShortcutAction) -> bool {
+        use crate::platform::{GlobalShortcut, ScreenshotAction};
+        use nickel_session_protocol::ShortcutAction;
+
+        let shortcut = match action {
+            ShortcutAction::ShowRun => GlobalShortcut::ShowRun,
+            ShortcutAction::OpenFiles => GlobalShortcut::OpenFiles,
+            ShortcutAction::OpenSettings => GlobalShortcut::OpenSettings,
+            ShortcutAction::ShowControlCenter => GlobalShortcut::ShowControlCenter,
+            ShortcutAction::ShowNotifications => GlobalShortcut::ShowNotifications,
+            ShortcutAction::ShowDesktop => GlobalShortcut::ShowDesktop,
+            ShortcutAction::ProjectDisplays => GlobalShortcut::ProjectDisplays,
+            ShortcutAction::ShowWindowMenu => GlobalShortcut::ShowWindowMenu,
+            ShortcutAction::ShowScreenshotTool => {
+                GlobalShortcut::Screenshot(ScreenshotAction::InteractiveRegion)
+            }
+            ShortcutAction::CaptureActiveWindow => {
+                GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindow)
+            }
+            ShortcutAction::CaptureActiveWindowToFile => {
+                GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindowToFile)
+            }
+        };
+        self.shell.global_shortcut(shortcut)
+    }
+
     #[cfg(test)]
     fn shell_mut(&mut self) -> &mut LiveShell {
         &mut self.shell
@@ -335,6 +370,7 @@ mod tests {
     use super::*;
     use crate::platform::{SessionRequestError, ShellCommand};
     use std::sync::atomic::{AtomicU8, Ordering};
+    use nickel_core::hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge};
 
     struct TestHost;
 
@@ -351,6 +387,12 @@ mod tests {
 
         fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
             Ok(())
+        }
+
+        fn capture_desktop(&self) -> crate::session_host::DesktopCapturePoll {
+            crate::session_host::DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture {
+                image: image::RgbaImage::new(4, 4),
+            }))
         }
     }
 
@@ -574,5 +616,61 @@ mod tests {
         }
         assert!(coordinator.visible(launcher));
         assert!(!coordinator.scene(launcher).unwrap().is_empty());
+    }
+
+    #[test]
+    fn production_meta_r_reducer_opens_internal_run_surface() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+        }]);
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        let mut hotkeys = CompositorShortcutAdapter::default();
+
+        assert_eq!(
+            hotkeys.handle(KeyCode::SuperLeft, KeyEdge::Pressed).action,
+            None
+        );
+        assert_eq!(
+            hotkeys.handle(KeyCode::KeyR, KeyEdge::Pressed).action,
+            Some(HotkeyAction::ShowRun)
+        );
+        assert!(coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowRun));
+
+        assert!(coordinator.visible(launcher));
+        assert!(!coordinator.scene(launcher).unwrap().is_empty());
+    }
+
+    #[test]
+    fn production_print_screen_reducer_requests_internal_capture_surface() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+        }]);
+        let screenshot = coordinator
+            .surface(SurfaceRole::Screenshot, None)
+            .unwrap()
+            .id;
+        let mut hotkeys = CompositorShortcutAdapter::default();
+
+        assert_eq!(
+            hotkeys
+                .handle(KeyCode::PrintScreen, KeyEdge::Pressed)
+                .action,
+            Some(HotkeyAction::ShowScreenshotTool)
+        );
+        assert!(
+            coordinator
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+        );
+
+        assert!(!coordinator.visible(screenshot));
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        assert!(coordinator.visible(screenshot));
+        assert!(!coordinator.scene(screenshot).unwrap().is_empty());
     }
 }

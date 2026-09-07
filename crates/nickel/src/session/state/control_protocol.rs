@@ -735,12 +735,20 @@ impl NickelSession {
         result: nickel_session_protocol::CaptureResult,
     ) {
         let Some(reply_path) = self.output_capture_reply_path.take() else {
-            let mut internal = self.internal_capture.lock().unwrap();
-            if let crate::session::InternalCaptureState::Pending(pending) = &*internal
-                && pending == path
-            {
-                *internal =
-                    crate::session::InternalCaptureState::Complete(path.to_path_buf(), result);
+            let completed = {
+                let mut internal = self.internal_capture.lock().unwrap();
+                if let crate::session::InternalCaptureState::Pending(pending) = &*internal
+                    && pending == path
+                {
+                    *internal =
+                        crate::session::InternalCaptureState::Complete(path.to_path_buf(), result);
+                    true
+                } else {
+                    false
+                }
+            };
+            if completed {
+                self.wake_internal_shell();
             }
             return;
         };

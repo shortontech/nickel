@@ -2882,6 +2882,15 @@ impl NickelSession {
         action: nickel_session_protocol::ShortcutAction,
     ) {
         tracing::info!(?action, "global shortcut activated");
+        if let Some(shell) = self.internal_shell.as_mut() {
+            let changed = shell.global_shortcut(action);
+            if changed {
+                self.sync_internal_shell();
+                self.schedule_internal_ui_frame();
+            }
+            self.wake_internal_shell();
+            return;
+        }
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::GlobalShortcut { action }),
