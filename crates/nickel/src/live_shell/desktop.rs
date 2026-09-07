@@ -20,6 +20,7 @@ use nickel_ui::{
 };
 
 use super::desktop_label_foreground;
+use crate::file_window_host::FileWindowHost;
 
 pub struct DesktopApplication {
     pub(super) wallpaper: Option<Arc<image::RgbaImage>>,
@@ -56,6 +57,7 @@ pub struct DesktopApplication {
     pub(super) operation_rx: std::sync::mpsc::Receiver<Result<String, String>>,
     pub(super) paste_in_progress: bool,
     pub(super) error: Option<String>,
+    pub(super) file_window_host: Arc<dyn FileWindowHost>,
 }
 
 pub(super) struct DesktopViewportState {
@@ -183,7 +185,11 @@ pub enum DesktopMessage {
 }
 
 impl DesktopApplication {
-    pub(super) fn new(wallpaper: Option<Arc<image::RgbaImage>>, palette: ThemePalette) -> Self {
+    pub(super) fn new(
+        wallpaper: Option<Arc<image::RgbaImage>>,
+        palette: ThemePalette,
+        file_window_host: Arc<dyn FileWindowHost>,
+    ) -> Self {
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         let path = nickel_file::desktop_directory();
         let browser = DirectoryBrowser::open(&path).ok();
@@ -223,6 +229,7 @@ impl DesktopApplication {
             operation_rx,
             paste_in_progress: false,
             error: None,
+            file_window_host,
         }
     }
 
@@ -612,7 +619,12 @@ impl DesktopApplication {
     pub(super) fn activate(&mut self, id: DesktopEntryId) {
         if let Some(action) = self.layout.activate(id) {
             let result = match action {
-                DesktopFileAction::Browse(path) => launch_nickel_file(&path),
+                DesktopFileAction::Browse(path) => {
+                    self.file_window_host
+                        .dispatch(nickel_file::FileWindowRequest::OpenOrFocus(
+                            nickel_file::FileLaunch::Browse(path),
+                        ))
+                }
                 DesktopFileAction::Open(path) => nickel_file::open_path(&path),
             };
             if let Err(error) = result {
@@ -974,53 +986,6 @@ fn desktop_layout_path() -> std::path::PathBuf {
     root.join("nickel").join("desktop-layout")
 }
 
-fn launch_nickel_file(path: &std::path::Path) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .with_file_name(if cfg!(target_os = "windows") {
-            "nickel-file.exe"
-        } else {
-            "nickel-file"
-        });
-    std::process::Command::new(executable)
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-fn launch_nickel_file_properties(path: &std::path::Path) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .with_file_name(if cfg!(target_os = "windows") {
-            "nickel-file.exe"
-        } else {
-            "nickel-file"
-        });
-    std::process::Command::new(executable)
-        .arg("--properties")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
-fn launch_nickel_file_rename(path: &std::path::Path) -> Result<(), String> {
-    let executable = std::env::current_exe()
-        .map_err(|error| error.to_string())?
-        .with_file_name(if cfg!(target_os = "windows") {
-            "nickel-file.exe"
-        } else {
-            "nickel-file"
-        });
-    std::process::Command::new(executable)
-        .arg("--rename")
-        .arg(path)
-        .spawn()
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-}
-
 impl nickel_ui::Application for DesktopApplication {
     type Message = DesktopMessage;
 
@@ -1080,9 +1045,15 @@ impl nickel_ui::Application for DesktopApplication {
                     .map(|item| item.entry.path.clone())
                 {
                     let result = if rename {
-                        launch_nickel_file_rename(&path)
+                        self.file_window_host
+                            .dispatch(nickel_file::FileWindowRequest::Open(
+                                nickel_file::FileLaunch::Rename(path),
+                            ))
                     } else {
-                        launch_nickel_file_properties(&path)
+                        self.file_window_host
+                            .dispatch(nickel_file::FileWindowRequest::OpenOrFocus(
+                                nickel_file::FileLaunch::Properties(path),
+                            ))
                     };
                     if let Err(error) = result {
                         self.error = Some(error);

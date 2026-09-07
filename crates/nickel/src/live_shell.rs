@@ -28,6 +28,7 @@ use nickel_ui::{
 
 use crate::{
     control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
+    file_window_host::{FileWindowHost, default_file_window_host},
     launcher::{DashboardAccount, DashboardProject, DashboardSection, Launcher},
     launcher_view::{
         LauncherAction, LauncherApplication, LauncherIconCache, LauncherShellEffect,
@@ -686,11 +687,19 @@ impl LiveShell {
         }
     }
     pub fn new() -> Result<Self, String> {
-        Self::new_with_session_host(default_session_host())
+        Self::new_with_hosts(default_session_host(), default_file_window_host())
     }
 
+    #[cfg(test)]
     pub(crate) fn new_with_session_host(
         session_host: Arc<dyn SessionHost>,
+    ) -> Result<Self, String> {
+        Self::new_with_hosts(session_host, default_file_window_host())
+    }
+
+    pub(crate) fn new_with_hosts(
+        session_host: Arc<dyn SessionHost>,
+        file_window_host: Arc<dyn FileWindowHost>,
     ) -> Result<Self, String> {
         let shell_settings = ShellSettings::load_default();
         let application_discovery = platform::application_discovery();
@@ -797,7 +806,7 @@ impl LiveShell {
         );
         let notification_host = NotificationHost::new(NotificationApp::new(palette), 420, 180);
         let desktop_host = nickel_ui::UiHost::new(
-            DesktopApplication::new(wallpaper.clone(), palette),
+            DesktopApplication::new(wallpaper.clone(), palette, file_window_host.clone()),
             1920,
             1080,
         );
@@ -3797,6 +3806,30 @@ impl LiveShell {
     }
 
     fn launch_application(&mut self, application: Application) {
+        if application.id().starts_with("place:")
+            && let Some(path) = application
+                .launch_command()
+                .and_then(|command| command.get(1))
+                .map(std::path::PathBuf::from)
+        {
+            let result = self
+                .desktop_host
+                .application()
+                .file_window_host
+                .dispatch(crate::file_window_host::browse_request(path));
+            match result {
+                Ok(()) => {
+                    self.launcher.record_launch(application.id());
+                    self.persist_launcher_preferences();
+                    self.set_launcher_visible(false);
+                }
+                Err(error) => {
+                    self.launcher_status =
+                        Some(format!("Could not launch {}: {error}", application.name()))
+                }
+            }
+            return;
+        }
         #[cfg(target_os = "linux")]
         if platform::application_requires_secure_storage(&application)
             && platform::secure_storage_state().unwrap_or_else(|error| {

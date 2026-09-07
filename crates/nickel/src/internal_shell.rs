@@ -5,7 +5,11 @@
 //! application ids, or the session control socket.  The compositor supplies a
 //! typed [`SessionHost`], output geometry, input and presentation.
 
-use std::{collections::HashMap, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    sync::{Arc, mpsc},
+    time::Instant,
+};
 
 use nickel_ui::{
     AnyView, Application, HostBatch, InternalSurfaceId, InternalSurfaceSet, Text, ViewContext,
@@ -13,6 +17,7 @@ use nickel_ui::{
 };
 
 use crate::{
+    file_window_host::internal_file_window_channel,
     live_shell::LiveShell,
     session_host::SessionHost,
     winit_shell::{PANEL_HEIGHT, PanelEdge, SurfaceRole},
@@ -70,16 +75,21 @@ pub(crate) struct InternalShellCoordinator {
     entries: Vec<InternalShellSurface>,
     indices: HashMap<(SurfaceRole, Option<String>), usize>,
     panel_edge: PanelEdge,
+    file_windows: nickel_file::FileWindowCoordinator,
+    file_requests: mpsc::Receiver<nickel_file::FileWindowRequest>,
 }
 
 impl InternalShellCoordinator {
     pub fn new(session_host: Arc<dyn SessionHost>, panel_edge: PanelEdge) -> Result<Self, String> {
+        let (file_window_host, file_requests) = internal_file_window_channel();
         Ok(Self {
-            shell: LiveShell::new_with_session_host(session_host)?,
+            shell: LiveShell::new_with_hosts(session_host, file_window_host)?,
             surfaces: InternalSurfaceSet::new(),
             entries: Vec::new(),
             indices: HashMap::new(),
             panel_edge,
+            file_windows: nickel_file::FileWindowCoordinator::new(),
+            file_requests,
         })
     }
 
@@ -172,11 +182,27 @@ impl InternalShellCoordinator {
     }
 
     pub fn poll(&mut self, now: Instant) -> Vec<InternalSurfaceId> {
+        self.apply_file_requests();
         let changed = self.shell.poll_host_deadlines(now);
         self.entries
             .iter()
             .filter(|surface| changed.contains(&surface.role))
             .map(|surface| surface.id)
+            .collect()
+    }
+
+    pub fn file_windows(&self) -> &nickel_file::FileWindowCoordinator {
+        &self.file_windows
+    }
+
+    pub fn file_windows_mut(&mut self) -> &mut nickel_file::FileWindowCoordinator {
+        &mut self.file_windows
+    }
+
+    fn apply_file_requests(&mut self) -> Vec<nickel_file::FileWindowAction> {
+        self.file_requests
+            .try_iter()
+            .map(|request| self.file_windows.handle(request))
             .collect()
     }
 

@@ -59,6 +59,7 @@ mod desktop {
 }
 #[cfg(target_os = "linux")]
 mod executable_index;
+mod file_window_host;
 #[allow(clippy::needless_borrow, dead_code)]
 mod icons;
 #[allow(clippy::manual_is_multiple_of, dead_code)]
