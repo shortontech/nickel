@@ -131,6 +131,11 @@ name = "nickel-test-input"
 path = "src/bin/nickel-test-input.rs"
 
 [[bin]]
+name = "nickel-nested-acceptance"
+path = "src/bin/nickel-nested-acceptance.rs"
+required-features = ["backend-winit"]
+
+[[bin]]
 name = "nickel-test-notification"
 path = "src/bin/nickel-test-notification.rs"
 
