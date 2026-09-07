@@ -123,6 +123,9 @@ fn spawn_deferred_terminal(arguments: &[String]) -> Result<std::process::Child, 
             .unwrap_or_else(|| std::path::Path::new("."))
             .join(terminal_name);
     }
+    if !executable.is_file() {
+        return Err(LaunchError::MissingTarget("Nickel Terminal".into()));
+    }
     let mut command = std::process::Command::new(executable);
     command
         .arg("--defer-window-for-child-ms")
