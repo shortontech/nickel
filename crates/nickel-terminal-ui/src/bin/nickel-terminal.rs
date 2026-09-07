@@ -538,12 +538,14 @@ impl Application for TerminalApp {
                     Button::new(Message::ActivateTab(tab.id), label)
                         .id(format!("terminal-tab-{}", tab.id))
                         .height(30.0)
+                        .center_label_vertically()
                         .padding(Insets::horizontal(8.0)),
                 )
                 .child(
                     Button::new(Message::CloseTab(tab.id), "×")
                         .id(format!("terminal-tab-close-{}", tab.id))
                         .height(30.0)
+                        .center_label_vertically()
                         .width(30.0),
                 );
         }
@@ -552,6 +554,7 @@ impl Application for TerminalApp {
                 Button::new(Message::NewTab, "+")
                     .id("terminal-new-tab")
                     .height(30.0)
+                    .center_label_vertically()
                     .width(34.0),
             );
         }
@@ -958,6 +961,20 @@ mod tests {
                 names.iter().any(|name| name == expected),
                 "missing {expected}: {names:?}"
             );
+        }
+        let tab_controls = host
+            .semantic_nodes()
+            .into_iter()
+            .filter(|node| {
+                let id = node.id.as_str();
+                id.contains("terminal-tab-") || id.ends_with("/terminal-new-tab")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tab_controls.len(), 5);
+        for control in &tab_controls {
+            assert!(control.bounds.size.height >= 28.0);
+            assert!((control.bounds.origin.y - tab_controls[0].bounds.origin.y).abs() < 0.01);
+            assert!((control.bounds.size.height - tab_controls[0].bounds.size.height).abs() < 0.01);
         }
     }
 
