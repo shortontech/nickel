@@ -842,6 +842,138 @@ mod tests {
     }
 
     #[test]
+    fn local_panel_hover_and_launcher_typing_preserve_unrelated_scene_generations() {
+        let mut coordinator = coordinator();
+        coordinator.bar_on_all_displays = true;
+        coordinator.set_outputs(&[
+            InternalOutput {
+                name: "left".into(),
+                width: 1000,
+                height: 800,
+                scale: 1.0,
+            },
+            InternalOutput {
+                name: "right".into(),
+                width: 1000,
+                height: 800,
+                scale: 1.0,
+            },
+        ]);
+        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
+            windows: vec![nickel_session_protocol::WindowSnapshot {
+                id: nickel_session_protocol::WindowId(991),
+                application_id: "org.nickel.audit".into(),
+                title: "Audit task".into(),
+                active: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                geometry: None,
+                workspace: nickel_session_protocol::WorkspaceId(1),
+            }],
+            ..Default::default()
+        });
+        let desktop = coordinator
+            .surface(SurfaceRole::Desktop, Some("left"))
+            .unwrap()
+            .id;
+        let left_panel = coordinator
+            .surface(SurfaceRole::Panel, Some("left"))
+            .unwrap()
+            .id;
+        let right_panel = coordinator
+            .surface(SurfaceRole::Panel, Some("right"))
+            .unwrap()
+            .id;
+        for id in [desktop, right_panel, left_panel] {
+            coordinator.scene(id);
+        }
+        let target = coordinator
+            .shell
+            .resolve_semantic_target(
+                &nickel_session_protocol::ShellSemanticTarget::PanelApplication {
+                    application_id: "org.nickel.audit".into(),
+                    output: Some("left".into()),
+                    interaction: nickel_session_protocol::PointerInteraction::Hover,
+                },
+            )
+            .unwrap();
+        coordinator.set_panel_context("left", (0, 0));
+        let changes = coordinator.step_slot_changes(
+            left_panel,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(
+                    nickel_ui::Point {
+                        x: target.x as f32,
+                        y: target.y as f32,
+                    },
+                ))],
+                ..Default::default()
+            },
+        );
+        assert_eq!(changes, vec![left_panel]);
+        for id in changes {
+            coordinator.scene(id);
+        }
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("right"))
+                .unwrap()
+                .scene_generation,
+            1
+        );
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("left"))
+                .unwrap()
+                .scene_generation,
+            1
+        );
+        coordinator.toggle_launcher();
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        coordinator.scene(launcher);
+        let changes = coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
+                    "terminal".into(),
+                ))],
+                ..Default::default()
+            },
+        );
+        assert_eq!(changes, vec![launcher]);
+        for id in changes {
+            coordinator.scene(id);
+        }
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("left"))
+                .unwrap()
+                .scene_generation,
+            2
+        );
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("left"))
+                .unwrap()
+                .scene_generation,
+            1
+        );
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Launcher, None)
+                .unwrap()
+                .commands_copied
+                > 0
+        );
+        assert!(
+            !coordinator
+                .poll(Instant::now() + std::time::Duration::from_secs(61))
+                .contains(&desktop)
+        );
+    }
+
+    #[test]
     fn panel_semantic_click_opens_the_internal_launcher() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {

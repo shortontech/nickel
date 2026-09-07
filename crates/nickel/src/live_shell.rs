@@ -522,6 +522,7 @@ pub struct LiveShell {
     panel_hover: Option<PanelHover>,
     panel_hover_output: Option<String>,
     panel_host: nickel_ui::UiHost<PanelApplication>,
+    panel_hosts: HashMap<Option<String>, nickel_ui::UiHost<PanelApplication>>,
     panel_projections: HashMap<Option<String>, PanelTaskProjection>,
     panel_change_token: HostChangeToken,
     panel_deadline: Option<Instant>,
@@ -954,6 +955,7 @@ impl LiveShell {
             panel_hover: None,
             panel_hover_output: None,
             panel_host,
+            panel_hosts: HashMap::new(),
             panel_projections: HashMap::new(),
             panel_change_token: HostChangeToken::default(),
             panel_deadline: None,
@@ -1851,7 +1853,14 @@ impl LiveShell {
                 .min(),
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
-        push("panel", self.panel_deadline);
+        push(
+            "panel",
+            self.panel_hosts
+                .values()
+                .filter_map(|host| host.next_deadline())
+                .chain(self.panel_host.next_deadline())
+                .min(),
+        );
         push("lock", self.lock_deadline);
         push("control", self.control_deadline);
         push("screenshot", self.screenshot.next_deadline());
@@ -2039,7 +2048,22 @@ impl LiveShell {
         if desktop_changed {
             changed.push(SurfaceRole::Desktop);
         }
-        if self.panel_deadline.is_some_and(|deadline| now >= deadline) {
+        let input_output = self.panel_output.clone();
+        let mut due_panels = self
+            .panel_hosts
+            .iter()
+            .filter(|(_, host)| host.next_deadline().is_some_and(|deadline| now >= deadline))
+            .map(|(output, _)| output.clone())
+            .collect::<Vec<_>>();
+        if self
+            .panel_host
+            .next_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            due_panels.push(input_output.clone());
+        }
+        for output in due_panels {
+            self.switch_panel_output(output);
             let outcome = self.panel_host.step(HostBatch {
                 now: Some(now),
                 events: vec![HostEvent::Poll],
@@ -2047,10 +2071,11 @@ impl LiveShell {
             });
             self.panel_change_token = outcome.change_token;
             self.panel_deadline = outcome.next_deadline;
-            if outcome.changed {
+            if outcome.changed | self.apply_panel_effects() {
                 changed.push(SurfaceRole::Panel);
             }
         }
+        self.switch_panel_output(input_output);
         if self.lock_deadline.is_some_and(|deadline| now >= deadline) {
             let outcome = self.lock_host.step(HostBatch {
                 now: Some(now),
@@ -2613,20 +2638,19 @@ impl LiveShell {
                 output,
                 interaction,
             } => {
-                let groups = self
-                    .panel_projections
-                    .get(output)
-                    .map_or(&self.panel_host.application().groups, |projection| {
-                        &projection.groups
-                    });
+                let host = if output.is_none() || output == &self.panel_output {
+                    &self.panel_host
+                } else {
+                    self.panel_hosts.get(output)?
+                };
+                let groups = &host.application().groups;
                 let index = groups.iter().take(12).position(|group| {
                     group
                         .application_id
                         .as_ref()
                         .is_some_and(|id| id.as_str() == application_id)
                 })?;
-                let bounds = self
-                    .panel_host
+                let bounds = host
                     .semantic_targets_for_message(&PanelAction::Task(index))
                     .into_iter()
                     .next()?
@@ -2778,7 +2802,27 @@ impl LiveShell {
     }
 
     pub fn set_panel_output(&mut self, output: impl Into<String>) {
-        self.panel_output = Some(output.into());
+        self.switch_panel_output(Some(output.into()));
+    }
+
+    fn switch_panel_output(&mut self, output: Option<String>) {
+        if self.panel_output == output {
+            return;
+        }
+        let next = self.panel_hosts.remove(&output).unwrap_or_else(|| {
+            let mut application = self.panel_host.application().clone();
+            application.effects.clear();
+            application.task_drag = None;
+            application.panel_hover = None;
+            nickel_ui::UiHost::new(application, 1920, 56)
+        });
+        let previous = std::mem::replace(&mut self.panel_host, next);
+        if self.panel_hosts.len() >= 32 {
+            self.panel_hosts.clear();
+        }
+        self.panel_hosts
+            .insert(std::mem::replace(&mut self.panel_output, output), previous);
+        self.panel_deadline = self.panel_host.next_deadline();
     }
 
     /// Render a concrete output without transferring popover/input ownership.
@@ -2788,10 +2832,12 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> Vec<PaintCommand> {
-        let input_output = self.panel_output.take();
-        self.panel_output = output.map(str::to_owned);
+        let input_output = self.panel_output.clone();
+        let input_change_token = self.panel_change_token;
+        self.switch_panel_output(output.map(str::to_owned));
         let scene = self.panel_scene(width, height);
-        self.panel_output = input_output;
+        self.switch_panel_output(input_output);
+        self.panel_change_token = input_change_token;
         scene
     }
 
@@ -4689,6 +4735,18 @@ impl LiveShell {
         &mut self,
         outputs: &[crate::internal_shell::InternalOutput],
     ) {
+        if self
+            .panel_output
+            .as_ref()
+            .is_some_and(|name| !outputs.iter().any(|output| &output.name == name))
+        {
+            self.switch_panel_output(None);
+        }
+        self.panel_hosts.retain(|output, _| {
+            output
+                .as_ref()
+                .is_none_or(|name| outputs.iter().any(|output| &output.name == name))
+        });
         self.panel_projections.retain(|output, _| {
             output
                 .as_ref()

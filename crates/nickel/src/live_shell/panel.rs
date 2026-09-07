@@ -89,6 +89,7 @@ pub enum PanelAction {
     Control,
 }
 
+#[derive(Clone)]
 pub struct PanelApplication {
     pub(super) keyboard_enabled: bool,
     pub(super) keyboard_visible: bool,

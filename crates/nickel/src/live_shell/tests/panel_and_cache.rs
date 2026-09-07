@@ -32,14 +32,15 @@
         shell.apply_internal_session_snapshot(Snapshot { outputs: vec![output("left", 0), output("right", 1000)], windows: vec![window(1, 0, "Left task"), window(2, 1000, "Right task")], ..Default::default() });
         shell.refresh_fast();
         shell.set_panel_output("left");
+        shell.scene(SurfaceRole::Panel, 1000, 56);
         shell.panel_scene_for_output(Some("right"), 1000, 56);
         assert_eq!(shell.panel_output.as_deref(), Some("left"));
-        assert_eq!(shell.panel_host.application().groups[0].application_name, "Right task");
-        let right = Arc::clone(&shell.panel_host.application().groups);
+        assert_eq!(shell.panel_hosts[&Some("right".into())].application().groups[0].application_name, "Right task");
+        let right = Arc::clone(&shell.panel_hosts[&Some("right".into())].application().groups);
         shell.panel_scene_for_output(Some("left"), 1000, 56);
         assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
         shell.panel_scene_for_output(Some("right"), 1000, 56);
-        assert!(Arc::ptr_eq(&right, &shell.panel_host.application().groups));
+        assert!(Arc::ptr_eq(&right, &shell.panel_hosts[&Some("right".into())].application().groups));
         shell.panel_host_ui(UiEvent::PointerMoved(Point { x: 0.0, y: 0.0 }), 1000);
         assert_eq!(shell.panel_host.application().groups[0].application_name, "Left task");
         shell.all_windows_on_every_bar = true;
@@ -49,6 +50,32 @@
         assert_eq!(shell.panel_host.application().groups.len(), 2);
         shell.retain_panel_outputs(&[]);
         assert!(shell.panel_projections.is_empty());
+        assert!(!shell.panel_hosts.contains_key(&Some("right".into())));
+        assert!(!shell.panel_hosts.contains_key(&Some("left".into())));
+        assert!(shell.panel_output.is_none());
+    }
+
+    #[test]
+    fn rendering_a_sibling_panel_preserves_pointer_capture_and_keyboard_focus() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.set_panel_output("left");
+        shell.scene(SurfaceRole::Panel, 1280, 56);
+        let target = shell.panel_host.query_unique(&SemanticSelector::RoleAndName { role: SemanticRole::Button, name: "Open Nickel Start".into() }).unwrap();
+        let point = Point { x: target.bounds.origin.x + target.bounds.size.width / 2.0, y: target.bounds.origin.y + target.bounds.size.height / 2.0 };
+        shell.panel_host_ui(UiEvent::FocusNext, 1280);
+        shell.panel_host_ui(UiEvent::PointerMoved(point), 1280);
+        shell.panel_host_ui(UiEvent::PointerPressed(point), 1280);
+        let before = shell.panel_host.inspect();
+        shell.panel_scene_for_output(Some("right"), 800, 56);
+        let after = shell.panel_host.inspect();
+        assert_eq!(before.pointer_capture, after.pointer_capture);
+        assert_eq!(before.pointer_hover, after.pointer_hover);
+        assert_eq!(before.keyboard_focus, after.keyboard_focus);
+        assert_eq!(shell.panel_output.as_deref(), Some("left"));
+        assert!(shell.panel_hosts[&Some("right".into())].inspect().pointer_hover.is_none());
+        assert!(shell.panel_hosts[&Some("right".into())].inspect().pointer_capture.is_none());
+        shell.panel_host_ui(UiEvent::PointerReleased(point), 1280);
+        assert!(shell.launcher_visible);
     }
 
     #[test]
