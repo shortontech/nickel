@@ -15,6 +15,7 @@ pub(crate) mod components;
 pub mod desktop;
 pub(crate) mod host;
 pub mod icons;
+mod internal_windows;
 pub(crate) mod layout;
 pub mod operations;
 pub(crate) mod platform;
@@ -26,6 +27,7 @@ pub mod watch;
 pub use app::FileFixtureProvider;
 pub use app::{FileApp, FileLaunch, FileMessage, FileViewMode, run};
 pub use host::FileHostAdapter;
+pub use internal_windows::{FileWindowAction, FileWindowCoordinator, FileWindowRequest};
 pub use watch::DirectoryWatch;
 
 pub fn desktop_directory() -> PathBuf {
