@@ -4,9 +4,9 @@ Nickel is an experimental desktop shell written entirely in Rust. On Windows, it
 GPU-rendered desktop, taskbar, application launcher, task switching, system controls, settings,
 and a file browser without requiring Windows Explorer as the desktop shell.
 
-The repository also contains a Linux compositor built with Smithay. It runs as a nested development
-session or directly through DRM and udev. Nickel's supported operating systems are Windows and
-Linux; macOS is not a build or release target.
+On Linux, the same Nickel executable owns a Smithay compositor and the desktop shell. It runs as a
+nested development session or directly through DRM and udev. Nickel's supported operating systems
+are Windows and Linux; macOS is not a build or release target.
 
 ## Included Applications
 
@@ -14,7 +14,7 @@ Linux; macOS is not a build or release target.
 - **Nickel Settings** — display and system settings
 - **Nickel File** — directory browsing and file launching
 - **Nickel Markdown** — safe, selectable local Markdown viewing
-- **Nickel Session** — the Linux compositor and session host
+- **Nickel** — the desktop shell and, on Linux, its compositor and session host
 
 ## What Nickel Does
 
@@ -96,7 +96,7 @@ cargo test --workspace
 Launch the desktop shell:
 
 ```bash
-cargo run -p nickel-shell
+cargo run -p nickel
 ```
 
 For a Windows cross-build smoke test under Proton, the shell has two optional acceptance flags:
@@ -133,11 +133,10 @@ cargo run -p nickel-markdown-ui -- README.md
 Run Nickel inside an existing Linux desktop:
 
 ```bash
-cargo run -p nickel-session --no-default-features --features backend-winit -- \
-  --backend winit --command target/debug/nickel
+cargo run -p nickel --no-default-features --features backend-winit -- --backend winit
 ```
 
-Live compositor tests may add `--test-control` before `--command`. This explicitly enables the
+Live compositor tests may add `--test-control` alongside `--backend winit`. This explicitly enables the
 capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
 inject semantic keyboard and pointer events through the same Smithay input path as physical
 devices. The flag is rejected by the direct backend and is disabled by default.
@@ -146,15 +145,15 @@ With the session-issued `NICKEL_SESSION_CONTROL` and `NICKEL_SESSION_TOKEN` envi
 `nickel-test-input` can inspect registered windows and inject individual production input events:
 
 ```bash
-cargo run -p nickel-session --bin nickel-test-input -- windows
-cargo run -p nickel-session --bin nickel-test-input -- workspaces
-cargo run -p nickel-session --bin nickel-test-input -- outputs
-cargo run -p nickel-session --bin nickel-test-input -- surfaces
-cargo run -p nickel-session --bin nickel-test-input -- caches
-cargo run -p nickel-session --bin nickel-test-input -- move 64 700
-cargo run -p nickel-session --bin nickel-test-input -- wheel 0 -120
-cargo run -p nickel-session --bin nickel-test-input -- button left pressed
-cargo run -p nickel-session --bin nickel-test-input -- button left released
+cargo run -p nickel --bin nickel-test-input -- windows
+cargo run -p nickel --bin nickel-test-input -- workspaces
+cargo run -p nickel --bin nickel-test-input -- outputs
+cargo run -p nickel --bin nickel-test-input -- surfaces
+cargo run -p nickel --bin nickel-test-input -- caches
+cargo run -p nickel --bin nickel-test-input -- move 64 700
+cargo run -p nickel --bin nickel-test-input -- wheel 0 -120
+cargo run -p nickel --bin nickel-test-input -- button left pressed
+cargo run -p nickel --bin nickel-test-input -- button left released
 ```
 
 The same capability provides semantic workspace commands, nested output hotplug, and lock-boundary
@@ -164,13 +163,13 @@ actions. Run `nickel-test-input --help` for the complete command set.
 Renderer-owned shell targets can be exercised without copying panel or overlay coordinates:
 
 ```bash
-cargo run -p nickel-session --bin nickel-test-input -- \
+cargo run -p nickel --bin nickel-test-input -- \
   semantic panel-app org.nickel.Terminal hover
-cargo run -p nickel-session --bin nickel-test-input -- \
+cargo run -p nickel --bin nickel-test-input -- \
   semantic preview 10 menu
-cargo run -p nickel-session --bin nickel-test-input -- \
+cargo run -p nickel --bin nickel-test-input -- \
   semantic menu 10 minimize
-cargo run -p nickel-session --bin nickel-test-input -- \
+cargo run -p nickel --bin nickel-test-input -- \
   scenario grouped-windows org.nickel.Terminal
 ```
 
@@ -200,26 +199,23 @@ The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL developme
 it without the nested backend:
 
 ```bash
-cargo build -p nickel-shell
-cargo build -p nickel-session
+cargo build -p nickel
 ```
 
 Run it from a text VT:
 
 ```bash
-RUST_LOG=info target/debug/nickel-session \
-  --backend udev --command target/debug/nickel
+RUST_LOG=info target/debug/nickel --backend udev
 ```
 
 Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
 
 ### Linux Login Session
 
-Build the direct compositor, shell, and login launcher:
+Build the integrated compositor, shell, and login launcher:
 
 ```bash
-cargo build --release -p nickel-session
-cargo build --release -p nickel-shell
+cargo build --release -p nickel
 ```
 
 Install the completed build as an SDDM Wayland session:
@@ -238,13 +234,13 @@ To remove the session, delete only the files installed by the script:
 sudo rm /usr/share/wayland-sessions/nickel.desktop
 sudo rm /usr/share/applications/nickel-settings.desktop
 sudo rm /usr/share/icons/hicolor/512x512/apps/nickel-settings.png
-sudo rm /usr/local/bin/nickel-login /usr/local/bin/nickel-session
-sudo rm /usr/local/bin/nickel /usr/local/bin/nickel-settings
+sudo rm /usr/local/bin/nickel-login /usr/local/bin/nickel
+sudo rm /usr/local/bin/nickel-settings /usr/local/bin/nickel-terminal
 ```
 
 If a development build cannot start, select another desktop from SDDM's session chooser. From that
-desktop, inspect the previous boot with `journalctl -b -1 | rg 'nickel|sddm-helper'`, rebuild both
-the direct compositor and shell, and rerun the installer. A compositor startup failure exits back to
+desktop, inspect the previous boot with `journalctl -b -1 | rg 'nickel|sddm-helper'`, rebuild
+Nickel, and rerun the installer. A compositor startup failure exits back to
 the display manager; an intentional logout exits successfully. Do not replace the installed binaries
 with symlinks into `target/`: a later default-feature build can replace the direct-backend binary.
 
@@ -290,9 +286,9 @@ crates/
 |-- nickel-markdown/    Safe typed Markdown parsing and presentation
 |-- nickel-markdown-ui/ Standalone read-only Markdown viewer
 |-- nickel-platform/    Shared native platform adapters
-|-- nickel-session/     Linux compositor and session
+|-- nickel/             Desktop shell plus the Linux compositor and session host
 |-- nickel-settings/    Nickel Plating settings application
-`-- nickel-shell/      Desktop shell and platform integration
+`-- nickel-terminal/   Nickel terminal application
 ```
 
 Active design work lives in [`specs/`](specs/). Completed specifications live in

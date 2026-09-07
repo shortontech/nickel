@@ -15,8 +15,8 @@ Settings field; use Move up if the keyboard covers it.
 preferences and device detection. The shell reads this once at startup. Settings shows an override
 without overwriting the saved preference and makes the preference rows read-only for that session.
 
-For nested testing, build `nickel-session` with `--features backend-winit`. Set
-`NICKEL_NESTED_SIZE=1280x720` and `NICKEL_ON_SCREEN_KEYBOARD=1` on the supervised session process.
+For nested testing, build `nickel` with `--features backend-winit` and run it with `--backend winit`.
+Set `NICKEL_NESTED_SIZE=1280x720` and `NICKEL_ON_SCREEN_KEYBOARD=1` on the Nickel process.
 Use an isolated X server, a short private runtime directory, and disposable XDG config/state
 folders. Clear inherited Wayland and session-control credentials before launching the session.
 Do not start a second desktop on the active display for unattended tests.

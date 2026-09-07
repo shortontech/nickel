@@ -305,14 +305,14 @@ fn consumers_cannot_grow_or_create_parallel_hit_authority() {
 #[test]
 fn compositor_recovery_keeps_semantics_and_hit_testing_in_ui_host() {
     let root = workspace_root();
-    let recovery = fs::read_to_string(root.join("crates/nickel-session/src/recovery_ui.rs"))
+    let recovery = fs::read_to_string(root.join("crates/nickel/src/session/recovery_ui.rs"))
         .expect("compositor recovery UI must exist");
     assert!(recovery.contains("UiHost<RecoveryApplication>"));
     assert!(recovery.contains("Button::new(RecoveryAction::Retry"));
     assert!(recovery.contains("Button::new(RecoveryAction::Exit"));
 
     let mut session_files = Vec::new();
-    rust_files(&root.join("crates/nickel-session/src"), &mut session_files);
+    rust_files(&root.join("crates/nickel/src/session"), &mut session_files);
     let forbidden = ["recovery_action_at", "RecoveryLayout"];
     let mut violations = Vec::new();
     for path in session_files {

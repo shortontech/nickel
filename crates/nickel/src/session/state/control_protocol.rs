@@ -182,7 +182,7 @@ impl NickelSession {
     /// PID/token authentication: exclusive mutable access to the compositor
     /// state is the capability. External callers must continue through the
     /// authenticated protocol path above.
-    pub(super) fn handle_authority_request(
+    pub(crate) fn handle_authority_request(
         &mut self,
         request: SessionAuthorityRequest,
     ) -> ServerMessage {

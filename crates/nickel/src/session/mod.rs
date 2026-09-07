@@ -64,7 +64,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     nickel_logging::init("nickel-session")?;
 
-    let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
+    let mut arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
+    if arguments.command.is_none() {
+        arguments.command = Some((
+            std::env::current_exe()?.into_os_string(),
+            vec![OsString::from("--role"), OsString::from("shell")],
+        ));
+    }
     let mut event_loop: EventLoop<'static, NickelSession> = EventLoop::try_new()?;
 
     let display: Display<NickelSession> = Display::new()?;

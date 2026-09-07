@@ -15,20 +15,20 @@ if [ -z "$install_mode" ]; then
     fi
 fi
 
-for executable in nickel-login nickel-session nickel nickel-settings nickel-terminal; do
+for executable in nickel-login nickel nickel-settings nickel-terminal; do
     if [ ! -x "$release/$executable" ]; then
         echo "Missing $release/$executable; build the release session first." >&2
         exit 1
     fi
 done
 
-if ! "$release/nickel-session" --available-backends | grep -qx udev; then
-    echo "The release nickel-session lacks the native udev backend." >&2
-    echo "Rebuild it with: cargo build --release -p nickel-session" >&2
+if ! "$release/nickel" --available-backends | grep -qx udev; then
+    echo "The release nickel executable lacks the native udev backend." >&2
+    echo "Rebuild it with: cargo build --release -p nickel" >&2
     exit 1
 fi
 
-for executable in nickel-login nickel-session nickel nickel-settings nickel-terminal; do
+for executable in nickel-login nickel nickel-settings nickel-terminal; do
     destination="$install_root/usr/local/bin/$executable"
     if [ "$install_mode" = symlink ]; then
         mkdir -p "$(dirname "$destination")"

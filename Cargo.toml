@@ -9,7 +9,7 @@ members = [
     "crates/nickel-ui-testkit",
     "crates/nickel-ui-workbench",
     "crates/ui-declarative-macros",
-    "crates/nickel-shell",
+    "crates/nickel",
     "crates/nickel-core",
     "crates/nickel-storage",
     "crates/nickel-logging",
@@ -26,7 +26,7 @@ members = [
     "crates/nickel-terminal",
     "crates/nickel-terminal-ui",
 ]
-default-members = ["crates/nickel-shell"]
+default-members = ["crates/nickel"]
 resolver = "3"
 
 [profile.dev]

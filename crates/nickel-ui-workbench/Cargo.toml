@@ -12,7 +12,7 @@ nickel-file = { path = "../nickel-file", optional = true, features = ["workbench
 nickel-gaze = { path = "../nickel-gaze", optional = true }
 nickel-markdown = { path = "../nickel-markdown" }
 nickel-markdown-ui = { path = "../nickel-markdown-ui", optional = true, features = ["workbench-fixtures"] }
-nickel-shell = { path = "../nickel-shell", optional = true, features = ["workbench-fixtures"] }
+nickel-shell = { package = "nickel", path = "../nickel", optional = true, features = ["workbench-fixtures"] }
 nickel-ui = { path = "../nickel-ui" }
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 serde.workspace = true

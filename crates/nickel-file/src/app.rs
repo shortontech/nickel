@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     hash::{DefaultHasher, Hash, Hasher},
     path::PathBuf,
     sync::{

@@ -1794,7 +1794,7 @@ mod tests {
         production.push_str(&codex[fallback_end..codex.find("#[cfg(test)]\nmod tests").unwrap()]);
         assert_no_literal_colors(&production, "Codex UI");
         assert_no_literal_colors(
-            include_str!("../../nickel-shell/src/window_preview.rs")
+            include_str!("../../nickel/src/window_preview.rs")
                 .split("#[cfg(test)]")
                 .next()
                 .unwrap(),

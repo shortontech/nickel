@@ -98,6 +98,7 @@ use winit_shell::{
 
 const NO_DESKTOP_WINDOWS_FLAG: &str = "--no-desktop-windows";
 const PANEL_TOP_FLAG: &str = "--panel-top";
+const INTERNAL_ROLE_FLAG: &str = "--role";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CommandLineOptions {
@@ -108,13 +109,22 @@ struct CommandLineOptions {
 impl CommandLineOptions {
     fn parse(arguments: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Self, String> {
         let mut options = Self::default();
-        for argument in arguments {
+        let mut arguments = arguments.into_iter();
+        while let Some(argument) = arguments.next() {
             let argument = argument
                 .into_string()
                 .map_err(|_| "Nickel shell arguments must be valid UTF-8".to_string())?;
             match argument.as_str() {
                 NO_DESKTOP_WINDOWS_FLAG => options.no_desktop_windows = true,
                 PANEL_TOP_FLAG => options.panel_top = true,
+                INTERNAL_ROLE_FLAG => {
+                    let role = arguments
+                        .next()
+                        .ok_or_else(|| "--role requires an internal role".to_string())?;
+                    if role != "shell" {
+                        return Err(format!("unknown internal Nickel role {role:?}"));
+                    }
+                }
                 _ => {
                     return Err(format!(
                         "unknown Nickel shell argument {argument:?}; supported acceptance flags: \

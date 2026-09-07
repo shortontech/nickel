@@ -49,7 +49,7 @@ fn injected_session_host_receives_shell_commands_without_platform_transport() {
     }
 
     let host = Arc::new(RecordingHost(AtomicUsize::new(0)));
-    let mut shell = LiveShell::new_with_session_host(host.clone()).expect("live shell");
+    let shell = LiveShell::new_with_session_host(host.clone()).expect("live shell");
 
     assert!(shell.dispatch_session_command(
         "test-direct-session-host",

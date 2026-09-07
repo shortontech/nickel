@@ -1,12 +1,14 @@
 # Session recovery
 
-`nickel-session` supervises the user-facing shell independently of the compositor. An unexpected
-shell exit does not close application clients or end the login session. Restarts use a bounded
-one-to-four-second delay; a shell that remains healthy for thirty seconds clears the consecutive
-failure count.
+The `nickel` executable owns both the Linux compositor session and the user-facing shell. During
+the transition to fully internal shell surfaces, the compositor starts a private
+`nickel --role shell` child. This role is an implementation detail, not a separate installed product
+or a user-facing startup command. An unexpected role exit does not close application clients or end
+the login session. Restarts use a bounded one-to-four-second delay; a role that remains healthy for
+thirty seconds clears the consecutive failure count.
 
 After three consecutive failures the compositor presents its own recovery panel on every output.
-This panel is not a shell client and remains available when the shell executable cannot start.
+This panel is not a shell client and remains available when the internal shell role cannot start.
 While it is visible, ordinary keyboard, pointer, and touch input is withheld from application
 clients. `Enter` requests an immediate supervised restart and `Escape` terminates the compositor
 session cleanly so the display manager can return to its greeter. System virtual-terminal chords
@@ -20,15 +22,15 @@ configured provider.
 ## Recorded nested acceptance
 
 On 2026-08-29, a native Wayland KCalc client remained mapped while the supervised XWayland process
-was killed with `SIGKILL` and restarted on the same display number. Killing the shell preserved the
-same compositor and KCalc process. Three shell failures inside the 30-second health window produced
+was killed with `SIGKILL` and restarted on the same display number. Killing the shell role
+preserved the same compositor and KCalc process. Three shell failures inside the 30-second health window produced
 the compositor-owned recovery panel over an opaque output; semantic Enter replaced the shell and
 cleared recovery without restarting the compositor. A second recovery run used semantic Escape;
 the compositor exited normally and reaped the replacement shell, XWayland, and native test client.
 This is development evidence only; the same failure matrix still requires an SDDM-launched session.
 
 On 2026-08-30, recovery pointer acceptance used the compositor's production panel layout rather
-than copied coordinates. After three `SIGKILL` shell failures, clicking Retry replaced shell PID
+than copied coordinates. After three `SIGKILL` shell-role failures, clicking Retry replaced shell PID
 `1309903` with `1311200` and restored all nine registered shell surfaces. A second three-failure
 cycle clicked Log out safely; the nested compositor, shell, and XWayland PIDs all exited. Recovery
 pointer motion remained compositor-owned and was never forwarded to an application client.

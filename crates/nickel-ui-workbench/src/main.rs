@@ -218,7 +218,7 @@ macro_rules! shell_external_fixture {
             description: $description,
             tags: &["shell", "production", "external-provider"],
             source: FixtureSource {
-                crate_name: "nickel-shell",
+                crate_name: "nickel",
                 file: "src/workbench_fixtures.rs",
                 line: 1,
             },
@@ -228,7 +228,7 @@ macro_rules! shell_external_fixture {
         };
         const $provider: ExternalFixtureProvider = ExternalFixtureProvider {
             protocol_version: 1,
-            cargo_package: "nickel-shell",
+            cargo_package: "nickel",
             workbench_feature: "shell-provider",
         };
     };
@@ -4339,7 +4339,7 @@ mod tests {
         ] {
             let entry = fixture_entry(id).expect("external shell metadata");
             assert!(entry.is_external(), "{id} must stay lazy by default");
-            assert_eq!(entry.metadata.source.crate_name, "nickel-shell");
+            assert_eq!(entry.metadata.source.crate_name, "nickel");
             assert_eq!(
                 entry.external_provider.unwrap().workbench_feature,
                 "shell-provider"
@@ -4353,7 +4353,7 @@ mod tests {
         for id in ["shell.runtime", "shell.desktop", "shell.launcher-search"] {
             let entry = fixture_entry(id).expect("linked shell fixture");
             assert!(!entry.is_external(), "{id} must be production-backed");
-            assert_eq!(entry.metadata.source.crate_name, "nickel-shell");
+            assert_eq!(entry.metadata.source.crate_name, "nickel");
         }
     }
 

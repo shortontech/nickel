@@ -15,7 +15,6 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
     fs::create_dir(&release).expect("release directory");
     for binary in [
         "nickel-login",
-        "nickel-session",
         "nickel",
         "nickel-settings",
         "nickel-terminal",
@@ -23,10 +22,10 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
         executable(&release.join(binary));
     }
     fs::write(
-        release.join("nickel-session"),
+        release.join("nickel"),
         b"#!/bin/sh\n[ \"$1\" = --available-backends ] && echo udev\n",
     )
-    .expect("write fixture session executable");
+    .expect("write fixture Nickel executable");
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -43,13 +42,12 @@ fn installer_stages_self_contained_sddm_session_from_any_working_directory() {
 
     for binary in [
         "nickel-login",
-        "nickel-session",
         "nickel",
         "nickel-settings",
         "nickel-terminal",
     ] {
         let installed = root.join("usr/local/bin").join(binary);
-        let expected: &[u8] = if binary == "nickel-session" {
+        let expected: &[u8] = if binary == "nickel" {
             b"#!/bin/sh\n[ \"$1\" = --available-backends ] && echo udev\n"
         } else {
             b"fixture"
@@ -114,15 +112,14 @@ fn installer_rejects_session_without_native_backend() {
     fs::create_dir(&release).expect("release directory");
     for binary in [
         "nickel-login",
-        "nickel-session",
         "nickel",
         "nickel-settings",
         "nickel-terminal",
     ] {
         executable(&release.join(binary));
     }
-    fs::write(release.join("nickel-session"), b"#!/bin/sh\nexit 0\n")
-        .expect("write fixture session executable");
+    fs::write(release.join("nickel"), b"#!/bin/sh\nexit 0\n")
+        .expect("write fixture Nickel executable");
 
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -135,5 +132,5 @@ fn installer_rejects_session_without_native_backend() {
         .expect("run installer");
 
     assert!(!status.success());
-    assert!(!root.join("usr/local/bin/nickel-session").exists());
+    assert!(!root.join("usr/local/bin/nickel").exists());
 }

@@ -80,8 +80,8 @@ fn logical_rectangle_and_intersection_have_one_shared_authority() {
 
     for consumer in [
         "crates/nickel-core/src/dpi.rs",
-        "crates/nickel-session/src/shell_layout.rs",
-        "crates/nickel-shell/src/platform/linux.rs",
+        "crates/nickel/src/session/shell_layout.rs",
+        "crates/nickel/src/platform/linux.rs",
     ] {
         let source = fs::read_to_string(root.join(consumer)).unwrap();
         assert!(
@@ -90,7 +90,7 @@ fn logical_rectangle_and_intersection_have_one_shared_authority() {
         );
     }
     let shell_layout =
-        fs::read_to_string(root.join("crates/nickel-session/src/shell_layout.rs")).unwrap();
+        fs::read_to_string(root.join("crates/nickel/src/session/shell_layout.rs")).unwrap();
     assert!(shell_layout.contains("nickel_core::geometry::LogicalRect"));
 }
 

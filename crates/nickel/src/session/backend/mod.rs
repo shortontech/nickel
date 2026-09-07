@@ -89,7 +89,7 @@ impl SessionArguments {
                 Some("--test-control") => test_control = true,
                 _ => {
                     return Err(format!(
-                        "unexpected argument {}; usage: nickel-session [--backend winit|udev] [--test-control] [--command PROGRAM [ARG ...]]",
+                        "unexpected argument {}; usage: nickel [--backend winit|udev] [--test-control] [--command PROGRAM [ARG ...]]",
                         argument.to_string_lossy()
                     )
                     .into());
