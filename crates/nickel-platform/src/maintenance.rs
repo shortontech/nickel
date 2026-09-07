@@ -787,15 +787,60 @@ fn run_windows_update_action(script: &str) -> Result<MaintenanceOutcome, Mainten
 #[cfg(target_os = "windows")]
 fn run_windows_install_updates() -> Result<MaintenanceOutcome, MaintenanceError> {
     let output = windows_powershell(
-        "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');$u=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $q.Updates){if(-not $i.EulaAccepted){[Console]::Out.WriteLine('CONSENT_REQUIRED');return};$null=$u.Add($i)};if($u.Count -gt 0){$d=$s.CreateUpdateDownloader();$d.Updates=$u;$null=$d.Download();$ready=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $u){if($i.IsDownloaded){$null=$ready.Add($i)}};if($ready.Count -gt 0){$installer=$s.CreateUpdateInstaller();$installer.Updates=$ready;$null=$installer.Install()}}",
+        "$ErrorActionPreference='Stop';$s=New-Object -ComObject Microsoft.Update.Session;$q=$s.CreateUpdateSearcher().Search('IsInstalled=0 and IsHidden=0');$u=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $q.Updates){if(-not $i.EulaAccepted){[Console]::Out.WriteLine('CONSENT_REQUIRED');return};$null=$u.Add($i)};if($u.Count -eq 0){[Console]::Out.WriteLine('NO_UPDATES');return};$d=$s.CreateUpdateDownloader();$d.Updates=$u;$dr=$d.Download();[Console]::Out.WriteLine('DOWNLOAD_RESULT:'+([int]$dr.ResultCode));if(([int]$dr.ResultCode)-notin 2,3){return};$ready=New-Object -ComObject Microsoft.Update.UpdateColl;foreach($i in $u){if($i.IsDownloaded){$null=$ready.Add($i)}};if($ready.Count -eq 0){[Console]::Out.WriteLine('NO_READY_UPDATES');return};$installer=$s.CreateUpdateInstaller();$installer.Updates=$ready;$ir=$installer.Install();[Console]::Out.WriteLine('INSTALL_RESULT:'+([int]$ir.ResultCode))",
     )?;
-    if output.lines().any(|line| line.trim() == "CONSENT_REQUIRED") {
-        windows_native_consent(
+    match parse_windows_install_result(&output)? {
+        MaintenanceOutcome::NativeConsentRequired { .. } => windows_native_consent(
             "ms-settings:windowsupdate",
             "Windows Update requires license consent",
-        )
-    } else {
+        ),
+        outcome => Ok(outcome),
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_install_result(output: &str) -> Result<MaintenanceOutcome, MaintenanceError> {
+    if output.lines().any(|line| line.trim() == "CONSENT_REQUIRED") {
+        return Ok(MaintenanceOutcome::NativeConsentRequired {
+            detail: "Windows Update requires license consent".into(),
+        });
+    }
+    if output.lines().any(|line| line.trim() == "NO_UPDATES") {
+        return Ok(MaintenanceOutcome::Accepted);
+    }
+    for (phase, marker) in [
+        ("download", "DOWNLOAD_RESULT:"),
+        ("installation", "INSTALL_RESULT:"),
+    ] {
+        if let Some(code) = output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(marker))
+            .and_then(|value| value.parse::<u8>().ok())
+            && code != 2
+        {
+            return Err(MaintenanceError {
+                class: if code == 5 {
+                    MaintenanceFailureClass::Cancelled
+                } else {
+                    MaintenanceFailureClass::Unknown
+                },
+                detail: format!("Windows Update {phase} returned operation result {code}"),
+            });
+        }
+    }
+    if output.lines().any(|line| line.trim() == "NO_READY_UPDATES") {
+        return Err(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: "Windows Update downloaded no installable updates".into(),
+        });
+    }
+    if output.lines().any(|line| line.trim() == "INSTALL_RESULT:2") {
         Ok(MaintenanceOutcome::Accepted)
+    } else {
+        Err(MaintenanceError {
+            class: MaintenanceFailureClass::Unknown,
+            detail: "Windows Update returned no terminal installation result".into(),
+        })
     }
 }
 
@@ -1281,6 +1326,41 @@ mod tests {
             ),
         ] {
             assert_eq!(classify_command_failure(code, diagnostic), expected);
+        }
+    }
+
+    #[test]
+    fn windows_update_operation_results_cannot_masquerade_as_acceptance() {
+        assert_eq!(
+            parse_windows_install_result("NO_UPDATES\n").unwrap(),
+            MaintenanceOutcome::Accepted
+        );
+        assert_eq!(
+            parse_windows_install_result("DOWNLOAD_RESULT:2\nINSTALL_RESULT:2\n").unwrap(),
+            MaintenanceOutcome::Accepted
+        );
+        assert!(matches!(
+            parse_windows_install_result("CONSENT_REQUIRED\n").unwrap(),
+            MaintenanceOutcome::NativeConsentRequired { .. }
+        ));
+
+        for (output, class) in [
+            ("DOWNLOAD_RESULT:5\n", MaintenanceFailureClass::Cancelled),
+            (
+                "DOWNLOAD_RESULT:3\nINSTALL_RESULT:2\n",
+                MaintenanceFailureClass::Unknown,
+            ),
+            (
+                "DOWNLOAD_RESULT:2\nINSTALL_RESULT:4\n",
+                MaintenanceFailureClass::Unknown,
+            ),
+            ("NO_READY_UPDATES\n", MaintenanceFailureClass::Unknown),
+            ("", MaintenanceFailureClass::Unknown),
+        ] {
+            assert_eq!(
+                parse_windows_install_result(output).unwrap_err().class,
+                class
+            );
         }
     }
 
