@@ -3,8 +3,9 @@
 use std::collections::BTreeMap;
 
 use nickel_ui::{
-    Application, DamageRegion, HostBatch, HostEvent, InternalSurfaceId, InternalSurfaceSet,
-    Point as UiPoint, SoftwareRenderer, Text, UiEvent, View, ViewContext,
+    Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
+    InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer, Text, UiEvent, View,
+    ViewContext,
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 use smithay::{
@@ -87,13 +88,15 @@ pub struct InternalUiRendererDiagnostics {
     pub gpu_frames: u64,
     pub fallback_frames: u64,
     pub fallback_primitive_count: usize,
+    pub fallback_text_count: usize,
+    pub fallback_image_count: usize,
 }
 
 /// Nickel display-list adapter for Smithay's renderer element API.
 ///
-/// Rectangular fills and strokes become solid render elements and never enter
-/// the software rasterizer. Rounded geometry, gradients, text, and images use
-/// one bounded full-surface upload until dedicated GPU primitives are added.
+/// Geometry and gradients become solid render elements and never enter the
+/// software rasterizer. Text and images use one bounded full-surface upload
+/// until dedicated texture primitives are added.
 pub struct SmithayFrameRenderer {
     software: SoftwareRenderer,
     solids: Vec<(nickel_ui::Rect, SolidColorBuffer)>,
@@ -127,6 +130,9 @@ impl SmithayFrameRenderer {
                 command,
                 PaintCommand::Fill { .. }
                     | PaintCommand::OverlayFill { .. }
+                    | PaintCommand::TopRoundedFill { .. }
+                    | PaintCommand::RoundedFill { .. }
+                    | PaintCommand::Gradient { .. }
                     | PaintCommand::Stroke { .. }
                     | PaintCommand::OverlayStroke { .. }
                     | PaintCommand::PushClip(_)
@@ -147,6 +153,91 @@ impl SmithayFrameRenderer {
             .push((rect, SolidColorBuffer::new(size, color32f(color))));
     }
 
+    fn push_rounded_solid(
+        &mut self,
+        rect: nickel_ui::Rect,
+        color: u32,
+        radius: f32,
+        top_only: bool,
+        clip: nickel_ui::Rect,
+    ) {
+        let radius = radius
+            .max(0.0)
+            .min(rect.size.width / 2.0)
+            .min(rect.size.height / 2.0);
+        if radius < 0.5 {
+            self.push_solid(rect, color, clip);
+            return;
+        }
+        // One logical-pixel strip per row gives the same pixel-centre circle
+        // rule as SoftwareRenderer while keeping the result renderer-native.
+        let rows = rect.size.height.ceil().max(1.0) as u32;
+        for row in 0..rows {
+            let y = row as f32;
+            let height = (rect.size.height - y).clamp(0.0, 1.0);
+            if height == 0.0 {
+                continue;
+            }
+            let sample_y = y + height / 2.0;
+            let corner_y = if sample_y < radius {
+                Some(radius - sample_y)
+            } else if !top_only && sample_y > rect.size.height - radius {
+                Some(sample_y - (rect.size.height - radius))
+            } else {
+                None
+            };
+            let inset = corner_y
+                .map(|dy| radius - (radius * radius - dy * dy).max(0.0).sqrt())
+                .unwrap_or(0.0);
+            self.push_solid(
+                nickel_ui::Rect::new(
+                    rect.origin.x + inset,
+                    rect.origin.y + y,
+                    (rect.size.width - inset * 2.0).max(0.0),
+                    height,
+                ),
+                color,
+                clip,
+            );
+        }
+    }
+
+    fn push_gradient(
+        &mut self,
+        rect: nickel_ui::Rect,
+        gradient: LinearGradient,
+        clip: nickel_ui::Rect,
+    ) {
+        let (steps, horizontal) = match gradient.axis {
+            GradientAxis::Horizontal => (rect.size.width.ceil().max(1.0) as u32, true),
+            GradientAxis::Vertical => (rect.size.height.ceil().max(1.0) as u32, false),
+        };
+        for step in 0..steps {
+            let progress = if steps <= 1 {
+                0.0
+            } else {
+                step as f32 / (steps - 1) as f32
+            };
+            let color = interpolate_color(gradient.start, gradient.end, progress);
+            let strip = if horizontal {
+                nickel_ui::Rect::new(
+                    rect.origin.x + step as f32,
+                    rect.origin.y,
+                    (rect.size.width - step as f32).min(1.0),
+                    rect.size.height,
+                )
+            } else {
+                nickel_ui::Rect::new(
+                    rect.origin.x,
+                    rect.origin.y + step as f32,
+                    rect.size.width,
+                    (rect.size.height - step as f32).min(1.0),
+                )
+            };
+            self.push_solid(strip, color, clip);
+        }
+    }
+
     fn prepare_gpu(&mut self, frame: RenderFrame<'_>) {
         self.solids.clear();
         let viewport = nickel_ui::Rect::new(
@@ -161,6 +252,19 @@ impl SmithayFrameRenderer {
             match command {
                 PaintCommand::Fill { rect, color } | PaintCommand::OverlayFill { rect, color } => {
                     self.push_solid(*rect, *color, clip)
+                }
+                PaintCommand::TopRoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => self.push_rounded_solid(*rect, *color, *radius, true, clip),
+                PaintCommand::RoundedFill {
+                    rect,
+                    color,
+                    radius,
+                } => self.push_rounded_solid(*rect, *color, *radius, false, clip),
+                PaintCommand::Gradient { rect, gradient } => {
+                    self.push_gradient(*rect, *gradient, clip)
                 }
                 PaintCommand::Stroke { rect, color, width }
                 | PaintCommand::OverlayStroke { rect, color, width } => {
@@ -291,6 +395,9 @@ impl FrameRenderer for SmithayFrameRenderer {
         let damage = if Self::supports_gpu(frame.commands) {
             self.mode = InternalUiPresentationMode::GpuSolid;
             self.diagnostics.gpu_frames += 1;
+            self.diagnostics.fallback_primitive_count = 0;
+            self.diagnostics.fallback_text_count = 0;
+            self.diagnostics.fallback_image_count = 0;
             self.prepare_gpu(frame);
             DamageRegion {
                 rects: [nickel_ui::Rect::new(
@@ -305,7 +412,23 @@ impl FrameRenderer for SmithayFrameRenderer {
         } else {
             self.mode = InternalUiPresentationMode::RasterFallback;
             self.diagnostics.fallback_frames += 1;
-            self.diagnostics.fallback_primitive_count = frame.commands.len();
+            self.diagnostics.fallback_text_count = frame
+                .commands
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        PaintCommand::Text { .. } | PaintCommand::StyledText { .. }
+                    )
+                })
+                .count();
+            self.diagnostics.fallback_image_count = frame
+                .commands
+                .iter()
+                .filter(|command| matches!(command, PaintCommand::Image { .. }))
+                .count();
+            self.diagnostics.fallback_primitive_count =
+                self.diagnostics.fallback_text_count + self.diagnostics.fallback_image_count;
             self.prepare_fallback(frame)
         };
         Ok(damage)
@@ -332,6 +455,31 @@ fn color32f(color: u32) -> Color32F {
         (color & 0xff) as f32 / 255.0,
         alpha as f32 / 255.0,
     )
+}
+
+fn interpolate_color(start: u32, end: u32, progress: f32) -> u32 {
+    let channels = |color: u32| {
+        let alpha = if color <= 0x00ff_ffff {
+            0xff
+        } else {
+            (color >> 24) & 0xff
+        };
+        [
+            alpha,
+            (color >> 16) & 0xff,
+            (color >> 8) & 0xff,
+            color & 0xff,
+        ]
+    };
+    let start = channels(start);
+    let end = channels(end);
+    let mut result = 0;
+    for (shift, channel) in [24, 16, 8, 0].into_iter().zip(0..4) {
+        let value =
+            start[channel] as f32 + (end[channel] as f32 - start[channel] as f32) * progress;
+        result |= (value.round() as u32) << shift;
+    }
+    result
 }
 
 /// Session-owned applications and their compositor presentation state.
@@ -895,7 +1043,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_primitive_selects_bounded_raster_fallback() {
+    fn rounded_fill_stays_on_gpu_as_scanline_solids() {
         let commands = [PaintCommand::RoundedFill {
             rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
             color: 0x336699,
@@ -912,10 +1060,37 @@ mod tests {
             })
             .unwrap();
 
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert!(renderer.raster.is_none());
+        assert_eq!(renderer.solids.len(), 12);
+        assert!(renderer.solids[0].0.size.width < 20.0);
+        assert_eq!(renderer.solids[6].0.size.width, 20.0);
+    }
+
+    #[test]
+    fn text_fallback_reports_the_remaining_primitive_cause() {
+        let commands = [PaintCommand::Text {
+            bounds: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
+            text: "Nickel".into(),
+            scale: 1.0,
+            color: 0x336699,
+            align: nickel_ui::TextAlign::Start,
+            bold: false,
+            wrap: false,
+        }];
+        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (20, 12),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
         assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
-        assert!(renderer.raster.is_some());
-        assert!(renderer.solids.is_empty());
-        assert_eq!(renderer.diagnostics().fallback_frames, 1);
-        assert_eq!(renderer.diagnostics().fallback_primitive_count, 1);
+        assert_eq!(renderer.diagnostics().fallback_text_count, 1);
+        assert_eq!(renderer.diagnostics().fallback_image_count, 0);
     }
 }
