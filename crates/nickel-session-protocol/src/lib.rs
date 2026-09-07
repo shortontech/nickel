@@ -473,7 +473,7 @@ pub enum ServerMessage {
     IdleInhibition {
         surfaces: u16,
     },
-    CacheDiagnostics(CacheDiagnostics),
+    CacheDiagnostics(Box<CacheDiagnostics>),
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),

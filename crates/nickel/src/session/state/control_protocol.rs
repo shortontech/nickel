@@ -259,103 +259,115 @@ impl NickelSession {
                     .as_ref()
                     .map(crate::session::backend::udev::UdevData::identify_badge_diagnostics)
                     .unwrap_or_default();
-                ServerMessage::CacheDiagnostics(nickel_session_protocol::CacheDiagnostics {
-                    internal_ui_surfaces: u16::try_from(internal_ui.surfaces).unwrap_or(u16::MAX),
-                    internal_ui_gpu_frames: internal_ui.gpu_frames,
-                    internal_ui_fallback_frames: internal_ui.fallback_frames,
-                    internal_ui_software_frame_bytes: internal_ui.software_frame_bytes as u64,
-                    internal_ui_fallback_raster_bytes: internal_ui.fallback_raster_bytes as u64,
-                    internal_ui_image_cache_entries: u16::try_from(internal_ui.image_cache_entries)
+                ServerMessage::CacheDiagnostics(Box::new(
+                    nickel_session_protocol::CacheDiagnostics {
+                        internal_ui_surfaces: u16::try_from(internal_ui.surfaces)
+                            .unwrap_or(u16::MAX),
+                        internal_ui_gpu_frames: internal_ui.gpu_frames,
+                        internal_ui_fallback_frames: internal_ui.fallback_frames,
+                        internal_ui_software_frame_bytes: internal_ui.software_frame_bytes as u64,
+                        internal_ui_fallback_raster_bytes: internal_ui.fallback_raster_bytes as u64,
+                        internal_ui_image_cache_entries: u16::try_from(
+                            internal_ui.image_cache_entries,
+                        )
                         .unwrap_or(u16::MAX),
-                    internal_ui_image_cache_bytes: internal_ui.image_cache_bytes as u64,
-                    internal_ui_text_cache_entries: u16::try_from(internal_ui.text_cache_entries)
+                        internal_ui_image_cache_bytes: internal_ui.image_cache_bytes as u64,
+                        internal_ui_text_cache_entries: u16::try_from(
+                            internal_ui.text_cache_entries,
+                        )
                         .unwrap_or(u16::MAX),
-                    internal_ui_text_cache_bytes: internal_ui.text_cache_bytes as u64,
-                    internal_ui_texture_import_failures: internal_ui.texture_import_failures,
-                    internal_ui_fallback_import_failures: internal_ui.fallback_import_failures,
-                    internal_shell_wallpaper_entries: u16::try_from(shell_images.wallpaper_entries)
+                        internal_ui_text_cache_bytes: internal_ui.text_cache_bytes as u64,
+                        internal_ui_texture_import_failures: internal_ui.texture_import_failures,
+                        internal_ui_fallback_import_failures: internal_ui.fallback_import_failures,
+                        internal_shell_wallpaper_entries: u16::try_from(
+                            shell_images.wallpaper_entries,
+                        )
                         .unwrap_or(u16::MAX),
-                    internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
-                    preview_entries: u16::try_from(self.preview_frames.len()).unwrap_or(u16::MAX),
-                    preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
-                    preview_bytes: self.preview_bytes() as u64,
-                    preview_byte_capacity: PREVIEW_BYTE_CAPACITY as u64,
-                    preview_peak_bytes: self.preview_counters.peak_bytes,
-                    preview_admissions: self.preview_counters.admissions,
-                    preview_evictions: self.preview_counters.evictions,
-                    preview_invalidations: self.preview_counters.invalidations,
-                    preview_captures: self.preview_counters.captures,
-                    preview_skipped_unchanged: self.preview_counters.skipped_unchanged,
-                    preview_readback_bytes: self.preview_counters.readback_bytes,
-                    preview_protocol_copy_bytes: self.preview_counters.protocol_copy_bytes,
-                    preview_protocol_raw_copy_bytes: self.preview_counters.protocol_raw_copy_bytes,
-                    preview_protocol_base64_bytes: self.preview_counters.protocol_base64_bytes,
-                    preview_protocol_json_payload_bytes: self
-                        .preview_counters
-                        .protocol_json_payload_bytes,
-                    preview_protocol_framed_copy_bytes: self
-                        .preview_counters
-                        .protocol_framed_copy_bytes,
-                    preview_capture_failures: self.preview_counters.capture_failures,
-                    preview_cache_generation: self.preview_counters.cache_generation,
-                    metadata_entries: u16::try_from(metadata.entries).unwrap_or(u16::MAX),
-                    metadata_title_bytes: metadata.title_bytes as u64,
-                    metadata_peak_title_bytes: metadata.peak_title_bytes as u64,
-                    metadata_app_id_bytes: metadata.app_id_bytes as u64,
-                    metadata_peak_app_id_bytes: metadata.peak_app_id_bytes as u64,
-                    metadata_truncations: metadata.truncations,
-                    metadata_canonicalizations: metadata.canonicalizations,
-                    metadata_updates: metadata.updates,
-                    metadata_live_snapshot_bytes: metadata.live_snapshot_bytes as u64,
-                    metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,
-                    titlebar_entries: u16::try_from(titlebar.entries).unwrap_or(u16::MAX),
-                    titlebar_live_bytes: titlebar.live_bytes as u64,
-                    titlebar_peak_bytes: titlebar.peak_bytes as u64,
-                    titlebar_hits: titlebar.hits,
-                    titlebar_misses: titlebar.misses,
-                    titlebar_rasterizations: titlebar.rasterizations,
-                    titlebar_avoided_rasterizations: titlebar.avoided_rasterizations,
-                    titlebar_evictions: titlebar.evictions,
-                    titlebar_generation: titlebar.generation,
-                    titlebar_font_database_loads: titlebar.font_database_loads,
-                    titlebar_renderer_bytes: titlebar.renderer_bytes.map(|bytes| bytes as u64),
-                    recovery_entries: u16::try_from(recovery.entries).unwrap_or(u16::MAX),
-                    recovery_live_bytes: recovery.live_bytes as u64,
-                    recovery_peak_bytes: recovery.peak_bytes as u64,
-                    recovery_rasterizations: recovery.rasterizations,
-                    recovery_avoided_rasterizations: recovery.avoided_rasterizations,
-                    recovery_evictions: recovery.evictions,
-                    recovery_generation: recovery.generation,
-                    recovery_renderer_bytes: recovery.renderer_bytes.map(|bytes| bytes as u64),
-                    #[cfg(feature = "backend-udev")]
-                    identify_entries: u16::try_from(identify.entries).unwrap_or(u16::MAX),
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_entries: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_live_bytes: identify.live_bytes as u64,
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_live_bytes: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_peak_bytes: identify.peak_bytes as u64,
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_peak_bytes: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_rasterizations: identify.rasterizations,
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_rasterizations: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_avoided_rasterizations: identify.avoided_rasterizations,
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_avoided_rasterizations: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_evictions: identify.evictions,
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_evictions: 0,
-                    #[cfg(feature = "backend-udev")]
-                    identify_renderer_bytes: identify.renderer_bytes.map(|bytes| bytes as u64),
-                    #[cfg(not(feature = "backend-udev"))]
-                    identify_renderer_bytes: None,
-                })
+                        internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
+                        preview_entries: u16::try_from(self.preview_frames.len())
+                            .unwrap_or(u16::MAX),
+                        preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
+                        preview_bytes: self.preview_bytes() as u64,
+                        preview_byte_capacity: PREVIEW_BYTE_CAPACITY as u64,
+                        preview_peak_bytes: self.preview_counters.peak_bytes,
+                        preview_admissions: self.preview_counters.admissions,
+                        preview_evictions: self.preview_counters.evictions,
+                        preview_invalidations: self.preview_counters.invalidations,
+                        preview_captures: self.preview_counters.captures,
+                        preview_skipped_unchanged: self.preview_counters.skipped_unchanged,
+                        preview_readback_bytes: self.preview_counters.readback_bytes,
+                        preview_protocol_copy_bytes: self.preview_counters.protocol_copy_bytes,
+                        preview_protocol_raw_copy_bytes: self
+                            .preview_counters
+                            .protocol_raw_copy_bytes,
+                        preview_protocol_base64_bytes: self.preview_counters.protocol_base64_bytes,
+                        preview_protocol_json_payload_bytes: self
+                            .preview_counters
+                            .protocol_json_payload_bytes,
+                        preview_protocol_framed_copy_bytes: self
+                            .preview_counters
+                            .protocol_framed_copy_bytes,
+                        preview_capture_failures: self.preview_counters.capture_failures,
+                        preview_cache_generation: self.preview_counters.cache_generation,
+                        metadata_entries: u16::try_from(metadata.entries).unwrap_or(u16::MAX),
+                        metadata_title_bytes: metadata.title_bytes as u64,
+                        metadata_peak_title_bytes: metadata.peak_title_bytes as u64,
+                        metadata_app_id_bytes: metadata.app_id_bytes as u64,
+                        metadata_peak_app_id_bytes: metadata.peak_app_id_bytes as u64,
+                        metadata_truncations: metadata.truncations,
+                        metadata_canonicalizations: metadata.canonicalizations,
+                        metadata_updates: metadata.updates,
+                        metadata_live_snapshot_bytes: metadata.live_snapshot_bytes as u64,
+                        metadata_peak_snapshot_bytes: metadata.peak_snapshot_bytes as u64,
+                        titlebar_entries: u16::try_from(titlebar.entries).unwrap_or(u16::MAX),
+                        titlebar_live_bytes: titlebar.live_bytes as u64,
+                        titlebar_peak_bytes: titlebar.peak_bytes as u64,
+                        titlebar_hits: titlebar.hits,
+                        titlebar_misses: titlebar.misses,
+                        titlebar_rasterizations: titlebar.rasterizations,
+                        titlebar_avoided_rasterizations: titlebar.avoided_rasterizations,
+                        titlebar_evictions: titlebar.evictions,
+                        titlebar_generation: titlebar.generation,
+                        titlebar_font_database_loads: titlebar.font_database_loads,
+                        titlebar_renderer_bytes: titlebar.renderer_bytes.map(|bytes| bytes as u64),
+                        recovery_entries: u16::try_from(recovery.entries).unwrap_or(u16::MAX),
+                        recovery_live_bytes: recovery.live_bytes as u64,
+                        recovery_peak_bytes: recovery.peak_bytes as u64,
+                        recovery_rasterizations: recovery.rasterizations,
+                        recovery_avoided_rasterizations: recovery.avoided_rasterizations,
+                        recovery_evictions: recovery.evictions,
+                        recovery_generation: recovery.generation,
+                        recovery_renderer_bytes: recovery.renderer_bytes.map(|bytes| bytes as u64),
+                        #[cfg(feature = "backend-udev")]
+                        identify_entries: u16::try_from(identify.entries).unwrap_or(u16::MAX),
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_entries: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_live_bytes: identify.live_bytes as u64,
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_live_bytes: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_peak_bytes: identify.peak_bytes as u64,
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_peak_bytes: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_rasterizations: identify.rasterizations,
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_rasterizations: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_avoided_rasterizations: identify.avoided_rasterizations,
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_avoided_rasterizations: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_evictions: identify.evictions,
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_evictions: 0,
+                        #[cfg(feature = "backend-udev")]
+                        identify_renderer_bytes: identify.renderer_bytes.map(|bytes| bytes as u64),
+                        #[cfg(not(feature = "backend-udev"))]
+                        identify_renderer_bytes: None,
+                    },
+                ))
             }
             Query::Workspaces => ServerMessage::Workspaces(self.protocol_workspaces()),
             Query::ShellBehavior => {
