@@ -691,6 +691,11 @@ impl LiveShell {
             None
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn codex_available(&self) -> bool {
+        self.launcher.codex_available()
+    }
     pub fn new() -> Result<Self, String> {
         Self::new_with_hosts(default_session_host(), default_file_window_host())
     }

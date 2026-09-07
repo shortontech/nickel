@@ -103,6 +103,22 @@ impl InternalShellCoordinator {
         self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
     }
 
+    pub fn apply_codex_projection(
+        &mut self,
+        projection: nickel_core::optional_features::CodexAvailabilityProjection,
+    ) -> bool {
+        self.shell.apply_codex_projection(projection)
+    }
+
+    pub fn take_requested_codex_project(&mut self) -> Option<String> {
+        self.shell.take_requested_codex_project()
+    }
+
+    #[cfg(test)]
+    fn codex_available(&self) -> bool {
+        self.shell.codex_available()
+    }
+
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
         let mut desired = Vec::new();
         for output in outputs {
@@ -378,6 +394,29 @@ mod tests {
             [coordinator.surface(SurfaceRole::Launcher, None).unwrap().id]
         );
         assert!(coordinator.refresh_system().is_empty());
+    }
+
+    #[test]
+    fn compositor_can_publish_codex_availability_to_shell_surfaces() {
+        use nickel_core::optional_features::{
+            CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+        };
+
+        let mut coordinator = coordinator();
+        assert!(!coordinator.codex_available());
+
+        assert!(
+            coordinator.apply_codex_projection(CodexAvailabilityProjection::new(
+                FeatureSupport::Supported,
+                FeatureInstallation::Installed,
+                true,
+                FeatureHealth::Loading,
+                7,
+                Some("Checking the selected Codex backend…".into()),
+            ))
+        );
+
+        assert!(coordinator.codex_available());
     }
 
     #[test]

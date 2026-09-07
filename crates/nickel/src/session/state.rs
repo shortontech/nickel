@@ -627,7 +627,7 @@ impl NickelSession {
     ) -> Result<(), String> {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
-        let shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
         let platform_updates = crate::platform::system_status_receiver();
         let (platform_update_tx, platform_update_rx) =
             smithay::reexports::calloop::channel::channel();
@@ -657,7 +657,25 @@ impl NickelSession {
             .map_err(|error| format!("could not register internal system feed: {error}"))?;
         let feature_settings =
             nickel_core::optional_features::OptionalFeatureSettings::load_default();
-        self.internal_codex = feature_settings.effective_codex_enabled().then(|| {
+        let codex_enabled = feature_settings.effective_codex_enabled();
+        if codex_enabled {
+            use nickel_core::optional_features::{
+                CodexAvailabilityProjection, FeatureHealth, FeatureInstallation, FeatureSupport,
+            };
+            // The in-process host is the selected Codex installation. Publish a
+            // recoverable loading projection before the first menu is opened;
+            // otherwise LiveShell's unavailable default hides the only affordance
+            // capable of starting the host and discovering its real state.
+            shell.apply_codex_projection(CodexAvailabilityProjection::new(
+                FeatureSupport::Supported,
+                FeatureInstallation::Installed,
+                true,
+                FeatureHealth::Loading,
+                feature_settings.codex_generation,
+                Some("Checking the selected Codex backend…".into()),
+            ));
+        }
+        self.internal_codex = codex_enabled.then(|| {
             crate::internal_codex::InternalCodexHost::new(
                 feature_settings.codex_source,
                 shell.semantic_theme(),
@@ -845,6 +863,7 @@ impl NickelSession {
             let actions = shell.drain_file_actions();
             let shell_changed = !changed.is_empty();
             let codex_menu_visible = shell.codex_project_menu_visible();
+            let requested_codex_project = shell.take_requested_codex_project();
             let _ = shell;
             if shell_changed {
                 self.sync_internal_shell();
@@ -870,6 +889,17 @@ impl NickelSession {
             } else if let Some(mut host) = self.internal_codex.take() {
                 if let Some(menu) = host.project_menu() {
                     host.close(&mut self.internal_ui, menu);
+                }
+                self.internal_codex = Some(host);
+            }
+            if let Some(project_id) = requested_codex_project
+                && let Some(mut host) = self.internal_codex.take()
+            {
+                let placement = crate::internal_codex::CodexSurfacePlacement::default();
+                if let Err(error) =
+                    host.open_project_by_id(&mut self.internal_ui, placement, &project_id)
+                {
+                    tracing::warn!(%error, %project_id, "could not open internal Codex project");
                 }
                 self.internal_codex = Some(host);
             }

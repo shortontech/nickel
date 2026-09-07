@@ -156,6 +156,60 @@ impl InternalCodexHost {
         result
     }
 
+    /// Resolve a launcher project identity through the already-owned project
+    /// menu model and open its most recently used thread directly.
+    pub fn open_project_by_id(
+        &mut self,
+        runtime: &mut InternalUiRuntime,
+        placement: CodexSurfacePlacement,
+        project_id: &str,
+    ) -> Result<InternalSurfaceId, String> {
+        let menu = self
+            .project_menu
+            .ok_or_else(|| "Codex project data is still loading".to_owned())?;
+        let (project, initial_thread) = {
+            let state = &runtime
+                .application::<ChatApplication>(menu)
+                .ok_or_else(|| "Codex project menu host is unavailable".to_owned())?
+                .state;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .cloned()
+                .ok_or_else(|| format!("Codex project {project_id} is unavailable"))?;
+            let initial_thread = state
+                .threads
+                .iter()
+                .filter(|thread| {
+                    state
+                        .thread_runtime
+                        .get(&thread.id)
+                        .and_then(|entry| entry.project_id.as_deref())
+                        .map_or_else(
+                            || {
+                                thread.cwd.as_ref().is_some_and(|cwd| {
+                                    project
+                                        .roots
+                                        .iter()
+                                        .any(|root| cwd == root || cwd.starts_with(root))
+                                })
+                            },
+                            |id| id == project.id,
+                        )
+                })
+                .max_by_key(|thread| thread.last_used_at)
+                .map(|thread| thread.id.clone());
+            (project, initial_thread)
+        };
+        let cwd = project
+            .roots
+            .first()
+            .cloned()
+            .ok_or_else(|| format!("Codex project {} has no root", project.id))?;
+        self.open_project(runtime, placement, cwd, project.id, initial_thread)
+    }
+
     /// Feed normalized input, focus, and resize data to an owned application.
     #[allow(dead_code)] // Explicit adapter API for non-routed host batches (IME/clipboard).
     pub fn step(
