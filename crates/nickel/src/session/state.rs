@@ -711,10 +711,26 @@ impl NickelSession {
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
     ) -> Result<(), String> {
+        self.enable_internal_shell_with_system_updates(
+            host,
+            crate::platform::system_status_receiver(),
+        )
+    }
+
+    fn enable_internal_shell_with_system_updates(
+        &mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+        platform_updates: std::sync::mpsc::Receiver<crate::platform::SystemStatusUpdate>,
+    ) -> Result<(), String> {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
         let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
-        let platform_updates = crate::platform::system_status_receiver();
+        // Include the seeded platform snapshot in the initial scenes. Later
+        // transitions remain calloop-driven; forwarded startup duplicates are
+        // state-equal no-ops and cannot create a delayed idle redraw.
+        for update in platform_updates.try_iter() {
+            let _ = shell.apply_system_status_update(update);
+        }
         let (platform_update_tx, platform_update_rx) =
             smithay::reexports::calloop::channel::channel();
         std::thread::Builder::new()
@@ -6284,8 +6300,9 @@ mod protocol_tests {
     fn unchanged_internal_desktop_has_no_sixty_hertz_poll_or_redraw_loop() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (mut event_loop, mut session) = preview_test_session();
+        let (_system_tx, system_rx) = std::sync::mpsc::channel();
         session
-            .enable_internal_shell(Arc::new(IdleInternalHost))
+            .enable_internal_shell_with_system_updates(Arc::new(IdleInternalHost), system_rx)
             .expect("headless internal shell");
 
         // Consume the intentionally immediate initialization wakeup. The

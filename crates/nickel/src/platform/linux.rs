@@ -351,6 +351,11 @@ pub fn system_status_receiver() -> mpsc::Receiver<super::SystemStatusUpdate> {
     use notify::{RecursiveMode, Watcher};
 
     let (sender, receiver) = mpsc::channel();
+    // Seed the consumer synchronously. Forwarder thread scheduling must not
+    // turn initial discovery into a redraw after the first scene settles.
+    let _ = sender.send(super::SystemStatusUpdate::Network(network_status()));
+    let _ = sender.send(super::SystemStatusUpdate::Bluetooth(bluetooth_status()));
+    let _ = sender.send(super::SystemStatusUpdate::Audio(audio_status()));
     let control = linux_control::subscribe();
     let control_sender = sender.clone();
     let _ = thread::Builder::new()
