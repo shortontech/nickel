@@ -65,7 +65,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     nickel_logging::init("nickel-session")?;
 
     let mut arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
-    if arguments.command.is_none() {
+    if arguments.shell_process == backend::ShellProcessMode::Supervised
+        && arguments.command.is_none()
+    {
         arguments.command = Some((
             std::env::current_exe()?.into_os_string(),
             vec![OsString::from("--role"), OsString::from("shell")],
@@ -159,8 +161,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let (supervisor_tx, supervisor_rx) = mpsc::channel();
-    state.set_shell_supervisor(supervisor_tx.clone());
-    let shell_supervisor = if let Some((program, command_arguments)) = arguments.command {
+    let shell_supervisor = if arguments.shell_process == backend::ShellProcessMode::Supervised {
+        state.set_shell_supervisor(supervisor_tx.clone());
+        let (program, command_arguments) = arguments
+            .command
+            .expect("supervised shell process has a default command");
         Some(spawn_supervised(
             program,
             command_arguments,
@@ -175,6 +180,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             },
         )?)
     } else {
+        tracing::info!(
+            "transitional shell process disabled; compositor-owned UI host must provide shell surfaces"
+        );
         None
     };
 
