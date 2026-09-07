@@ -96,32 +96,47 @@ impl InternalShellCoordinator {
     }
 
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
-        self.surfaces = InternalSurfaceSet::new();
-        self.entries.clear();
-        self.indices.clear();
-
+        let mut desired = Vec::new();
         for output in outputs {
             for role in [SurfaceRole::Desktop, SurfaceRole::Panel, SurfaceRole::Lock] {
                 let size = role_size(role, output.width, output.height, self.panel_edge);
-                self.insert(role, Some(output.name.clone()), size);
+                desired.push((role, Some(output.name.clone()), size));
             }
         }
-        let Some(primary) = outputs.first() else {
-            return;
-        };
-        for role in [
-            SurfaceRole::Launcher,
-            SurfaceRole::ControlCenter,
-            SurfaceRole::Notification,
-            SurfaceRole::VolumeOsd,
-            SurfaceRole::WindowPreview,
-            SurfaceRole::WindowContextMenu,
-            SurfaceRole::CodexProjectMenu,
-            SurfaceRole::Screenshot,
-            SurfaceRole::OnScreenKeyboard,
-        ] {
-            let size = role_size(role, primary.width, primary.height, self.panel_edge);
-            self.insert(role, None, size);
+        if let Some(primary) = outputs.first() {
+            for role in [
+                SurfaceRole::Launcher,
+                SurfaceRole::ControlCenter,
+                SurfaceRole::Notification,
+                SurfaceRole::VolumeOsd,
+                SurfaceRole::WindowPreview,
+                SurfaceRole::WindowContextMenu,
+                SurfaceRole::CodexProjectMenu,
+                SurfaceRole::Screenshot,
+                SurfaceRole::OnScreenKeyboard,
+            ] {
+                let size = role_size(role, primary.width, primary.height, self.panel_edge);
+                desired.push((role, None, size));
+            }
+        }
+
+        let mut existing = std::mem::take(&mut self.entries)
+            .into_iter()
+            .map(|surface| ((surface.role, surface.output.clone()), surface))
+            .collect::<HashMap<_, _>>();
+        self.indices.clear();
+        for (role, output, size) in desired {
+            let key = (role, output.clone());
+            if let Some(mut surface) = existing.remove(&key) {
+                surface.size = size;
+                self.indices.insert(key, self.entries.len());
+                self.entries.push(surface);
+            } else {
+                self.insert(role, output, size);
+            }
+        }
+        for surface in existing.into_values() {
+            self.surfaces.remove(surface.id);
         }
     }
 
@@ -306,6 +321,75 @@ mod tests {
         assert_eq!(panel.size, (1280, PANEL_HEIGHT));
         assert!(coordinator.visible(panel.id));
         assert!(!coordinator.visible(coordinator.surface(SurfaceRole::Launcher, None).unwrap().id));
+    }
+
+    #[test]
+    fn topology_reconciliation_preserves_surfaces_for_unchanged_outputs() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[
+            InternalOutput {
+                name: "left".into(),
+                width: 1280,
+                height: 720,
+            },
+            InternalOutput {
+                name: "right".into(),
+                width: 1920,
+                height: 1080,
+            },
+        ]);
+        let left_panel = coordinator
+            .surface(SurfaceRole::Panel, Some("left"))
+            .unwrap()
+            .id;
+        let right_desktop = coordinator
+            .surface(SurfaceRole::Desktop, Some("right"))
+            .unwrap()
+            .id;
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+
+        coordinator.set_outputs(&[
+            InternalOutput {
+                name: "right".into(),
+                width: 1600,
+                height: 900,
+            },
+            InternalOutput {
+                name: "new".into(),
+                width: 1024,
+                height: 768,
+            },
+        ]);
+
+        assert!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("left"))
+                .is_none()
+        );
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("right"))
+                .unwrap()
+                .id,
+            right_desktop
+        );
+        assert_eq!(
+            coordinator.surface(SurfaceRole::Launcher, None).unwrap().id,
+            launcher
+        );
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("right"))
+                .unwrap()
+                .size,
+            (1600, PANEL_HEIGHT)
+        );
+        assert!(
+            !coordinator
+                .surfaces()
+                .iter()
+                .any(|surface| surface.id == left_panel)
+        );
     }
 
     #[test]
