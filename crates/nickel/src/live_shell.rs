@@ -1881,6 +1881,7 @@ impl LiveShell {
                 .values()
                 .filter_map(|host| host.next_deadline())
                 .chain(self.panel_host.next_deadline())
+                .chain(self.panel_deadline)
                 .min(),
         );
         push("lock", self.lock_deadline);
@@ -2078,9 +2079,10 @@ impl LiveShell {
             .map(|(output, _)| output.clone())
             .collect::<Vec<_>>();
         if self
-            .panel_host
-            .next_deadline()
-            .is_some_and(|deadline| now >= deadline)
+            .panel_deadline
+            .into_iter()
+            .chain(self.panel_host.next_deadline())
+            .any(|deadline| now >= deadline)
         {
             due_panels.push(input_output.clone());
         }
@@ -2662,8 +2664,14 @@ impl LiveShell {
             } => {
                 let host = if output.is_none() || output == &self.panel_output {
                     &self.panel_host
+                } else if let Some(host) = self.panel_hosts.get(output) {
+                    host
+                } else if self.panel_output.is_none() && self.panel_hosts.is_empty() {
+                    // The legacy single-panel presenter has no named output
+                    // host. Its requested output is a native routing hint.
+                    &self.panel_host
                 } else {
-                    self.panel_hosts.get(output)?
+                    return None;
                 };
                 let groups = &host.application().groups;
                 let index = groups.iter().take(12).position(|group| {
