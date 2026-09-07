@@ -9,7 +9,11 @@ use std::{
     io::Read,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
+    sync::{
+        Arc, Mutex, OnceLock, RwLock,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant, SystemTime},
 };
 
@@ -196,13 +200,20 @@ impl Default for IndexSnapshot {
 pub(crate) struct ExecutableIndex {
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
     refresh: Arc<mpsc::SyncSender<RefreshReason>>,
+    pending_path_refresh: Arc<Mutex<Option<Option<std::ffi::OsString>>>>,
     _watcher: Arc<Mutex<Option<RecommendedWatcher>>>,
 }
 
 #[derive(Clone, Debug)]
 enum RefreshReason {
     Filesystem,
-    Environment(Option<std::ffi::OsString>),
+}
+
+struct ScanWorkerRefresh {
+    watcher: std::sync::Weak<Mutex<Option<RecommendedWatcher>>>,
+    sender: std::sync::Weak<mpsc::SyncSender<RefreshReason>>,
+    filesystem_dirty: Arc<AtomicBool>,
+    pending_path: Arc<Mutex<Option<Option<std::ffi::OsString>>>>,
 }
 
 impl ExecutableIndex {
@@ -210,13 +221,21 @@ impl ExecutableIndex {
         let snapshot = Arc::new(RwLock::new(Arc::new(IndexSnapshot::default())));
         let (refresh, receiver) = mpsc::sync_channel(1);
         let refresh = Arc::new(refresh);
-        let watcher = path
-            .as_deref()
-            .and_then(|path| watch_effective_path(path, budgets, Arc::clone(&refresh)));
+        let pending_path_refresh = Arc::new(Mutex::new(None));
+        let filesystem_dirty = Arc::new(AtomicBool::new(false));
+        let watcher = path.as_deref().and_then(|path| {
+            watch_effective_path(
+                path,
+                budgets,
+                Arc::clone(&refresh),
+                Arc::clone(&filesystem_dirty),
+            )
+        });
         let watcher = Arc::new(Mutex::new(watcher));
         let worker_snapshot = Arc::clone(&snapshot);
         let worker_watcher = Arc::downgrade(&watcher);
         let worker_refresh = Arc::downgrade(&refresh);
+        let worker_pending_path_refresh = Arc::clone(&pending_path_refresh);
         let _ = std::thread::Builder::new()
             .name("nickel-executable-index".into())
             .spawn(move || {
@@ -225,13 +244,18 @@ impl ExecutableIndex {
                     budgets,
                     worker_snapshot,
                     receiver,
-                    worker_watcher,
-                    worker_refresh,
+                    ScanWorkerRefresh {
+                        watcher: worker_watcher,
+                        sender: worker_refresh,
+                        filesystem_dirty,
+                        pending_path: worker_pending_path_refresh,
+                    },
                 );
             });
         Self {
             snapshot,
             refresh,
+            pending_path_refresh,
             _watcher: watcher,
         }
     }
@@ -256,14 +280,20 @@ impl ExecutableIndex {
 
     #[allow(dead_code)]
     pub(crate) fn request_refresh(&self) {
-        let _ = self
-            .refresh
-            .try_send(RefreshReason::Environment(std::env::var_os("PATH")));
+        *self
+            .pending_path_refresh
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(std::env::var_os("PATH"));
+        let _ = self.refresh.try_send(RefreshReason::Filesystem);
     }
 
     #[cfg(test)]
     fn request_path_refresh(&self, path: Option<std::ffi::OsString>) {
-        let _ = self.refresh.try_send(RefreshReason::Environment(path));
+        *self
+            .pending_path_refresh
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(path);
+        let _ = self.refresh.try_send(RefreshReason::Filesystem);
     }
 }
 
@@ -271,10 +301,12 @@ fn watch_effective_path(
     path: &std::ffi::OsStr,
     budgets: ScanBudgets,
     refresh: Arc<mpsc::SyncSender<RefreshReason>>,
+    filesystem_dirty: Arc<AtomicBool>,
 ) -> Option<RecommendedWatcher> {
     let callback_refresh = refresh;
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if event.is_ok() {
+            filesystem_dirty.store(true, Ordering::Release);
             let _ = callback_refresh.try_send(RefreshReason::Filesystem);
         }
     })
@@ -311,25 +343,46 @@ fn scan_worker(
     budgets: ScanBudgets,
     snapshot: Arc<RwLock<Arc<IndexSnapshot>>>,
     receiver: mpsc::Receiver<RefreshReason>,
-    watcher: std::sync::Weak<Mutex<Option<RecommendedWatcher>>>,
-    refresh: std::sync::Weak<mpsc::SyncSender<RefreshReason>>,
+    refresh: ScanWorkerRefresh,
 ) {
     let mut generation = 1_u64;
     loop {
+        if let Some(updated) = refresh
+            .pending_path
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            replace_path_watcher(
+                &refresh.watcher,
+                &refresh.sender,
+                &refresh.filesystem_dirty,
+                updated.as_deref(),
+                budgets,
+            );
+            path = updated;
+        }
         scan_path_generation_until(path.as_deref(), budgets, generation, &snapshot, || {
-            refresh.upgrade().is_none()
+            refresh.sender.upgrade().is_none()
         });
         generation = generation.saturating_add(1);
+        if refresh.filesystem_dirty.swap(false, Ordering::AcqRel) {
+            continue;
+        }
         match receiver.recv_timeout(Duration::from_secs(30)) {
-            Ok(RefreshReason::Filesystem) => {}
-            Ok(RefreshReason::Environment(updated)) => {
-                replace_path_watcher(&watcher, &refresh, updated.as_deref(), budgets);
-                path = updated;
+            Ok(RefreshReason::Filesystem) => {
+                refresh.filesystem_dirty.swap(false, Ordering::AcqRel);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let updated = std::env::var_os("PATH");
                 if updated != path {
-                    replace_path_watcher(&watcher, &refresh, updated.as_deref(), budgets);
+                    replace_path_watcher(
+                        &refresh.watcher,
+                        &refresh.sender,
+                        &refresh.filesystem_dirty,
+                        updated.as_deref(),
+                        budgets,
+                    );
                     path = updated;
                 }
             }
@@ -341,14 +394,16 @@ fn scan_worker(
 fn replace_path_watcher(
     watcher: &std::sync::Weak<Mutex<Option<RecommendedWatcher>>>,
     refresh: &std::sync::Weak<mpsc::SyncSender<RefreshReason>>,
+    filesystem_dirty: &Arc<AtomicBool>,
     path: Option<&std::ffi::OsStr>,
     budgets: ScanBudgets,
 ) {
     let (Some(watcher), Some(refresh)) = (watcher.upgrade(), refresh.upgrade()) else {
         return;
     };
-    *watcher.lock().unwrap_or_else(|error| error.into_inner()) =
-        path.and_then(|path| watch_effective_path(path, budgets, refresh));
+    *watcher.lock().unwrap_or_else(|error| error.into_inner()) = path.and_then(|path| {
+        watch_effective_path(path, budgets, refresh, Arc::clone(filesystem_dirty))
+    });
 }
 
 fn publish(
@@ -1107,8 +1162,12 @@ mod tests {
                 ScanBudgets::default(),
                 snapshot,
                 receiver,
-                std::sync::Weak::new(),
-                weak_refresh,
+                ScanWorkerRefresh {
+                    watcher: std::sync::Weak::new(),
+                    sender: weak_refresh,
+                    filesystem_dirty: Arc::new(AtomicBool::new(false)),
+                    pending_path: Arc::new(Mutex::new(None)),
+                },
             );
         })
         .join()
