@@ -4,11 +4,13 @@ use nickel_codex::{
     ApprovalPolicy, BackendChoice, CodexSettings, CommandDecision, FileChangeDecision, RemoteHost,
     ServerRequestId,
 };
-use nickel_markdown::{MarkdownPalette, markdown_content_view};
+use nickel_markdown::{MarkdownDocument, MarkdownPalette, markdown_content_view};
 use nickel_ui::SemanticRole;
 use nickel_ui::prelude::*;
 
-use crate::model::{item_label, item_markdown_document};
+use crate::model::item_label;
+#[cfg(test)]
+use crate::model::item_markdown_document;
 use crate::{
     BackendMode, ChatController, ChatItem, ChatItemKind, ChatState, ConnectionStatus,
     ControllerCommand, ControllerEvent, PendingInteraction, create_managed_workspace,
@@ -409,7 +411,14 @@ impl ChatApplication {
 
     pub fn poll_controller(&mut self) -> bool {
         let mut changed = false;
-        while let Some((generation, event)) = self.controller.try_recv() {
+        let started = std::time::Instant::now();
+        for _ in 0..128 {
+            if started.elapsed() >= std::time::Duration::from_millis(4) {
+                break;
+            }
+            let Some((generation, event)) = self.controller.try_recv() else {
+                break;
+            };
             if generation == self.state.generation {
                 match &event {
                     ControllerEvent::ThreadSelected(thread) => {
@@ -1072,7 +1081,11 @@ impl Application for ChatApplication {
 }
 
 #[component]
-fn ItemCard(item: &ChatItem, theme: SemanticTheme) -> impl View<ChatMessage> {
+fn ItemCard(
+    item: &ChatItem,
+    document: std::sync::Arc<MarkdownDocument>,
+    theme: SemanticTheme,
+) -> impl View<ChatMessage> {
     let (background, color) = match &item.kind {
         ChatItemKind::User => (theme.surfaces.selected, theme.text.primary),
         ChatItemKind::Agent => (theme.surfaces.card, theme.text.primary),
@@ -1085,7 +1098,6 @@ fn ItemCard(item: &ChatItem, theme: SemanticTheme) -> impl View<ChatMessage> {
         ChatItemKind::Unknown(_) => (theme.surfaces.card, theme.text.secondary),
     };
     let label = item_label(&item.kind);
-    let document = item_markdown_document(item);
     let label_run_id = format!("{}/label", item.id);
     let (maximum_width, alignment) = if item.kind == ChatItemKind::User {
         (760.0, Align::End)
@@ -1580,7 +1592,7 @@ fn configured_chat_view(
                                     .children(state.items.iter().enumerate()
                                         .skip(transcript_range.start)
                                         .take(transcript_range.len())
-                                        .map(|(_, item)| ui! { <ItemCard key={item.id.clone()} item={item} theme={theme} /> })))}
+                                        .map(|(index, item)| ui! { <ItemCard key={item.id.clone()} item={item} document={state.markdown_document(index)} theme={theme} /> })))}
                         })
                     }}
                 </Column>
@@ -1941,7 +1953,7 @@ mod tests {
         assert!(!document.diagnostics.is_empty());
 
         let tree = UiFrame::layout(
-            ui! { <ItemCard item={&item} theme={semantic_theme()} /> },
+            ui! { <ItemCard item={&item} document={std::sync::Arc::new(item_markdown_document(&item))} theme={semantic_theme()} /> },
             Rect::new(0.0, 0.0, 600.0, 400.0),
         );
         assert!(has_accessible_text(&tree, "Heading"));
@@ -1957,7 +1969,7 @@ mod tests {
             complete: true,
         };
         let tree = UiFrame::layout(
-            ui! { <ItemCard item={&item} theme={semantic_theme()} /> },
+            ui! { <ItemCard item={&item} document={std::sync::Arc::new(item_markdown_document(&item))} theme={semantic_theme()} /> },
             Rect::new(0.0, 0.0, 600.0, 200.0),
         );
         let nodes = tree.resolved_layout().nodes();

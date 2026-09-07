@@ -1,5 +1,5 @@
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
@@ -19,6 +19,97 @@ const MAX_ITEM_ALIASES: usize = 2_000;
 const MAX_DIAGNOSTICS: usize = 100;
 const MAX_THREADS: usize = 200;
 const MAX_PENDING: usize = 32;
+pub const MAX_ITEM_TEXT_BYTES: usize = 256 * 1024;
+pub const MAX_TRANSCRIPT_TEXT_BYTES: usize = 8 * 1024 * 1024;
+const OMISSION_MARKER: &str =
+    "\n\n[Further output omitted from this local view; reload server history.]";
+
+fn bound_text(text: &mut String) {
+    if text.len() > MAX_ITEM_TEXT_BYTES {
+        let mut end = MAX_ITEM_TEXT_BYTES - OMISSION_MARKER.len();
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str(OMISSION_MARKER);
+    }
+    if text.capacity() > MAX_ITEM_TEXT_BYTES {
+        text.shrink_to_fit();
+    }
+}
+
+fn append_bounded(text: &mut String, delta: &str) {
+    if text.ends_with(OMISSION_MARKER) {
+        return;
+    }
+    let mut end = delta
+        .len()
+        .min(MAX_ITEM_TEXT_BYTES.saturating_sub(text.len()) + 1);
+    while !delta.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.push_str(&delta[..end]);
+    if end < delta.len() && text.len() <= MAX_ITEM_TEXT_BYTES {
+        text.push_str(OMISSION_MARKER);
+    }
+    bound_text(text);
+}
+
+#[derive(Clone, Debug, Default)]
+struct ItemProjection {
+    generation: u64,
+    cached: RefCell<Option<DerivedItem>>,
+    builds: Cell<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct DerivedItem {
+    generation: u64,
+    document: Arc<MarkdownDocument>,
+    runs: Vec<SelectionRun>,
+}
+
+impl ItemProjection {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        *self.cached.get_mut() = None;
+    }
+
+    fn ensure(&self, item: &ChatItem) {
+        if self
+            .cached
+            .borrow()
+            .as_ref()
+            .is_some_and(|cached| cached.generation == self.generation)
+        {
+            return;
+        }
+        let mut document = Arc::new(item_markdown_document(item));
+        let mut runs = selection_runs_from_document(item, &document);
+        // Tie derived expansion to the aggregate source budget, including run identifiers.
+        let budget = 2048 + 16 * item.text.capacity() + 4 * item.id.capacity();
+        if crate::projection_memory::derived_capacity(&document, &runs) > budget {
+            let source = format!(
+                "{}\n\n[Formatting omitted from this local view to limit memory use.]",
+                item_markdown_source(item)
+            );
+            document = Arc::new(MarkdownDocument {
+                source: source.clone(),
+                blocks: vec![nickel_markdown::Block::Paragraph {
+                    inlines: vec![nickel_markdown::Inline::Text { text: source }],
+                }],
+                diagnostics: Vec::new(),
+            });
+            runs = selection_runs_from_document(item, &document);
+        }
+        *self.cached.borrow_mut() = Some(DerivedItem {
+            generation: self.generation,
+            document,
+            runs,
+        });
+        self.builds.set(self.builds.get().saturating_add(1));
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionStatus {
@@ -98,13 +189,14 @@ pub struct ChatState {
     /// Backend item IDs that intentionally route into a differently named merged transcript item.
     /// Ordinary item IDs are resolved directly from `items` instead of mirrored in an index.
     item_aliases: VecDeque<(String, String)>,
+    retired_item_ids: VecDeque<String>,
     turn_agent_index: Option<usize>,
     exploration_index: Option<usize>,
     exploration_item_ids: HashSet<String>,
     exploration_reads: HashSet<String>,
     exploration_lists: HashSet<String>,
     exploration_searches: HashSet<String>,
-    item_selection_runs: VecDeque<Vec<SelectionRun>>,
+    item_selection_runs: VecDeque<ItemProjection>,
     selection_revision: u64,
     selection_document_cache: RefCell<(u64, usize, Arc<SelectionDocument>)>,
 }
@@ -143,6 +235,7 @@ impl Default for ChatState {
             collapsed_projects: HashSet::new(),
             local_sequence: 0,
             item_aliases: VecDeque::new(),
+            retired_item_ids: VecDeque::new(),
             turn_agent_index: None,
             exploration_index: None,
             exploration_item_ids: HashSet::new(),
@@ -278,6 +371,33 @@ impl ChatState {
         if generation != self.generation {
             return false;
         }
+        let valid_metadata = match &event {
+            ControllerEvent::ThreadSelected(thread) => thread
+                .turns
+                .iter()
+                .flat_map(|turn| &turn.items)
+                .all(|item| item.id.len() <= 4096 && item.item_type.len() <= 4096),
+            ControllerEvent::Protocol(event) => match &event.kind {
+                EventKind::ItemStarted {
+                    item_id, item_type, ..
+                } => item_id.len() <= 4096 && item_type.len() <= 4096,
+                EventKind::AgentMessageDelta { item_id, .. }
+                | EventKind::CommandOutputDelta { item_id, .. }
+                | EventKind::FileChangeDelta { item_id, .. }
+                | EventKind::PlanDelta { item_id, .. }
+                | EventKind::ReasoningDelta { item_id, .. } => item_id.len() <= 4096,
+                _ => true,
+            },
+            _ => true,
+        };
+        if !valid_metadata {
+            self.status = ConnectionStatus::Disconnected;
+            self.push_diagnostic(
+                "Transcript metadata exceeds local capacity; reconnect and reload server history"
+                    .into(),
+            );
+            return true;
+        }
         match event {
             ControllerEvent::Ready {
                 provenance,
@@ -305,6 +425,10 @@ impl ChatState {
                 self.threads = threads
                     .into_iter()
                     .filter(|thread| seen.insert(thread.id.clone()))
+                    .map(|mut thread| {
+                        thread.turns = Vec::new();
+                        thread
+                    })
                     .collect();
                 self.threads.sort_by(|left, right| {
                     right
@@ -416,6 +540,7 @@ impl ChatState {
         self.item_selection_runs.clear();
         self.invalidate_selection_projection();
         self.item_aliases.clear();
+        self.retired_item_ids.clear();
         self.turn_agent_index = None;
         self.clear_exploration();
         self.pending.clear();
@@ -437,6 +562,7 @@ impl ChatState {
         self.item_selection_runs.clear();
         self.invalidate_selection_projection();
         self.item_aliases.clear();
+        self.retired_item_ids.clear();
         self.pending.clear();
         self.active_turn = None;
         self.interrupt_requested = false;
@@ -444,7 +570,7 @@ impl ChatState {
         self.conversation_pinned = true;
         for turn in &thread.turns {
             self.clear_exploration();
-            let mut turn_agent_index = None;
+            let mut turn_agent_id: Option<String> = None;
             for item in &turn.items {
                 let kind = chat_item_kind(&item.item_type);
                 if kind == ChatItemKind::Command
@@ -455,13 +581,20 @@ impl ChatState {
                         .all(|action| !matches!(action, CommandAction::Unknown))
                 {
                     self.upsert_exploration(&item.id, &item.command_actions);
-                } else if kind == ChatItemKind::Agent && turn_agent_index.is_some() {
-                    let index = turn_agent_index.expect("checked above");
+                } else if kind == ChatItemKind::Agent
+                    && turn_agent_id
+                        .as_deref()
+                        .and_then(|id| self.resolve_item_index(id))
+                        .is_some()
+                {
+                    let index = self
+                        .resolve_item_index(turn_agent_id.as_deref().unwrap())
+                        .unwrap();
                     if !item.text.is_empty() {
                         if !self.items[index].text.is_empty() {
-                            self.items[index].text.push_str("\n\n");
+                            append_bounded(&mut self.items[index].text, "\n\n");
                         }
-                        self.items[index].text.push_str(&item.text);
+                        append_bounded(&mut self.items[index].text, &item.text);
                     }
                     self.register_item_alias(item.id.clone(), index);
                     self.refresh_item_projection(index);
@@ -473,7 +606,7 @@ impl ChatState {
                         complete: true,
                     });
                     if kind == ChatItemKind::Agent {
-                        turn_agent_index = Some(self.items.len() - 1);
+                        turn_agent_id = self.items.back().map(|item| item.id.clone());
                     }
                 }
             }
@@ -505,7 +638,14 @@ impl ChatState {
                 self.active_turn = Some(turn_id);
                 self.interrupt_requested = false;
             }
-            EventKind::TurnCompleted { .. } => {
+            EventKind::TurnCompleted { turn_id, .. } => {
+                if self
+                    .active_turn
+                    .as_ref()
+                    .is_some_and(|active| active != &turn_id)
+                {
+                    return;
+                }
                 if let Some(index) = self.exploration_index {
                     self.items[index].complete = true;
                     self.refresh_exploration_text();
@@ -541,7 +681,8 @@ impl ChatState {
                             .is_some_and(|index| self.items[index].complete);
                     if merge_agent_update {
                         let index = self.turn_agent_index.expect("checked above");
-                        self.items[index].text.push_str("\n\n");
+                        append_bounded(&mut self.items[index].text, "\n\n");
+                        append_bounded(&mut self.items[index].text, &initial_text);
                         self.items[index].complete = false;
                         self.register_item_alias(item_id, index);
                         self.refresh_item_projection(index);
@@ -565,10 +706,7 @@ impl ChatState {
                 if let Some(index) = self.resolve_item_index(&item_id) {
                     if self.items[index].text.is_empty() {
                         self.reconcile_selection_runs();
-                        self.items.remove(index);
-                        self.item_selection_runs.remove(index);
-                        self.invalidate_selection_projection();
-                        self.reconcile_item_aliases();
+                        self.remove_item(index);
                     } else {
                         self.items[index].complete = true;
                     }
@@ -652,6 +790,34 @@ impl ChatState {
             }
         }
         self.exploration_item_ids.insert(item_id.to_owned());
+        let mut limited = false;
+        for set in [
+            &mut self.exploration_reads,
+            &mut self.exploration_lists,
+            &mut self.exploration_searches,
+            &mut self.exploration_item_ids,
+        ] {
+            set.retain(|value| {
+                let keep = value.len() <= 4096;
+                limited |= !keep;
+                keep
+            });
+            while set.len() > MAX_ITEMS {
+                if let Some(key) = set.iter().min().cloned() {
+                    set.remove(&key);
+                    limited = true;
+                }
+            }
+            // HashSet growth is geometric even when the live entry count is bounded.
+            if set.capacity() > MAX_ITEMS * 2 {
+                set.shrink_to_fit();
+            }
+        }
+        if limited {
+            self.push_diagnostic(
+                "Exploration detail capacity reached; displayed counts are lower bounds".into(),
+            );
+        }
         let index = if let Some(index) = self.exploration_index {
             index
         } else {
@@ -702,29 +868,91 @@ impl ChatState {
         self.refresh_item_projection(index);
     }
 
-    fn push_item(&mut self, item: ChatItem) {
+    fn push_item(&mut self, mut item: ChatItem) {
+        bound_text(&mut item.text);
+        item.id.shrink_to_fit();
         self.reconcile_selection_runs();
         if self.items.len() == MAX_ITEMS {
-            let removed = self
+            let index = self
                 .items
-                .pop_front()
-                .expect("bounded transcript is non-empty");
-            self.item_selection_runs.pop_front();
-            self.item_aliases
-                .retain(|(_, canonical_id)| canonical_id != &removed.id);
+                .iter()
+                .position(|item| item.complete)
+                .unwrap_or(0);
+            self.remove_item(index);
         }
         self.item_selection_runs
-            .push_back(selection_runs_for_item(&item));
+            .push_back(ItemProjection::default());
         self.invalidate_selection_projection();
         self.items.push_back(item);
+        self.enforce_transcript_budget();
     }
 
     fn refresh_item_projection(&mut self, index: usize) {
-        self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
+        bound_text(&mut self.items[index].text);
+        self.item_selection_runs[index].invalidate();
         self.invalidate_selection_projection();
+        self.enforce_transcript_budget();
     }
 
-    fn record_selected_thread(&mut self, thread: Thread) {
+    fn remove_item(&mut self, index: usize) {
+        if let Some(removed) = self.items.remove(index) {
+            self.item_selection_runs.remove(index);
+            self.retired_item_ids.extend(
+                self.item_aliases
+                    .iter()
+                    .filter(|(_, canonical)| canonical == &removed.id)
+                    .map(|(alias, _)| alias.clone()),
+            );
+            self.retired_item_ids.push_back(removed.id.clone());
+            while self.retired_item_ids.len() > MAX_ITEMS
+                || self
+                    .retired_item_ids
+                    .iter()
+                    .map(String::capacity)
+                    .sum::<usize>()
+                    > 2 * 1024 * 1024
+            {
+                self.retired_item_ids.pop_front();
+            }
+            self.item_aliases
+                .retain(|(_, canonical)| canonical != &removed.id);
+            for slot in [&mut self.turn_agent_index, &mut self.exploration_index] {
+                *slot = slot.and_then(|old| {
+                    if old == index {
+                        None
+                    } else {
+                        Some(old - usize::from(old > index))
+                    }
+                });
+            }
+            self.invalidate_selection_projection();
+        }
+    }
+
+    fn enforce_transcript_budget(&mut self) {
+        let mut evicted = false;
+        while self
+            .items
+            .iter()
+            .map(|item| item.text.capacity())
+            .sum::<usize>()
+            > MAX_TRANSCRIPT_TEXT_BYTES
+        {
+            let index = self
+                .items
+                .iter()
+                .position(|item| item.complete)
+                .unwrap_or(0);
+            self.remove_item(index);
+            evicted = true;
+        }
+        if evicted {
+            self.push_diagnostic("Older output omitted from this local view; reload server history for retained history".into());
+        }
+    }
+
+    fn record_selected_thread(&mut self, mut thread: Thread) {
+        thread.turns = Vec::new();
         self.selected_thread = Some(thread.id.clone());
         if !self.threads.iter().any(|known| known.id == thread.id) {
             self.threads.insert(0, thread);
@@ -741,7 +969,7 @@ impl ChatState {
         self.items[index].id = item_id.to_owned();
         self.items[index].complete = false;
         self.reconcile_selection_runs();
-        self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
+        self.item_selection_runs[index].invalidate();
         self.invalidate_selection_projection();
         self.reconcile_item_aliases();
         true
@@ -749,18 +977,24 @@ impl ChatState {
 
     fn push_pending(&mut self, interaction: PendingInteraction) {
         if self.pending.len() == MAX_PENDING {
-            self.pending.remove(0);
-            self.push_diagnostic("Pending interaction limit reached".into());
+            self.status = ConnectionStatus::Disconnected;
+            self.push_diagnostic(
+                "Pending interaction capacity exceeded; reconnect to recover authoritative state"
+                    .into(),
+            );
+            return;
         }
         self.pending.push(interaction);
     }
 
     fn append_delta(&mut self, item_id: String, delta: String, inferred_kind: ChatItemKind) {
+        if self.retired_item_ids.contains(&item_id) {
+            return;
+        }
         if let Some(index) = self.resolve_item_index(&item_id) {
             self.reconcile_selection_runs();
-            self.items[index].text.push_str(&delta);
-            self.item_selection_runs[index] = selection_runs_for_item(&self.items[index]);
-            self.invalidate_selection_projection();
+            append_bounded(&mut self.items[index].text, &delta);
+            self.refresh_item_projection(index);
         } else {
             self.push_item(ChatItem {
                 id: item_id,
@@ -800,6 +1034,15 @@ impl ChatState {
                 self.item_aliases.pop_front();
             }
             self.item_aliases.push_back((item_id, canonical_id.clone()));
+            while self
+                .item_aliases
+                .iter()
+                .map(|(alias, id)| alias.capacity() + id.capacity())
+                .sum::<usize>()
+                > 2 * 1024 * 1024
+            {
+                self.item_aliases.pop_front();
+            }
         }
     }
 
@@ -821,7 +1064,11 @@ impl ChatState {
 
     fn reconcile_selection_runs(&mut self) {
         if self.item_selection_runs.len() != self.items.len() {
-            self.item_selection_runs = self.items.iter().map(selection_runs_for_item).collect();
+            self.item_selection_runs = self
+                .items
+                .iter()
+                .map(|_| ItemProjection::default())
+                .collect();
             self.invalidate_selection_projection();
         }
     }
@@ -847,8 +1094,11 @@ impl ChatState {
         let runs = if self.item_selection_runs.len() == self.items.len() {
             self.item_selection_runs
                 .iter()
-                .flatten()
-                .cloned()
+                .zip(&self.items)
+                .flat_map(|(projection, item)| {
+                    projection.ensure(item);
+                    projection.cached.borrow().as_ref().unwrap().runs.clone()
+                })
                 .collect::<Vec<_>>()
         } else {
             self.items
@@ -860,6 +1110,22 @@ impl ChatState {
         *self.selection_document_cache.borrow_mut() =
             (self.selection_revision, self.items.len(), document.clone());
         document
+    }
+
+    pub(crate) fn markdown_document(&self, index: usize) -> Arc<MarkdownDocument> {
+        if self.item_selection_runs.len() == self.items.len() {
+            let projection = &self.item_selection_runs[index];
+            projection.ensure(&self.items[index]);
+            projection
+                .cached
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .document
+                .clone()
+        } else {
+            Arc::new(item_markdown_document(&self.items[index]))
+        }
     }
 }
 
@@ -876,13 +1142,16 @@ pub(crate) fn item_markdown_document(item: &ChatItem) -> MarkdownDocument {
 }
 
 fn selection_runs_for_item(item: &ChatItem) -> Vec<SelectionRun> {
+    selection_runs_from_document(item, &item_markdown_document(item))
+}
+
+fn selection_runs_from_document(item: &ChatItem, document: &MarkdownDocument) -> Vec<SelectionRun> {
     let mut runs = vec![SelectionRun::block(
         format!("{}/label", item.id),
         item_label(&item.kind),
     )];
-    let document = item_markdown_document(item);
     runs.extend(markdown_selection_runs(
-        &document,
+        document,
         &format!("{}/body", item.id),
     ));
     runs
@@ -954,6 +1223,242 @@ mod tests {
     use std::{hint::black_box, mem::size_of, time::Instant};
 
     use super::*;
+
+    fn delta(state: &mut ChatState, text: &str) {
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 1,
+                kind: EventKind::AgentMessageDelta {
+                    item_id: "stream".into(),
+                    delta: text.into(),
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn unicode_stream_truncation_is_visible_bounded_and_terminal() {
+        let mut state = ChatState::default();
+        delta(&mut state, &"界".repeat(MAX_ITEM_TEXT_BYTES));
+        assert!(state.items[0].text.ends_with(OMISSION_MARKER));
+        assert!(state.items[0].text.capacity() <= MAX_ITEM_TEXT_BYTES);
+        let retained = state.items[0].text.clone();
+        delta(&mut state, "late text");
+        assert_eq!(state.items[0].text, retained);
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 2,
+                kind: EventKind::ItemCompleted {
+                    item_id: "stream".into(),
+                },
+            }),
+        );
+        assert!(state.items[0].complete);
+        assert!(
+            state
+                .transcript_selection_document()
+                .runs()
+                .iter()
+                .any(|run| run.text.contains("Further output omitted"))
+        );
+    }
+
+    #[test]
+    fn streaming_rebuilds_only_consumed_items_once_per_batch() {
+        let text = "## Heading\n\n**Unicode 世界** and `incomplete";
+        let mut small = ChatState::default();
+        small.push_item(ChatItem {
+            id: "offscreen".into(),
+            kind: ChatItemKind::Agent,
+            text: "untouched".into(),
+            complete: true,
+        });
+        for character in text.chars() {
+            delta(&mut small, &character.to_string());
+        }
+        assert!(
+            small
+                .item_selection_runs
+                .iter()
+                .all(|projection| projection.builds.get() == 0)
+        );
+        let rendered = small.markdown_document(1);
+        assert!(Arc::ptr_eq(&rendered, &small.markdown_document(1)));
+        assert_eq!(small.item_selection_runs[1].builds.get(), 1);
+        assert_eq!(small.item_selection_runs[0].builds.get(), 0);
+        // The full selection document is an explicit consumer of offscreen logical text.
+        small.transcript_selection_document();
+        assert_eq!(small.item_selection_runs[1].builds.get(), 1);
+        assert_eq!(small.item_selection_runs[0].builds.get(), 1);
+        let mut big = ChatState::default();
+        delta(&mut big, text);
+        assert_eq!(*rendered, *big.markdown_document(0));
+        assert_eq!(
+            small.item_selection_runs[1]
+                .cached
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .runs,
+            big.item_selection_runs[0]
+                .cached
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .runs
+        );
+        delta(&mut small, "` end");
+        assert_eq!(small.item_selection_runs[1].builds.get(), 1);
+        assert!(!Arc::ptr_eq(&rendered, &small.markdown_document(1)));
+        assert_eq!(small.item_selection_runs[1].builds.get(), 2);
+    }
+
+    #[test]
+    fn adjacent_completed_agent_items_preserve_started_text_and_aliases() {
+        let mut state = ChatState::default();
+        let turn_id = TurnId("turn".into());
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 1,
+                kind: EventKind::TurnStarted {
+                    thread_id: ThreadId("thread".into()),
+                    turn_id: turn_id.clone(),
+                },
+            }),
+        );
+        for (item_id, initial_text) in [("first", "first text"), ("second", "世界 second")] {
+            state.apply(
+                1,
+                ControllerEvent::Protocol(CodexEvent {
+                    sequence: 2,
+                    kind: EventKind::ItemStarted {
+                        thread_id: None,
+                        turn_id: Some(turn_id.clone()),
+                        item_id: item_id.into(),
+                        item_type: "agentMessage".into(),
+                        command_actions: Vec::new(),
+                        initial_text: initial_text.into(),
+                    },
+                }),
+            );
+            state.apply(
+                1,
+                ControllerEvent::Protocol(CodexEvent {
+                    sequence: 3,
+                    kind: EventKind::ItemCompleted {
+                        item_id: item_id.into(),
+                    },
+                }),
+            );
+        }
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].text, "first text\n\n世界 second");
+        assert!(state.items[0].complete);
+        assert_eq!(state.resolve_item_index("second"), Some(0));
+    }
+
+    #[test]
+    fn transcript_capacity_plateaus_and_evicted_late_deltas_stay_retired() {
+        let mut state = ChatState::default();
+        for index in 0..100 {
+            state.push_item(ChatItem {
+                id: format!("item-{index}"),
+                kind: ChatItemKind::Agent,
+                text: "x".repeat(MAX_ITEM_TEXT_BYTES),
+                complete: true,
+            });
+            assert!(
+                state
+                    .items
+                    .iter()
+                    .map(|item| item.text.capacity())
+                    .sum::<usize>()
+                    <= MAX_TRANSCRIPT_TEXT_BYTES
+            );
+        }
+        let retained = state.items.len();
+        state.append_delta("item-0".into(), "stale".into(), ChatItemKind::Agent);
+        assert_eq!(state.items.len(), retained);
+        let cached = state.transcript_selection_document();
+        let weak = Arc::downgrade(&cached);
+        drop(cached);
+        state.new_chat();
+        assert!(weak.upgrade().is_none());
+        assert!(state.retired_item_ids.is_empty());
+    }
+
+    #[test]
+    fn pathological_markdown_expansion_uses_visible_bounded_plain_text() {
+        let mut state = ChatState::default();
+        state.push_item(ChatItem {
+            id: "i".repeat(4096),
+            kind: ChatItemKind::Agent,
+            text: "**x** ".repeat(1000),
+            complete: true,
+        });
+        let document = state.markdown_document(0);
+        assert!(document.source.contains("Formatting omitted"));
+        let cache = state.item_selection_runs[0].cached.borrow();
+        let cache = cache.as_ref().unwrap();
+        assert!(
+            crate::projection_memory::derived_capacity(&document, &cache.runs)
+                <= 2048 + 16 * state.items[0].text.capacity() + 4 * state.items[0].id.capacity()
+        );
+    }
+
+    #[test]
+    #[ignore = "release streaming comparison; run with --release --ignored --nocapture"]
+    fn streaming_projection_measurement() {
+        for bytes in [4096, 32768, 131072] {
+            let chunk = "Some **text** and Unicode 世界. ".repeat(2);
+            let count = bytes / chunk.len();
+            let mut legacy = ChatItem {
+                id: "stream".into(),
+                kind: ChatItemKind::Agent,
+                text: String::new(),
+                complete: false,
+            };
+            let started = Instant::now();
+            for _ in 0..count {
+                legacy.text.push_str(&chunk);
+                black_box(selection_runs_for_item(&legacy));
+            }
+            let legacy_elapsed = started.elapsed();
+            let mut state = ChatState::default();
+            let started = Instant::now();
+            for index in 0..count {
+                delta(&mut state, &chunk);
+                if (index + 1) % 128 == 0 {
+                    black_box(state.transcript_selection_document());
+                }
+            }
+            let selected = state.transcript_selection_document();
+            let elapsed = started.elapsed();
+            let builds = state.item_selection_runs[0].builds.get();
+            assert_eq!(
+                selected.runs(),
+                SelectionDocument::new(selection_runs_for_item(&legacy)).runs()
+            );
+            assert_eq!(builds as usize, count.div_ceil(128));
+            let cache = state.item_selection_runs[0].cached.borrow();
+            let cache = cache.as_ref().unwrap();
+            let retained = state.items[0].text.capacity()
+                + crate::projection_memory::derived_capacity(&cache.document, &cache.runs);
+            eprintln!(
+                "streaming bytes={} deltas={count} legacy_rebuilds={count} batched_rebuilds={builds} legacy_us={} batched_us={} retained_capacity={retained}",
+                legacy.text.len(),
+                legacy_elapsed.as_micros(),
+                elapsed.as_micros()
+            );
+            assert!(
+                elapsed < legacy_elapsed / 4,
+                "batching should reduce this repeated-parse workload by at least 75%"
+            );
+        }
+    }
 
     const TINY_DERIVED_OPERATION_P95_ADDITION: std::time::Duration =
         std::time::Duration::from_micros(100);
@@ -1054,7 +1559,14 @@ mod tests {
         state
             .item_selection_runs
             .iter()
-            .flatten()
+            .flat_map(|projection| {
+                projection
+                    .cached
+                    .borrow()
+                    .as_ref()
+                    .map(|cached| cached.runs.clone())
+                    .unwrap_or_default()
+            })
             .map(|run| size_of::<SelectionRun>() + run.id.capacity() + run.text.len())
             .sum()
     }
@@ -1295,8 +1807,7 @@ mod tests {
             let runs = state
                 .item_selection_runs
                 .iter()
-                .flatten()
-                .cloned()
+                .flat_map(|projection| projection.cached.borrow().as_ref().unwrap().runs.clone())
                 .collect::<Vec<_>>();
             assert_eq!(runs.len(), expected_runs);
             black_box(runs);
@@ -1322,7 +1833,9 @@ mod tests {
 
             let start = Instant::now();
             let document =
-                SelectionDocument::new(state.item_selection_runs.iter().flatten().cloned());
+                SelectionDocument::new(state.item_selection_runs.iter().flat_map(|projection| {
+                    projection.cached.borrow().as_ref().unwrap().runs.clone()
+                }));
             assert_eq!(document.runs().len(), expected_runs);
             black_box(document);
             rebuilt_documents.push(start.elapsed());

@@ -1,6 +1,7 @@
 mod attachments;
 mod controller;
 mod model;
+mod projection_memory;
 mod view;
 
 pub use attachments::{
