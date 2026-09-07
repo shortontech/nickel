@@ -20,7 +20,7 @@ use smithay::{
             },
         },
     },
-    utils::{Logical, Point, Transform},
+    utils::{Logical, Point, Rectangle, Transform},
 };
 
 smithay::backend::renderer::element::render_elements! {
@@ -86,7 +86,8 @@ fn output_local_location(
 /// How the most recently prepared UI frame will reach Smithay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InternalUiPresentationMode {
-    /// Every primitive maps to GPU-native Smithay solid elements.
+    /// Every primitive maps to a Smithay solid or independently imported
+    /// texture element; there is no full-surface upload.
     GpuSolid,
     /// The display list contains a primitive not yet handled natively and is
     /// rasterized once into an importable texture to preserve exact ordering.
@@ -104,22 +105,31 @@ pub struct InternalUiRendererDiagnostics {
 
 /// Nickel display-list adapter for Smithay's renderer element API.
 ///
-/// Geometry and gradients become solid render elements and never enter the
-/// software rasterizer. Text and images use one bounded full-surface upload
-/// until dedicated texture primitives are added.
+/// Geometry and gradients become solid render elements. Images are imported as
+/// their own textures, while text is rasterized into tightly bounded glyph
+/// textures; neither causes a full-surface software upload.
 pub struct SmithayFrameRenderer {
     software: SoftwareRenderer,
-    solids: Vec<(nickel_ui::Rect, SolidColorBuffer)>,
+    primitives: Vec<GpuPrimitive>,
     raster: Option<MemoryRenderBuffer>,
     mode: InternalUiPresentationMode,
     diagnostics: InternalUiRendererDiagnostics,
+}
+
+enum GpuPrimitive {
+    Solid(nickel_ui::Rect, SolidColorBuffer),
+    Texture {
+        rect: nickel_ui::Rect,
+        source: Rectangle<f64, Logical>,
+        buffer: MemoryRenderBuffer,
+    },
 }
 
 impl SmithayFrameRenderer {
     fn new(width: u32, height: u32, scale: f32) -> Self {
         Self {
             software: SoftwareRenderer::new(width, height, scale),
-            solids: Vec::new(),
+            primitives: Vec::new(),
             raster: None,
             mode: InternalUiPresentationMode::RasterFallback,
             diagnostics: InternalUiRendererDiagnostics::default(),
@@ -145,6 +155,9 @@ impl SmithayFrameRenderer {
                     | PaintCommand::Gradient { .. }
                     | PaintCommand::Stroke { .. }
                     | PaintCommand::OverlayStroke { .. }
+                    | PaintCommand::Image { .. }
+                    | PaintCommand::Text { .. }
+                    | PaintCommand::StyledText { .. }
                     | PaintCommand::PushClip(_)
                     | PaintCommand::PopClip
             )
@@ -159,8 +172,10 @@ impl SmithayFrameRenderer {
             rect.size.width.ceil().max(1.0) as i32,
             rect.size.height.ceil().max(1.0) as i32,
         );
-        self.solids
-            .push((rect, SolidColorBuffer::new(size, color32f(color))));
+        self.primitives.push(GpuPrimitive::Solid(
+            rect,
+            SolidColorBuffer::new(size, color32f(color)),
+        ));
     }
 
     fn push_rounded_solid(
@@ -250,7 +265,7 @@ impl SmithayFrameRenderer {
     }
 
     fn prepare_gpu(&mut self, frame: RenderFrame<'_>) {
-        self.solids.clear();
+        self.primitives.clear();
         let viewport = nickel_ui::Rect::new(
             0.0,
             0.0,
@@ -325,10 +340,114 @@ impl SmithayFrameRenderer {
                         clips.pop();
                     }
                 }
-                _ => unreachable!("GPU support checked before translation"),
+                PaintCommand::Text { bounds, .. } | PaintCommand::StyledText { bounds, .. } => {
+                    self.push_text_texture(command, *bounds, clip, frame.scale_factor);
+                }
+                PaintCommand::Image {
+                    bounds,
+                    image,
+                    high_density,
+                    ..
+                } => {
+                    let image = high_density
+                        .as_ref()
+                        .filter(|_| frame.scale_factor >= 1.5)
+                        .unwrap_or(image);
+                    let Some(rect) = intersect(*bounds, clip) else {
+                        continue;
+                    };
+                    if bounds.size.width <= 0.0
+                        || bounds.size.height <= 0.0
+                        || image.width() == 0
+                        || image.height() == 0
+                    {
+                        continue;
+                    }
+                    let scale_x = f64::from(image.width()) / f64::from(bounds.size.width);
+                    let scale_y = f64::from(image.height()) / f64::from(bounds.size.height);
+                    let source = Rectangle::new(
+                        (
+                            f64::from(rect.origin.x - bounds.origin.x) * scale_x,
+                            f64::from(rect.origin.y - bounds.origin.y) * scale_y,
+                        )
+                            .into(),
+                        (
+                            f64::from(rect.size.width) * scale_x,
+                            f64::from(rect.size.height) * scale_y,
+                        )
+                            .into(),
+                    );
+                    self.primitives.push(GpuPrimitive::Texture {
+                        rect,
+                        source,
+                        buffer: MemoryRenderBuffer::from_slice(
+                            image.as_raw(),
+                            Fourcc::Abgr8888,
+                            (image.width() as i32, image.height() as i32),
+                            1,
+                            Transform::Normal,
+                            None,
+                        ),
+                    });
+                }
             }
         }
         self.raster = None;
+    }
+
+    fn push_text_texture(
+        &mut self,
+        command: &PaintCommand,
+        bounds: nickel_ui::Rect,
+        clip: nickel_ui::Rect,
+        scale: f32,
+    ) {
+        let Some(rect) = intersect(bounds, clip) else {
+            return;
+        };
+        if bounds.size.width <= 0.0 || bounds.size.height <= 0.0 {
+            return;
+        }
+        let mut local = command.clone();
+        match &mut local {
+            PaintCommand::Text { bounds, .. } | PaintCommand::StyledText { bounds, .. } => {
+                bounds.origin = nickel_ui::Point { x: 0.0, y: 0.0 };
+            }
+            _ => unreachable!("text texture receives a text command"),
+        }
+        let width = (bounds.size.width * scale).ceil().max(1.0) as u32;
+        let height = (bounds.size.height * scale).ceil().max(1.0) as u32;
+        let mut software = SoftwareRenderer::new(width, height, scale);
+        software.render(&[local]);
+        let mut bytes = Vec::with_capacity(software.pixels().len() * 4);
+        for pixel in software.pixels() {
+            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+        }
+        let (physical_width, physical_height) = software.size();
+        let source = Rectangle::new(
+            (
+                f64::from(rect.origin.x - bounds.origin.x) * f64::from(scale),
+                f64::from(rect.origin.y - bounds.origin.y) * f64::from(scale),
+            )
+                .into(),
+            (
+                f64::from(rect.size.width) * f64::from(scale),
+                f64::from(rect.size.height) * f64::from(scale),
+            )
+                .into(),
+        );
+        self.primitives.push(GpuPrimitive::Texture {
+            rect,
+            source,
+            buffer: MemoryRenderBuffer::from_slice(
+                &bytes,
+                Fourcc::Abgr8888,
+                (physical_width as i32, physical_height as i32),
+                1,
+                Transform::Normal,
+                None,
+            ),
+        });
     }
 
     fn prepare_fallback(&mut self, frame: RenderFrame<'_>) -> DamageRegion {
@@ -346,7 +465,7 @@ impl SmithayFrameRenderer {
             Transform::Normal,
             None,
         ));
-        self.solids.clear();
+        self.primitives.clear();
         damage
     }
 
@@ -361,21 +480,47 @@ impl SmithayFrameRenderer {
     {
         match self.mode {
             InternalUiPresentationMode::GpuSolid => self
-                .solids
+                .primitives
                 .iter()
                 .rev()
-                .map(|(rect, buffer)| {
-                    SolidColorRenderElement::from_buffer(
+                .filter_map(|primitive| match primitive {
+                    GpuPrimitive::Solid(rect, buffer) => Some(
+                        SolidColorRenderElement::from_buffer(
+                            buffer,
+                            (
+                                location.x + rect.origin.x.round() as i32,
+                                location.y + rect.origin.y.round() as i32,
+                            ),
+                            1.0,
+                            1.0,
+                            Kind::Unspecified,
+                        )
+                        .into(),
+                    ),
+                    GpuPrimitive::Texture {
+                        rect,
+                        source,
                         buffer,
+                    } => MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
                         (
-                            location.x + rect.origin.x.round() as i32,
-                            location.y + rect.origin.y.round() as i32,
+                            f64::from(location.x) + f64::from(rect.origin.x),
+                            f64::from(location.y) + f64::from(rect.origin.y),
                         ),
-                        1.0,
-                        1.0,
+                        buffer,
+                        None,
+                        Some(*source),
+                        Some(
+                            (
+                                rect.size.width.ceil() as i32,
+                                rect.size.height.ceil() as i32,
+                            )
+                                .into(),
+                        ),
                         Kind::Unspecified,
                     )
-                    .into()
+                    .ok()
+                    .map(Into::into),
                 })
                 .collect(),
             InternalUiPresentationMode::RasterFallback => self
@@ -1078,7 +1223,11 @@ mod tests {
         assert_eq!(runtime.ids_for_output("DP-1").collect::<Vec<_>>(), vec![id]);
         assert!(runtime.ids_for_output("HDMI-A-1").next().is_none());
         assert!(runtime.has_damage());
-        assert!(runtime.render_buffer(id).is_some());
+        assert!(runtime.render_buffer(id).is_none());
+        assert_eq!(
+            runtime.presentation.get(&id).unwrap().renderer.mode(),
+            InternalUiPresentationMode::GpuSolid
+        );
         assert!(!runtime.has_damage());
         assert!(runtime.remove(id));
         assert!(runtime.is_empty());
@@ -1288,11 +1437,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
-        assert_eq!(renderer.solids.len(), 1);
-        assert_eq!(
-            renderer.solids[0].0,
-            nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0)
-        );
+        assert_eq!(renderer.primitives.len(), 1);
+        let GpuPrimitive::Solid(rect, _) = &renderer.primitives[0] else {
+            panic!("fill should produce a solid")
+        };
+        assert_eq!(*rect, nickel_ui::Rect::new(5.0, 4.0, 20.0, 10.0));
         assert!(renderer.raster.is_none());
         assert_eq!(renderer.diagnostics().gpu_frames, 1);
     }
@@ -1317,13 +1466,19 @@ mod tests {
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
         assert!(renderer.raster.is_none());
-        assert_eq!(renderer.solids.len(), 12);
-        assert!(renderer.solids[0].0.size.width < 20.0);
-        assert_eq!(renderer.solids[6].0.size.width, 20.0);
+        assert_eq!(renderer.primitives.len(), 12);
+        let GpuPrimitive::Solid(first, _) = &renderer.primitives[0] else {
+            panic!("rounded row should be a solid")
+        };
+        let GpuPrimitive::Solid(middle, _) = &renderer.primitives[6] else {
+            panic!("rounded row should be a solid")
+        };
+        assert!(first.size.width < 20.0);
+        assert_eq!(middle.size.width, 20.0);
     }
 
     #[test]
-    fn text_fallback_reports_the_remaining_primitive_cause() {
+    fn text_uses_a_bounded_texture_without_full_surface_fallback() {
         let commands = [PaintCommand::Text {
             bounds: nickel_ui::Rect::new(0.0, 0.0, 20.0, 12.0),
             text: "Nickel".into(),
@@ -1333,19 +1488,63 @@ mod tests {
             bold: false,
             wrap: false,
         }];
-        let mut renderer = SmithayFrameRenderer::new(20, 12, 1.0);
+        let mut renderer = SmithayFrameRenderer::new(40, 24, 2.0);
 
         renderer
             .render_frame(RenderFrame {
                 commands: &commands,
                 logical_size: (20, 12),
+                scale_factor: 2.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        let GpuPrimitive::Texture { source, .. } = &renderer.primitives[0] else {
+            panic!("text should produce a texture")
+        };
+        assert_eq!(source.size, (40.0, 24.0).into());
+        assert!(renderer.raster.is_none());
+        assert_eq!(renderer.diagnostics().fallback_text_count, 0);
+        assert_eq!(renderer.diagnostics().fallback_image_count, 0);
+    }
+
+    #[test]
+    fn clipped_image_uses_cropped_texture_coordinates_without_surface_fallback() {
+        use std::sync::Arc;
+
+        let image = Arc::new(image::RgbaImage::new(40, 20));
+        let commands = [
+            PaintCommand::PushClip(nickel_ui::Rect::new(15.0, 8.0, 10.0, 5.0)),
+            PaintCommand::Image {
+                bounds: nickel_ui::Rect::new(10.0, 5.0, 20.0, 10.0),
+                id: 3,
+                generation: 1,
+                image,
+                high_density: None,
+            },
+            PaintCommand::PopClip,
+        ];
+        let mut renderer = SmithayFrameRenderer::new(40, 20, 1.0);
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (40, 20),
                 scale_factor: 1.0,
                 generation: 1,
             })
             .unwrap();
 
-        assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
-        assert_eq!(renderer.diagnostics().fallback_text_count, 1);
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        let GpuPrimitive::Texture { rect, source, .. } = &renderer.primitives[0] else {
+            panic!("image should produce a texture")
+        };
+        assert_eq!(*rect, nickel_ui::Rect::new(15.0, 8.0, 10.0, 5.0));
+        assert_eq!(
+            *source,
+            Rectangle::new((10.0, 6.0).into(), (20.0, 10.0).into())
+        );
+        assert!(renderer.raster.is_none());
         assert_eq!(renderer.diagnostics().fallback_image_count, 0);
     }
 }
