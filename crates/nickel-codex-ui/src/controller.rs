@@ -131,7 +131,7 @@ enum SnapshotScope {
 }
 
 impl ChatController {
-    #[cfg(feature = "workbench-fixtures")]
+    #[cfg(any(test, feature = "workbench-fixtures"))]
     pub(crate) fn fixture_idle(generation: u64) -> Self {
         let (commands, command_receiver) = mpsc::channel();
         let (_event_sender, events) = mpsc::channel();

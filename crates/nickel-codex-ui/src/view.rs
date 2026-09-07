@@ -164,6 +164,9 @@ const APPROVAL_POLICIES: [ApprovalPolicy; 4] = [
     ApprovalPolicy::Never,
 ];
 
+const CONTROLLER_POLL_MIN: std::time::Duration = std::time::Duration::from_millis(16);
+const CONTROLLER_POLL_MAX: std::time::Duration = std::time::Duration::from_millis(128);
+
 pub struct ChatApplication {
     pub state: ChatState,
     controller: ChatController,
@@ -189,6 +192,7 @@ pub struct ChatApplication {
     pub(crate) resume_picker_loading: bool,
     pub(crate) resume_picker_pending: Option<nickel_codex::ThreadId>,
     pub(crate) command_picker_open: bool,
+    controller_poll_interval: std::time::Duration,
     theme: SemanticTheme,
 }
 
@@ -333,6 +337,7 @@ impl ChatApplication {
             resume_picker_loading: false,
             resume_picker_pending: None,
             command_picker_open: false,
+            controller_poll_interval: CONTROLLER_POLL_MIN,
             theme: semantic_theme(),
         }
     }
@@ -365,6 +370,7 @@ impl ChatApplication {
     }
 
     pub fn resume_thread(&mut self, id: nickel_codex::ThreadId) -> Result<(), String> {
+        self.controller_poll_interval = CONTROLLER_POLL_MIN;
         self.pending_initial_resume = Some(id.clone());
         self.shell_writer_thread = Some(id.clone());
         if self.controller.send(ControllerCommand::SelectThread(id)) {
@@ -388,12 +394,14 @@ impl ChatApplication {
     }
 
     pub fn use_project(&mut self, cwd: PathBuf, project_id: String) {
+        self.controller_poll_interval = CONTROLLER_POLL_MIN;
         self.shell_project = Some((cwd.clone(), Some(project_id.clone())));
         self.controller
             .send(ControllerCommand::NewChatIn(cwd, Some(project_id)));
     }
 
     pub fn use_project_root(&mut self, cwd: PathBuf) {
+        self.controller_poll_interval = CONTROLLER_POLL_MIN;
         self.shell_project = Some((cwd.clone(), None));
         self.controller
             .send(ControllerCommand::NewChatIn(cwd, None));
@@ -446,6 +454,13 @@ impl ChatApplication {
                 self.state.thread_error = None;
             }
         }
+        self.controller_poll_interval = if changed {
+            CONTROLLER_POLL_MIN
+        } else {
+            self.controller_poll_interval
+                .saturating_mul(2)
+                .min(CONTROLLER_POLL_MAX)
+        };
         changed
     }
 
@@ -538,6 +553,9 @@ impl Application for ChatApplication {
     type Message = ChatMessage;
 
     fn update(&mut self, message: Self::Message) {
+        // User activity commonly sends work to the controller. Restore low-latency polling;
+        // empty polls will back off again without rebuilding the UI.
+        self.controller_poll_interval = CONTROLLER_POLL_MIN;
         match message {
             ChatMessage::DraftChanged(value) => self.state.draft = value,
             ChatMessage::PasteImage(bytes) => {
@@ -988,7 +1006,7 @@ impl Application for ChatApplication {
     }
 
     fn poll_interval(&self) -> Option<std::time::Duration> {
-        Some(std::time::Duration::from_millis(16))
+        Some(self.controller_poll_interval)
     }
 
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
@@ -1720,8 +1738,10 @@ fn configured_chat_view(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use nickel_codex::{ReplayBackend, Thread, ThreadId};
-    use nickel_ui::{HostBatch, HostEvent, Rect, UiFrame};
+    use nickel_ui::{HostBatch, HostEvent, Rect, UiFrame, UiHost};
     use nickel_ui_testkit::Scenario;
 
     use super::*;
@@ -1731,6 +1751,62 @@ mod tests {
             0xf4f6f8, 0xe8edf4, 0xffffff, 0xd6dce5, 0xcbd2dc, 0x171a20, 0x4d5664, 0x075ca8,
             0xc9e5ff, 0x6c3fa0, 0xefe4ff,
         ))
+    }
+
+    #[test]
+    fn empty_controller_polls_back_off_without_rebuilding() {
+        let backend = ReplayBackend::from_json(r#"{"name":"idle","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.controller = ChatController::fixture_idle(app.state.generation);
+        let started = Instant::now();
+        let mut host = UiHost::new_at(app, 800, 600, started);
+
+        let first_due = started + CONTROLLER_POLL_MIN;
+        let first = host.step(HostBatch {
+            now: Some(first_due),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(!first.changed);
+        assert!(!first.telemetry.rebuilt);
+        assert_eq!(
+            first.next_deadline,
+            Some(first_due + Duration::from_millis(32))
+        );
+
+        let second_due = first.next_deadline.unwrap();
+        let second = host.step(HostBatch {
+            now: Some(second_due),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(!second.changed);
+        assert!(!second.telemetry.rebuilt);
+        assert_eq!(
+            second.next_deadline,
+            Some(second_due + Duration::from_millis(64))
+        );
+    }
+
+    #[test]
+    fn user_activity_restores_low_latency_controller_polling() {
+        let backend = ReplayBackend::from_json(r#"{"name":"idle","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.controller = ChatController::fixture_idle(app.state.generation);
+        for _ in 0..4 {
+            assert!(!app.poll_controller());
+        }
+        assert_eq!(Application::poll_interval(&app), Some(CONTROLLER_POLL_MAX));
+
+        app.update(ChatMessage::DraftChanged("hello".into()));
+
+        assert_eq!(Application::poll_interval(&app), Some(CONTROLLER_POLL_MIN));
     }
 
     #[test]
