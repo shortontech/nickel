@@ -311,19 +311,49 @@ impl InternalShellCoordinator {
 
     pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) -> bool {
         self.shell.apply_internal_session_snapshot(snapshot);
+        self.shell.refresh_fast()
+    }
+
+    pub fn apply_session_snapshot_changes(
+        &mut self,
+        snapshot: nickel_session_protocol::Snapshot,
+    ) -> Vec<InternalSurfaceId> {
+        self.shell.apply_internal_session_snapshot(snapshot);
         // An external shell refreshes its feeds from the session socket. The
         // unified shell instead receives the canonical snapshot directly, so
         // consume it here before deciding which compositor-owned surfaces need
         // repainting. Merely storing it leaves panels on their pinned-only
         // startup projection until an unrelated full refresh happens.
-        self.shell.refresh_fast()
+        let roles = self.shell.refresh_fast_changes();
+        self.entries
+            .iter()
+            .filter(|surface| roles.contains(&surface.role))
+            .map(|surface| surface.id)
+            .collect()
     }
 
     pub fn apply_system_status_update(
         &mut self,
         update: crate::platform::SystemStatusUpdate,
-    ) -> bool {
-        self.shell.apply_system_status_update(update)
+    ) -> Vec<InternalSurfaceId> {
+        let roles: Option<&[SurfaceRole]> = match &update {
+            crate::platform::SystemStatusUpdate::Audio(_) => {
+                Some(&[SurfaceRole::ControlCenter, SurfaceRole::VolumeOsd])
+            }
+            crate::platform::SystemStatusUpdate::Network(_)
+            | crate::platform::SystemStatusUpdate::Bluetooth(_) => {
+                Some(&[SurfaceRole::ControlCenter])
+            }
+            crate::platform::SystemStatusUpdate::ShellSettingsChanged => None,
+        };
+        if !self.shell.apply_system_status_update(update) {
+            return Vec::new();
+        }
+        self.entries
+            .iter()
+            .filter(|surface| roles.is_none_or(|roles| roles.contains(&surface.role)))
+            .map(|surface| surface.id)
+            .collect()
     }
 
     pub fn file_windows(&self) -> &nickel_file::FileWindowCoordinator {
@@ -839,6 +869,75 @@ mod tests {
                 .taskbar_has_application("org.kde.konsole")
         );
         assert!(!coordinator.apply_session_snapshot(snapshot));
+    }
+
+    #[test]
+    fn system_feed_changes_only_invalidate_their_visible_consumers() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        let desktop = coordinator
+            .surface(SurfaceRole::Desktop, Some("nested"))
+            .unwrap()
+            .id;
+        let panel = coordinator
+            .surface(SurfaceRole::Panel, Some("nested"))
+            .unwrap()
+            .id;
+        let control = coordinator
+            .surface(SurfaceRole::ControlCenter, None)
+            .unwrap()
+            .id;
+        let osd = coordinator
+            .surface(SurfaceRole::VolumeOsd, None)
+            .unwrap()
+            .id;
+        coordinator.scene(desktop);
+        coordinator.scene(panel);
+        let audio = crate::platform::SystemStatusUpdate::Audio(crate::platform::AudioStatus {
+            available: true,
+            devices: Vec::new(),
+            volume_percent: 73,
+            muted: true,
+        });
+        let changes = coordinator.apply_system_status_update(audio.clone());
+        assert_eq!(changes, vec![control, osd]);
+        for id in changes {
+            coordinator.scene(id);
+        }
+        assert!(coordinator.apply_system_status_update(audio).is_empty());
+        let network =
+            crate::platform::SystemStatusUpdate::Network(crate::platform::NetworkStatus {
+                available: true,
+                enabled: true,
+                connected: true,
+                name: "Audit Network".into(),
+                signal_percent: 53,
+                networks: Vec::new(),
+            });
+        assert_eq!(
+            coordinator.apply_system_status_update(network.clone()),
+            vec![control]
+        );
+        assert!(coordinator.apply_system_status_update(network).is_empty());
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Desktop, Some("nested"))
+                .unwrap()
+                .scene_generation,
+            1
+        );
+        assert_eq!(
+            coordinator
+                .surface(SurfaceRole::Panel, Some("nested"))
+                .unwrap()
+                .scene_generation,
+            1
+        );
     }
 
     #[test]

@@ -830,9 +830,10 @@ impl NickelSession {
                     let changed = state
                         .internal_shell
                         .as_mut()
-                        .is_some_and(|shell| shell.apply_system_status_update(update));
-                    if changed {
-                        state.sync_internal_shell();
+                        .map(|shell| shell.apply_system_status_update(update))
+                        .unwrap_or_default();
+                    if !changed.is_empty() {
+                        state.sync_internal_shell_changes(Some(&changed));
                         state.request_output_redraw();
                     }
                 }
@@ -1054,25 +1055,8 @@ impl NickelSession {
             let snapshot = self.protocol_snapshot();
             *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
             let shell = self.internal_shell.as_mut().unwrap();
-            let snapshot_changed = shell.apply_session_snapshot(snapshot);
-            let mut changed = shell.poll(now);
-            if snapshot_changed {
-                changed.extend(
-                    shell
-                        .surfaces()
-                        .iter()
-                        .filter(|surface| {
-                            matches!(
-                                surface.role,
-                                crate::winit_shell::SurfaceRole::Panel
-                                    | crate::winit_shell::SurfaceRole::Launcher
-                                    | crate::winit_shell::SurfaceRole::WindowPreview
-                                    | crate::winit_shell::SurfaceRole::WindowContextMenu
-                            )
-                        })
-                        .map(|surface| surface.id),
-                );
-            }
+            let mut changed = shell.apply_session_snapshot_changes(snapshot);
+            changed.extend(shell.poll(now));
             let actions = shell.drain_file_actions();
             let shell_changed = !changed.is_empty();
             let codex_menu_visible = shell.codex_project_menu_visible();

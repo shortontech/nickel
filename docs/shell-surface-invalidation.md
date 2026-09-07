@@ -10,8 +10,10 @@ wallpaper, topology, scale and application replacement.
 Window membership, ordering and active-state updates affect panels, launcher status,
 previews and context menus. Geometry-only moves also compare output membership because
 the portable task model intentionally omits native geometry. Clock deadlines invalidate
-panels. Secure-storage status affects the launcher. Tray and system-status transactions
-retain the global synchronization path. Local panel hover and launcher text input do
+panels. Secure-storage status affects the launcher. Tray updates affect panels;
+notifications affect their own surface; audio affects control center and volume OSD;
+network and Bluetooth affect control center. Only settings transactions retain global
+synchronization. Local panel hover and launcher text input do
 not copy desktop or sibling scenes. Visibility transitions update the affected surface
 and panel affordances. Panel actions additionally invalidate task previews and menus;
 control interactions invalidate panel, volume OSD and keyboard consumers; preview and

@@ -1080,6 +1080,11 @@ impl LiveShell {
     }
 
     pub fn refresh_fast(&mut self) -> bool {
+        !self.refresh_fast_changes().is_empty()
+    }
+
+    pub(crate) fn refresh_fast_changes(&mut self) -> Vec<SurfaceRole> {
+        let mut redraw = Vec::new();
         let mut changed = false;
         // Window geometry is not part of OpenWindow's task model. Moving a
         // window between outputs must still invalidate per-output taskbars.
@@ -1162,6 +1167,14 @@ impl LiveShell {
                 changed = true;
             }
         }
+        if changed {
+            redraw.extend([
+                SurfaceRole::Panel,
+                SurfaceRole::Launcher,
+                SurfaceRole::WindowPreview,
+                SurfaceRole::WindowContextMenu,
+            ]);
+        }
         #[cfg(target_os = "linux")]
         let workspaces = self
             .internal_workspaces
@@ -1174,7 +1187,7 @@ impl LiveShell {
             workspaces.status(),
             "workspaces",
         ) {
-            changed = true;
+            redraw.push(SurfaceRole::Launcher);
         }
         if let FeedState::Ready(workspaces) = workspaces
             && workspaces != self.workspaces
@@ -1189,8 +1202,14 @@ impl LiveShell {
             if self.window_menu.is_none() && self.application_menu_target.is_none() {
                 self.close_window_preview();
             }
-            changed = true;
+            redraw.extend([
+                SurfaceRole::Desktop,
+                SurfaceRole::Panel,
+                SurfaceRole::WindowPreview,
+                SurfaceRole::WindowContextMenu,
+            ]);
         }
+        changed = false;
         if self
             .preview_leave_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
@@ -1230,11 +1249,14 @@ impl LiveShell {
             }
             self.preview_refresh_deadline = Some(preview_refresh_now + PREVIEW_REFRESH_INTERVAL);
         }
+        if changed {
+            redraw.extend([SurfaceRole::WindowPreview, SurfaceRole::WindowContextMenu]);
+        }
         let tray = normalize_tray_items(self.tray_feed.snapshot());
         if tray != self.tray {
             self.tray = tray;
             self.tray_icons = panel_tray_icons(&self.tray);
-            changed = true;
+            redraw.push(SurfaceRole::Panel);
         }
         let notification = self.notification_feed.snapshot();
         if !self.notification_history_visible && notification != self.notification {
@@ -1246,9 +1268,9 @@ impl LiveShell {
                 events: vec![HostEvent::Poll],
                 ..HostBatch::default()
             });
-            changed = true;
+            redraw.push(SurfaceRole::Notification);
         }
-        changed
+        redraw
     }
 
     #[cfg(target_os = "linux")]
