@@ -1660,6 +1660,7 @@ impl DesktopApplication {
         Self {
             wallpaper,
             palette,
+            file_window_host: crate::file_window_host::default_file_window_host(),
             browser: None,
             watch: None,
             layout: DesktopLayout::new(vec![DesktopOutput {
