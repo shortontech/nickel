@@ -112,6 +112,7 @@ pub struct InternalUiRendererDiagnostics {
 /// textures; neither causes a full-surface software upload.
 pub struct SmithayFrameRenderer {
     software: SoftwareRenderer,
+    text_software: SoftwareRenderer,
     primitives: Vec<GpuPrimitive>,
     raster: Option<MemoryRenderBuffer>,
     mode: InternalUiPresentationMode,
@@ -128,10 +129,22 @@ enum GpuPrimitive {
     },
 }
 
+// Smithay render elements are intentionally simple, but expanding curved or
+// gradient geometry into thousands of individual elements makes importing and
+// submitting one frame slower than the bounded software fallback. Keep the GPU
+// path as the default and fail over before a complex scene can monopolize the
+// compositor event loop.
+const MAX_GPU_ELEMENTS_PER_SURFACE: usize = 1_024;
+
 impl SmithayFrameRenderer {
     fn new(width: u32, height: u32, scale: f32, renderer_mode: InternalUiRendererMode) -> Self {
         Self {
             software: SoftwareRenderer::new(width, height, scale),
+            // Text commands are rasterized into bounded textures. Reuse one
+            // renderer so its process font database and shaping cache survive
+            // across every label in a scene; constructing a font system per
+            // command can stall the compositor event loop for many seconds.
+            text_software: SoftwareRenderer::new(1, 1, scale),
             primitives: Vec::new(),
             raster: None,
             mode: InternalUiPresentationMode::RasterFallback,
@@ -165,6 +178,29 @@ impl SmithayFrameRenderer {
                     | PaintCommand::PushClip(_)
                     | PaintCommand::PopClip
             )
+        })
+    }
+
+    fn estimated_gpu_elements(commands: &[PaintCommand]) -> usize {
+        commands.iter().fold(0_usize, |total, command| {
+            let elements = match command {
+                PaintCommand::Fill { .. }
+                | PaintCommand::OverlayFill { .. }
+                | PaintCommand::Image { .. }
+                | PaintCommand::Text { .. }
+                | PaintCommand::StyledText { .. } => 1,
+                PaintCommand::TopRoundedFill { rect, .. }
+                | PaintCommand::RoundedFill { rect, .. } => {
+                    rect.size.height.ceil().max(1.0) as usize
+                }
+                PaintCommand::Gradient { rect, gradient } => match gradient.axis {
+                    GradientAxis::Horizontal => rect.size.width.ceil().max(1.0) as usize,
+                    GradientAxis::Vertical => rect.size.height.ceil().max(1.0) as usize,
+                },
+                PaintCommand::Stroke { .. } | PaintCommand::OverlayStroke { .. } => 4,
+                PaintCommand::PushClip(_) | PaintCommand::PopClip => 0,
+            };
+            total.saturating_add(elements)
         })
     }
 
@@ -421,13 +457,14 @@ impl SmithayFrameRenderer {
         }
         let width = (bounds.size.width * scale).ceil().max(1.0) as u32;
         let height = (bounds.size.height * scale).ceil().max(1.0) as u32;
-        let mut software = SoftwareRenderer::new(width, height, scale);
-        software.render(&[local]);
-        let mut bytes = Vec::with_capacity(software.pixels().len() * 4);
-        for pixel in software.pixels() {
+        self.text_software.resize(width, height, scale);
+        self.text_software.invalidate();
+        self.text_software.render(&[local]);
+        let mut bytes = Vec::with_capacity(self.text_software.pixels().len() * 4);
+        for pixel in self.text_software.pixels() {
             bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
         }
-        let (physical_width, physical_height) = software.size();
+        let (physical_width, physical_height) = self.text_software.size();
         let source = Rectangle::new(
             (
                 f64::from(rect.origin.x - bounds.origin.x) * f64::from(scale),
@@ -552,8 +589,10 @@ impl FrameRenderer for SmithayFrameRenderer {
     type Error = std::convert::Infallible;
 
     fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
+        let estimated_gpu_elements = Self::estimated_gpu_elements(frame.commands);
         let damage = if self.renderer_mode == InternalUiRendererMode::Gpu
             && Self::supports_gpu(frame.commands)
+            && estimated_gpu_elements <= MAX_GPU_ELEMENTS_PER_SURFACE
         {
             self.mode = InternalUiPresentationMode::GpuSolid;
             self.diagnostics.gpu_frames += 1;
@@ -590,7 +629,11 @@ impl FrameRenderer for SmithayFrameRenderer {
                 .filter(|command| matches!(command, PaintCommand::Image { .. }))
                 .count();
             self.diagnostics.fallback_primitive_count =
-                self.diagnostics.fallback_text_count + self.diagnostics.fallback_image_count;
+                if estimated_gpu_elements > MAX_GPU_ELEMENTS_PER_SURFACE {
+                    estimated_gpu_elements
+                } else {
+                    self.diagnostics.fallback_text_count + self.diagnostics.fallback_image_count
+                };
             self.prepare_fallback(frame)
         };
         Ok(damage)
@@ -1534,6 +1577,35 @@ mod tests {
         };
         assert!(first.size.width < 20.0);
         assert_eq!(middle.size.width, 20.0);
+    }
+
+    #[test]
+    fn element_heavy_scene_uses_bounded_fallback() {
+        let commands = [PaintCommand::RoundedFill {
+            rect: nickel_ui::Rect::new(0.0, 0.0, 20.0, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as f32),
+            color: 0x336699,
+            radius: 4.0,
+        }];
+        let mut renderer =
+            SmithayFrameRenderer::new(20, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as u32, 1.0);
+
+        renderer
+            .render_frame(RenderFrame {
+                commands: &commands,
+                logical_size: (20, (MAX_GPU_ELEMENTS_PER_SURFACE + 1) as u32),
+                scale_factor: 1.0,
+                generation: 1,
+            })
+            .unwrap();
+
+        assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert!(renderer.primitives.is_empty());
+        assert!(renderer.raster.is_some());
+        assert_eq!(renderer.diagnostics().fallback_frames, 1);
+        assert_eq!(
+            renderer.diagnostics().fallback_primitive_count,
+            MAX_GPU_ELEMENTS_PER_SURFACE + 1
+        );
     }
 
     #[test]
