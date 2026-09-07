@@ -67,6 +67,8 @@ mod launcher;
 mod lock_auth;
 use launcher::{DashboardProject, DashboardSection, ProjectActivity, normalize_dashboard_projects};
 mod control_view;
+#[allow(dead_code)] // Wired into the Smithay runtime by the next integration slice.
+mod internal_shell;
 mod launcher_view;
 mod live_shell;
 #[allow(dead_code)]
