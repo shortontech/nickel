@@ -213,11 +213,12 @@ impl SmithayFrameRenderer {
             GradientAxis::Vertical => (rect.size.height.ceil().max(1.0) as u32, false),
         };
         for step in 0..steps {
-            let progress = if steps <= 1 {
-                0.0
+            let extent = if horizontal {
+                rect.size.width
             } else {
-                step as f32 / (steps - 1) as f32
+                rect.size.height
             };
+            let progress = ((step as f32 + 0.5) / extent.max(1.0)).clamp(0.0, 1.0);
             let color = interpolate_color(gradient.start, gradient.end, progress);
             let strip = if horizontal {
                 nickel_ui::Rect::new(
