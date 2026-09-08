@@ -417,6 +417,9 @@ impl NickelSession {
         )
     }
 
+    // Only nested capture takes a reusable CPU buffer before submitting work.
+    // Native asynchronous capture leaves the previous frame in place until ready.
+    #[cfg(any(feature = "backend-winit", test))]
     pub(crate) fn preview_capture_failed(
         &mut self,
         id: WindowId,

@@ -542,3 +542,35 @@ not replace the remaining workspace gates or live session acceptance.
 Removed the integrated, clean `/external/.worktrees/nickel-normalized-touch` worktree and its
 disposable artifacts after checking no process used it. Branch and commits remain available for
 recovery. No installed or running binary was replaced, and the live session was not restarted.
+
+## Workspace acceptance follow-up
+
+The first default-feature `cargo test --workspace --quiet` run reached the source reuse gate and
+failed because its Nickel inventory still counted 92 files rather than 96. Reviewed the four added
+modules against their callers and existing authorities; `docs/code-reuse-audit.md` records their
+distinct responsibilities and remaining input gap. Refreshed the inventory to 263 workspace Rust
+sources (96 Nickel), correcting the audit prose's older 236-source count as well. The rerun passes
+all three reuse-authority checks; full workspace completion is recorded separately once terminal.
+
+Default-feature compilation also exposed an unused nested-only CPU-buffer failure helper. It is now
+gated to `backend-winit`/tests, with the ownership difference from asynchronous native capture
+documented at the method. No native failure accounting was removed.
+
+Keyboard follow-up inspection confirms that `nickel-ui::FocusedInputDispatcher` already owns editing
+chords. The native host must transport normalized input **and** clipboard outcomes: currently
+`InternalUiRuntime::step` retains only `HostEventOutcome.changed`, and the session selection owner
+only represents XWayland. Merely dropping the modifier rejection and forwarding a chord would still
+lose copy results and provide no paste offer. This is an identified implementation seam, not evidence
+that modified native input is complete. Added a protocol compatibility test for snapshots with the
+optional internal-recipient field omitted, and for distinct native/window identity namespaces.
+
+The workspace rerun is terminal, **not green**: after passing the refreshed reuse gate, it failed
+`nickel-markdown-ui::cli::valid_and_missing_documents_keep_viewer_alive_without_sidecar_files`.
+The launched viewer reported `Could not find wayland compositor` and exited before inspection.
+No Xvfb, Xephyr, Weston, or Cage executable was found; available Xorg has no dummy driver.
+No live display was substituted. A follow-up run excludes only this named GUI test to gather the
+remaining workspace evidence, without changing or ignoring the test in source. Full GUI acceptance
+remains pending in an isolated display environment.
+
+The new keyboard protocol compatibility test passed. Full workspace strict Clippy also passed:
+`CARGO_BUILD_JOBS=4 cargo clippy --workspace --all-targets --all-features -- -D warnings`.

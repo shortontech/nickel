@@ -1271,6 +1271,32 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn keyboard_internal_recipient_is_optional_and_distinct_from_window_identity() {
+        let legacy = super::OnScreenKeyboardSnapshot {
+            recipient: Some(super::WindowId(7)),
+            epoch: 19,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&legacy).unwrap();
+        assert!(wire.get("internal_recipient").is_none());
+        let decoded: super::OnScreenKeyboardSnapshot = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded, legacy);
+        assert!(decoded.has_recipient());
+
+        let native = super::OnScreenKeyboardSnapshot {
+            internal_recipient: Some(7),
+            epoch: 20,
+            ..Default::default()
+        };
+        let decoded: super::OnScreenKeyboardSnapshot =
+            serde_json::from_value(serde_json::to_value(&native).unwrap()).unwrap();
+        assert_eq!(decoded, native);
+        assert!(decoded.recipient.is_none());
+        assert!(decoded.has_recipient());
+        assert!(!super::OnScreenKeyboardSnapshot::default().has_recipient());
+    }
+
     use super::*;
 
     #[test]

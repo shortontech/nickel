@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-06.
-Scope: all 236 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-08.
+Scope: all 263 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -60,11 +60,34 @@ registration replaces title metadata. Focused scrollbar, selection, layout, disp
 desktop, panel, fixture, preview, control-protocol, and output-retirement modules reduce coordinator
 density without creating parallel policy authorities.
 
-The strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
+The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 236-source inventory is current,
+translations rather than competing product authorities. The exact 263-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
+
+## 0220–0225 source additions (2026-09-08)
+
+The previous inventory checkpoint `6c16784` listed 259 sources, including 92 in Nickel.
+Four new Nickel modules bring those totals to 263 and 96. Reviewed ownership boundaries:
+
+- `platform/status_mailbox.rs` owns replaceable status delivery and wake coalescing. It does not
+  replace ordered command queues or duplicate backend device discovery. Audio activity metadata
+  preserves transitions lost by snapshot replacement; the shell retains OSD policy.
+- `session/internal_ui/desktop_input.rs` translates native pointer/touch/key identities into the
+  existing normalized input contract and retains capture ownership. Desktop/keyboard reducers and
+  hit testing remain in their existing owners. Generic hosted-app input still uses its adapter;
+  complete native keyboard/clipboard normalization remains unfinished.
+- `session/backend/udev/preview.rs` owns one primary-GPU submission and readiness timer, distinct
+  from output presentation. Admission/cache/retry policy remains in `state/preview.rs`; the native
+  module consumes that authority rather than retaining another frame cache.
+- `session/preview_submission.rs` shares finish-before-error ordering between native and nested
+  capture. Its caller supplies renderer completion policy: native uses nonblocking `try_finish`,
+  nested retains synchronous completion. It does not claim to bound arbitrary driver latency.
+
+The pinned Smithay vendor is dependency source outside the workspace-crate inventory; its narrow
+API patch and upstream provenance are recorded in `vendor/smithay/NICKEL-PATCHES.md`. This source
+refresh does not represent a new clone-scan measurement or complete live acceptance of these specs.
 
 ## Authority exception baselines
 
