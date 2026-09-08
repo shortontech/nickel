@@ -756,7 +756,8 @@ pub struct NickelSession {
     preview_attempted: HashMap<WindowId, (u64, u64)>,
     preview_render_wave: u64,
     preview_retry_pending: HashSet<WindowId>,
-    preview_retry_scheduled: Option<u64>,
+    preview_failures: HashMap<WindowId, preview::PreviewFailure>,
+    preview_retry_scheduled: Option<(u64, smithay::reexports::calloop::RegistrationToken)>,
     preview_retry_epoch: u64,
     preview_counters: PreviewCacheCounters,
     pub hotkeys: CompositorShortcutAdapter,
@@ -2216,6 +2217,7 @@ impl NickelSession {
             preview_attempted: HashMap::new(),
             preview_render_wave: 0,
             preview_retry_pending: HashSet::new(),
+            preview_failures: HashMap::new(),
             preview_retry_scheduled: None,
             preview_retry_epoch: 1,
             preview_counters: PreviewCacheCounters::default(),
@@ -7455,6 +7457,109 @@ mod protocol_tests {
     }
 
     #[test]
+    fn preview_source_churn_and_failed_capture_preserve_presentation_generation() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session
+            .windows
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
+        session.set_switcher_preview_interest(vec![id]);
+        session.store_preview(
+            id,
+            super::PreviewFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![41; 4],
+            },
+        );
+        let presented = session.preview_counters.presentation_generation;
+        let allocation = session.preview_frames[&id].rgba.as_ptr();
+
+        // Exercise the same content invalidation used by surface commits. Neither
+        // repeated commits nor a failed replacement changes the retained pixels.
+        for _ in 0..1000 {
+            session.invalidate_preview_content(id);
+        }
+        assert!(session.preview_dirty.contains(&id));
+        assert_eq!(session.preview_counters.invalidations, 1000);
+        assert_eq!(session.preview_counters.presentation_generation, presented);
+        let (pixels, dimensions) = session.take_preview_capture_buffer(id);
+        session.preview_capture_failed(id, pixels, dimensions);
+        assert_eq!(session.preview_counters.presentation_generation, presented);
+        assert_eq!(session.preview_frames[&id].rgba.as_ptr(), allocation);
+        assert_eq!(session.preview_frames[&id].rgba, vec![41; 4]);
+
+        session.store_preview(
+            id,
+            super::PreviewFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![42; 4],
+            },
+        );
+        assert_eq!(
+            session.preview_counters.presentation_generation,
+            presented + 1
+        );
+        session.reassociate_preview_surface(id);
+        assert!(!session.preview_frames.contains_key(&id));
+        assert_eq!(
+            session.preview_counters.presentation_generation,
+            presented + 2
+        );
+        session.reassociate_preview_surface(id);
+        assert_eq!(
+            session.preview_counters.presentation_generation,
+            presented + 2
+        );
+    }
+
+    #[test]
+    fn retiring_preview_scratch_does_not_invalidate_presented_pixels() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session
+            .windows
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
+        session.set_switcher_preview_interest(vec![id]);
+        let (pixels, dimensions) = session.take_preview_capture_buffer(id);
+        session.preview_capture_failed(id, pixels, dimensions);
+        session.clear_switcher_preview_interest();
+        assert_eq!(session.preview_counters.presentation_generation, 0);
+        assert_eq!(session.preview_bytes(), 0);
+        assert_eq!(session.preview_counters.evictions, 1);
+
+        session.set_switcher_preview_interest(vec![id]);
+        session.store_preview(
+            id,
+            super::PreviewFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![41; 4],
+            },
+        );
+        session.clear_switcher_preview_interest();
+        assert_eq!(session.preview_counters.presentation_generation, 2);
+        assert_eq!(session.preview_bytes(), 0);
+
+        session.set_switcher_preview_interest(vec![id]);
+        session.store_preview(
+            id,
+            super::PreviewFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![42; 4],
+            },
+        );
+        session.clear_all_previews();
+        assert_eq!(session.preview_counters.presentation_generation, 4);
+        session.clear_all_previews();
+        assert_eq!(session.preview_counters.presentation_generation, 4);
+    }
+
+    #[test]
     fn fitted_preview_frame_is_stored_at_its_actual_dimensions() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
@@ -7557,24 +7662,26 @@ mod protocol_tests {
             .windows
             .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
-        session.preview_retry_pending.insert(old);
+        session.set_switcher_preview_interest(vec![old]);
+        session.record_preview_failure(old, std::time::Instant::now());
         session.schedule_preview_retry();
-        let stale_epoch = session.preview_retry_scheduled.unwrap();
+        let stale_epoch = session.preview_retry_scheduled.unwrap().0;
 
         session.clear_all_previews();
         let current = session
             .windows
             .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
+        session.set_switcher_preview_interest(vec![current]);
         session.preview_content_generation.insert(current, 10);
-        session.preview_retry_pending.insert(current);
+        session.record_preview_failure(current, std::time::Instant::now());
         session.schedule_preview_retry();
-        assert_ne!(session.preview_retry_scheduled, Some(stale_epoch));
+        assert_ne!(session.preview_retry_scheduled.unwrap().0, stale_epoch);
 
         event_loop
-            .dispatch(std::time::Duration::from_millis(25), &mut session)
+            .dispatch(std::time::Duration::from_millis(150), &mut session)
             .unwrap();
-        assert_eq!(session.preview_content_generation[&current], 11);
+        assert_eq!(session.preview_content_generation[&current], 10);
         assert!(session.preview_retry_pending.is_empty());
     }
 
@@ -7586,8 +7693,9 @@ mod protocol_tests {
             .windows
             .insert(crate::session::window_registry::WindowAdmission::Ordinary)
             .unwrap();
+        session.set_switcher_preview_interest(vec![id]);
         session.preview_content_generation.insert(id, 4);
-        session.preview_retry_pending.insert(id);
+        session.record_preview_failure(id, std::time::Instant::now());
         session.schedule_preview_retry_after(std::time::Duration::from_millis(200));
 
         event_loop
@@ -7600,15 +7708,92 @@ mod protocol_tests {
         event_loop
             .dispatch(std::time::Duration::from_millis(220), &mut session)
             .unwrap();
-        assert_eq!(session.preview_content_generation[&id], 5);
+        assert_eq!(session.preview_content_generation[&id], 4);
         assert!(session.preview_retry_pending.is_empty());
         assert!(session.preview_retry_scheduled.is_none());
 
         event_loop
             .dispatch(std::time::Duration::from_millis(30), &mut session)
             .unwrap();
-        assert_eq!(session.preview_content_generation[&id], 5);
+        assert_eq!(session.preview_content_generation[&id], 4);
         assert!(session.preview_retry_scheduled.is_none());
+    }
+
+    #[test]
+    fn preview_failure_backoff_survives_source_churn_and_stops_after_five_attempts() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let id = session
+            .windows
+            .insert(crate::session::window_registry::WindowAdmission::Ordinary)
+            .unwrap();
+        session.set_switcher_preview_interest(vec![id]);
+        let mut now = std::time::Instant::now();
+        for delay_ms in [100, 200, 400, 800] {
+            assert!(session.preview_retry_ready(id, now));
+            session.record_preview_failure(id, now);
+            // Video commits coalesce source content but cannot bypass cooldown.
+            for _ in 0..1000 {
+                session.invalidate_preview_content(id);
+            }
+            let before = now + std::time::Duration::from_millis(delay_ms - 1);
+            assert!(!session.preview_retry_ready(id, before));
+            assert!(!session.ready_preview_retries(before));
+            now += std::time::Duration::from_millis(delay_ms);
+            assert!(session.preview_retry_ready(id, now));
+            assert!(session.ready_preview_retries(now));
+            assert!(!session.ready_preview_retries(now));
+        }
+        session.record_preview_failure(id, now);
+        let later = now + std::time::Duration::from_secs(3600);
+        session.invalidate_preview_content(id);
+        assert!(!session.preview_retry_ready(id, later));
+        assert!(!session.ready_preview_retries(later));
+        assert!(session.preview_retry_pending.is_empty());
+        session.schedule_preview_retry();
+        assert!(session.preview_retry_scheduled.is_none());
+        assert_eq!(session.preview_failures.len(), 1);
+
+        session.reassociate_preview_surface(id);
+        assert!(session.preview_retry_ready(id, later));
+        session.record_preview_failure(id, later);
+        session.clear_switcher_preview_interest();
+        assert!(session.preview_failures.is_empty());
+        session.set_switcher_preview_interest(vec![id]);
+        assert!(session.preview_retry_ready(id, later));
+    }
+
+    #[test]
+    fn preview_retry_drains_only_due_windows_and_success_retires_failure_state() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let ids = (0..2)
+            .map(|_| {
+                session
+                    .windows
+                    .insert(crate::session::window_registry::WindowAdmission::Ordinary)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        session.set_switcher_preview_interest(ids.clone());
+        let now = std::time::Instant::now();
+        session.record_preview_failure(ids[0], now);
+        session.record_preview_failure(ids[1], now + std::time::Duration::from_millis(50));
+        assert!(session.ready_preview_retries(now + std::time::Duration::from_millis(100)));
+        assert!(!session.preview_retry_pending.contains(&ids[0]));
+        assert!(session.preview_retry_pending.contains(&ids[1]));
+        session.store_preview(
+            ids[1],
+            super::PreviewFrame {
+                width: 1,
+                height: 1,
+                rgba: vec![41; 4],
+            },
+        );
+        assert!(!session.preview_failures.contains_key(&ids[1]));
+        assert!(session.preview_retry_pending.is_empty());
+        session.clear_all_previews();
+        assert!(session.preview_failures.is_empty());
     }
 
     #[test]
@@ -7720,13 +7905,17 @@ mod protocol_tests {
             second_node_wave
         ));
 
+        session.preview_admitted.insert(id);
         session.preview_renderer_failed(id);
-        assert!(session.advance_preview_retry_generation());
+        assert!(!session.ready_preview_retries(std::time::Instant::now()));
+        assert!(session.ready_preview_retries(
+            std::time::Instant::now() + std::time::Duration::from_millis(100)
+        ));
         let retry_wave = session.begin_preview_render_wave();
         assert!(record_preview_capture_attempt(
             &mut session.preview_attempted,
             id,
-            7,
+            6,
             retry_wave
         ));
     }

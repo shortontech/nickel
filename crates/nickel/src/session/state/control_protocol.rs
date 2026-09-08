@@ -320,7 +320,7 @@ impl NickelSession {
                             .preview_counters
                             .protocol_framed_copy_bytes,
                         preview_capture_failures: self.preview_counters.capture_failures,
-                        preview_cache_generation: self.preview_counters.cache_generation,
+                        preview_cache_generation: self.preview_counters.presentation_generation,
                         metadata_entries: u16::try_from(metadata.entries).unwrap_or(u16::MAX),
                         metadata_title_bytes: metadata.title_bytes as u64,
                         metadata_peak_title_bytes: metadata.peak_title_bytes as u64,

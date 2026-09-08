@@ -1,4 +1,6 @@
 id	hide	suspend	close	output_reconnect	topology_shrink	theme	locale	font	application_replace	fixture_teardown
+native_preview_readback	retain	clear	drop_owner	retain	retain	retain	retain	retain	replace	drop_owner
+native_system_status_mailbox	retain	retain	drop_owner	retain	retain	retain	retain	retain	drop_owner	drop_owner
 frame_build_scratch	na	na	drop_owner	na	na	rebuild	rebuild	rebuild	drop_owner	drop_owner
 semantic_query_index	na	na	drop_owner	na	na	rebuild	rebuild	rebuild	drop_owner	drop_owner
 plain_text_measure	retain	clear	drop_owner	retain	retain	clear	clear	clear	drop_owner	drop_owner

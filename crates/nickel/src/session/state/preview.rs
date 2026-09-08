@@ -13,6 +13,27 @@ pub const PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER: usize = 7;
 pub const PREVIEW_ENTRY_CAPACITY: usize = PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER * 2;
 pub const PREVIEW_BYTE_CAPACITY: usize = PREVIEW_ENTRY_CAPACITY * PREVIEW_FRAME_BYTES;
 
+#[derive(Clone, Copy, Default)]
+pub(super) struct PreviewFailure {
+    attempts: u8,
+    retry_at: Option<Instant>,
+}
+
+impl PreviewFailure {
+    fn record(&mut self, now: Instant) {
+        // Four delayed retries (100, 200, 400, 800 ms), then stop until a
+        // new visible admission or source identity resets this failure state.
+        // Ordinary animated commits must not reopen an unsupported capture path.
+        self.attempts = self.attempts.saturating_add(1).min(5);
+        self.retry_at =
+            (self.attempts < 5).then(|| now + Duration::from_millis(100 << (self.attempts - 1)));
+    }
+
+    fn ready(self, now: Instant) -> bool {
+        self.retry_at.is_some_and(|deadline| now >= deadline)
+    }
+}
+
 pub(crate) fn preview_capture_dimensions(width: i32, height: i32) -> Option<(u16, u16)> {
     if width <= 0 || height <= 0 {
         return None;
@@ -140,7 +161,9 @@ pub(crate) struct PreviewCacheCounters {
     pub(super) protocol_json_payload_bytes: u64,
     pub(super) protocol_framed_copy_bytes: u64,
     pub(super) capture_failures: u64,
-    pub(super) cache_generation: u64,
+    // Presentation changes only when visible pixels arrive or retire. Source
+    // commits request capture independently, without rebuilding the old overlay.
+    pub(super) presentation_generation: u64,
 }
 
 impl NickelSession {
@@ -165,7 +188,7 @@ impl NickelSession {
 
     #[cfg(feature = "backend-udev")]
     pub(crate) fn preview_generation(&self) -> u64 {
-        self.preview_counters.cache_generation
+        self.preview_counters.presentation_generation
     }
 
     pub(super) fn drop_preview_frame(&mut self, id: &WindowId) {
@@ -173,13 +196,16 @@ impl NickelSession {
         self.preview_content_generation.remove(id);
         self.preview_attempted.remove(id);
         self.preview_retry_pending.remove(id);
-        let released =
-            self.preview_spares.remove(id).is_some() || self.preview_frames.remove(id).is_some();
-        if released {
+        self.preview_failures.remove(id);
+        let spare = self.preview_spares.remove(id).is_some();
+        let frame = self.preview_frames.remove(id).is_some();
+        if spare || frame {
             self.preview_counters.evictions += 1;
-            self.preview_counters.cache_generation = self
+        }
+        if frame {
+            self.preview_counters.presentation_generation = self
                 .preview_counters
-                .cache_generation
+                .presentation_generation
                 .wrapping_add(1)
                 .max(1);
         }
@@ -192,7 +218,7 @@ impl NickelSession {
         );
         if admitted != self.preview_admitted {
             self.preview_retry_epoch = self.preview_retry_epoch.wrapping_add(1).max(1);
-            self.preview_retry_scheduled = None;
+            self.cancel_preview_retry_timer();
             self.preview_retry_pending
                 .retain(|id| admitted.contains(id));
         }
@@ -210,6 +236,8 @@ impl NickelSession {
             );
         }
         self.preview_admitted = admitted;
+        #[cfg(feature = "backend-udev")]
+        self.reconcile_native_preview_interest();
         self.schedule_preview_retry();
     }
 
@@ -235,13 +263,16 @@ impl NickelSession {
 
     pub(crate) fn reassociate_preview_surface(&mut self, id: WindowId) {
         if self.preview_admitted.contains(&id) {
-            self.preview_frames.remove(&id);
+            self.preview_failures.remove(&id);
+            self.preview_retry_pending.remove(&id);
+            if self.preview_frames.remove(&id).is_some() {
+                self.preview_counters.presentation_generation = self
+                    .preview_counters
+                    .presentation_generation
+                    .wrapping_add(1)
+                    .max(1);
+            }
             self.preview_counters.invalidations += 1;
-            self.preview_counters.cache_generation = self
-                .preview_counters
-                .cache_generation
-                .wrapping_add(1)
-                .max(1);
             self.preview_dirty.insert(id);
             advance_preview_content_generation(
                 &mut self.preview_content_generation,
@@ -256,9 +287,15 @@ impl NickelSession {
         while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
             root = parent;
         }
-        if let Some(id) = self.surface_windows.get(&root.id()).copied()
-            && self.preview_admitted.contains(&id)
-        {
+        if let Some(id) = self.surface_windows.get(&root.id()).copied() {
+            self.invalidate_preview_content(id);
+        }
+    }
+
+    pub(super) fn invalidate_preview_content(&mut self, id: WindowId) {
+        if self.preview_admitted.contains(&id) {
+            // Keep the last completed pixels presentable while replacement work
+            // is pending. Dirty content is not a change to the displayed image.
             self.preview_dirty.insert(id);
             advance_preview_content_generation(
                 &mut self.preview_content_generation,
@@ -266,11 +303,6 @@ impl NickelSession {
                 id,
             );
             self.preview_counters.invalidations += 1;
-            self.preview_counters.cache_generation = self
-                .preview_counters
-                .cache_generation
-                .wrapping_add(1)
-                .max(1);
         }
     }
 
@@ -279,7 +311,55 @@ impl NickelSession {
         self.preview_render_wave
     }
 
+    #[cfg(feature = "backend-udev")]
+    fn reconcile_native_preview_interest(&mut self) {
+        if let Some(native) = self.native.as_mut()
+            && let Some(token) = native.retain_native_preview_interest(&self.preview_admitted)
+        {
+            self.event_loop_handle.remove(token);
+        }
+    }
+
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn preview_capture_work_pending(&self) -> bool {
+        let now = Instant::now();
+        self.preview_admitted.iter().any(|id| {
+            (self.preview_dirty.contains(id) || !self.preview_frames.contains_key(id))
+                && self.preview_retry_ready(*id, now)
+                && self
+                    .preview_attempted
+                    .get(id)
+                    .is_none_or(|(generation, _)| {
+                        *generation
+                            != self
+                                .preview_content_generation
+                                .get(id)
+                                .copied()
+                                .unwrap_or(1)
+                    })
+        })
+    }
+
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn preview_capture_tag(&self, id: WindowId) -> Option<(u64, u64)> {
+        self.preview_admitted.contains(&id).then(|| {
+            (
+                self.preview_retry_epoch,
+                self.preview_content_generation
+                    .get(&id)
+                    .copied()
+                    .unwrap_or(1),
+            )
+        })
+    }
+
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn defer_preview_capture(&mut self, id: WindowId) {
+        self.preview_attempted.remove(&id);
+    }
+
     pub(crate) fn preview_capture_candidates(&mut self, wave: u64) -> Vec<(WindowId, Window)> {
+        let now = Instant::now();
         let admitted = self.preview_admitted.clone();
         let dirty = self.preview_dirty.clone();
         let mut candidates = Vec::new();
@@ -293,6 +373,9 @@ impl NickelSession {
                 continue;
             };
             if !admitted.contains(&id) {
+                continue;
+            }
+            if !self.preview_retry_ready(id, now) {
                 continue;
             }
             if dirty.contains(&id) || !self.preview_frames.contains_key(&id) {
@@ -353,54 +436,105 @@ impl NickelSession {
         } else {
             self.preview_spares.insert(id, rgba);
         }
-        self.preview_retry_pending.insert(id);
+        self.record_preview_failure(id, Instant::now());
         self.update_preview_peak_bytes();
     }
 
     pub(crate) fn preview_renderer_failed(&mut self, id: WindowId) {
         self.preview_counters.capture_failures += 1;
-        self.preview_retry_pending.insert(id);
+        self.record_preview_failure(id, Instant::now());
     }
 
-    pub(crate) fn advance_preview_retry_generation(&mut self) -> bool {
-        let pending = std::mem::take(&mut self.preview_retry_pending);
-        self.preview_retry_scheduled = None;
-        for id in pending.iter().copied() {
-            advance_preview_content_generation(
-                &mut self.preview_content_generation,
-                &mut self.preview_attempted,
-                id,
-            );
+    pub(super) fn record_preview_failure(&mut self, id: WindowId, now: Instant) {
+        // Like capture storage, failure metadata belongs only to visible admitted
+        // IDs; it cannot grow with the number of windows ever seen by the shell.
+        if !self.preview_admitted.contains(&id) {
+            return;
         }
-        !pending.is_empty()
+        let failure = self.preview_failures.entry(id).or_default();
+        failure.record(now);
+        if failure.retry_at.is_some() {
+            self.preview_retry_pending.insert(id);
+        } else {
+            self.preview_retry_pending.remove(&id);
+            if self.preview_retry_pending.is_empty() {
+                self.cancel_preview_retry_timer();
+            }
+        }
+    }
+
+    pub(super) fn preview_retry_ready(&self, id: WindowId, now: Instant) -> bool {
+        self.preview_failures
+            .get(&id)
+            .is_none_or(|failure| failure.ready(now))
+    }
+
+    pub(super) fn ready_preview_retries(&mut self, now: Instant) -> bool {
+        let mut ready = false;
+        self.preview_retry_pending.retain(|id| {
+            if self
+                .preview_failures
+                .get(id)
+                .is_some_and(|failure| failure.ready(now))
+            {
+                // Retry the newest source generation, not a fabricated commit.
+                self.preview_attempted.remove(id);
+                ready = true;
+                false
+            } else {
+                true
+            }
+        });
+        ready
+    }
+
+    fn cancel_preview_retry_timer(&mut self) {
+        if let Some((_, token)) = self.preview_retry_scheduled.take() {
+            self.event_loop_handle.remove(token);
+        }
     }
 
     pub(crate) fn schedule_preview_retry(&mut self) {
-        self.schedule_preview_retry_after(std::time::Duration::from_millis(16));
+        self.schedule_preview_retry_after(Duration::ZERO);
     }
 
     pub(crate) fn schedule_preview_retry_after(&mut self, delay: std::time::Duration) {
         if self.preview_retry_pending.is_empty() || self.preview_retry_scheduled.is_some() {
             return;
         }
+        let Some(deadline) = self
+            .preview_retry_pending
+            .iter()
+            .filter_map(|id| self.preview_failures.get(id)?.retry_at)
+            .min()
+        else {
+            return;
+        };
         let epoch = self.preview_retry_epoch;
-        let timer = Timer::from_duration(delay);
+        let timer =
+            Timer::from_duration(delay.max(deadline.saturating_duration_since(Instant::now())));
         match self
             .event_loop_handle
             .insert_source(timer, move |_, _, data| {
                 if data.preview_retry_epoch == epoch
-                    && data.preview_retry_scheduled == Some(epoch)
-                    && data.advance_preview_retry_generation()
+                    && data
+                        .preview_retry_scheduled
+                        .as_ref()
+                        .is_some_and(|(scheduled, _)| *scheduled == epoch)
                 {
-                    data.request_output_redraw();
-                    #[cfg(feature = "backend-udev")]
-                    if data.native.is_some() {
-                        data.render_all_outputs_once();
+                    data.preview_retry_scheduled = None;
+                    if data.ready_preview_retries(Instant::now()) {
+                        data.request_output_redraw();
+                        #[cfg(feature = "backend-udev")]
+                        if data.native.is_some() {
+                            data.render_all_outputs_once();
+                        }
                     }
+                    data.schedule_preview_retry();
                 }
                 TimeoutAction::Drop
             }) {
-            Ok(_) => self.preview_retry_scheduled = Some(epoch),
+            Ok(token) => self.preview_retry_scheduled = Some((epoch, token)),
             Err(error) => tracing::warn!(?error, "failed to schedule preview capture retry"),
         }
     }
@@ -426,20 +560,32 @@ impl NickelSession {
             frame.height
         ));
         self.preview_counters.captures += 1;
-        self.preview_counters.cache_generation = self
+        self.preview_counters.presentation_generation = self
             .preview_counters
-            .cache_generation
+            .presentation_generation
             .wrapping_add(1)
             .max(1);
         self.preview_counters.readback_bytes += frame.rgba.len() as u64;
         self.preview_frames.insert(id, frame);
         self.preview_spares.remove(&id);
+        self.preview_failures.remove(&id);
+        self.preview_retry_pending.remove(&id);
+        if self.preview_retry_pending.is_empty() {
+            self.cancel_preview_retry_timer();
+        }
         self.preview_dirty.remove(&id);
         self.preview_attempted.remove(&id);
         self.update_preview_peak_bytes();
     }
 
     pub(super) fn clear_all_previews(&mut self) {
+        if !self.preview_frames.is_empty() {
+            self.preview_counters.presentation_generation = self
+                .preview_counters
+                .presentation_generation
+                .wrapping_add(1)
+                .max(1);
+        }
         self.preview_counters.evictions +=
             (self.preview_frames.len() + self.preview_spares.len()) as u64;
         self.preview_switcher_interest.clear();
@@ -451,8 +597,9 @@ impl NickelSession {
         self.preview_frames.clear();
         self.preview_spares.clear();
         self.preview_retry_pending.clear();
+        self.preview_failures.clear();
         self.preview_retry_epoch = self.preview_retry_epoch.wrapping_add(1).max(1);
-        self.preview_retry_scheduled = None;
+        self.cancel_preview_retry_timer();
         self.preview_frames.shrink_to_fit();
         self.preview_spares.shrink_to_fit();
         self.preview_switcher_interest.shrink_to_fit();
@@ -462,6 +609,9 @@ impl NickelSession {
         self.preview_content_generation.shrink_to_fit();
         self.preview_attempted.shrink_to_fit();
         self.preview_retry_pending.shrink_to_fit();
+        self.preview_failures.shrink_to_fit();
+        #[cfg(feature = "backend-udev")]
+        self.reconcile_native_preview_interest();
         #[cfg(feature = "backend-udev")]
         if let Some(native) = self.native.as_mut() {
             native.clear_task_switcher_cache();

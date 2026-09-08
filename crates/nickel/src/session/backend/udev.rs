@@ -142,6 +142,7 @@ fn connector_name(connector: &connector::Info) -> String {
 }
 
 type RendererBackend = GbmGlesBackend<GlesRenderer, DrmDeviceFd>;
+mod preview;
 type NativeRenderer<'a> =
     smithay::backend::renderer::multigpu::MultiRenderer<'a, 'a, RendererBackend, RendererBackend>;
 smithay::backend::renderer::element::render_elements! {
@@ -707,6 +708,7 @@ pub struct UdevData {
     frame_icons: Option<crate::session::window_frame::FrameIcons>,
     identify_badges: IdentifyBadgeCache,
     task_switcher_cache: Option<TaskSwitcherBufferCache>,
+    preview_work: preview::NativePreviewWork,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -776,6 +778,7 @@ struct TaskSwitcherBufferKey {
     candidates: Vec<crate::session::window_registry::WindowId>,
     selected: usize,
     output_size: (i32, i32),
+    // Source dirtiness alone must not resize and upload unchanged thumbnails.
     preview_generation: u64,
 }
 
@@ -979,6 +982,7 @@ pub fn init_udev(
         frame_icons: crate::session::window_frame::FrameIcons::load(),
         identify_badges: IdentifyBadgeCache::default(),
         task_switcher_cache: None,
+        preview_work: preview::NativePreviewWork::default(),
     });
     let (buffer_commit_tx, buffer_commit_rx) = channel::channel();
     data.buffer_commit_tx = Some(buffer_commit_tx);
@@ -2230,7 +2234,7 @@ impl NickelSession {
         }
     }
 
-    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, wave: u64) {
+    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, _wave: u64) {
         let shell_bootstrapping = self.launcher_window.is_none();
         let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         identified_outputs.sort_by_key(|output| {
@@ -2284,11 +2288,6 @@ impl NickelSession {
             let frame_icons = native.frame_icons.clone();
             let background = surface.background.clone();
             let identify_badge = identify_index.map(|index| native.identify_badges.get(index));
-            let preview_windows = if self.locked {
-                Vec::new()
-            } else {
-                self.preview_capture_candidates(wave)
-            };
             if surface.invalidate_pending {
                 surface.drm.reset_buffer_ages();
                 surface.invalidate_pending = false;
@@ -2336,9 +2335,6 @@ impl NickelSession {
             let mut renderer = match renderer {
                 Ok(renderer) => renderer,
                 Err(error) => {
-                    for (id, _) in &preview_windows {
-                        self.preview_renderer_failed(*id);
-                    }
                     tracing::error!(
                         ?error,
                         render = %native.primary_gpu,
@@ -2348,24 +2344,6 @@ impl NickelSession {
                     return Some((output, true));
                 }
             };
-            let mut preview_retry = false;
-            for (id, window) in preview_windows {
-                let (rgba, previous_dimensions) = self.take_preview_capture_buffer(id);
-                let mut rgba = rgba;
-                if let Some((width, height)) = capture_preview(&mut renderer, &window, &mut rgba) {
-                    self.store_preview(
-                        id,
-                        PreviewFrame {
-                            width,
-                            height,
-                            rgba,
-                        },
-                    );
-                } else {
-                    self.preview_capture_failed(id, rgba, previous_dimensions);
-                    preview_retry = true;
-                }
-            }
             let mut elements: Vec<
                 NativeElement<NativeRenderer<'_>, WaylandSurfaceRenderElement<NativeRenderer<'_>>>,
             > = Vec::new();
@@ -2963,10 +2941,13 @@ impl NickelSession {
                     }
                 }
             };
-            Some((output, retry || preview_retry))
+            // Optional preview failures have their own bounded retry timer. They
+            // must not drive the output's 16 ms presentation-recovery loop.
+            Some((output, retry))
         })();
         self.native = Some(native);
         self.schedule_preview_retry();
+        self.schedule_native_preview_work();
         let Some((output, retry)) = rendered else {
             return;
         };
@@ -3496,25 +3477,32 @@ where
     }
 }
 
-fn capture_preview(
-    renderer: &mut NativeRenderer<'_>,
+fn submit_preview(
+    renderer: &mut GlesRenderer,
     window: &smithay::desktop::Window,
-    rgba: &mut Vec<u8>,
-) -> Option<(u16, u16)> {
+) -> Option<preview::SubmittedPreview> {
     (|| {
+        // Do not knowingly enter the renderer's synchronous no-fence fallback.
+        // A fence-creation failure inside Smithay finish remains a limitation.
+        if !renderer
+            .capabilities()
+            .contains(&smithay::backend::renderer::gles::Capability::ExportFence)
+        {
+            return None;
+        }
         let geometry = window.geometry();
         let dimensions =
             crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
         let width = i32::from(dimensions.0);
         let height = i32::from(dimensions.1);
-        let mut texture = <NativeRenderer<'_> as Offscreen<GlesTexture>>::create_buffer(
+        let mut texture = <GlesRenderer as Offscreen<GlesTexture>>::create_buffer(
             renderer,
             Fourcc::Abgr8888,
             (width, height).into(),
         )
         .ok()?;
         let mut framebuffer = renderer.bind(&mut texture).ok()?;
-        let elements = window.render_elements::<WaylandSurfaceRenderElement<NativeRenderer<'_>>>(
+        let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
             renderer,
             (-geometry.loc.x, -geometry.loc.y).into(),
             Scale::from(1.0),
@@ -3535,29 +3523,41 @@ fn capture_preview(
             1.0,
         )
         .collect::<Vec<_>>();
-        let mut frame = renderer
+        let frame = renderer
             .render(&mut framebuffer, (width, height).into(), Transform::Normal)
             .ok()?;
-        frame
-            .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
-            .ok()?;
-        draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
-        frame.finish().ok()?.wait().ok()?;
+        let _submitted = crate::session::preview_submission::finish_preview_submission(
+            frame,
+            |frame| {
+                frame.clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])?;
+                draw_render_elements(frame, 1.0, &elements, &[damage]).map(|_| ())
+            },
+            Frame::finish,
+        )
+        .ok()?;
         let region = Rectangle::<i32, Buffer>::from_size((width, height).into());
         let mapping = renderer
             .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
             .ok()?;
-        let mapped = renderer.map_texture(&mapping).ok()?;
-        if !crate::session::state::preview_mapping_has_exact_size(
-            mapped,
-            dimensions.0,
-            dimensions.1,
-        ) {
-            return None;
-        }
-        let replacement = crate::session::state::reuse_preview_pixels(std::mem::take(rgba), mapped);
-        *rgba = replacement;
-        Some(dimensions)
+        drop(framebuffer);
+        // The fence must follow ReadPixels, not merely the thumbnail draw. Map
+        // is deferred until this fence signals in a later event-loop turn.
+        let display = renderer.egl_context().display().clone();
+        let fence = renderer
+            .with_context(|gl| {
+                let fence = smithay::backend::egl::fence::EGLFence::create(&display).ok()?;
+                // SAFETY: with_context made this renderer's GL context current;
+                // Flush submits work without waiting or changing GL binding state.
+                unsafe { gl.Flush() };
+                Some(smithay::backend::renderer::sync::SyncPoint::from(fence))
+            })
+            .ok()??;
+        Some(preview::SubmittedPreview {
+            texture,
+            mapping,
+            fence,
+            dimensions,
+        })
     })()
 }
 

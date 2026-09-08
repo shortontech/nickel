@@ -11,6 +11,8 @@ mod internal_ui;
 pub(crate) mod login_services;
 mod on_screen_keyboard;
 mod output_retirement;
+#[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+mod preview_submission;
 mod recovery_ui;
 mod session_services;
 mod shell_layout;

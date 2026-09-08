@@ -153,6 +153,31 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 
 ## 0223: bounded native system-status delivery (implementation checkpoint)
 
+Release retention evidence, 2026-09-07:
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`
+passed. The synthetic workload publishes 1,000 changing audio snapshots with 64 devices to three
+stalled subscribers. One historical unbounded fanout stage retained 3,000 device-list payloads
+totaling 40,128,000 bytes of vector/string capacity. The mailbox retained one shared latest payload
+of 13,376 bytes across all three receivers, verified by Arc identity, with three wake callbacks.
+Publication took 45.149565 ms for that baseline and 4.079075 ms for the mailbox in this single run;
+these are not latency percentiles or compositor frame measurements. The test verifies final volume.
+
+Capacity excludes queue nodes, Arc headers, allocator metadata, producer graph storage, and RSS.
+Allocation operation counts and process peak RSS were not measured. This comparison models one
+former fanout stage, not the complete old relay pipeline, and proves no particular idle RAM saving.
+The ownership/lifecycle inventories now include the mailbox as `pending_measure`: four pending
+domain slots bound backlog count, but individual backend vectors/strings remain uncapped. Hidden
+or suspended UI retains its subscription and receives latest state; receiver/source replacement
+or drop releases ownership rather than tying backend delivery to a particular visible surface.
+Native media-repeat acceptance and remaining workspace gates are still required.
+
+Validation for this measurement/inventory checkpoint: Nickel library suite 637 passed, 12 ignored;
+the release retention workload passed separately; strict Nickel all-target/all-feature Clippy,
+formatting and diff whitespace checks passed. Routine workbench validation passed with 28 fixtures,
+45 cache and 45 lifecycle records, 22 consumer records, and 22 live acceptance records. Inventory
+validation checks the records, not execution of those live acceptance cases; final-completion
+inventory admission is not claimed. No running shell executable was replaced.
+
 Added a typed four-slot mailbox for audio/network/Bluetooth snapshots and settings invalidation.
 Each slot holds the latest immutable Arc payload; replacement releases the old pending payload.
 Wake callbacks execute outside the mutex. Empty-to-pending publication wakes; drain removes pending
@@ -286,8 +311,135 @@ Any staged readback must check completion **after the readback submission**, not
 render completion, before mapping. Renderer-context ownership, stale completion rejection, and safe
 resource retirement remain required; no asynchronous pipeline has been implemented yet.
 
+Follow-up inspection checked the actual Cargo.lock-pinned Smithay Git revision
+`e3d461a057ba244d213a8498ec372b0799cca103`, not just the similarly versioned registry source.
+Its GLES `finish_internal` falls back to `glFinish` when `export_sync_point` cannot create a fence.
+`GlesFrame::drop` calls `finish_internal` and waits on the returned sync point: Nickel's early
+clear/draw error returns can therefore block through unfinished-frame destruction too. A successful
+explicit finish marks the frame finished, so the later Drop sees a signaled point; that distinction
+matters for error handling. The pinned implementation also retains PBO ReadPixels followed by
+MapBufferRange with no application readiness gate. A preview implementation must avoid the fallback
+and unfinished-frame drop waits, not merely remove the explicit wait in Nickel. No dependency code
+was changed, and no nonblocking guarantee is claimed from this source inspection alone.
+
 Specs remain active. Full workspace/lint gates and the specified native acceptance are not claimed
 by the focused checks above. Existing docs/spec changes from the investigation remain preserved.
+
+## 0225: separate source dirtiness from preview presentation
+
+The compositor now advances preview presentation generation only for completed frame storage or
+retirement, not ordinary client commits or scratch-buffer retirement. Surface reassociation still
+retires old pixels and advances presentation when a frame existed. The existing task-switcher key
+uses that presentation revision, so source invalidation alone no longer forces CPU thumbnail resize
+and overlay upload. The protocol retains its `preview_cache_generation` field name for compatibility,
+with its completed-presentation meaning documented. Capture/content generations remain independent.
+
+Two production-session regressions cover 1,000 content invalidations, failed replacement preserving
+the old pixel allocation/revision, successful replacement, surface reassociation, and scratch versus
+frame retirement. These are cache lifecycle tests, not semantic input or GPU responsiveness tests.
+Focused preview tests passed: 27 passed, 2 ignored. This change does not remove blocking GPU waits,
+introduce capture cadence/backoff, or prove bounded event-loop latency; those requirements remain open.
+
+Validation: full Nickel library suite 639 passed, 12 ignored. After adding full-clear revision
+coverage, the affected retirement test and strict Nickel all-target/all-feature Clippy passed again;
+formatting and diff whitespace checks passed. Full-clear advances presentation only if completed
+frames existed. No native input, mixer state, or running executable was changed.
+
+## 0225: bounded capture-failure retries
+
+Failed captures now retry after 100, 200, 400, and 800 ms, then stop after the fifth failure for that
+admission/source identity. Candidate selection checks the cooldown even when ordinary client commits
+advance content generation. Retrying clears the attempt marker for the newest content rather than
+inventing a new source generation. Success removes failure state; source reassociation and renewed
+visible admission reset it. Per-window failure metadata is restricted to the existing admitted set
+and retires on hide/close/clear. The last completed frame remains intact after capture failure.
+
+Native output presentation no longer treats preview failure as a reason for its 16 ms render-recovery
+loop. One coalesced preview timer drains only due retry IDs; different deadlines remain pending.
+Admission changes remove the previous calloop source, with an epoch guard against stale callbacks;
+success or exhausted attempts cancel the timer when no retries remain. The nested backend's existing
+capture interval can delay a retry further, but cannot shorten its failure cooldown.
+
+Focused preview tests: 29 passed, 2 ignored. New deterministic session tests verify four exact cooldowns,
+4,000 source invalidations that cannot bypass them, capped failure despite an hour of elapsed synthetic
+time, reset/retirement, and two-window due-time separation. Existing real calloop tests cover timer
+replacement and one-shot delayed dispatch. These tests exercise retry policy, not driver failure or
+input-to-dismiss latency. A due retry still requests output rendering; readiness-driven capture,
+successful-capture cadence/fairness, renderer-replacement reset, and removal of blocking GPU waits
+remain unfinished. No native stress reproduction or session replacement was performed.
+
+Validation for the retry checkpoint: full Nickel library suite 641 passed, 12 ignored; strict Nickel
+all-target/all-feature Clippy, formatting and diff whitespace checks passed. These are Linux build
+and deterministic test results, not native compositor acceptance or full workspace certification.
+
+## 0225: explicit failed-submission completion
+
+Native and nested capture now share `finish_preview_submission`: draw errors are retained until
+explicit frame completion has run, then the original draw error is returned. This avoids propagating
+clear/draw failure through Smithay's unfinished-frame Drop, which explicitly waits on a fence.
+The small shared ordering test models successful/failed draw and completion combinations, preserves
+the original error, and rejects implicit Drop waiting. It is not a real GLES failure-injection test.
+Successful capture still uses the explicit wait/readback path, and explicit finish retains Smithay's
+own glFinish fallback. No asynchronous-readback or complete nonblocking claim is made.
+
+Further pinned-source inspection shows `MultiRenderer::Offscreen` and `Bind` use the target renderer
+when one exists, and `copy_framebuffer` maps from that same target. MultiFrame completion can transfer
+the render result to the target, with a CPU-copy fallback. Thus a staged native preview pipeline must
+also choose a stable renderer owner; simply fencing whichever output's multi-GPU renderer happens to
+be active can retain the cross-GPU completion path. A primary-GPU-owned preview submission is a
+candidate design, but has not been implemented or validated. Output presentation still uses its
+existing multi-GPU path; no DisplayLink or session configuration was changed.
+
+Validation: the focused submission-ordering test passed, strict Nickel all-target/all-feature Clippy
+passed (including compilation of both native and nested paths), and formatting/diff whitespace checks
+passed. The full library suite was not rerun for this small follow-up; the preceding retry checkpoint's
+641-pass result remains its own evidence, not a test result for this new helper.
+
+## 0225: staged primary-GPU native readback (partial)
+
+Native output rendering no longer calls preview capture before DRM/EVDI presentation. It schedules
+one coalesced preview-work source. That source uses the primary GPU alone, submits at most one new
+thumbnail per turn, and retains one texture/PBO/fence slot. The fence is created after PBO ReadPixels
+submission and flushed; map/copy runs only after a readiness query reports completion on a later
+turn. Pending polls do not request output rendering. Completed current pixels invalidate presentation.
+No borrowed renderer is moved to another thread, and target-GPU transfer is not used for this work.
+
+Per-window submission timestamps impose a 100 ms minimum interval. Least-recently-attempted candidates
+are chosen first from the bounded admitted set; unchosen attempts are released rather than queued.
+Admission/content tags and primary GPU/context identity reject obsolete completions. Obsolete work
+keeps the pending slot until readiness or a one-second timeout, preventing client commits from
+continually submitting behind a slow fence. Timeout enters the existing capped failure backoff.
+Interest retirement prunes timestamp metadata; pending GPU resources can outlive hide until ready
+or timeout. Lock/suspend and backend ownership retirement clear pending state without an explicit wait.
+Ordinary idle presentation with no capture work does not arm this source.
+
+The pending payload ceiling is one 240x135 RGBA texture plus one equally sized PBO: 259,200 logical
+payload bytes, separately from the existing CPU cache. Actual GL/driver allocation, deferred-delete
+retention, and source import costs are not measured; the new inventory row remains pending_measure.
+Trace-level diagnostics include submission duration, map/copy duration, elapsed submission-to-install,
+timeout and logical pending payload. Elapsed time is CPU monotonic wall time, not measured GPU duration.
+
+This is not complete nonblocking acceptance. Smithay can still fall back to glFinish if its internal
+fence export fails despite advertised capability; that API limitation is not bypassed. GL submission,
+source import and cleanup latency remain unmeasured. The nested backend still uses synchronous
+readback. Continuous source changes may reject pending snapshots before installation; live animation
+coverage, renderer replacement/hotplug generations, semantic dismissal, complete counters, and native
+frame/input measurements remain required. The readiness tests are pure policy/fence-adapter tests,
+not a substitute for those native checks. No running compositor was rebuilt or replaced.
+
+Validation: full Nickel library suite 644 passed, 12 ignored; strict Nickel all-target/all-feature
+Clippy passed; routine workbench validation passed with 46 cache and lifecycle records. After adding
+the existing renderer lifecycle activation/retirement counters to pending identity (in addition to
+GPU node and EGL handle), both focused readiness checks and strict Clippy passed again. Formatting
+and diff whitespace checks also passed. Driver
+readback, stale animated completions, and native latency remain unverified.
+
+Parallel 0222 work: a read-only review found that native OSK uses generic Overlay focus policy and
+can steal its recipient's focus on press. A focused implementation is assigned in isolated worktree
+`/external/.worktrees/nickel-0222-keyboard-routing`, branch `fix/0222-native-keyboard-routing`:
+non-focus-taking identity, normalized pointer leases/cancellation, primary-button lease protection,
+and stale resize cancellation. Geometry and internal application recipient authority remain separate
+required follow-ups; no agent changes have been integrated or accepted yet.
 
 Additional checks for the 0224 implementation passed:
 

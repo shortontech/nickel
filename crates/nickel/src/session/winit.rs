@@ -901,14 +901,20 @@ fn capture_preview(
             1.0,
         )
         .collect::<Vec<_>>();
-        let mut frame = renderer
+        let frame = renderer
             .render(&mut framebuffer, (width, height).into(), Transform::Normal)
             .ok()?;
-        frame
-            .clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])
-            .ok()?;
-        draw_render_elements(&mut frame, 1.0, &elements, &[damage]).ok()?;
-        frame.finish().ok()?.wait().ok()?;
+        crate::session::preview_submission::finish_preview_submission(
+            frame,
+            |frame| {
+                frame.clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])?;
+                draw_render_elements(frame, 1.0, &elements, &[damage]).map(|_| ())
+            },
+            Frame::finish,
+        )
+        .ok()?
+        .wait()
+        .ok()?;
         let buffer_region = Rectangle::<i32, Buffer>::from_size((width, height).into());
         let mapping = renderer
             .copy_framebuffer(&framebuffer, buffer_region, Fourcc::Abgr8888)

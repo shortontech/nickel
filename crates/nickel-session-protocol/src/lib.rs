@@ -566,6 +566,8 @@ pub struct CacheDiagnostics {
     #[serde(default)]
     pub preview_capture_failures: u64,
     #[serde(default)]
+    /// Completed preview presentation revision; source commits awaiting capture
+    /// do not advance this value while the last completed pixels remain visible.
     pub preview_cache_generation: u64,
     pub metadata_entries: u16,
     pub metadata_title_bytes: u64,
