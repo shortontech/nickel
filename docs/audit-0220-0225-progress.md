@@ -723,3 +723,45 @@ cleared for the child, `WINIT_UNIX_BACKEND=x11` and `LIBGL_ALWAYS_SOFTWARE=1` ar
 The runner stopped its display after completion. This is isolated GUI startup evidence, not native
 Wayland/GPU/audio acceptance. A full workspace no-fail-fast run with **no test-name exclusion** is
 now using the same isolated runner; its terminal result will be recorded separately.
+
+## 0224 completion audit and final allocation evidence
+
+The unfiltered isolated workspace run at `2b52b1e` completed with exit 0:
+`cargo test --workspace --no-fail-fast --quiet`, with the private Xvfb environment described above.
+No test-name exclusion was applied; built-in ignored tests remain ignored. The Nickel library
+reported **659 passed, 12 ignored**, nickel-ui **335 passed, 2 ignored**, and the workbench
+**46 passed**. Strict workspace all-target/all-feature Clippy also passed. Neither command exercised
+the running native desktop; these results do not establish live acceptance for the other specs.
+
+The release comparison now measures the redundant clone's additional live pixel-vector capacity
+while its source is still alive, and runs both 240×135 and 480×270 RGBA images. The aspect-retention
+regression now calls production `update_preview_image`, not the historical copy baseline.
+
+| Dimensions | Frames per case | Removed cumulative pixel-copy bytes | Removed extra live pixel capacity | Unchanged allocation calls, old → new | Changing allocation calls, old → new |
+| --- | --- | --- | --- | --- | --- |
+| 240×135 | 1,000 | 129,600,000 | 129,600 bytes | 2,000 → 0 | 2,000 → 1,000 |
+| 480×270 | 1,000 | 518,400,000 | 518,400 bytes | 2,000 → 0 | 2,000 → 1,000 |
+
+Both unchanged and changing cases remove one full pixel allocation/copy per supplied frame.
+The fourfold pixel-area increase produces fourfold payload/capacity, not additional retained caches.
+Capacity measures this component's redundant buffer only: it is not allocator metadata, whole-refresh
+heap high-water, GPU storage, RSS or PSS. Provider allocations and warmed map admission remain outside
+the sample. Timings from this single instrumented run (old → new): 240×135 unchanged
+4.476306 → 2.372421 ms, changing 2.404410 → 0.092266 ms; 480×270 unchanged
+172.447491 → 11.669688 ms, changing 9.460208 → 0.089812 ms. Timing is observational, not a latency
+guarantee or a claim that compositor stalls are resolved. Command:
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
+
+Requirement mapping for 0224: production refresh provides owned-frame admission, borrowed content
+comparison, unchanged Arc identity, pixel/dimension replacement and close retirement; bounded group
+churn covers release and the unchanged 32-entry limit. Source review confirms the 500 ms deadline,
+visible-group filtering and content equality remain intact. Preview frame tests cover retained pixel
+identity across theme changes, source-aspect containment, semantic activation geometry and ordering.
+No production renderer or activation policy was changed by the copy removal. This scoped evidence
+does not substitute for 0225 native GPU/readback or DisplayLink responsiveness acceptance.
+
+Final focused command `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib preview -- --nocapture`:
+**48 passed, 2 ignored**. The ignored allocation comparison was run separately in release mode as
+recorded above. Formatting and diff checks passed. Spec 0224 is archived under `specs/done/`;
+the remaining five specs stay active. The keyboard agent's reviewed commit `ff956b3` is ready but
+not yet integrated; its clipboard limit remains unconfigured pending the user's choice.

@@ -69,28 +69,32 @@
     fn owned_preview_refresh_release_evidence() {
         use crate::allocation_counter::thread_allocation_operations;
         use std::hint::black_box;
-        for changing in [false, true] {
+        for (width, height, changing) in [(240, 135, false), (240, 135, true), (480, 270, false), (480, 270, true)] {
             let mut legacy = HashMap::new();
             let mut moved = HashMap::new();
             // Warm admission and map capacity before sampling refresh work.
             // Changing frames start at a different color from this cached seed.
-            let seed = RgbaImage::from_pixel(240, 135, Rgba([if changing { 0 } else { 17 }, 20, 30, 255]));
+            let seed = RgbaImage::from_pixel(width, height, Rgba([if changing { 0 } else { 17 }, 20, 30, 255]));
             legacy.insert(WindowId(1), Arc::new(seed.clone()));
             moved.insert(WindowId(1), Arc::new(seed));
             let mut legacy_time = Duration::ZERO;
             let mut moved_time = Duration::ZERO;
             let mut cloned_payload = 0;
+            let mut peak_extra_pixel_capacity = 0;
             let mut legacy_allocations = 0;
             let mut moved_allocations = 0;
             for index in 0..1000 {
                 let color = if changing { ((index + 1) % 251) as u8 } else { 17 };
-                let source = RgbaImage::from_pixel(240, 135, Rgba([color, 20, 30, 255]));
+                let source = RgbaImage::from_pixel(width, height, Rgba([color, 20, 30, 255]));
                 let incoming = source.clone(); // provider allocations excluded from timing
                 let allocations_before = thread_allocation_operations();
                 let started = Instant::now();
                 let copy = Arc::new(super::legacy_preview_copy(black_box(&source)));
                 assert_ne!(source.as_ptr(), copy.as_ptr());
                 cloned_payload += source.as_raw().len();
+                // Both allocations are alive here: this measures the clone's
+                // additional pixel storage, not whole-process peak memory.
+                peak_extra_pixel_capacity = peak_extra_pixel_capacity.max(copy.as_raw().capacity());
                 if legacy.get(&WindowId(1)).is_none_or(|current: &Arc<RgbaImage>| **current != *copy) {
                     legacy.insert(WindowId(1), copy);
                 }
@@ -108,7 +112,8 @@
                 assert_eq!(legacy, moved);
             }
             assert!(legacy_allocations >= moved_allocations + 1000);
-            println!("owned-preview changing={changing} frames=1000 legacy={legacy_time:?} moved={moved_time:?} eliminated_pixel_copy_bytes={cloned_payload} legacy_allocation_calls={legacy_allocations} moved_allocation_calls={moved_allocations}; allocation calls include Arc/map storage; payload excludes Arc headers; provider allocations, RSS and GPU storage excluded");
+            assert!(peak_extra_pixel_capacity >= width as usize * height as usize * 4);
+            println!("owned-preview changing={changing} dimensions={width}x{height} frames=1000 legacy={legacy_time:?} moved={moved_time:?} eliminated_pixel_copy_bytes={cloned_payload} legacy_peak_extra_pixel_capacity_bytes={peak_extra_pixel_capacity} legacy_allocation_calls={legacy_allocations} moved_allocation_calls={moved_allocations}; allocation calls include Arc/map storage; extra capacity measures only the redundant clone, not process peak memory; payload excludes Arc headers; provider allocations, RSS and GPU storage excluded");
         }
     }
 
@@ -636,12 +641,15 @@
     #[test]
     fn preview_cache_retains_authoritative_source_aspect_for_ui_containment() {
         let source = RgbaImage::from_pixel(240, 135, Rgba([10, 20, 30, 255]));
-        let normalized = super::legacy_preview_copy(&source);
+        let expected = source.clone();
+        let mut cache = HashMap::new();
+        super::update_preview_image(&mut cache, WindowId(1), source);
+        let retained = &cache[&WindowId(1)];
 
-        assert_eq!(normalized.dimensions(), source.dimensions());
-        assert_eq!(normalized.as_raw(), source.as_raw());
+        assert_eq!(retained.dimensions(), expected.dimensions());
+        assert_eq!(retained.as_raw(), expected.as_raw());
         assert_eq!(
-            super::PREVIEW_CACHE_CAPACITY * normalized.as_raw().len(),
+            super::PREVIEW_CACHE_CAPACITY * retained.as_raw().len(),
             4_147_200
         );
     }
