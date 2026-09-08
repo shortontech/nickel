@@ -172,8 +172,9 @@ impl super::state::NickelSession {
                     if let Some((_, token)) = session.native_clipboard.pending_read.take() {
                         session.event_loop_handle.remove(token);
                     }
-                    // A delayed source cannot target whichever field happens to have
-                    // focus later. Both the native identity and authority epoch must match.
+                    // A delayed source cannot target a different native surface.
+                    // This lease checks surface identity and authority epoch; it
+                    // does not yet distinguish fields within the same surface.
                     let result = result.and_then(|text| {
                         if session.internal_ui.focused() != Some(recipient) {
                             return Err("clipboard paste recipient changed");

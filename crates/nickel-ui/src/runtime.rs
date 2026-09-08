@@ -1733,7 +1733,7 @@ impl<A: Application> UiHost<A> {
                 stage: HostFailureStage::Clipboard,
                 optional: false,
                 detail:
-                    "Clipboard text exceeds the native transfer limit; nothing was cut or copied"
+                    "Clipboard operation exceeds the native transfer limit; that operation was rejected"
                         .into(),
             });
         }

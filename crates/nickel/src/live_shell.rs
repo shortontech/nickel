@@ -2015,13 +2015,20 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
-        self.launcher_host_input_with_clipboard_limit(input, clipboard_text, width, height, None)
+        self.launcher_host_event_with_clipboard_limit(
+            HostEvent::Normalized {
+                input,
+                clipboard_text,
+            },
+            width,
+            height,
+            None,
+        )
     }
 
-    pub(crate) fn launcher_host_input_with_clipboard_limit(
+    pub(crate) fn launcher_host_event_with_clipboard_limit(
         &mut self,
-        input: nickel_input::InputEvent,
-        clipboard_text: Option<String>,
+        event: HostEvent,
         width: u32,
         height: u32,
         limit: Option<usize>,
@@ -2030,10 +2037,7 @@ impl LiveShell {
             let outcome = self.run_host.step(HostBatch {
                 clipboard_text_limit: limit,
                 surface_size: Some((width, height)),
-                events: vec![HostEvent::Normalized {
-                    input,
-                    clipboard_text,
-                }],
+                events: vec![event],
                 ..HostBatch::default()
             });
             self.apply_run_effects();
@@ -2047,10 +2051,7 @@ impl LiveShell {
         let outcome = self.launcher_host.step(HostBatch {
             clipboard_text_limit: limit,
             surface_size: Some((width, height)),
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text,
-            }],
+            events: vec![event],
             ..HostBatch::default()
         });
         let actions = self.launcher_host.application_mut().take_effects();
@@ -2416,21 +2417,20 @@ impl LiveShell {
         outcome.changed
     }
 
-    pub(crate) fn control_host_input(
+    pub(crate) fn control_host_event(
         &mut self,
-        input: nickel_input::InputEvent,
-        clipboard_text: Option<String>,
+        event: HostEvent,
         size: (u32, u32),
         limit: Option<usize>,
     ) -> nickel_ui::HostEventOutcome {
+        if !self.control_visible {
+            return Default::default();
+        }
         self.sync_control_host(size.0, size.1);
         let mut outcome = self.control_host.step(HostBatch {
             surface_size: Some(size),
             clipboard_text_limit: limit,
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text,
-            }],
+            events: vec![event],
             ..Default::default()
         });
         self.host_runtime_samples.record(outcome.telemetry);

@@ -765,3 +765,40 @@ Final focused command `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib preview -- 
 recorded above. Formatting and diff checks passed. Spec 0224 is archived under `specs/done/`;
 the remaining five specs stay active. The keyboard agent's reviewed commit `ff956b3` is ready but
 not yet integrated; its clipboard limit remains unconfigured pending the user's choice.
+
+## Native keyboard chord integration and semantic clipboard follow-up
+
+Integrated agent commit `ff956b3` as `b62263f`, retaining the newer libinput output mapping and preview
+retry fixes. Native keyboard chords now use shared normalized UI key policy without changing physical
+seat modifiers. Clipboard outcomes survive native-runtime and shell-coordinator transport. Copy/cut
+admission precedes editor mutation, secure-field restrictions remain shared, and descriptor transfers
+use deadlines and bounded worker permits. The product text-size limit is still **unconfigured**;
+native clipboard admission remains disabled until that policy is resolved. No default was inferred
+from the unanswered 16 MiB suggestion.
+
+Integration review found that semantic UiEvent routing in launcher/control-center surfaces still
+bypassed the agent's normalized-only clipboard handling. Those surfaces now accept either event form
+through the same limit-aware host call and preserve its ownership outcome. A coordinator regression
+rejects an oversized semantic Cut, then successfully cuts the preserved selection under an admitted
+limit. Existing dependency invalidation stays in place; hidden control-center input remains rejected.
+The failure wording now refers to the rejected operation, not the whole batch, because a different
+copy/cut in that batch may have succeeded.
+
+Root verification: native keyboard lease test **1 passed**; coordinator suite **15 passed**;
+clipboard-filtered all-feature tests **8 passed, 4 live tests ignored** across Nickel/nickel-ui;
+source-reuse authority tests **3 passed**. Strict workspace all-target/all-feature Clippy passed,
+followed by the small hidden-control guard restoration. The source inventory now covers 265 Rust
+sources, including 98 in Nickel, with the two new clipboard modules' ownership boundaries documented.
+
+Remaining acceptance: real Wayland/XWayland clipboard interoperability, live keyboard visibility,
+typing/focus and device/output behavior, and the clipboard-size decision. Async paste leases currently
+protect surface identity and keyboard epoch, **not field identity inside an unchanged surface**.
+The implementation comment now states that exact scope rather than promising field-level safety.
+Spec 0222 is not archived, and no running desktop, audio, clipboard or input state was changed.
+
+Post-follow-up full all-feature library run completed with exit 0:
+`CARGO_BUILD_JOBS=4 cargo test -p nickel -p nickel-ui --lib --all-features --quiet`.
+Nickel: **671 passed, 12 ignored**; nickel-ui: **336 passed, 2 ignored**. Strict workspace
+all-target/all-feature Clippy was rerun after the hidden-control guard and passed; formatting and
+diff checks passed. The integrated keyboard worktree was clean, with no remaining agent build,
+before cleanup of its checkout and 3.3 GiB disposable target cache. Its branch/commit are preserved.

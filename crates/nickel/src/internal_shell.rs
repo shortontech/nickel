@@ -545,9 +545,11 @@ impl InternalShellCoordinator {
             } = event
             {
                 let mut outcome = if entry.role == SurfaceRole::Launcher {
-                    self.shell.launcher_host_input_with_clipboard_limit(
-                        input,
-                        clipboard_text,
+                    self.shell.launcher_host_event_with_clipboard_limit(
+                        nickel_ui::HostEvent::Normalized {
+                            input,
+                            clipboard_text,
+                        },
                         entry.size.0,
                         entry.size.1,
                         batch.clipboard_text_limit,
@@ -558,9 +560,11 @@ impl InternalShellCoordinator {
                         SurfaceRole::VolumeOsd,
                         SurfaceRole::OnScreenKeyboard,
                     ]);
-                    self.shell.control_host_input(
-                        input,
-                        clipboard_text,
+                    self.shell.control_host_event(
+                        nickel_ui::HostEvent::Normalized {
+                            input,
+                            clipboard_text,
+                        },
                         entry.size,
                         batch.clipboard_text_limit,
                     )
@@ -630,9 +634,37 @@ impl InternalShellCoordinator {
                 SurfaceRole::Launcher if action => dependent_roles.push(SurfaceRole::Panel),
                 _ => {}
             }
-            changed |= self
-                .shell
-                .shell_role_host_ui(entry.role, event, entry.size.0, entry.size.1);
+            // Semantic commands and context-menu activation need the same
+            // pre-edit admission and ownership transport as normalized keys.
+            let outcome = match entry.role {
+                SurfaceRole::Launcher => Some(self.shell.launcher_host_event_with_clipboard_limit(
+                    nickel_ui::HostEvent::Ui(event),
+                    entry.size.0,
+                    entry.size.1,
+                    batch.clipboard_text_limit,
+                )),
+                SurfaceRole::ControlCenter => Some(self.shell.control_host_event(
+                    nickel_ui::HostEvent::Ui(event),
+                    entry.size,
+                    batch.clipboard_text_limit,
+                )),
+                _ => {
+                    changed |= self.shell.shell_role_host_ui(
+                        entry.role,
+                        event,
+                        entry.size.0,
+                        entry.size.1,
+                    );
+                    None
+                }
+            };
+            if let Some(mut outcome) = outcome {
+                changed |= outcome.changed;
+                crate::session_host::record_clipboard_outcome(
+                    &mut self.clipboard_result,
+                    &mut outcome,
+                );
+            }
         }
         let mut changes = Vec::new();
         if changed {
@@ -1531,6 +1563,38 @@ mod tests {
         assert_eq!(
             coordinator.take_clipboard_result(),
             Some(Ok("terminal".into()))
+        );
+        coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                clipboard_text_limit: Some(4),
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextCut)],
+                ..Default::default()
+            },
+        );
+        assert!(matches!(coordinator.take_clipboard_result(), Some(Err(_))));
+        coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                clipboard_text_limit: Some(8),
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextCut)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            coordinator.take_clipboard_result(),
+            Some(Ok("terminal".into())),
+            "rejected semantic Cut must preserve the selected text for the accepted Cut"
+        );
+        coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                clipboard_text_limit: Some(8),
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
+                    "terminal".into(),
+                ))],
+                ..Default::default()
+            },
         );
         assert_eq!(
             coordinator

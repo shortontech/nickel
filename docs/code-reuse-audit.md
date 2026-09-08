@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-08.
-Scope: all 263 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 265 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,14 +62,14 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 263-source inventory is current,
+translations rather than competing product authorities. The exact 265-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
 ## 0220–0225 source additions (2026-09-08)
 
 The previous inventory checkpoint `6c16784` listed 259 sources, including 92 in Nickel.
-Four new Nickel modules bring those totals to 263 and 96. Reviewed ownership boundaries:
+Six new Nickel modules bring those totals to 265 and 98. Reviewed ownership boundaries:
 
 - `platform/status_mailbox.rs` owns replaceable status delivery and wake coalescing. It does not
   replace ordered command queues or duplicate backend device discovery. Audio activity metadata
@@ -84,6 +84,10 @@ Four new Nickel modules bring those totals to 263 and 96. Reviewed ownership bou
 - `session/preview_submission.rs` shares finish-before-error ordering between native and nested
   capture. Its caller supplies renderer completion policy: native uses nonblocking `try_finish`,
   nested retains synchronous completion. It does not claim to bound arbitrary driver latency.
+- `session/native_clipboard.rs` owns native clipboard selection, asynchronous completion and
+  recipient checks. Editor capability and cut admission remain in the shared UI text-command owner.
+- `session/clipboard_transfer.rs` owns bounded descriptor I/O and worker permits, not selection or
+  editor policy. The native text-size policy remains unconfigured pending the user's choice.
 
 The pinned Smithay vendor is dependency source outside the workspace-crate inventory; its narrow
 API patch and upstream provenance are recorded in `vendor/smithay/NICKEL-PATCHES.md`. This source
