@@ -37,6 +37,36 @@
         assert!(last.upgrade().is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_preview_delivery_preserves_unchanged_pixels_and_retires_hidden_cards() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        let id = WindowId(42);
+        shell.windows = vec![OpenWindow { id, application_id: None, active: true, title: "Native preview".into(), state: Default::default() }];
+        shell.open_window_preview(0);
+        assert_eq!(shell.native_preview_windows(), vec![id]);
+        assert!(!shell.sync_native_preview_pixels(|_| None));
+        let image = RgbaImage::from_pixel(240, 135, Rgba([10, 20, 30, 255]));
+        assert!(shell.sync_native_preview_pixels(|requested| {
+            assert_eq!(requested, id);
+            Some((240, 135, image.as_raw()))
+        }));
+        let first = Arc::downgrade(&shell.preview_images[&id]);
+        assert_eq!(shell.preview_images[&id].as_raw(), image.as_raw());
+        assert!(!shell.sync_native_preview_pixels(|_| Some((240, 135, image.as_raw()))));
+        assert!(Arc::ptr_eq(&first.upgrade().unwrap(), &shell.preview_images[&id]));
+        let replacement = RgbaImage::from_pixel(135, 240, Rgba([11, 20, 30, 255]));
+        assert!(shell.sync_native_preview_pixels(|_| Some((135, 240, replacement.as_raw()))));
+        assert!(first.upgrade().is_none());
+        assert_eq!(shell.preview_images[&id].dimensions(), (135, 240));
+        assert!(shell.sync_native_preview_pixels(|_| None));
+        assert!(shell.preview_images.is_empty());
+        shell.close_window_preview();
+        assert!(shell.native_preview_windows().is_empty());
+        assert!(!shell.sync_native_preview_pixels(|_| panic!("hidden preview cannot request pixels")));
+    }
+
     #[test]
     fn owned_preview_refresh_moves_pixels_preserves_identity_and_retires_old_images() {
         let mut cache = HashMap::new();

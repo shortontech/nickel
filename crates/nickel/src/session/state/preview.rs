@@ -575,9 +575,9 @@ impl NickelSession {
     }
 
     pub(crate) fn store_preview(&mut self, id: WindowId, frame: PreviewFrame) {
-        // Capture leases are created only for admitted IDs after the byte/entry ceiling has
-        // already been reconciled. No event dispatch can change admission while the synchronous
-        // renderer call owns the lease, so commit is intentionally infallible.
+        // Capture starts only after admission. Async callers validate their
+        // completion lease before this commit; they must not dispatch events
+        // between that validation and storage, which could change admission.
         assert!(self.preview_admitted.contains(&id));
         assert!(preview_mapping_has_exact_size(
             &frame.rgba,

@@ -3682,6 +3682,60 @@ impl LiveShell {
         self.application_menu_host = None;
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_preview_cache_empty(&self) -> bool {
+        self.preview_images.is_empty()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn native_preview_windows(&mut self) -> Vec<crate::model::WindowId> {
+        let Some(index) = self.preview_group else {
+            return Vec::new();
+        };
+        self.panel_groups()
+            .get(index)
+            .map(|group| {
+                group
+                    .windows
+                    .iter()
+                    .take(PREVIEW_CACHE_CAPACITY)
+                    .map(|window| window.id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn sync_native_preview_pixels<'a>(
+        &mut self,
+        mut frame_for: impl FnMut(crate::model::WindowId) -> Option<(u16, u16, &'a [u8])>,
+    ) -> bool {
+        let windows = self.native_preview_windows();
+        let previous = self.preview_images.len();
+        self.preview_images
+            .retain(|id, _| windows.contains(id) && frame_for(*id).is_some());
+        let mut changed = previous != self.preview_images.len();
+        for id in windows {
+            let Some((width, height, rgba)) = frame_for(id) else {
+                continue;
+            };
+            if self.preview_images.get(&id).is_some_and(|image| {
+                image.dimensions() == (u32::from(width), u32::from(height))
+                    && image.as_raw().as_slice() == rgba
+            }) {
+                continue;
+            }
+            // The session retains its completed frame for other consumers. Copy
+            // once into the existing UI owner, never through JSON or self-RPC.
+            if let Some(image) =
+                image::RgbaImage::from_raw(u32::from(width), u32::from(height), rgba.to_vec())
+            {
+                changed |= update_preview_image(&mut self.preview_images, id, image);
+            }
+        }
+        changed
+    }
+
     fn close_window_preview(&mut self) {
         self.preview_group = None;
         self.preview_pending = None;

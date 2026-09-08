@@ -1582,6 +1582,10 @@ impl NickelSession {
         self.sync_internal_shell_changes(None);
     }
 
+    pub(crate) fn refresh_internal_preview_pixels(&mut self) {
+        self.sync_internal_shell_changes(Some(&[]));
+    }
+
     /// `None` is an explicit global dependency change (theme, locale, wallpaper,
     /// topology, scale or application replacement). Local service/input updates
     /// carry identities; visibility and placement are reconciled independently.
@@ -1589,6 +1593,26 @@ impl NickelSession {
         let Some(mut shell) = self.internal_shell.take() else {
             return;
         };
+        // Native hover cards have no external feed socket. Reuse the session's
+        // existing admission and completed-pixel owners instead of self-RPC.
+        let interest = shell
+            .native_preview_windows()
+            .into_iter()
+            .map(|id| WindowId(id.0))
+            .collect::<Vec<_>>();
+        let interest_changed = interest != self.preview_overlay_interest;
+        if interest_changed {
+            self.set_overlay_preview_interest(interest);
+        }
+        let preview_pixels_changed = shell.sync_native_preview_pixels(
+            self.preview_counters.presentation_generation,
+            interest_changed,
+            |id| {
+                self.preview_frames
+                    .get(&WindowId(id.0))
+                    .map(|frame| (frame.width, frame.height, frame.rgba.as_slice()))
+            },
+        );
         let entries = shell.surfaces().to_vec();
         let outputs = self.internal_outputs();
         for mut surface in entries {
@@ -1646,6 +1670,8 @@ impl NickelSession {
                         .configure_scene(runtime_id, placement, output_scale);
                 if (resized
                     || geometry_changed
+                    || (preview_pixels_changed
+                        && surface.role == crate::winit_shell::SurfaceRole::WindowPreview)
                     || changed.is_none_or(|ids| ids.contains(&surface.id)))
                     && let Some(scene) = shell.scene(surface.id)
                 {

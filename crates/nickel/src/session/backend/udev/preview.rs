@@ -315,6 +315,7 @@ impl NickelSession {
         self.native = Some(native);
         self.schedule_preview_retry();
         if changed {
+            self.refresh_internal_preview_pixels();
             self.request_output_redraw();
             self.render_all_outputs_once();
         }

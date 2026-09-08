@@ -827,3 +827,34 @@ new snapshot is aggregate per current native backend lifetime and does not attri
 Verification: all-feature Nickel preview tests **49 passed, 2 ignored**; diagnostics protocol test
 **1 passed**; all-feature compilation and strict workspace all-target/all-feature Clippy passed.
 Formatting and diff checks passed. No live preview stress or desktop change was performed.
+
+## Native hover-preview delivery bridge (0225)
+
+Source tracing confirmed a second native preview gap: `WindowFeed::internal()` has no socket, so
+its `preview()` cannot return pixels. The native coordinator also never calls the external shell's
+`sync_transient_overlays`, leaving hover interest unregistered. A finished GPU readback alone could
+therefore not populate native hover cards.
+
+Native shell synchronization now obtains the visible hover window IDs from the existing LiveShell
+group, reconciles them through the session's existing overlay-interest admission, and supplies
+borrowed completed frame dimensions/pixels directly to the existing UI preview cache. Session IDs
+remain private to the adapter. No self-RPC, JSON conversion, helper thread, additional frame cache or
+new preview-selection policy is introduced. The existing session admission ceiling still determines
+which visible windows have frames; the remaining cards keep placeholders.
+
+Changed pixels are copied once into the UI's existing Arc-backed image owner because the session
+must retain its completed CPU frame for its other consumers. Equal pixels preserve Arc identity.
+This is a required ownership-boundary copy, not the redundant same-owner clone removed by 0224.
+The coordinator remembers only the completed presentation revision, avoiding pixel comparison during
+ordinary input/scene updates; empty caches can still refill after a close/reopen with the same revision.
+Frame retirement removes the UI copy. Native completion requests a preview-only content refresh
+before output presentation; it does not mark unrelated shell content dirty merely to install pixels.
+
+A passing ownership fixture covers pending/no-frame behavior, delivered bytes, unchanged Arc identity,
+pixel/dimension replacement, retirement and no requests after hide. Full native routing/rendered
+acceptance and controlled latency measurement remain outstanding; this fixture does not establish
+those. The asynchronous store comment was updated to state the actual caller-validated lease invariant.
+
+Verification: all-feature preview suite **50 passed, 2 ignored**; coordinator suite **15 passed**;
+strict Nickel all-target/all-feature Clippy, formatting and diff checks passed. No live desktop
+restart, binary replacement, input injection or preview stress was performed.

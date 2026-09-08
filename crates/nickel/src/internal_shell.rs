@@ -86,6 +86,7 @@ pub(crate) struct InternalShellCoordinator {
     file_requests: mpsc::Receiver<nickel_file::FileWindowRequest>,
     file_actions: Vec<nickel_file::FileWindowAction>,
     clipboard_result: Option<Result<String, String>>,
+    preview_generation: Option<u64>,
 }
 
 impl InternalShellCoordinator {
@@ -104,6 +105,7 @@ impl InternalShellCoordinator {
             file_requests,
             file_actions: Vec::new(),
             clipboard_result: None,
+            preview_generation: None,
         })
     }
 
@@ -405,6 +407,28 @@ impl InternalShellCoordinator {
             .filter(|surface| surface.role == SurfaceRole::Launcher)
             .map(|surface| surface.id)
             .collect()
+    }
+
+    pub(crate) fn native_preview_windows(&mut self) -> Vec<crate::model::WindowId> {
+        self.shell.native_preview_windows()
+    }
+
+    pub(crate) fn sync_native_preview_pixels<'a>(
+        &mut self,
+        generation: u64,
+        interest_changed: bool,
+        frame_for: impl FnMut(crate::model::WindowId) -> Option<(u16, u16, &'a [u8])>,
+    ) -> bool {
+        // Ordinary pointer/focus scene sync must not compare every thumbnail.
+        // The session revision changes only when completed pixels arrive/retire.
+        if self.preview_generation == Some(generation)
+            && !interest_changed
+            && !self.shell.native_preview_cache_empty()
+        {
+            return false;
+        }
+        self.preview_generation = Some(generation);
+        self.shell.sync_native_preview_pixels(frame_for)
     }
 
     pub fn apply_session_snapshot(&mut self, snapshot: nickel_session_protocol::Snapshot) -> bool {
