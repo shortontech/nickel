@@ -3483,10 +3483,15 @@ fn submit_preview(
 ) -> Option<preview::SubmittedPreview> {
     (|| {
         // Do not knowingly enter the renderer's synchronous no-fence fallback.
+        // Fencing also guards shared-context texture import/draw paths that can
+        // otherwise call glFinish before the preview's completion fence exists.
         // A fence-creation failure inside Smithay finish remains a limitation.
         if !renderer
             .capabilities()
             .contains(&smithay::backend::renderer::gles::Capability::ExportFence)
+            || !renderer
+                .capabilities()
+                .contains(&smithay::backend::renderer::gles::Capability::Fencing)
         {
             return None;
         }
