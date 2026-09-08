@@ -7790,6 +7790,55 @@ mod protocol_tests {
         assert_eq!(session.preview_counters.captures, 1);
     }
 
+    #[cfg(feature = "backend-udev")]
+    #[test]
+    fn unavailable_preview_renderer_exhausts_shared_retry_budget_without_retiring_pixels() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let ids = (0..3)
+            .map(|_| {
+                session
+                    .windows
+                    .insert(crate::session::window_registry::WindowAdmission::Ordinary)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        session.preview_admitted.extend(ids.iter().copied());
+        for id in &ids[1..] {
+            session.store_preview(
+                *id,
+                super::PreviewFrame {
+                    width: 1,
+                    height: 1,
+                    rgba: vec![41; 4],
+                },
+            );
+        }
+        session.preview_dirty.insert(ids[1]);
+        let old_pixels = session.preview_frames[&ids[1]].rgba.as_ptr();
+        let generation = session.preview_counters.presentation_generation;
+        let started = Instant::now();
+        for attempt in 0..5 {
+            let now = started + Duration::from_secs(attempt);
+            session.ready_preview_retries(now);
+            session.preview_renderer_unavailable(now);
+            assert_eq!(session.preview_counters.capture_failures, (attempt + 1) * 2);
+            // Output/frame activity during cooldown must not charge more failures
+            // or turn renderer lookup failure into an unbounded retry loop.
+            for _ in 0..100 {
+                session.preview_renderer_unavailable(now);
+            }
+            assert_eq!(session.preview_counters.capture_failures, (attempt + 1) * 2);
+        }
+        session.preview_renderer_unavailable(started + Duration::from_secs(60));
+        assert_eq!(session.preview_counters.capture_failures, 10);
+        assert!(session.preview_retry_pending.is_empty());
+        assert!(!session.preview_capture_work_pending());
+        assert_eq!(session.preview_frames[&ids[1]].rgba.as_ptr(), old_pixels);
+        assert_eq!(session.preview_counters.presentation_generation, generation);
+        assert!(!session.preview_failures.contains_key(&ids[2]));
+    }
+
     #[test]
     fn fourteen_first_capture_failures_retain_exactly_the_declared_capacity() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();

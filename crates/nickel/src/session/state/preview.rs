@@ -323,21 +323,43 @@ impl NickelSession {
     #[cfg(feature = "backend-udev")]
     pub(crate) fn preview_capture_work_pending(&self) -> bool {
         let now = Instant::now();
-        self.preview_admitted.iter().any(|id| {
-            (self.preview_dirty.contains(id) || !self.preview_frames.contains_key(id))
-                && self.preview_retry_ready(*id, now)
-                && self
-                    .preview_attempted
-                    .get(id)
-                    .is_none_or(|(generation, _)| {
-                        *generation
-                            != self
-                                .preview_content_generation
-                                .get(id)
-                                .copied()
-                                .unwrap_or(1)
-                    })
-        })
+        self.preview_admitted
+            .iter()
+            .any(|id| self.preview_capture_needed_at(id, now))
+    }
+
+    #[cfg(feature = "backend-udev")]
+    fn preview_capture_needed_at(&self, id: &WindowId, now: Instant) -> bool {
+        (self.preview_dirty.contains(id) || !self.preview_frames.contains_key(id))
+            && self.preview_retry_ready(*id, now)
+            && self
+                .preview_attempted
+                .get(id)
+                .is_none_or(|(generation, _)| {
+                    *generation
+                        != self
+                            .preview_content_generation
+                            .get(id)
+                            .copied()
+                            .unwrap_or(1)
+                })
+    }
+
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn preview_renderer_unavailable(&mut self, now: Instant) {
+        // Renderer acquisition precedes per-window submission. Charge its
+        // shared failure to eligible work too, or output activity can retry an
+        // unavailable renderer forever without entering the existing backoff.
+        let affected = self
+            .preview_admitted
+            .iter()
+            .copied()
+            .filter(|id| self.preview_capture_needed_at(id, now))
+            .collect::<Vec<_>>();
+        for id in affected {
+            self.preview_counters.capture_failures += 1;
+            self.record_preview_failure(id, now);
+        }
     }
 
     #[cfg(feature = "backend-udev")]

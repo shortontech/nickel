@@ -170,6 +170,7 @@ impl NickelSession {
                     if let Some(pending) = native.preview_work.pending.take() {
                         self.preview_renderer_failed(pending.id);
                     }
+                    self.preview_renderer_unavailable(now);
                     tracing::debug!(?error, "primary preview renderer unavailable");
                     return false;
                 }

@@ -618,3 +618,24 @@ the provider still allocates its incoming pixels. No steady-state PSS or GPU sav
 Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
 Strict Nickel all-target/all-feature Clippy passed after adding the counters; the subsequent warming
 change is test-only. An all-feature library run checks the allocator-enabled test binary separately.
+
+Allocator-enabled all-feature Nickel library run completed: **662 passed, 12 ignored**.
+
+## Renderer acquisition failure follow-up (0225)
+
+Source review found that primary renderer acquisition failure before submission returned without
+charging the preview failure budget when no pending job existed. Eligible work stayed ready, so
+ordinary output activity could repeatedly schedule the same unavailable renderer. The native error
+branch now charges eligible work through the existing per-window retry/backoff authority. A shared
+eligibility predicate keeps scheduling and failure admission consistent; no second retry timer or
+failure table was introduced. Already-cooled-down, exhausted and unchanged cached entries are not
+charged. A pending job's failure remains charged once through its existing path.
+
+A passing session adapter test simulates repeated availability failures and output-like repeated
+checks: two eligible windows exhaust five attempts each, cooldown checks add no failures, a third
+unchanged cached window is untouched, and the old pixel allocation and presentation generation are
+preserved. This covers bounded failure accounting without a GL device; it does not measure driver
+lookup latency or prove the complete native event-loop responsiveness requirement.
+
+Verification: all-feature preview suite **49 passed, 2 ignored**; strict Nickel all-target/all-feature
+Clippy, formatting and diff checks passed. No live GPU workload or session restart was performed.
