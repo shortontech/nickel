@@ -6,6 +6,27 @@
 
 use crate::platform::{self, SecureStorageState, SessionRequestError, ShellCommand};
 
+/// Copy effects and admission failures may coexist in a batch. A rejected cut
+/// never revokes a successful copy/cut that already supplied replacement text.
+pub(crate) fn record_clipboard_outcome(
+    slot: &mut Option<Result<String, String>>,
+    outcome: &mut nickel_ui::HostEventOutcome,
+) {
+    for failure in outcome
+        .failures
+        .iter()
+        .filter(|failure| failure.stage == nickel_ui::HostFailureStage::Clipboard)
+    {
+        tracing::warn!(detail = failure.detail, "host clipboard operation rejected");
+        if !matches!(slot, Some(Ok(_))) {
+            *slot = Some(Err(failure.detail.clone()));
+        }
+    }
+    if let Some(text) = outcome.clipboard_text.take() {
+        *slot = Some(Ok(text));
+    }
+}
+
 pub(crate) enum DesktopCapturePoll {
     Pending,
     Ready(Result<platform::DesktopCapture, String>),

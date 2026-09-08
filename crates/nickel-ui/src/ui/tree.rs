@@ -3560,6 +3560,7 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .find(|input| input.id == session.editor && input.secure == session.secure)?;
         let clipboard = state.clipboard_text().map(ToOwned::to_owned);
+        let clipboard_limit = state.clipboard_text_limit;
         let editor = state.editor(session.editor.clone(), &input.initial);
         if editor.document_generation() != session.document_generation
             || editor.selection_generation() != session.selection_generation
@@ -3567,7 +3568,7 @@ impl<Message: Clone> UiFrame<Message> {
             state.clear_text_context();
             return Some(Invalidation::Layout);
         }
-        let effect = crate::execute_text_command(
+        let effect = crate::text_context_menu::execute_text_command_with_limit(
             editor,
             crate::TextContextPolicy {
                 editable: true,
@@ -3576,11 +3577,13 @@ impl<Message: Clone> UiFrame<Message> {
             },
             command.command,
             clipboard.as_deref(),
+            clipboard_limit,
         );
         if effect.changed {
             outcome.messages.push((input.map)(editor.text().to_owned()));
         }
         outcome.clipboard_text = effect.clipboard_text;
+        state.clipboard_rejected |= effect.clipboard_rejected;
         Some(match command.command {
             crate::TextEditCommand::Copy => Invalidation::None,
             crate::TextEditCommand::SelectAll => Invalidation::Paint,
@@ -3598,8 +3601,9 @@ impl<Message: Clone> UiFrame<Message> {
     ) -> Option<Invalidation> {
         let id = state.focused()?.clone();
         let input = self.text_inputs.iter().find(|input| input.id == id)?;
+        let clipboard_limit = state.clipboard_text_limit;
         let editor = state.editor(id, &input.initial);
-        let effect = crate::execute_text_command(
+        let effect = crate::text_context_menu::execute_text_command_with_limit(
             editor,
             crate::TextContextPolicy {
                 editable: true,
@@ -3608,11 +3612,13 @@ impl<Message: Clone> UiFrame<Message> {
             },
             command,
             clipboard,
+            clipboard_limit,
         );
         if effect.changed {
             outcome.messages.push((input.map)(editor.text().to_owned()));
         }
         outcome.clipboard_text = effect.clipboard_text;
+        state.clipboard_rejected |= effect.clipboard_rejected;
         Some(match command {
             crate::TextEditCommand::Copy => Invalidation::None,
             crate::TextEditCommand::SelectAll => Invalidation::Paint,

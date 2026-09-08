@@ -607,6 +607,23 @@ impl XwmHandler for NickelSession {
         mime_type: String,
         fd: OwnedFd,
     ) {
+        if selection == SelectionTarget::Clipboard {
+            let owner =
+                smithay::wayland::selection::data_device::current_data_device_selection_userdata(
+                    &self.seat,
+                )
+                .map(|owner| owner.clone());
+            if let Some(SelectionOwner::NativeText(text)) = owner {
+                if matches!(
+                    mime_type.as_str(),
+                    "text/plain;charset=utf-8" | "text/plain"
+                ) && let Err(error) = self.send_native_clipboard(fd, text)
+                {
+                    tracing::warn!(error, "native clipboard XWayland transfer rejected");
+                }
+                return;
+            }
+        }
         let result = match selection {
             SelectionTarget::Clipboard => {
                 request_data_device_client_selection(&self.seat, mime_type, fd)

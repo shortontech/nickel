@@ -658,6 +658,7 @@ pub struct NickelSession {
     pub socket_name: OsString,
     pub display_handle: DisplayHandle,
     pub event_loop_handle: smithay::reexports::calloop::LoopHandle<'static, NickelSession>,
+    pub(crate) native_clipboard: super::native_clipboard::NativeClipboardState,
     #[cfg(feature = "backend-udev")]
     pub native: Option<crate::session::backend::udev::UdevData>,
 
@@ -1499,6 +1500,7 @@ impl NickelSession {
     }
 
     pub(crate) fn flush_internal_shell_input(&mut self) {
+        self.flush_native_clipboard_results();
         let events = self.internal_ui.drain_routed_events();
         if events.is_empty() || self.internal_shell.is_none() {
             return;
@@ -1543,6 +1545,7 @@ impl NickelSession {
         }
         let launcher_is_visible = shell.launcher_visible();
         let _ = shell;
+        self.flush_native_clipboard_results();
         if !launcher_was_visible && launcher_is_visible {
             self.launcher_output_name =
                 self.resolve_interaction_output(InvocationSource::RecentInteraction);
@@ -2161,6 +2164,7 @@ impl NickelSession {
             start_time,
             display_handle: dh,
             event_loop_handle: event_loop.handle(),
+            native_clipboard: Default::default(),
             #[cfg(feature = "backend-udev")]
             native: None,
 
@@ -6567,6 +6571,7 @@ mod protocol_tests {
     fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
         use nickel_session_protocol::OnScreenKeyboardInput;
         use nickel_ui::{UiEvent, id, ui};
+        use std::io::Write;
 
         #[derive(Default)]
         struct TypingApp(String);
@@ -6584,7 +6589,7 @@ mod protocol_tests {
         }
 
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-        let (_event_loop, mut session) = preview_test_session();
+        let (mut event_loop, mut session) = preview_test_session();
         let recipients = [
             crate::session::InternalSurfaceRole::Application,
             crate::session::InternalSurfaceRole::Overlay,
@@ -6627,6 +6632,124 @@ mod protocol_tests {
             "hello"
         );
 
+        // Native clipboard ownership follows real UI copy/cut policy; admission
+        // failure must preserve both the selected text and the previous owner.
+        session.native_clipboard.text_limit = Some(8);
+        let physical = session.seat.get_keyboard().unwrap().modifier_state();
+        let chord = |keysym| OnScreenKeyboardInput::Key {
+            keysym,
+            modifiers: vec![0xffe3],
+        };
+        session
+            .deliver_on_screen_keyboard_input(first.epoch, chord('a' as u32))
+            .unwrap();
+        session
+            .deliver_on_screen_keyboard_input(first.epoch, chord('c' as u32))
+            .unwrap();
+        {
+            let owner =
+                smithay::wayland::selection::data_device::current_data_device_selection_userdata(
+                    &session.seat,
+                )
+                .unwrap();
+            assert!(
+                matches!(&*owner, crate::session::handlers::SelectionOwner::NativeText(text) if text.as_ref() == "hello")
+            );
+        }
+        session.native_clipboard.text_limit = Some(4);
+        assert!(
+            session
+                .deliver_on_screen_keyboard_input(first.epoch, chord('x' as u32))
+                .is_err()
+        );
+        assert_eq!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[0])
+                .unwrap()
+                .0,
+            "hello"
+        );
+        session.native_clipboard.text_limit = Some(8);
+        session
+            .deliver_on_screen_keyboard_input(first.epoch, chord('x' as u32))
+            .unwrap();
+        assert!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[0])
+                .unwrap()
+                .0
+                .is_empty()
+        );
+        session
+            .deliver_on_screen_keyboard_input(first.epoch, chord('v' as u32))
+            .unwrap();
+        assert_eq!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[0])
+                .unwrap()
+                .0,
+            "hello"
+        );
+        assert_eq!(
+            session.seat.get_keyboard().unwrap().modifier_state(),
+            physical
+        );
+
+        let paste_key = crate::session::input::internal_virtual_key(
+            'v' as u32,
+            &[0xffe3],
+            nickel_input::EventOrder(55),
+        )
+        .unwrap();
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let permit = session.native_clipboard.reads.acquire(1).unwrap();
+        session
+            .begin_native_paste_read(
+                reader.into(),
+                first.epoch,
+                paste_key.clone(),
+                recipients[0],
+                8,
+                permit,
+            )
+            .unwrap();
+        writer.write_all(b"!").unwrap();
+        drop(writer);
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while session.native_clipboard.pending_read.is_some() && Instant::now() < deadline {
+            event_loop
+                .dispatch(Some(std::time::Duration::from_millis(10)), &mut session)
+                .unwrap();
+        }
+        assert!(session.native_clipboard.pending_read.is_none());
+        assert!(
+            session.native_clipboard.last_failure.is_none(),
+            "Closed must not overwrite successful completion"
+        );
+        assert_eq!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[0])
+                .unwrap()
+                .0,
+            "hello!"
+        );
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let permit = session.native_clipboard.reads.acquire(1).unwrap();
+        session
+            .begin_native_paste_read(
+                reader.into(),
+                first.epoch,
+                paste_key,
+                recipients[0],
+                8,
+                permit,
+            )
+            .unwrap();
+
         // Both owners have a None Smithay target. Their distinct native leases
         // must still reject a release captured before the focus transfer.
         assert!(session.internal_ui.touch_with_client(
@@ -6647,6 +6770,27 @@ mod protocol_tests {
                     }
                 )
                 .is_err()
+        );
+        writer.write_all(b"stale").unwrap();
+        drop(writer);
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while session.native_clipboard.pending_read.is_some() && Instant::now() < deadline {
+            event_loop
+                .dispatch(Some(std::time::Duration::from_millis(10)), &mut session)
+                .unwrap();
+        }
+        assert!(session.native_clipboard.pending_read.is_none());
+        assert_eq!(
+            session.native_clipboard.last_failure.as_deref(),
+            Some("clipboard paste recipient changed")
+        );
+        assert!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[1])
+                .unwrap()
+                .0
+                .is_empty()
         );
         let second = session.on_screen_keyboard_snapshot();
         assert_ne!(first.epoch, second.epoch);

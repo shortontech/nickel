@@ -4,11 +4,13 @@ mod handlers;
 
 mod authority;
 mod backend;
+mod clipboard_transfer;
 mod focus;
 mod grabs;
 mod input;
 mod internal_ui;
 pub(crate) mod login_services;
+mod native_clipboard;
 mod on_screen_keyboard;
 mod output_retirement;
 #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]

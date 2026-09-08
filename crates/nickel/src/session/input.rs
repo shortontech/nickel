@@ -172,6 +172,42 @@ fn desktop_key_event(
     }
 }
 
+/// Virtual modifiers describe one normalized chord; they never update the seat's
+/// physical modifier state or masquerade as a hardware scan code.
+pub(super) fn internal_virtual_key(
+    keysym: u32,
+    modifiers: &[u32],
+    order: nickel_input::EventOrder,
+) -> Result<nickel_input::KeyEvent, &'static str> {
+    use nickel_input::{Modifier, ModifierState, NativeCode, NativeKey, PhysicalKey};
+    if modifiers.len() > 5 {
+        return Err("invalid on-screen keyboard modifiers");
+    }
+    let sides = modifiers
+        .iter()
+        .map(|modifier| match modifier {
+            0xffe1 => Ok(Modifier::ShiftLeft),
+            0xffe3 => Ok(Modifier::ControlLeft),
+            0xffe9 => Ok(Modifier::AltLeft),
+            0xffeb => Ok(Modifier::SuperLeft),
+            0xfe03 => Ok(Modifier::AltRight),
+            _ => Err("invalid on-screen keyboard modifiers"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut event = desktop_key_event(
+        (0, Keysym::new(keysym), KeyState::Pressed),
+        ModifierState::from_sides(sides),
+        nickel_input::DeviceId(u64::MAX),
+        order,
+        false,
+    );
+    event.physical = PhysicalKey::Native(NativeKey {
+        namespace: "nickel-virtual-keysym".into(),
+        code: NativeCode::Numeric(u64::from(keysym)),
+    });
+    Ok(event)
+}
+
 impl NickelSession {
     fn route_internal_pointer_motion(
         &mut self,

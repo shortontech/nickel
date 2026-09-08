@@ -844,6 +844,9 @@ impl<A: Application> HostAdapter<A> for DefaultHostAdapter {}
 
 #[derive(Default)]
 pub struct HostBatch {
+    /// Native embedders may bound clipboard ownership without truncating text.
+    /// Oversized copy/cut is rejected before a cut can mutate the document.
+    pub clipboard_text_limit: Option<usize>,
     /// Monotonic time supplied by an adapter or deterministic harness.
     pub now: Option<Instant>,
     /// The embedding host mutated application-owned view data directly.
@@ -1519,6 +1522,8 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
+        self.state.clipboard_text_limit = batch.clipboard_text_limit;
+        self.state.clipboard_rejected = false;
         let step_started = Instant::now();
         let now = batch.now.unwrap_or_else(Instant::now);
         let mut combined = HostEventOutcome {
@@ -1629,7 +1634,7 @@ impl<A: Application> UiHost<A> {
                 combined.merge(self.dispatch_ui_event(UiEvent::PointerCancelled));
                 combined.merge(self.dispatch_ui_event(UiEvent::TouchLongPress(pending.origin)));
             }
-            let outcome = match event {
+            let mut outcome = match event {
                 HostEvent::Ui(event) => self.dispatch_ui_event(event),
                 HostEvent::Controller(action) => self.dispatch_controller_action(action),
                 HostEvent::Shortcut(shortcut) => {
@@ -1674,6 +1679,17 @@ impl<A: Application> UiHost<A> {
                     }
                 }
             };
+            // Reject a read-only Copy before merging its effect. An oversized
+            // later copy cannot erase bytes from an earlier successful Cut.
+            if self.state.clipboard_text_limit.is_some_and(|limit| {
+                outcome
+                    .clipboard_text
+                    .as_ref()
+                    .is_some_and(|text| text.len() > limit)
+            }) {
+                outcome.clipboard_text = None;
+                self.state.clipboard_rejected = true;
+            }
             combined.merge(outcome);
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
@@ -1711,6 +1727,16 @@ impl<A: Application> UiHost<A> {
             }
         }
         combined.effects = self.application.take_effect_evidence();
+        if self.state.clipboard_rejected {
+            combined.failures.push(HostFailure {
+                surface: self.application.title().into(),
+                stage: HostFailureStage::Clipboard,
+                optional: false,
+                detail:
+                    "Clipboard text exceeds the native transfer limit; nothing was cut or copied"
+                        .into(),
+            });
+        }
         self.next_application_deadline = match (
             self.next_application_deadline,
             self.application.poll_interval(),
@@ -3585,6 +3611,88 @@ mod tests {
                 .changed
         );
         assert_eq!(host.application_mut().text, "pasted");
+    }
+
+    #[test]
+    fn bounded_clipboard_rejects_cut_before_edit_or_ownership_change() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        host.handle_input(&focus_event(), None);
+        host.handle_event(UiEvent::TextInput("preserve me".into()));
+        host.handle_event(UiEvent::TextSelectAll);
+        let denied = host.step(HostBatch {
+            clipboard_text_limit: Some(4),
+            events: vec![HostEvent::Ui(UiEvent::TextCut)],
+            ..Default::default()
+        });
+        assert_eq!(host.application().text, "preserve me");
+        assert!(denied.clipboard_text.is_none());
+        assert_eq!(denied.failures.len(), 1);
+        let accepted = host.step(HostBatch {
+            clipboard_text_limit: Some(11),
+            events: vec![HostEvent::Ui(UiEvent::TextCut)],
+            ..Default::default()
+        });
+        assert!(host.application().text.is_empty());
+        assert_eq!(accepted.clipboard_text.as_deref(), Some("preserve me"));
+
+        host.handle_event(UiEvent::TextInput("large".into()));
+        host.handle_event(UiEvent::TextSelectAll);
+        let mixed = host.step(HostBatch {
+            clipboard_text_limit: Some(1),
+            events: vec![
+                HostEvent::Ui(UiEvent::TextCut),
+                HostEvent::Ui(UiEvent::TextMoveEnd {
+                    extend_selection: false,
+                }),
+                HostEvent::Ui(UiEvent::TextMoveLeft {
+                    extend_selection: true,
+                }),
+                HostEvent::Ui(UiEvent::TextCut),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(host.application().text, "larg");
+        assert_eq!(mixed.clipboard_text.as_deref(), Some("e"));
+        assert_eq!(mixed.failures.len(), 1);
+        let reverse = host.step(HostBatch {
+            clipboard_text_limit: Some(1),
+            events: vec![
+                HostEvent::Ui(UiEvent::TextMoveEnd {
+                    extend_selection: false,
+                }),
+                HostEvent::Ui(UiEvent::TextMoveLeft {
+                    extend_selection: true,
+                }),
+                HostEvent::Ui(UiEvent::TextCut),
+                HostEvent::Ui(UiEvent::TextSelectAll),
+                HostEvent::Ui(UiEvent::TextCut),
+            ],
+            ..Default::default()
+        });
+        assert_eq!(host.application().text, "lar");
+        assert_eq!(reverse.clipboard_text.as_deref(), Some("g"));
+        assert_eq!(reverse.failures.len(), 1);
+
+        let mut secure = UiHost::new(
+            SecureInputApplication {
+                text: String::new(),
+            },
+            320,
+            48,
+        );
+        secure.handle_input(&focus_event(), None);
+        secure.handle_event(UiEvent::TextInput("secret".into()));
+        secure.handle_event(UiEvent::TextSelectAll);
+        for event in [UiEvent::TextCopy, UiEvent::TextCut] {
+            let outcome = secure.step(HostBatch {
+                clipboard_text_limit: Some(0),
+                events: vec![HostEvent::Ui(event)],
+                ..Default::default()
+            });
+            assert!(outcome.clipboard_text.is_none());
+            assert!(outcome.failures.is_empty());
+            assert_eq!(secure.application().text, "secret");
+        }
     }
 
     #[test]

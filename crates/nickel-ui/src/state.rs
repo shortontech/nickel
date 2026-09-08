@@ -207,6 +207,8 @@ pub(crate) struct TextContextSession {
 
 #[derive(Clone, Debug)]
 pub struct UiStateStore {
+    pub(crate) clipboard_text_limit: Option<usize>,
+    pub(crate) clipboard_rejected: bool,
     durable: DurableNodeState,
     pointer: PointerModalityState,
     navigation: NavigationState,
@@ -225,6 +227,8 @@ impl Default for UiStateStore {
 impl UiStateStore {
     pub fn with_retention_frames(retention_frames: u64) -> Self {
         Self {
+            clipboard_text_limit: None,
+            clipboard_rejected: false,
             durable: DurableNodeState {
                 entries: HashMap::new(),
                 frame: 0,

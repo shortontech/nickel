@@ -1371,6 +1371,8 @@ fn interpolate_color(start: u32, end: u32, progress: f32) -> u32 {
 
 /// Session-owned applications and their compositor presentation state.
 pub struct InternalUiRuntime {
+    clipboard_limit: usize,
+    clipboard_result: Option<Result<String, String>>,
     surfaces: InternalSurfaceSet,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
     focused: Option<InternalSurfaceId>,
@@ -1392,6 +1394,8 @@ pub struct InternalUiRuntime {
 impl Default for InternalUiRuntime {
     fn default() -> Self {
         Self {
+            clipboard_limit: 0,
+            clipboard_result: None,
             surfaces: InternalSurfaceSet::default(),
             presentation: BTreeMap::new(),
             focused: None,
@@ -1692,7 +1696,16 @@ impl InternalUiRuntime {
         changed
     }
 
-    pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
+    pub(crate) fn set_clipboard_limit(&mut self, limit: usize) {
+        self.clipboard_limit = limit;
+    }
+
+    pub(crate) fn take_clipboard_result(&mut self) -> Option<Result<String, String>> {
+        self.clipboard_result.take()
+    }
+
+    pub fn step(&mut self, id: InternalSurfaceId, mut batch: HostBatch) -> bool {
+        batch.clipboard_text_limit = Some(self.clipboard_limit);
         if batch.window_focused == Some(false) {
             self.clear_desktop_pressed_keys();
         }
@@ -1709,7 +1722,9 @@ impl InternalUiRuntime {
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;
         };
-        let changed = surface.step(batch).changed;
+        let mut outcome = surface.step(batch);
+        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        let changed = outcome.changed;
         if changed && let Some(presentation) = self.presentation.get_mut(&id) {
             presentation.dirty = true;
         }

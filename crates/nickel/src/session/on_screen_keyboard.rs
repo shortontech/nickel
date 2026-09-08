@@ -29,6 +29,7 @@ pub(crate) struct OnScreenKeyboardState {
     enabled: bool,
     pub(crate) visible: bool,
     source: KeyboardSource,
+    virtual_order: u64,
 }
 
 impl Default for OnScreenKeyboardState {
@@ -48,6 +49,7 @@ impl Default for OnScreenKeyboardState {
             enabled: false,
             visible: false,
             source: KeyboardSource::new_auxiliary(),
+            virtual_order: 0,
         }
     }
 }
@@ -235,13 +237,17 @@ impl NickelSession {
                     nickel_ui::UiEvent::TextInput(text)
                 }
                 OnScreenKeyboardInput::Key { keysym, modifiers } => {
-                    // The existing internal key adapter has no chord transport.
-                    // Reject unsupported chords instead of turning Ctrl+C into c.
-                    if !modifiers.is_empty() {
-                        return Err("modified internal keyboard input is not supported");
+                    self.on_screen_keyboard.virtual_order =
+                        self.on_screen_keyboard.virtual_order.wrapping_add(1);
+                    let event = super::input::internal_virtual_key(
+                        keysym,
+                        &modifiers,
+                        nickel_input::EventOrder(self.on_screen_keyboard.virtual_order),
+                    )?;
+                    if crate::is_clipboard_paste(&nickel_input::InputEvent::Key(event.clone())) {
+                        return self.request_native_paste(epoch, event);
                     }
-                    super::input::internal_keyboard_event(Keysym::new(keysym), KeyState::Pressed)
-                        .ok_or("key unavailable for the internal recipient")?
+                    return self.dispatch_native_key(epoch, event, None);
                 }
             };
             self.internal_ui.keyboard(event);

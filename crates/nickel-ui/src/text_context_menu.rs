@@ -184,6 +184,8 @@ pub(crate) fn internal_read_only_text_context_menu<Message: Clone>(
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TextCommandEffect {
+    /// Admission failed before the document or clipboard ownership changed.
+    pub clipboard_rejected: bool,
     pub changed: bool,
     pub clipboard_text: Option<String>,
 }
@@ -192,9 +194,19 @@ pub struct TextCommandEffect {
 /// editor command. This makes stale menus and clipboard changes harmless.
 pub fn execute_text_command(
     editor: &mut TextEditor,
+    policy: TextContextPolicy,
+    command: TextEditCommand,
+    clipboard_text: Option<&str>,
+) -> TextCommandEffect {
+    execute_text_command_with_limit(editor, policy, command, clipboard_text, None)
+}
+
+pub(crate) fn execute_text_command_with_limit(
+    editor: &mut TextEditor,
     mut policy: TextContextPolicy,
     command: TextEditCommand,
     clipboard_text: Option<&str>,
+    limit: Option<usize>,
 ) -> TextCommandEffect {
     if command == TextEditCommand::Paste {
         policy.clipboard_has_text &= clipboard_text.is_some();
@@ -206,6 +218,20 @@ pub fn execute_text_command(
     if !enabled {
         return TextCommandEffect::default();
     }
+    // Check the existing secure/editable policy first. Admission inspects only
+    // the selected slice, before Cut mutates text or allocates clipboard bytes.
+    if matches!(command, TextEditCommand::Copy | TextEditCommand::Cut)
+        && limit.is_some_and(|limit| {
+            editor
+                .selected_text()
+                .is_some_and(|text| text.len() > limit)
+        })
+    {
+        return TextCommandEffect {
+            clipboard_rejected: true,
+            ..Default::default()
+        };
+    }
     let before = editor.text().to_owned();
     let mut copied = None;
     match command {
@@ -215,6 +241,7 @@ pub fn execute_text_command(
             return TextCommandEffect {
                 changed: true,
                 clipboard_text: editor.cut_selection(),
+                clipboard_rejected: false,
             };
         }
         TextEditCommand::Copy => copied = editor.selected_text().map(ToOwned::to_owned),
@@ -229,6 +256,7 @@ pub fn execute_text_command(
         TextEditCommand::SelectAll => editor.select_all(),
     }
     TextCommandEffect {
+        clipboard_rejected: false,
         changed: editor.text() != before,
         clipboard_text: copied,
     }

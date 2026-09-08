@@ -85,6 +85,7 @@ pub(crate) struct InternalShellCoordinator {
     file_windows: nickel_file::FileWindowCoordinator,
     file_requests: mpsc::Receiver<nickel_file::FileWindowRequest>,
     file_actions: Vec<nickel_file::FileWindowAction>,
+    clipboard_result: Option<Result<String, String>>,
 }
 
 impl InternalShellCoordinator {
@@ -102,6 +103,7 @@ impl InternalShellCoordinator {
             file_windows: nickel_file::FileWindowCoordinator::new(),
             file_requests,
             file_actions: Vec::new(),
+            clipboard_result: None,
         })
     }
 
@@ -534,6 +536,42 @@ impl InternalShellCoordinator {
             );
         }
         for event in batch.events {
+            if matches!(
+                entry.role,
+                SurfaceRole::Launcher | SurfaceRole::ControlCenter
+            ) && let nickel_ui::HostEvent::Normalized {
+                input,
+                clipboard_text,
+            } = event
+            {
+                let mut outcome = if entry.role == SurfaceRole::Launcher {
+                    self.shell.launcher_host_input_with_clipboard_limit(
+                        input,
+                        clipboard_text,
+                        entry.size.0,
+                        entry.size.1,
+                        batch.clipboard_text_limit,
+                    )
+                } else {
+                    dependent_roles.extend([
+                        SurfaceRole::Panel,
+                        SurfaceRole::VolumeOsd,
+                        SurfaceRole::OnScreenKeyboard,
+                    ]);
+                    self.shell.control_host_input(
+                        input,
+                        clipboard_text,
+                        entry.size,
+                        batch.clipboard_text_limit,
+                    )
+                };
+                changed |= outcome.changed;
+                crate::session_host::record_clipboard_outcome(
+                    &mut self.clipboard_result,
+                    &mut outcome,
+                );
+                continue;
+            }
             if entry.role == SurfaceRole::OnScreenKeyboard
                 && let nickel_ui::HostEvent::Normalized { input, .. } = event
             {
@@ -618,6 +656,10 @@ impl InternalShellCoordinator {
 
     pub fn toggle_launcher(&mut self) -> bool {
         self.shell.request_launcher_toggle()
+    }
+
+    pub(crate) fn take_clipboard_result(&mut self) -> Option<Result<String, String>> {
+        self.clipboard_result.take()
     }
 
     pub fn launcher_visible(&self) -> bool {
@@ -1461,6 +1503,35 @@ mod tests {
         for id in changes {
             coordinator.scene(id);
         }
+        coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                clipboard_text_limit: Some(8),
+                events: vec![
+                    nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextSelectAll),
+                    nickel_ui::HostEvent::Normalized {
+                        input: nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                            device: nickel_input::DeviceId(1),
+                            order: nickel_input::EventOrder(9),
+                            physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyC),
+                            logical: nickel_input::LogicalKey::Character("c".into()),
+                            location: nickel_input::KeyLocation::Standard,
+                            edge: nickel_input::KeyEdge::Pressed,
+                            repeat: false,
+                            modifiers: nickel_input::ModifierState::from_sides([
+                                nickel_input::Modifier::ControlLeft,
+                            ]),
+                        }),
+                        clipboard_text: None,
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            coordinator.take_clipboard_result(),
+            Some(Ok("terminal".into()))
+        );
         assert_eq!(
             coordinator
                 .surface(SurfaceRole::Panel, Some("left"))

@@ -2015,8 +2015,20 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
+        self.launcher_host_input_with_clipboard_limit(input, clipboard_text, width, height, None)
+    }
+
+    pub(crate) fn launcher_host_input_with_clipboard_limit(
+        &mut self,
+        input: nickel_input::InputEvent,
+        clipboard_text: Option<String>,
+        width: u32,
+        height: u32,
+        limit: Option<usize>,
+    ) -> nickel_ui::HostEventOutcome {
         if self.run_visible {
             let outcome = self.run_host.step(HostBatch {
+                clipboard_text_limit: limit,
                 surface_size: Some((width, height)),
                 events: vec![HostEvent::Normalized {
                     input,
@@ -2033,6 +2045,7 @@ impl LiveShell {
             .application_mut()
             .sync(&self.launcher, self.palette, status);
         let outcome = self.launcher_host.step(HostBatch {
+            clipboard_text_limit: limit,
             surface_size: Some((width, height)),
             events: vec![HostEvent::Normalized {
                 input,
@@ -2401,6 +2414,31 @@ impl LiveShell {
             self.apply_launcher_action(action);
         }
         outcome.changed
+    }
+
+    pub(crate) fn control_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+        clipboard_text: Option<String>,
+        size: (u32, u32),
+        limit: Option<usize>,
+    ) -> nickel_ui::HostEventOutcome {
+        self.sync_control_host(size.0, size.1);
+        let mut outcome = self.control_host.step(HostBatch {
+            surface_size: Some(size),
+            clipboard_text_limit: limit,
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text,
+            }],
+            ..Default::default()
+        });
+        self.host_runtime_samples.record(outcome.telemetry);
+        outcome.changed |= outcome.change_token != self.control_change_token;
+        self.control_change_token = outcome.change_token;
+        self.control_deadline = outcome.next_deadline;
+        self.apply_control_effects();
+        outcome
     }
 
     /// Dispatches compositor-owned semantic UI events through the same hosts and

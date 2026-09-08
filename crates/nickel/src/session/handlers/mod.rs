@@ -95,6 +95,7 @@ impl SeatHandler for NickelSession {
 #[derive(Clone)]
 pub enum SelectionOwner {
     XWayland(smithay::xwayland::xwm::XwmId),
+    NativeText(std::sync::Arc<String>),
 }
 
 impl SelectionHandler for NickelSession {
@@ -126,7 +127,19 @@ impl SelectionHandler for NickelSession {
         _seat: Seat<Self>,
         owner: &Self::SelectionUserData,
     ) {
-        let SelectionOwner::XWayland(owner_id) = owner;
+        let owner_id = match owner {
+            SelectionOwner::NativeText(text) => {
+                if matches!(
+                    mime_type.as_str(),
+                    "text/plain;charset=utf-8" | "text/plain"
+                ) && let Err(error) = self.send_native_clipboard(fd, text.clone())
+                {
+                    tracing::warn!(error, "native clipboard transfer was rejected");
+                }
+                return;
+            }
+            SelectionOwner::XWayland(owner_id) => owner_id,
+        };
         let Some((xwm_id, xwm)) = self.xwm.as_mut() else {
             return;
         };
