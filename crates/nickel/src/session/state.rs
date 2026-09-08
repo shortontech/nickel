@@ -133,6 +133,27 @@ mod internal_shell_placement_tests {
     }
 
     #[test]
+    fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
+        let placement = internal_shell_surface_placement(
+            SurfaceRole::VolumeOsd,
+            Some("right"),
+            (320, 88),
+            &outputs(),
+            Some("left"),
+        );
+        assert_eq!(placement.output.as_deref(), Some("right"));
+        assert_eq!(placement.geometry, (0, 240, 320, 88));
+        let fallback = internal_shell_surface_placement(
+            SurfaceRole::VolumeOsd,
+            Some("removed"),
+            (320, 88),
+            &outputs(),
+            None,
+        );
+        assert_eq!(fallback.output.as_deref(), Some("left"));
+    }
+
+    #[test]
     fn switching_active_output_relocates_one_launcher_to_negative_origin() {
         let right = internal_shell_surface_placement(
             SurfaceRole::Launcher,
@@ -1530,9 +1551,12 @@ impl NickelSession {
                 }
                 continue;
             }
+            let interaction_output = (surface.role == crate::winit_shell::SurfaceRole::VolumeOsd)
+                .then(|| self.preferred_interaction_output_name())
+                .flatten();
             let placement = internal_shell_surface_placement(
                 surface.role,
-                surface.output.as_deref(),
+                interaction_output.as_deref().or(surface.output.as_deref()),
                 surface.size,
                 &self.internal_outputs(),
                 self.launcher_output_name.as_deref(),
@@ -1550,7 +1574,7 @@ impl NickelSession {
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
-            let output_scale = surface
+            let output_scale = placement
                 .output
                 .as_deref()
                 .and_then(|name| self.space.outputs().find(|output| output.name() == name))
@@ -3327,6 +3351,19 @@ impl NickelSession {
             subscribers = self.launcher_subscribers.len(),
             "consumer control activated"
         );
+        if let Some(shell) = self.internal_shell.as_mut() {
+            if shell.consumer_control(control) {
+                let changed = shell
+                    .surfaces()
+                    .iter()
+                    .filter(|surface| surface.role == crate::winit_shell::SurfaceRole::VolumeOsd)
+                    .map(|surface| surface.id)
+                    .collect::<Vec<_>>();
+                self.sync_internal_shell_changes(Some(&changed));
+            }
+            self.wake_internal_shell();
+            return;
+        }
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::ConsumerControl { control }),
@@ -6828,6 +6865,54 @@ mod protocol_tests {
     }
 
     struct IdleInternalHost;
+
+    #[test]
+    fn native_media_notification_bypasses_legacy_subscribers_and_preserves_focus() {
+        use nickel_session_protocol::ConsumerControl;
+        struct RecordingMediaHost(std::sync::Mutex<Vec<ConsumerControl>>);
+        impl SessionHost for RecordingMediaHost {
+            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn consumer_control(&self, control: ConsumerControl) -> bool {
+                self.0.lock().unwrap().push(control);
+                true
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let (_system_tx, system_rx) = std::sync::mpsc::channel();
+        let host = Arc::new(RecordingMediaHost(std::sync::Mutex::new(Vec::new())));
+        session
+            .enable_internal_shell_with_system_updates(host.clone(), system_rx)
+            .unwrap();
+        let focus = session.seat.get_keyboard().unwrap().current_focus();
+        session.notify_consumer_control(ConsumerControl::VolumeUp);
+        // If native dispatch fell through to legacy delivery, this nonexistent
+        // subscriber would be removed on send failure.
+        let subscriber = std::path::PathBuf::from("/nonexistent-nickel-media-test/subscriber.sock");
+        session.launcher_subscribers.push(subscriber.clone());
+        for control in [
+            ConsumerControl::VolumeDown,
+            ConsumerControl::VolumeMute,
+            ConsumerControl::PlayPause,
+            ConsumerControl::Next,
+        ] {
+            session.notify_consumer_control(control);
+        }
+        assert_eq!(session.launcher_subscribers, vec![subscriber]);
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![
+                ConsumerControl::VolumeUp,
+                ConsumerControl::VolumeDown,
+                ConsumerControl::VolumeMute,
+                ConsumerControl::PlayPause,
+                ConsumerControl::Next
+            ]
+        );
+        assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), focus);
+    }
 
     impl SessionHost for IdleInternalHost {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {

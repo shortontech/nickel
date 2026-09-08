@@ -479,19 +479,13 @@ pub fn prepare_audio_environment() {
     }
 }
 
-pub fn handle_consumer_control(control: nickel_session_protocol::ConsumerControl) {
+pub fn handle_consumer_control(control: nickel_session_protocol::ConsumerControl) -> bool {
     use nickel_session_protocol::ConsumerControl;
     tracing::info!(?control, "handling Linux consumer control");
     match control {
-        ConsumerControl::VolumeUp => {
-            let _ = linux_audio::adjust_volume(5);
-        }
-        ConsumerControl::VolumeDown => {
-            let _ = linux_audio::adjust_volume(-5);
-        }
-        ConsumerControl::VolumeMute => {
-            let _ = linux_audio::toggle_mute();
-        }
+        ConsumerControl::VolumeUp => linux_audio::adjust_volume(5),
+        ConsumerControl::VolumeDown => linux_audio::adjust_volume(-5),
+        ConsumerControl::VolumeMute => linux_audio::toggle_mute(),
         _ => linux_control::handle_consumer_control(control),
     }
 }

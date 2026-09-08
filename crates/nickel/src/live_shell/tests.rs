@@ -78,6 +78,49 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
 }
 
 #[test]
+fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
+    let mut shell = LiveShell::new().unwrap();
+    let mut status = AudioStatus {
+        available: true,
+        volume_percent: 31,
+        muted: false,
+        devices: Vec::new(),
+    };
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    status.devices.push(crate::platform::AudioDeviceStatus {
+        id: "sink".into(),
+        name: "Speaker".into(),
+        is_default: true,
+    });
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    status.volume_percent = 36;
+    assert!(shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone())));
+    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
+    shell.volume_osd_scene(320, 88);
+    assert!(
+        shell
+            .volume_osd_host
+            .application()
+            .label
+            .starts_with("Volume 36%")
+    );
+    let first = shell.volume_osd_until.unwrap();
+    status.muted = true;
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
+    assert!(shell.volume_osd_until.unwrap() >= first);
+    let outcome = shell.poll_deadlines(Instant::now() + Duration::from_secs(2));
+    assert!(outcome.visibility_changed);
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    status.available = false;
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status.clone()));
+    status.available = true;
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status));
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+}
+
+#[test]
 fn settings_transition_reprojects_light_and_dark_appearance() {
     use nickel_core::{shell_settings::ThemePreference, theme::ThemePalette};
 

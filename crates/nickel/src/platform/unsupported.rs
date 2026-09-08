@@ -49,7 +49,9 @@ pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }
 
-pub fn handle_consumer_control(_control: nickel_session_protocol::ConsumerControl) {}
+pub fn handle_consumer_control(_control: nickel_session_protocol::ConsumerControl) -> bool {
+    false
+}
 
 pub fn capture_pointer(_window: &impl raw_window_handle::HasWindowHandle) -> bool {
     false

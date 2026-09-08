@@ -31,10 +31,40 @@ Payload counts describe that removed pixel copy, not aggregate allocator calls o
 Arc headers, provider decode/copy cost, renderer imports, GPU memory, and end-to-end presentation
 latency are not measured. The result does not fix the native GPU synchronization problem in 0225.
 
+## 0221: native media dispatch and audio feedback
+
+The native notifier now dispatches consumer controls directly through `InternalShellCoordinator` and
+the injected `SessionHost`, returning before legacy subscriber fanout. The production host enqueues
+to the existing PipeWire/MPRIS workers; its boolean result reports queue acceptance, not completed
+audio/player execution. Rejected commands are logged without keyboard text. Windows retains its
+native WM_APPCOMMAND ownership and does not duplicate these commands.
+
+Native audio snapshots now arm the existing 1,500 ms OSD on volume/mute changes after initial
+observation. Startup, device-metadata-only changes, and reconnection do not show unsolicited OSDs;
+unavailability retires the OSD. Subsequent external mixer value changes do show feedback. At a known
+volume limit, an accepted up/down request can display the last observed value without inventing an
+increment. OSD mapping uses the current preferred interaction output, not launcher affinity, and
+new runtime surfaces derive scale from their resolved placement. Limit feedback invalidates only
+the OSD rather than every shell scene.
+
+New recording-host tests exercise the coordinator and native session notifier, proving single
+dispatch with zero/legacy subscribers, rejection handling, no optimistic result for ordinary
+commands, unchanged keyboard focus, and OSD expiry. State/placement tests cover startup/metadata/
+reconnect suppression, volume/mute changes, and requested-output/fallback placement.
+
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` passed: 613 passed, 11 ignored.
+`cargo fmt --all --check`, `git diff --check`, and
+`CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` also passed.
+The previously run `native_` subset passed 16 tests before the final placement regression was added.
+Physical-key repeat/cancellation and actual mixer/player output remain to be exercised; the existing
+compositor repeat implementation was preserved, not independently proven by notifier tests.
+No physical or virtual media keys were sent to the user's desktop. Spec 0221 remains active pending
+the remaining ingress and native acceptance coverage and full-workspace gates.
+
 ## Remaining implementation
 
 - 0220: wire native desktop topology, viewport selection, and input to production authorities.
-- 0221: native media dispatch and status-driven OSD behavior.
+- 0221: remaining input/backend/native acceptance and final integration gates.
 - 0222: typed keyboard snapshots/effects and correct recipient epochs/gesture leases.
 - 0223: bounded latest-state status delivery with race-free wake/rearm.
 - 0225: nonblocking preview scheduling/capture with bounded work and retry backoff.

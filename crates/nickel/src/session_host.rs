@@ -22,6 +22,11 @@ use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
 pub trait SessionHost: Send + Sync {
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError>;
+    /// Enqueue a consumer action without blocking the compositor on backend I/O.
+    /// Success means accepted for delivery, not a confirmed mixer/player change.
+    fn consumer_control(&self, control: nickel_session_protocol::ConsumerControl) -> bool {
+        platform::handle_consumer_control(control)
+    }
     fn secure_storage_state(&self) -> Result<SecureStorageState, SessionRequestError> {
         Ok(SecureStorageState::Ready)
     }

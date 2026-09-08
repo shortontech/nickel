@@ -506,6 +506,12 @@ impl InternalShellCoordinator {
     /// The native input reducer already owns suppression and key-repeat
     /// semantics.  Keeping this final hop typed avoids depending on the legacy
     /// subscriber datagram, which does not exist in a unified session.
+    pub fn consumer_control(&mut self, control: nickel_session_protocol::ConsumerControl) -> bool {
+        self.shell
+            .global_shortcut(crate::platform::GlobalShortcut::ConsumerControl(control))
+    }
+
+    /// Deliver a non-consumer compositor shortcut through the same typed shell owner.
     pub fn global_shortcut(&mut self, action: nickel_session_protocol::ShortcutAction) -> bool {
         use crate::platform::{GlobalShortcut, ScreenshotAction};
         use nickel_session_protocol::ShortcutAction;
@@ -594,6 +600,66 @@ mod tests {
     }
 
     struct StorageHost(Arc<AtomicU8>);
+
+    #[test]
+    fn native_consumer_controls_use_typed_host_and_only_show_confirmed_limit_values() {
+        use nickel_session_protocol::ConsumerControl;
+        struct MediaHost(std::sync::Mutex<Vec<ConsumerControl>>);
+        impl SessionHost for MediaHost {
+            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn consumer_control(&self, control: ConsumerControl) -> bool {
+                self.0.lock().unwrap().push(control);
+                control != ConsumerControl::VolumeDown
+            }
+        }
+        let host = Arc::new(MediaHost(std::sync::Mutex::new(Vec::new())));
+        let mut shell = InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        shell.set_outputs(&[InternalOutput {
+            name: "test".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        let osd = shell.surface(SurfaceRole::VolumeOsd, None).unwrap().id;
+        shell.apply_system_status_update(crate::platform::SystemStatusUpdate::Audio(
+            crate::platform::AudioStatus {
+                available: true,
+                volume_percent: 100,
+                muted: false,
+                devices: Vec::new(),
+            },
+        ));
+        assert!(!shell.visible(osd));
+        assert!(shell.consumer_control(ConsumerControl::VolumeUp));
+        assert!(shell.visible(osd));
+        let changed = shell.poll(Instant::now() + std::time::Duration::from_secs(2));
+        assert!(changed.contains(&osd));
+        assert!(!shell.visible(osd));
+        for control in [
+            ConsumerControl::VolumeDown,
+            ConsumerControl::VolumeMute,
+            ConsumerControl::PlayPause,
+            ConsumerControl::Next,
+        ] {
+            assert!(!shell.consumer_control(control));
+            assert!(
+                !shell.visible(osd),
+                "accepted commands do not fabricate an audio result"
+            );
+        }
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![
+                ConsumerControl::VolumeUp,
+                ConsumerControl::VolumeDown,
+                ConsumerControl::VolumeMute,
+                ConsumerControl::PlayPause,
+                ConsumerControl::Next
+            ]
+        );
+    }
 
     impl SessionHost for StorageHost {
         fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {

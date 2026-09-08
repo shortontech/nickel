@@ -150,10 +150,11 @@ impl MprisTracker {
     }
 }
 
-pub fn handle_consumer_control(control: ConsumerControl) {
+pub fn handle_consumer_control(control: ConsumerControl) -> bool {
     match control {
         ConsumerControl::VolumeUp | ConsumerControl::VolumeDown | ConsumerControl::VolumeMute => {
             tracing::warn!(?control, "PipeWire audio control is not initialized");
+            false
         }
         _ => {
             let commands = MPRIS_COMMANDS.get_or_init(|| {
@@ -165,6 +166,9 @@ pub fn handle_consumer_control(control: ConsumerControl) {
             });
             if let Err(error) = commands.try_send(control) {
                 tracing::debug!(?control, %error, "MPRIS command queue is unavailable or full");
+                false
+            } else {
+                true
             }
         }
     }

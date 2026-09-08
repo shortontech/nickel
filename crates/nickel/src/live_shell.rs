@@ -508,6 +508,7 @@ pub struct LiveShell {
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
+    audio_status_observed: bool,
     volume_osd_until: Option<Instant>,
     volume_osd_host: nickel_ui::UiHost<VolumeOsdApplication>,
     launcher_visible: bool,
@@ -942,6 +943,7 @@ impl LiveShell {
             bluetooth,
             audio,
             volume_osd_until: None,
+            audio_status_observed: false,
             volume_osd_host,
             launcher_visible: false,
             run_visible: false,
@@ -1375,12 +1377,21 @@ impl LiveShell {
                 }
             }
             platform::SystemStatusUpdate::Audio(status) => {
-                if self.audio == status {
-                    false
-                } else {
-                    self.audio = status;
-                    true
+                let value_changed = self.audio.volume_percent != status.volume_percent
+                    || self.audio.muted != status.muted;
+                let show = self.audio_status_observed
+                    && self.audio.available
+                    && status.available
+                    && value_changed;
+                self.audio_status_observed = true;
+                let changed = self.audio != status;
+                self.audio = status;
+                if show {
+                    self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                } else if !self.audio.available {
+                    return self.volume_osd_until.take().is_some() || changed;
                 }
+                changed
             }
             platform::SystemStatusUpdate::ShellSettingsChanged => self.refresh_system(),
         }
@@ -3686,8 +3697,22 @@ impl LiveShell {
             }
             platform::GlobalShortcut::ShowWindowMenu => self.open_active_window_menu(),
             platform::GlobalShortcut::ConsumerControl(control) => {
-                platform::handle_consumer_control(control);
-                true
+                if !self.session_host.consumer_control(control) {
+                    tracing::warn!(?control, "consumer action could not be queued");
+                    return false;
+                }
+                // A clamped adjustment may produce no backend state transition.
+                // Display only the already-observed value, never an optimistic increment.
+                let at_limit = matches!(control,
+                    nickel_session_protocol::ConsumerControl::VolumeUp if self.audio.volume_percent == 100)
+                    || matches!(control,
+                        nickel_session_protocol::ConsumerControl::VolumeDown if self.audio.volume_percent == 0);
+                if at_limit && self.audio_status_observed && self.audio.available {
+                    self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
+                    true
+                } else {
+                    false
+                }
             }
             platform::GlobalShortcut::AudioChanged {
                 available,
