@@ -1,4 +1,5 @@
 use crate::model::{TrayItem, WindowId};
+pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
 #[cfg(target_os = "linux")]
@@ -91,7 +92,8 @@ pub struct AudioStatus {
     pub muted: bool,
 }
 
-/// A platform-owned state transition consumed directly by the in-process shell.
+/// Replaceable platform state consumed by the in-process shell. Intermediate
+/// snapshots may coalesce; ordered commands must never use this status channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SystemStatusUpdate {
     Network(NetworkStatus),
@@ -100,14 +102,14 @@ pub enum SystemStatusUpdate {
     ShellSettingsChanged,
 }
 
-pub fn system_status_receiver() -> std::sync::mpsc::Receiver<SystemStatusUpdate> {
+pub fn system_status_receiver() -> status_mailbox::StatusReceiver {
     #[cfg(target_os = "linux")]
     {
         linux::system_status_receiver()
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let (_sender, receiver) = std::sync::mpsc::channel();
+        let (_sender, receiver) = status_mailbox::channel();
         receiver
     }
 }

@@ -151,7 +151,37 @@ After the final client-transition flush changes, the full Nickel library suite p
 11 ignored); formatting, diff whitespace checks, and strict all-target/all-feature Nickel Clippy
 also passed. Runtime contract coverage is not physical-device or native desktop acceptance.
 
-## Remaining implementation
+## 0223: bounded native system-status delivery (implementation checkpoint)
+
+Added a typed four-slot mailbox for audio/network/Bluetooth snapshots and settings invalidation.
+Each slot holds the latest immutable Arc payload; replacement releases the old pending payload.
+Wake callbacks execute outside the mutex. Empty-to-pending publication wakes; drain removes pending
+slots under the same lock; registering a wake after publication also wakes. Snapshot count is bounded,
+but device-vector/string size and backend graph storage are not capped by this design.
+
+Audio/control workers now register weak mailbox senders, sharing one published Arc across subscribers.
+Receiver teardown removes registrations even when a backend is quiet. The native platform receiver
+subscribes directly to both backends and owns its settings watcher. The native calloop source uses a
+coalesced ping and drains current domains, replacing the previous source/receiver on reinitialization.
+The two platform relay threads, native relay thread, and parked per-receiver settings thread are gone
+from this path. Notify may still own implementation threads; no process-wide thread count is claimed.
+Existing ordered audio/control command queues were not changed. The external audio shortcut feed
+retains its blocking adapter, now reading latest audio state; this is not a general event-bus rewrite.
+
+Initial compilation exposed incorrect relative module paths in nested Linux adapters; corrected to
+the canonical platform path. Four focused tests then passed: 10,000-update stalled consumer, old
+payload retirement, late wake/reentrant publication, quiet teardown, and concurrent publish/drain
+are covered across those cases. Added tests cover shared payload retirement across subscribers and
+real calloop wake/rearm/source removal. Full Nickel library suite passed: 636 passed, 11 ignored.
+Formatting, diff whitespace checks, and strict all-target/all-feature Nickel Clippy passed.
+
+Remaining 0223 requirements: release allocation/retention measurements, reviewed ownership inventory,
+full-workspace gates, and native media/OSD acceptance under coalesced bursts. In particular, final-state
+coalescing can hide intermediate volume/mute transitions that return to the previously observed value;
+the feedback contract needs explicit integration coverage before this specification can be archived.
+No idle-RSS saving, allocation-count reduction, or complete media-feedback preservation is claimed.
+
+## Remaining implementation (all specs)
 
 Desktop scrolling checkpoint: native axis events now take the normalized desktop route before
 generic widget routing. Smithay wheel v120 values become fractional line deltas with the normalized

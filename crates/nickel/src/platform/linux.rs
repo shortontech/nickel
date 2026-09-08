@@ -385,65 +385,34 @@ pub fn audio_status() -> super::AudioStatus {
 
 /// Subscribe the compositor-owned shell to platform state without a socket or
 /// a frame-rate polling loop. Backend workers publish only actual transitions.
-pub fn system_status_receiver() -> mpsc::Receiver<super::SystemStatusUpdate> {
+pub fn system_status_receiver() -> super::status_mailbox::StatusReceiver {
     use notify::{RecursiveMode, Watcher};
 
-    let (sender, receiver) = mpsc::channel();
-    let control = linux_control::subscribe();
-    let control_sender = sender.clone();
-    let _ = thread::Builder::new()
-        .name("nickel-system-control-feed".into())
-        .spawn(move || {
-            while let Ok(update) = control.recv() {
-                if control_sender.send(update).is_err() {
-                    break;
-                }
-            }
-        });
-    let audio = linux_audio::subscribe();
-    let audio_sender = sender.clone();
-    let _ = thread::Builder::new()
-        .name("nickel-system-audio-feed".into())
-        .spawn(move || {
-            while let Ok(status) = audio.recv() {
-                if audio_sender
-                    .send(super::SystemStatusUpdate::Audio(status))
-                    .is_err()
+    let (_, mut receiver) = super::status_mailbox::channel();
+    linux_control::subscribe_into(&mut receiver);
+    linux_audio::subscribe_into(&mut receiver);
+    let sender = receiver.sender();
+    // The subscription owns its watcher. No parked settings thread or strong
+    // callback reference survives receiver teardown.
+    if let Ok(path) = nickel_core::shell_settings::settings_path()
+        && let Some(parent) = path.parent()
+    {
+        let watched_path = path.clone();
+        if let Ok(mut watcher) =
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+                if let Ok(event) = event
+                    && shell_settings_event_changed(&event, &watched_path)
                 {
-                    break;
+                    let _ = sender.send(std::sync::Arc::new(
+                        super::SystemStatusUpdate::ShellSettingsChanged,
+                    ));
                 }
-            }
-        });
-
-    let settings_sender = sender;
-    let _ = thread::Builder::new()
-        .name("nickel-shell-settings-feed".into())
-        .spawn(move || {
-            let Ok(path) = nickel_core::shell_settings::settings_path() else {
-                return;
-            };
-            let Some(parent) = path.parent() else {
-                return;
-            };
-            let watched_path = path.clone();
-            let Ok(mut watcher) =
-                notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                    let Ok(event) = event else { return };
-                    if shell_settings_event_changed(&event, &watched_path) {
-                        let _ =
-                            settings_sender.send(super::SystemStatusUpdate::ShellSettingsChanged);
-                    }
-                })
-            else {
-                return;
-            };
-            if watcher.watch(parent, RecursiveMode::NonRecursive).is_err() {
-                return;
-            }
-            loop {
-                thread::park();
-            }
-        });
+            })
+            && watcher.watch(parent, RecursiveMode::NonRecursive).is_ok()
+        {
+            receiver.keep_alive(watcher);
+        }
+    }
     receiver
 }
 
@@ -1764,7 +1733,10 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
         .name("nickel-audio-events".into())
         .spawn(move || {
             let updates = linux_audio::subscribe();
-            while let Ok(status) = updates.recv() {
+            loop {
+                let super::SystemStatusUpdate::Audio(status) = updates.recv() else {
+                    continue;
+                };
                 if audio_sender
                     .send(GlobalShortcut::AudioChanged {
                         available: status.available,

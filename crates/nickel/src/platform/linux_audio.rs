@@ -40,7 +40,7 @@ enum AudioCommand {
 struct AudioBackend {
     snapshot: Arc<RwLock<AudioStatus>>,
     commands: mpsc::Sender<AudioCommand>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<AudioStatus>>>>,
+    subscribers: Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
 }
 
 #[derive(Clone)]
@@ -96,16 +96,30 @@ pub fn select_output(id: &str) -> bool {
         .is_ok()
 }
 
-pub fn subscribe() -> mpsc::Receiver<AudioStatus> {
+pub fn subscribe() -> crate::platform::status_mailbox::StatusReceiver {
+    let (_, mut receiver) = crate::platform::status_mailbox::channel();
+    subscribe_into(&mut receiver);
+    receiver
+}
+
+pub fn subscribe_into(receiver: &mut crate::platform::status_mailbox::StatusReceiver) {
     let backend = backend();
-    let (sender, receiver) = mpsc::channel();
+    let sender = receiver.sender();
     if let Ok(mut subscribers) = backend.subscribers.lock() {
         subscribers.push(sender.clone());
     }
     if let Ok(status) = backend.snapshot.read() {
-        let _ = sender.send(status.clone());
+        let _ = sender.send(Arc::new(crate::platform::SystemStatusUpdate::Audio(
+            status.clone(),
+        )));
     }
-    receiver
+    let subscribers = Arc::clone(&backend.subscribers);
+    receiver.on_drop(move || {
+        subscribers
+            .lock()
+            .unwrap()
+            .retain(|entry| !entry.same_channel(&sender))
+    });
 }
 
 fn backend() -> &'static AudioBackend {
@@ -128,7 +142,7 @@ fn backend() -> &'static AudioBackend {
 
 fn audio_worker(
     snapshot: Arc<RwLock<AudioStatus>>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<AudioStatus>>>>,
+    subscribers: Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     commands: mpsc::Receiver<AudioCommand>,
 ) {
     pipewire::init();
@@ -146,7 +160,7 @@ fn audio_worker(
 
 fn run_connection(
     snapshot: &Arc<RwLock<AudioStatus>>,
-    subscribers: &Arc<Mutex<Vec<mpsc::Sender<AudioStatus>>>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     commands: &mpsc::Receiver<AudioCommand>,
 ) -> Result<(), String> {
     let main_loop = MainLoop::new(&Properties::new())
@@ -260,7 +274,7 @@ fn update_props(
     data: &[u8],
     graph: &Arc<Mutex<Graph>>,
     snapshot: &Arc<RwLock<AudioStatus>>,
-    subscribers: &Arc<Mutex<Vec<mpsc::Sender<AudioStatus>>>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
 ) {
     let mut volume = None;
     let mut muted = None;
@@ -326,7 +340,7 @@ fn default_sink_name(value: &str) -> Option<String> {
 
 fn publish(
     snapshot: &Arc<RwLock<AudioStatus>>,
-    subscribers: &Arc<Mutex<Vec<mpsc::Sender<AudioStatus>>>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     graph: &Graph,
 ) {
     let mut sinks = graph
@@ -369,6 +383,7 @@ fn publish(
         false
     };
     if changed && let Ok(mut subscribers) = subscribers.lock() {
+        let status = Arc::new(crate::platform::SystemStatusUpdate::Audio(status));
         subscribers.retain(|sender| sender.send(status.clone()).is_ok());
     }
 }

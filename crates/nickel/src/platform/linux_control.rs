@@ -36,7 +36,7 @@ struct ControlBackend {
     network: Arc<RwLock<NetworkStatus>>,
     bluetooth: Arc<RwLock<BluetoothStatus>>,
     commands: mpsc::Sender<Command>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
+    subscribers: Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
 }
 
 static BACKEND: OnceLock<ControlBackend> = OnceLock::new();
@@ -306,19 +306,25 @@ pub fn bluetooth_status() -> BluetoothStatus {
         .unwrap_or_default()
 }
 
-pub fn subscribe() -> mpsc::Receiver<SystemStatusUpdate> {
+pub fn subscribe_into(receiver: &mut crate::platform::status_mailbox::StatusReceiver) {
     let backend = backend();
-    let (sender, receiver) = mpsc::channel();
+    let sender = receiver.sender();
     if let Ok(mut subscribers) = backend.subscribers.lock() {
         subscribers.push(sender.clone());
     }
     if let Ok(status) = backend.network.read() {
-        let _ = sender.send(SystemStatusUpdate::Network(status.clone()));
+        let _ = sender.send(Arc::new(SystemStatusUpdate::Network(status.clone())));
     }
     if let Ok(status) = backend.bluetooth.read() {
-        let _ = sender.send(SystemStatusUpdate::Bluetooth(status.clone()));
+        let _ = sender.send(Arc::new(SystemStatusUpdate::Bluetooth(status.clone())));
     }
-    receiver
+    let subscribers = Arc::clone(&backend.subscribers);
+    receiver.on_drop(move || {
+        subscribers
+            .lock()
+            .unwrap()
+            .retain(|entry| !entry.same_channel(&sender))
+    });
 }
 
 pub fn set_wifi_enabled(enabled: bool) -> bool {
@@ -382,7 +388,7 @@ fn backend() -> &'static ControlBackend {
 fn worker(
     network: Arc<RwLock<NetworkStatus>>,
     bluetooth: Arc<RwLock<BluetoothStatus>>,
-    subscribers: Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
+    subscribers: Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     commands: mpsc::Receiver<Command>,
 ) {
     let system = Connection::system().ok();
@@ -433,10 +439,11 @@ fn worker(
 }
 
 fn publish(
-    subscribers: &Arc<Mutex<Vec<mpsc::Sender<SystemStatusUpdate>>>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     update: SystemStatusUpdate,
 ) {
     if let Ok(mut subscribers) = subscribers.lock() {
+        let update = Arc::new(update);
         subscribers.retain(|subscriber| subscriber.send(update.clone()).is_ok());
     }
 }

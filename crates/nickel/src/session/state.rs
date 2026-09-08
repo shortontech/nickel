@@ -650,6 +650,7 @@ pub struct NickelSession {
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     internal_shell_timer: InternalShellTimer,
+    internal_system_status_source: Option<smithay::reexports::calloop::RegistrationToken>,
     pub loop_signal: LoopSignal,
 
     // Smithay State
@@ -829,7 +830,7 @@ impl NickelSession {
     fn enable_internal_shell_with_system_updates(
         &mut self,
         host: std::sync::Arc<dyn crate::session_host::SessionHost>,
-        platform_updates: std::sync::mpsc::Receiver<crate::platform::SystemStatusUpdate>,
+        platform_updates: crate::platform::status_mailbox::StatusReceiver,
     ) -> Result<(), String> {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
@@ -837,36 +838,33 @@ impl NickelSession {
         self.publish_internal_keyboard_snapshot();
         // Apply updates that were already available without delaying shell
         // construction. Later transitions remain calloop-driven.
-        for update in platform_updates.try_iter() {
+        for update in platform_updates.drain() {
             let _ = shell.apply_system_status_update(update);
         }
-        let (platform_update_tx, platform_update_rx) =
-            smithay::reexports::calloop::channel::channel();
-        std::thread::Builder::new()
-            .name("nickel-internal-system-feed".into())
-            .spawn(move || {
-                while let Ok(update) = platform_updates.recv() {
-                    if platform_update_tx.send(update).is_err() {
-                        break;
+        let (ping, source) = smithay::reexports::calloop::ping::make_ping()
+            .map_err(|error| format!("could not create system status wake: {error}"))?;
+        platform_updates.set_waker(move || ping.ping());
+        let token = self
+            .event_loop_handle
+            .insert_source(source, move |_, _, state| {
+                let mut changed = Vec::new();
+                for update in platform_updates.drain() {
+                    if let Some(shell) = state.internal_shell.as_mut() {
+                        changed.extend(shell.apply_system_status_update(update));
                     }
                 }
-            })
-            .map_err(|error| format!("could not start internal system feed: {error}"))?;
-        self.event_loop_handle
-            .insert_source(platform_update_rx, |event, _, state| {
-                if let smithay::reexports::calloop::channel::Event::Msg(update) = event {
-                    let changed = state
-                        .internal_shell
-                        .as_mut()
-                        .map(|shell| shell.apply_system_status_update(update))
-                        .unwrap_or_default();
-                    if !changed.is_empty() {
-                        state.sync_internal_shell_changes(Some(&changed));
-                        state.request_output_redraw();
-                    }
+                changed.sort_unstable();
+                changed.dedup();
+                if !changed.is_empty() {
+                    state.sync_internal_shell_changes(Some(&changed));
+                    state.request_output_redraw();
                 }
             })
             .map_err(|error| format!("could not register internal system feed: {error}"))?;
+        // Retire quiet subscriptions as well as their event-loop wake on replacement.
+        if let Some(previous) = self.internal_system_status_source.replace(token) {
+            self.event_loop_handle.remove(previous);
+        }
         let feature_settings =
             nickel_core::optional_features::OptionalFeatureSettings::load_default();
         let codex_enabled = feature_settings.effective_codex_enabled();
@@ -2120,6 +2118,7 @@ impl NickelSession {
             internal_shell_surfaces: HashMap::new(),
             internal_file_surfaces: HashMap::new(),
             internal_shell_timer: InternalShellTimer::default(),
+            internal_system_status_source: None,
             loop_signal,
             socket_name,
 
@@ -6906,7 +6905,7 @@ mod protocol_tests {
         }
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();
-        let (_system_tx, system_rx) = std::sync::mpsc::channel();
+        let (_system_tx, system_rx) = crate::platform::status_mailbox::channel();
         let host = Arc::new(RecordingMediaHost(std::sync::Mutex::new(Vec::new())));
         session
             .enable_internal_shell_with_system_updates(host.clone(), system_rx)
@@ -6959,7 +6958,7 @@ mod protocol_tests {
     fn unchanged_internal_desktop_has_no_sixty_hertz_poll_or_redraw_loop() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (mut event_loop, mut session) = preview_test_session();
-        let (_system_tx, system_rx) = std::sync::mpsc::channel();
+        let (_system_tx, system_rx) = crate::platform::status_mailbox::channel();
         session
             .enable_internal_shell_with_system_updates(Arc::new(IdleInternalHost), system_rx)
             .expect("headless internal shell");
