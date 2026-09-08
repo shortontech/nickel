@@ -919,3 +919,17 @@ The unfiltered workspace run at `824d3a6` finished with exit 0 under the private
 No test-name exclusion was applied. This verifies the accumulated keyboard/preview bridge changes
 before the repeat-lifetime follow-up; that follow-up has its separate focused test and Clippy results
 above. Formatting and diff checks also passed after the repeat changes.
+
+## Release handoff checkpoint
+
+`CARGO_BUILD_JOBS=4 cargo build --release -p nickel` completed successfully at `ade3558`, using
+the primary checkout's normal target directory and the manifest's default native `backend-udev`
+feature. The resulting executable is `/projects/nickel/target/release/nickel` (54,861,744 bytes).
+No package installation or display-manager/session restart was performed. Read-only process
+inspection before building found no Nickel process and an active Plasma Wayland login; earlier
+references to a running Nickel session are historical, not the current observed desktop state.
+
+Updated active spec status summaries to reflect implemented input/geometry/ownership and recorded
+measurements without marking live acceptance complete. Spec 0224 remains the only archived spec
+from this set. Native device/output/audio/preview responsiveness acceptance requires coordinated
+testing, and the native clipboard text-size policy remains unanswered/unconfigured.
