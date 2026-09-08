@@ -26,6 +26,9 @@ use crate::{
 /// Geometry of an output supplied by the compositor-native host.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InternalOutput {
+    /// Canonical compositor-space logical origin; never divide by scale again.
+    pub x: i32,
+    pub y: i32,
     pub name: String,
     pub width: u32,
     pub height: u32,
@@ -139,6 +142,39 @@ impl InternalShellCoordinator {
 
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
         self.shell.retain_panel_outputs(outputs);
+        // Reconcile file placement before any surface can render. Creating a desktop
+        // slot alone leaves newly enumerated files without a live output assignment.
+        self.shell.set_desktop_outputs(
+            outputs
+                .iter()
+                .enumerate()
+                .map(|(index, output)| {
+                    // Match panel slot ownership below; an output without a panel
+                    // must retain its full usable desktop height.
+                    let reservation = if self.bar_on_all_displays || index == 0 {
+                        PANEL_HEIGHT.min(output.height)
+                    } else {
+                        0
+                    };
+                    nickel_file::desktop::DesktopOutput {
+                        id: output.name.clone(),
+                        primary: index == 0,
+                        work_area: nickel_file::desktop::Rect {
+                            x: output.x as f32,
+                            y: output.y as f32
+                                + if self.panel_edge == PanelEdge::Top {
+                                    reservation as f32
+                                } else {
+                                    0.0
+                                },
+                            width: output.width as f32,
+                            height: output.height.saturating_sub(reservation) as f32,
+                        },
+                        scale: output.scale,
+                    }
+                })
+                .collect(),
+        );
         let mut desired = Vec::new();
         for (index, output) in outputs.iter().enumerate() {
             for role in [SurfaceRole::Desktop, SurfaceRole::Lock] {
@@ -240,6 +276,29 @@ impl InternalShellCoordinator {
     }
 
     pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
+        let entry = self.entries.iter().find(|surface| surface.id == id)?;
+        if entry.role == SurfaceRole::Desktop {
+            let output = entry.output.as_deref()?;
+            let (origin, scale) = self.shell.desktop_output_projection(output)?;
+            // Layout reports the usable area's origin, but this surface covers the
+            // whole output. Undo only the top reservation so it stays visible in
+            // local icon coordinates rather than being subtracted a second time.
+            let top_reservation = if self.panel_edge == PanelEdge::Top
+                && self.surface(SurfaceRole::Panel, Some(output)).is_some()
+            {
+                PANEL_HEIGHT.min(entry.size.1) as f32
+            } else {
+                0.0
+            };
+            // Select the retained viewport on every render, independently of pointer
+            // focus and output enumeration order. The desktop model itself is shared.
+            self.shell.set_desktop_output(
+                output.to_owned(),
+                origin.x,
+                origin.y - top_reservation,
+                scale,
+            );
+        }
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
         let commands = if surface.role == SurfaceRole::Panel {
             self.shell.panel_scene_for_output(
@@ -539,7 +598,7 @@ impl InternalShellCoordinator {
     }
 
     #[cfg(test)]
-    fn shell_mut(&mut self) -> &mut LiveShell {
+    pub(crate) fn shell_mut(&mut self) -> &mut LiveShell {
         &mut self.shell
     }
 }
@@ -617,6 +676,8 @@ mod tests {
         let host = Arc::new(MediaHost(std::sync::Mutex::new(Vec::new())));
         let mut shell = InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
         shell.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "test".into(),
             width: 800,
             height: 600,
@@ -685,6 +746,8 @@ mod tests {
         )
         .unwrap();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "one".into(),
             width: 1920,
             height: 1080,
@@ -729,12 +792,16 @@ mod tests {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "one".into(),
                 width: 1920,
                 height: 1080,
                 scale: 1.0,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "two".into(),
                 width: 1280,
                 height: 720,
@@ -757,12 +824,16 @@ mod tests {
         coordinator.set_bar_on_all_displays(false);
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "primary".into(),
                 width: 1920,
                 height: 1080,
                 scale: 1.5,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "secondary".into(),
                 width: 1280,
                 height: 720,
@@ -794,12 +865,16 @@ mod tests {
         assert!(coordinator.set_bar_on_all_displays(true));
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "primary".into(),
                 width: 1920,
                 height: 1080,
                 scale: 1.5,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "secondary".into(),
                 width: 1280,
                 height: 720,
@@ -818,12 +893,16 @@ mod tests {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "left".into(),
                 width: 1280,
                 height: 720,
                 scale: 1.0,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "right".into(),
                 width: 1920,
                 height: 1080,
@@ -842,12 +921,16 @@ mod tests {
 
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "right".into(),
                 width: 1600,
                 height: 900,
                 scale: 1.0,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "new".into(),
                 width: 1024,
                 height: 768,
@@ -890,6 +973,8 @@ mod tests {
     fn scenes_are_rendered_from_reusable_shell_state() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
@@ -907,6 +992,8 @@ mod tests {
     fn meta_launcher_toggle_changes_internal_visibility_without_session_transport() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
@@ -949,6 +1036,8 @@ mod tests {
     fn system_feed_changes_only_invalidate_their_visible_consumers() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
@@ -1028,12 +1117,16 @@ mod tests {
         coordinator.bar_on_all_displays = true;
         coordinator.set_outputs(&[
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "left".into(),
                 width: 1000,
                 height: 800,
                 scale: 1.0,
             },
             InternalOutput {
+                x: 0,
+                y: 0,
                 name: "right".into(),
                 width: 1000,
                 height: 800,
@@ -1170,6 +1263,8 @@ mod tests {
     fn panel_semantic_click_opens_the_internal_launcher() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
@@ -1200,6 +1295,8 @@ mod tests {
     fn production_meta_r_reducer_opens_internal_run_surface() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,
@@ -1226,6 +1323,8 @@ mod tests {
     fn production_print_screen_reducer_requests_internal_capture_surface() {
         let mut coordinator = coordinator();
         coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
             name: "nested".into(),
             width: 800,
             height: 600,

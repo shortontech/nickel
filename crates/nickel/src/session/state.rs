@@ -97,6 +97,8 @@ mod internal_shell_placement_tests {
         vec![
             (
                 InternalOutput {
+                    x: -1920,
+                    y: -120,
                     name: "left".into(),
                     width: 1920,
                     height: 1080,
@@ -107,6 +109,8 @@ mod internal_shell_placement_tests {
             ),
             (
                 InternalOutput {
+                    x: 0,
+                    y: 240,
                     name: "right".into(),
                     width: 2560,
                     height: 1440,
@@ -1008,6 +1012,8 @@ impl NickelSession {
                 let geometry = self.space.output_geometry(output)?;
                 Some((
                     crate::internal_shell::InternalOutput {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
                         name: output.name(),
                         width: geometry.size.w.max(0) as u32,
                         height: geometry.size.h.max(0) as u32,

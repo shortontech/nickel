@@ -1342,3 +1342,82 @@
             ["--screen", "display", "--output", "DP-2"]
         );
     }
+    #[test]
+    fn native_desktop_initial_scene_and_hotplug_use_output_topology() {
+        use crate::internal_shell::{InternalOutput, InternalShellCoordinator};
+        use crate::winit_shell::{PanelEdge, PANEL_HEIGHT};
+        use std::{ffi::OsString, path::PathBuf};
+
+        for edge in [PanelEdge::Top, PanelEdge::Bottom] {
+            let mut coordinator = InternalShellCoordinator::new(
+                crate::session_host::default_session_host(), edge,
+            ).unwrap();
+            coordinator.set_bar_on_all_displays(true);
+            let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+            let mut desktop = super::DesktopApplication::fixture(None, palette);
+            // Mirror native startup: directory enumeration precedes output discovery.
+            // The fixture disables persistence and filesystem watching.
+            desktop.layout = nickel_file::desktop::DesktopLayout::new(Vec::new());
+            desktop.layout.reconcile(vec![(
+                nickel_file::FileIdentity(1, 2),
+                nickel_file::FileEntry {
+                    display_name_override: None,
+                    name: OsString::from("native-topology.txt"),
+                    path: PathBuf::from("/desktop/native-topology.txt"),
+                    is_directory: false,
+                    size: None,
+                    modified: None,
+                },
+            )]);
+            coordinator.shell_mut().desktop_host = UiHost::new(desktop, 1, 1);
+            let left = InternalOutput {
+                name: "left".into(), x: -800, y: -120,
+                width: 800, height: 600, scale: 1.5,
+            };
+            let right = InternalOutput {
+                name: "right".into(), x: 0, y: 0,
+                width: 900, height: 700, scale: 1.0,
+            };
+            coordinator.set_outputs(&[left.clone(), right.clone()]);
+            // Render the secondary first: rendering order must not choose ownership.
+            for output in ["right", "left", "right", "left"] {
+                let id = coordinator.surface(SurfaceRole::Desktop, Some(output)).unwrap().id;
+                assert!(coordinator.scene(id).is_some());
+                let shell = coordinator.shell_mut();
+                let item = shell.desktop_host.accessibility_nodes().iter()
+                    .find(|node| node.semantic_role == Some(SemanticRole::GridCell));
+                assert_eq!(item.is_some(), output == "left");
+                if let Some(item) = item {
+                    assert_eq!(item.label.as_deref(), Some("native-topology.txt"));
+                    assert!(item.rect.origin.x >= 0.0);
+                    let reserved = if edge == PanelEdge::Top { PANEL_HEIGHT as f32 } else { 0.0 };
+                    assert!(item.rect.origin.y >= reserved);
+                    // Placement policy may preserve the original global (0, 0)
+                    // position within a negative-origin output. Verify projection,
+                    // not an assumed first-grid-cell placement.
+                    let position = shell.desktop_host.application().layout.items()[0].position;
+                    assert_eq!(item.rect.origin.x, position.x - left.x as f32);
+                    assert_eq!(item.rect.origin.y, position.y - left.y as f32);
+                    assert!(item.rect.origin.y + item.rect.size.height <= left.height as f32);
+                }
+                let desktop = shell.desktop_host.application();
+                assert_eq!(desktop.active_scale, if output == "left" { 1.5 } else { 1.0 });
+                assert_eq!(desktop.output_origin.y, if output == "left" { -120.0 } else { 0.0 });
+            }
+            // Repeated disconnects must retire parked viewports without forgetting
+            // the file's original output affinity when that display returns.
+            for _ in 0..3 {
+                coordinator.set_outputs(std::slice::from_ref(&right));
+                let id = coordinator.surface(SurfaceRole::Desktop, Some("right")).unwrap().id;
+                coordinator.scene(id).unwrap();
+                assert_eq!(coordinator.shell_mut().desktop_host.application().layout.items()[0].output, "right");
+                assert!(coordinator.shell_mut().desktop_viewports.is_empty());
+                // Change primary enumeration while restoring the remembered output.
+                coordinator.set_outputs(&[right.clone(), left.clone()]);
+                let id = coordinator.surface(SurfaceRole::Desktop, Some("left")).unwrap().id;
+                coordinator.scene(id).unwrap();
+                assert_eq!(coordinator.shell_mut().desktop_host.application().layout.items()[0].output, "left");
+                assert!(coordinator.shell_mut().desktop_viewports.len() <= 1);
+            }
+        }
+    }

@@ -94,9 +94,33 @@ recipient ownership, authoritative mapped geometry, complete preference/override
 typing acceptance remain. The existing keyboard poll is still present; event-only refresh and command
 admission must be reviewed with 0223 rather than treating a shared snapshot as an unlimited-work budget.
 
+## 0220: native desktop topology and rendering (partial implementation)
+
+`InternalOutput` now carries canonical logical origins from Smithay space geometry. The native
+coordinator synchronizes desktop layout before constructing output slots, reserves space only for
+outputs with a panel, and selects each output's retained desktop viewport before rendering. The
+projection subtracts the whole-output origin, not the usable-area origin; top-panel reservations
+therefore remain visible in local icon coordinates. Comments document these coordinate contracts.
+
+A synthetic coordinator regression begins with directory entries but no layout outputs, then renders
+the secondary before the primary without pointer input. It checks semantic labels and exact local
+projection against production placement, negative origins, differing scales, both panel edges,
+reversed primary enumeration, and three disconnect/reconnect cycles. Reconnection restores output
+affinity and parked viewport storage remains bounded. The initial test incorrectly assumed the first
+grid cell: existing policy can preserve global (0, 0) within a negative-origin output. The corrected
+assertion checks exact model-to-surface projection and visible bounds, without changing that policy.
+
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` passed: 617 passed, 11 ignored.
+`cargo fmt --all --check`, `git diff --check`, and
+`CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` passed.
+This is rendering/topology evidence, not native input or live acceptance. The UI-only native event
+route still discards button/modifier details and does not dispatch desktop input. Normalized input,
+capture/focus cancellation, saved-layout fixtures, directory changes, and physical monitor testing
+remain required. No running session, release executable, or saved desktop layout was changed.
+
 ## Remaining implementation
 
-- 0220: wire native desktop topology, viewport selection, and input to production authorities.
+- 0220: complete normalized native desktop input, capture/focus lifecycle, and remaining acceptance.
 - 0221: remaining input/backend/native acceptance and final integration gates.
 - 0222: finish gesture leases, native/internal recipient routing, geometry, and acceptance.
 - 0223: bounded latest-state status delivery with race-free wake/rearm.
