@@ -114,9 +114,26 @@ assertion checks exact model-to-surface projection and visible bounds, without c
 `cargo fmt --all --check`, `git diff --check`, and
 `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` passed.
 This is rendering/topology evidence, not native input or live acceptance. The UI-only native event
-route still discards button/modifier details and does not dispatch desktop input. Normalized input,
+route still discards button/modifier details before reaching the coordinator. Normalized ingress,
 capture/focus cancellation, saved-layout fixtures, directory changes, and physical monitor testing
 remain required. No running session, release executable, or saved desktop layout was changed.
+
+The coordinator now accepts `HostEvent::Normalized` for Desktop and passes the original event to
+the production `LiveShell::desktop_input` reducer. Rendering and input share one viewport-selection
+helper, so a previously rendered secondary cannot redirect a primary desktop click. The coordinator
+regression now resolves the icon through semantic geometry, renders another output, selects through
+normalized input, opens a secondary-button context menu, and cancels menu/capture on focus loss.
+It also delivers a real modifier snapshot and checks that focus loss clears selection modifiers,
+since their matching key releases may be delivered to the newly focused client. This is a desktop
+state fix, not an explanation or verified fix for the reported terminal `@` input.
+
+The focused coordinator regression passed after these additions. This does **not** yet connect
+Smithay's device ingress: `InternalUiRuntime` still queues lossy `UiEvent`s, and native button routing
+still collapses buttons to pressed/released. Full-fidelity runtime routing, per-device capture,
+keyboard ownership, and focus/hotplug cancellation must be completed before native acceptance.
+After the normalized-dispatch and modifier-reset changes, the full Nickel library suite again
+passed (617 passed, 11 ignored), as did formatting, diff whitespace checks, and strict Nickel
+all-target/all-feature Clippy. These checks do not replace the required full-workspace gates.
 
 ## Remaining implementation
 

@@ -275,7 +275,9 @@ impl InternalShellCoordinator {
             .is_some_and(|surface| self.shell.surface_visible(surface.role))
     }
 
-    pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
+    /// Bind a desktop viewport for either rendering or normalized input. Keeping
+    /// this projection in one place prevents input from using the last drawn output.
+    fn select_desktop_viewport(&mut self, id: InternalSurfaceId) -> Option<()> {
         let entry = self.entries.iter().find(|surface| surface.id == id)?;
         if entry.role == SurfaceRole::Desktop {
             let output = entry.output.as_deref()?;
@@ -290,7 +292,7 @@ impl InternalShellCoordinator {
             } else {
                 0.0
             };
-            // Select the retained viewport on every render, independently of pointer
+            // Select the retained viewport on every dispatch, independently of pointer
             // focus and output enumeration order. The desktop model itself is shared.
             self.shell.set_desktop_output(
                 output.to_owned(),
@@ -299,6 +301,11 @@ impl InternalShellCoordinator {
                 scale,
             );
         }
+        Some(())
+    }
+
+    pub fn scene(&mut self, id: InternalSurfaceId) -> Option<Vec<PaintCommand>> {
+        self.select_desktop_viewport(id)?;
         let surface = self.entries.iter_mut().find(|surface| surface.id == id)?;
         let commands = if surface.role == SurfaceRole::Panel {
             self.shell.panel_scene_for_output(
@@ -455,6 +462,9 @@ impl InternalShellCoordinator {
         id: InternalSurfaceId,
         batch: HostBatch,
     ) -> Vec<InternalSurfaceId> {
+        if self.select_desktop_viewport(id).is_none() {
+            return Vec::new();
+        }
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
             return Vec::new();
         };
@@ -466,6 +476,14 @@ impl InternalShellCoordinator {
         let mut changed = false;
         let mut dependent_roles = Vec::new();
         for event in batch.events {
+            // Desktop reducers need the original button, key edge, modifier snapshot,
+            // and contact identity. Do not fabricate them from lossy UiEvent actions.
+            if entry.role == SurfaceRole::Desktop {
+                if let nickel_ui::HostEvent::Normalized { input, .. } = event {
+                    changed |= self.shell.desktop_input(input);
+                }
+                continue;
+            }
             let nickel_ui::HostEvent::Ui(event) = event else {
                 continue;
             };

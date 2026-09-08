@@ -1404,6 +1404,61 @@
                 assert_eq!(desktop.active_scale, if output == "left" { 1.5 } else { 1.0 });
                 assert_eq!(desktop.output_origin.y, if output == "left" { -120.0 } else { 0.0 });
             }
+            // Input must restore its target viewport even if another output drew last.
+            let left_id = coordinator.surface(SurfaceRole::Desktop, Some("left")).unwrap().id;
+            coordinator.scene(left_id).unwrap();
+            let target = coordinator.shell_mut().desktop_host.accessibility_nodes().iter()
+                .find(|node| node.semantic_role == Some(SemanticRole::GridCell)).unwrap().rect;
+            let right_id = coordinator.surface(SurfaceRole::Desktop, Some("right")).unwrap().id;
+            coordinator.scene(right_id).unwrap();
+            let input = |button, edge| nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(1),
+                button,
+                edge,
+                position: Some(nickel_input::Point {
+                    x: f64::from(target.origin.x + target.size.width / 2.0),
+                    y: f64::from(target.origin.y + target.size.height / 2.0),
+                }),
+            });
+            let batch = |input| HostBatch {
+                events: vec![HostEvent::Normalized { input, clipboard_text: None }],
+                ..Default::default()
+            };
+            let changes = coordinator.step_slot_changes(left_id, batch(input(
+                nickel_input::PointerButton::Primary, nickel_input::KeyEdge::Pressed,
+            )));
+            assert_eq!(changes, vec![left_id]);
+            assert_eq!(coordinator.shell_mut().desktop_host.application().layout.selected().len(), 1);
+            coordinator.step_slot_changes(left_id, batch(input(
+                nickel_input::PointerButton::Primary, nickel_input::KeyEdge::Released,
+            )));
+            coordinator.step_slot_changes(left_id, batch(input(
+                nickel_input::PointerButton::Secondary, nickel_input::KeyEdge::Pressed,
+            )));
+            assert_eq!(coordinator.shell_mut().desktop_host.application().context_menu.as_ref().unwrap().output, "left");
+            // Close the menu before checking the desktop key reducer; menu input
+            // deliberately belongs to its own normalized UiHost while it is open.
+            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::FocusLost {
+                order: nickel_input::EventOrder(2),
+            }));
+            assert!(coordinator.shell_mut().desktop_host.application().context_menu.is_none());
+            assert!(coordinator.shell_mut().desktop_overlay_pointer_capture.is_none());
+            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(3),
+                physical: nickel_input::PhysicalKey::Code(KeyCode::ControlLeft),
+                logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Control),
+                location: nickel_input::KeyLocation::Left,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: false,
+                modifiers: nickel_input::ModifierState::from_sides([nickel_input::Modifier::ControlLeft]),
+            })));
+            assert!(coordinator.shell_mut().desktop_host.application().modifiers.toggle);
+            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::FocusLost {
+                order: nickel_input::EventOrder(4),
+            }));
+            assert!(!coordinator.shell_mut().desktop_host.application().modifiers.toggle);
             // Repeated disconnects must retire parked viewports without forgetting
             // the file's original output affinity when that display returns.
             for _ in 0..3 {

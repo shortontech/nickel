@@ -1603,6 +1603,9 @@ impl LiveShell {
             let application = self.desktop_host.application_mut();
             if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
                 application.dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
+                // The corresponding key-up may go to the newly focused client.
+                // Never carry a held selection modifier into the next desktop visit.
+                application.modifiers = Default::default();
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;
