@@ -257,6 +257,25 @@ impl InternalShellCoordinator {
         &self.entries
     }
 
+    /// Keep scene layout and normalized input in the same compositor-owned
+    /// logical size. Resizing does not replace the slot or its gesture identity.
+    pub fn set_surface_size(&mut self, id: InternalSurfaceId, size: (u32, u32)) -> bool {
+        let Some(surface) = self.entries.iter_mut().find(|surface| surface.id == id) else {
+            return false;
+        };
+        if surface.size == size {
+            return false;
+        }
+        surface.size = size;
+        if let Some(host) = self.surfaces.get_mut(id) {
+            host.step(HostBatch {
+                surface_size: Some(size),
+                ..Default::default()
+            });
+        }
+        true
+    }
+
     pub fn surface(
         &self,
         role: SurfaceRole,

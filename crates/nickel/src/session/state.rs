@@ -137,6 +137,28 @@ mod internal_shell_placement_tests {
     }
 
     #[test]
+    fn native_keyboard_uses_authority_height_dock_and_output_without_rescaling() {
+        let mut outputs = outputs();
+        outputs[0].0.scale = 1.5;
+        for (top, y) in [(true, -120), (false, 592)] {
+            let placement =
+                super::internal_keyboard_surface_placement(Some("left"), top, 368, &outputs)
+                    .unwrap();
+            assert_eq!(placement.geometry, (-1920, y, 1920, 368));
+            assert_eq!(placement.output.as_deref(), Some("left"));
+        }
+        let resized =
+            super::internal_keyboard_surface_placement(Some("right"), false, 280, &outputs)
+                .unwrap();
+        assert_eq!(resized.geometry, (0, 1400, 2560, 280));
+        assert!(
+            super::internal_keyboard_surface_placement(Some("removed"), false, 368, &outputs)
+                .is_none()
+        );
+        assert!(super::internal_keyboard_surface_placement(None, false, 368, &[]).is_none());
+    }
+
+    #[test]
     fn volume_osd_uses_requested_interaction_output_without_launcher_affinity() {
         let placement = internal_shell_surface_placement(
             SurfaceRole::VolumeOsd,
@@ -1555,7 +1577,8 @@ impl NickelSession {
             return;
         };
         let entries = shell.surfaces().to_vec();
-        for surface in entries {
+        let outputs = self.internal_outputs();
+        for mut surface in entries {
             // The real ChatApplication host owns this role. LiveShell retains
             // only its visibility policy and must not paint a second shell
             // scene over the compositor-owned menu.
@@ -1575,33 +1598,52 @@ impl NickelSession {
             let interaction_output = (surface.role == crate::winit_shell::SurfaceRole::VolumeOsd)
                 .then(|| self.preferred_interaction_output_name())
                 .flatten();
-            let placement = internal_shell_surface_placement(
+            let mut placement = internal_shell_surface_placement(
                 surface.role,
                 interaction_output.as_deref().or(surface.output.as_deref()),
                 surface.size,
-                &self.internal_outputs(),
+                &outputs,
                 self.launcher_output_name.as_deref(),
             );
+            let mut resized = false;
+            if surface.role == crate::winit_shell::SurfaceRole::OnScreenKeyboard {
+                let Some(keyboard) = internal_keyboard_surface_placement(
+                    self.on_screen_keyboard.output_name.as_deref(),
+                    self.on_screen_keyboard.dock_top,
+                    self.on_screen_keyboard.height,
+                    &outputs,
+                ) else {
+                    if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                        self.internal_ui.remove(runtime_id);
+                    }
+                    continue;
+                };
+                placement = keyboard;
+                surface.size = (placement.geometry.2, placement.geometry.3);
+                resized = shell.set_surface_size(surface.id, surface.size);
+            }
+            let output_scale = placement
+                .output
+                .as_deref()
+                .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
+                .map_or(1.0, |(output, _, _)| output.scale);
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
-                if changed.is_none_or(|ids| ids.contains(&surface.id))
+                let geometry_changed =
+                    self.internal_ui
+                        .configure_scene(runtime_id, placement, output_scale);
+                if (resized
+                    || geometry_changed
+                    || changed.is_none_or(|ids| ids.contains(&surface.id)))
                     && let Some(scene) = shell.scene(surface.id)
                 {
                     tracing::trace!(surface = ?surface.id, role = ?surface.role, reason = if changed.is_none() { "global" } else { "content" }, "rebuild internal shell scene");
                     self.internal_ui.update_scene(runtime_id, scene);
                 }
-                self.internal_ui.relocate(runtime_id, placement);
                 continue;
             }
             let Some(scene) = shell.scene(surface.id) else {
                 continue;
             };
-            let output_scale = placement
-                .output
-                .as_deref()
-                .and_then(|name| self.space.outputs().find(|output| output.name() == name))
-                .map_or(1.0, |output| {
-                    output.current_scale().fractional_scale() as f32
-                });
             let runtime_id = self
                 .internal_ui
                 .insert_scene(scene, placement, output_scale);
@@ -6146,6 +6188,40 @@ impl NickelSession {
                     })
             })
     }
+}
+
+fn internal_keyboard_surface_placement(
+    output_name: Option<&str>,
+    dock_top: bool,
+    height: u32,
+    outputs: &[(crate::internal_shell::InternalOutput, i32, i32)],
+) -> Option<crate::session::InternalSurfacePlacement> {
+    let (output, x, y) = match output_name {
+        Some(name) => outputs.iter().find(|(output, _, _)| output.name == name),
+        None => outputs.first(),
+    }?;
+    // Share the reservation geometry with external keyboard surfaces. These are
+    // compositor logical coordinates; fractional output scale is applied later.
+    let geometry = shell_layout::keyboard_area(
+        shell_layout::Geometry {
+            x: *x,
+            y: *y,
+            width: i32::try_from(output.width).unwrap_or(i32::MAX),
+            height: i32::try_from(output.height).unwrap_or(i32::MAX),
+        },
+        dock_top,
+        height,
+    );
+    let size = (geometry.width.max(0) as u32, geometry.height.max(0) as u32);
+    let mut placement = internal_shell_surface_placement(
+        crate::winit_shell::SurfaceRole::OnScreenKeyboard,
+        Some(&output.name),
+        size,
+        outputs,
+        None,
+    );
+    placement.geometry = (geometry.x, geometry.y, size.0, size.1);
+    Some(placement)
 }
 
 fn internal_shell_surface_placement(

@@ -1648,6 +1648,44 @@ impl InternalUiRuntime {
             .map(|surface| surface.scale_factor)
     }
 
+    /// Resize an externally produced scene without replacing its runtime ID.
+    /// In particular, a keyboard resize gesture must keep its captured target
+    /// while scene layout, host geometry and raster scale change together.
+    pub(crate) fn configure_scene(
+        &mut self,
+        id: InternalSurfaceId,
+        placement: InternalSurfacePlacement,
+        scale: f32,
+    ) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        if surface.external_scene.is_none() {
+            return false;
+        }
+        let resized = surface.placement.geometry.2 != placement.geometry.2
+            || surface.placement.geometry.3 != placement.geometry.3
+            || surface.scale_factor != scale;
+        let changed = resized || surface.placement != placement;
+        surface.placement = placement;
+        surface.scale_factor = scale;
+        if resized {
+            surface.renderer.suspend();
+            surface.dirty = true;
+            if let Some(host) = self.surfaces.get_mut(id) {
+                host.step(HostBatch {
+                    surface_size: Some((
+                        surface.placement.geometry.2,
+                        surface.placement.geometry.3,
+                    )),
+                    scale_factor: Some(scale),
+                    ..Default::default()
+                });
+            }
+        }
+        changed
+    }
+
     pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
         if batch.window_focused == Some(false) {
             self.clear_desktop_pressed_keys();
@@ -2274,6 +2312,27 @@ mod tests {
         let shown = runtime.renderer_diagnostics(id).unwrap();
         assert_eq!(shown.software_frame_bytes, 120 * 32 * 4);
         assert_eq!(shown.fallback_raster_bytes, 120 * 32 * 4);
+    }
+
+    #[test]
+    fn configuring_external_scene_resizes_host_and_scale_without_replacing_identity() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert_scene(Vec::new(), placement(Some("DP-1")), 1.0);
+        let target = InternalSurfacePlacement {
+            geometry: (-1920, 592, 1920, 368),
+            ..placement(Some("DP-1"))
+        };
+        assert!(runtime.configure_scene(id, target.clone(), 1.5));
+        assert_eq!(runtime.placement(id), Some(&target));
+        assert_eq!(runtime.scale_factor(id), Some(1.5));
+        assert_eq!(
+            runtime.surfaces.get(id).unwrap().logical_size(),
+            (1920, 368)
+        );
+        assert_eq!(runtime.surfaces.get(id).unwrap().scale_factor(), 1.5);
+        assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
+        assert!(!runtime.configure_scene(id, target, 1.5));
+        assert!(runtime.drain_routed_events().is_empty());
     }
 
     #[test]
