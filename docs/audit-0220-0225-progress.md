@@ -639,3 +639,22 @@ lookup latency or prove the complete native event-loop responsiveness requiremen
 
 Verification: all-feature preview suite **49 passed, 2 ignored**; strict Nickel all-target/all-feature
 Clippy, formatting and diff checks passed. No live GPU workload or session restart was performed.
+
+## Audio reconnect command ownership (0221/0223)
+
+Review found an actual ordered-command loss outside the mailbox: after `run_connection` failed,
+`audio_worker` called `commands.try_recv()` solely to check disconnection and discarded an
+`Ok(command)` result. A queued volume/mute action could disappear on each reconnect. The worker now
+retains a probed head command in one pending slot across failed setup and consumes it before later
+queue entries. This also preserves termination when the queue is empty/disconnected and PipeWire
+cannot connect; simply removing the probe would lose that shutdown behavior. Backend I/O,
+unavailable publication and the existing delay remain in the worker.
+
+A synthetic reconnect test queues adjustment/mute pairs across two failed connection attempts and
+asserts all four arrive in order before disconnect terminates the loop. It does not connect to
+PipeWire or change user audio. Further live repeat/final-volume acceptance remains pending; a queue
+delivery assertion alone does not prove asynchronous device property acknowledgments.
+
+The companion unavailable-server test proves an empty disconnected command source stops after one
+failed connection attempt. Focused audio tests: **4 passed, 2 live PipeWire tests ignored**. No live
+volume or mute command was issued.

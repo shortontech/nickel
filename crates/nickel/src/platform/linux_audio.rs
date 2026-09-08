@@ -146,14 +146,34 @@ fn audio_worker(
     commands: mpsc::Receiver<AudioCommand>,
 ) {
     pipewire::init();
-    loop {
-        if let Err(error) = run_connection(&snapshot, &subscribers, &commands) {
+    retry_audio_connection(
+        &commands,
+        |pending| run_connection(&snapshot, &subscribers, &commands, pending),
+        |error| {
             tracing::warn!(%error, "PipeWire audio connection failed; retrying");
             publish(&snapshot, &subscribers, &Graph::default());
             thread::sleep(Duration::from_millis(500));
-        }
-        if matches!(commands.try_recv(), Err(mpsc::TryRecvError::Disconnected)) {
-            return;
+        },
+    );
+}
+
+fn retry_audio_connection(
+    commands: &mpsc::Receiver<AudioCommand>,
+    mut connect: impl FnMut(&mut Option<AudioCommand>) -> Result<(), String>,
+    mut on_failure: impl FnMut(String),
+) {
+    // Preserve the head command read by a disconnect probe across failed
+    // connection setup. It must execute before later queue entries; one slot
+    // also lets an empty disconnected worker stop when PipeWire is unavailable.
+    let mut pending = None;
+    while let Err(error) = connect(&mut pending) {
+        on_failure(error);
+        if pending.is_none() {
+            match commands.try_recv() {
+                Ok(command) => pending = Some(command),
+                Err(mpsc::TryRecvError::Disconnected) => return,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
         }
     }
 }
@@ -162,6 +182,7 @@ fn run_connection(
     snapshot: &Arc<RwLock<AudioStatus>>,
     subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     commands: &mpsc::Receiver<AudioCommand>,
+    pending: &mut Option<AudioCommand>,
 ) -> Result<(), String> {
     let main_loop = MainLoop::new(&Properties::new())
         .ok_or_else(|| "could not create PipeWire main loop".to_owned())?;
@@ -260,7 +281,11 @@ fn run_connection(
             .iterate(Some(Duration::from_millis(50)))
             .map_err(|error| error.to_string())?;
         loop {
-            match commands.try_recv() {
+            match pending
+                .take()
+                .map(Ok)
+                .unwrap_or_else(|| commands.try_recv())
+            {
                 Ok(command) => apply_command(command, &graph)?,
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
@@ -493,6 +518,79 @@ mod tests {
     };
 
     use super::{average_volume, default_sink_name, set_volume, status};
+
+    #[test]
+    fn connection_retries_preserve_queued_commands_and_stop_after_disconnect() {
+        use std::{cell::Cell, sync::mpsc};
+        let (sender, receiver) = mpsc::channel();
+        let mut sender = Some(sender);
+        let attempts = Cell::new(0);
+        let mut delivered = Vec::new();
+        let mut failures = Vec::new();
+        super::retry_audio_connection(
+            &receiver,
+            |pending| {
+                let attempt = attempts.get();
+                attempts.set(attempt + 1);
+                if attempt < 2 {
+                    return Err(format!("connection failure {attempt}"));
+                }
+                delivered.extend(pending.take());
+                delivered.extend(receiver.try_iter());
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(mpsc::TryRecvError::Disconnected)
+                ));
+                Ok(())
+            },
+            |error| {
+                failures.push(error);
+                // Model media presses arriving during reconnect, not a snapshot
+                // stream where replacing an intermediate value would be valid.
+                sender
+                    .as_ref()
+                    .unwrap()
+                    .send(super::AudioCommand::AdjustVolume(5))
+                    .unwrap();
+                sender
+                    .as_ref()
+                    .unwrap()
+                    .send(super::AudioCommand::ToggleMute)
+                    .unwrap();
+                if attempts.get() == 2 {
+                    sender.take();
+                }
+            },
+        );
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(failures.len(), 2);
+        assert!(matches!(
+            delivered.as_slice(),
+            [
+                super::AudioCommand::AdjustVolume(5),
+                super::AudioCommand::ToggleMute,
+                super::AudioCommand::AdjustVolume(5),
+                super::AudioCommand::ToggleMute,
+            ]
+        ));
+    }
+
+    #[test]
+    fn unavailable_audio_worker_stops_when_empty_command_source_disconnects() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(sender);
+        let mut attempts = 0;
+        super::retry_audio_connection(
+            &receiver,
+            |_| {
+                attempts += 1;
+                assert_eq!(attempts, 1, "disconnected worker must not retry forever");
+                Err("unavailable".into())
+            },
+            |_| {},
+        );
+        assert_eq!(attempts, 1);
+    }
 
     #[test]
     fn volume_normalization_is_bounded() {
