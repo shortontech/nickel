@@ -524,3 +524,21 @@ distinct preference generation and recipient epoch, rejection of the first owner
 and rejection after focus surrender. This is synthetic adapter evidence, not live typing acceptance.
 Modified internal key chords remain unsupported and explicitly rejected; plain-key navigation and
 text delivery do not establish full chord/clipboard or automatic native text-field activation coverage.
+
+Integrated `ab27be7` as `3fcd29e`: normalized Desktop/OSK touch retains physical device/contact
+identity, captured target and last release coordinates. Surface retirement cancels before removing
+coordinator identities and retains contact tombstones to consume later releases. Device removal
+cancels only that device; seat-wide cancellation flushes immediately. Synthetic adapter tests cover
+equal slots on separate devices and release after retirement; the semantic coordinator key fixture
+now exercises touch typing and cancellation. Physical touch coordinates still use the existing
+first-output transform, so multi-output touch mapping remains unfinished.
+
+Primary all-feature Nickel library tests after integration: **661 passed, 12 ignored**; strict
+Nickel all-target/all-feature Clippy passed. Follow-up review also corrected the generic hosted-app
+touch branch to reconcile seat/OSK ownership, not only normalized desktop touches. The native
+recipient test now transfers focus through that generic touch adapter and passes. These checks do
+not replace the remaining workspace gates or live session acceptance.
+
+Removed the integrated, clean `/external/.worktrees/nickel-normalized-touch` worktree and its
+disposable artifacts after checking no process used it. Branch and commits remain available for
+recovery. No installed or running binary was replaced, and the live session was not restarted.

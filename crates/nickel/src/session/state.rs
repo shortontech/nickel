@@ -6629,7 +6629,14 @@ mod protocol_tests {
 
         // Both owners have a None Smithay target. Their distinct native leases
         // must still reject a release captured before the focus transfer.
-        assert!(session.focus_internal_surface(recipients[1]));
+        assert!(session.internal_ui.touch_with_client(
+            0,
+            (10.0, 10.0),
+            crate::session::TouchPhase::Started,
+            false,
+        ));
+        session.reconcile_internal_application_focus();
+        assert_eq!(session.internal_ui.focused(), Some(recipients[1]));
         session.internal_ui.keyboard(UiEvent::FocusNext);
         assert!(
             session

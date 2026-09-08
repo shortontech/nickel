@@ -1374,9 +1374,9 @@ impl NickelSession {
                     )
                 {
                     self.flush_internal_shell_input();
-                    if normalized {
-                        self.reconcile_internal_application_focus();
-                    }
+                    // Generic hosted apps can acquire focus on touch too; the
+                    // seat and OSK lease must follow that runtime transition.
+                    self.reconcile_internal_application_focus();
                     self.request_output_redraw();
                     return None;
                 }
