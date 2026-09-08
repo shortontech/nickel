@@ -1491,3 +1491,38 @@
             }
         }
     }
+    #[test]
+    fn desktop_scroll_preserves_pixels_and_fractional_lines_without_selection_snapback() {
+        let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
+        let mut desktop = super::DesktopApplication::fixture(None, palette);
+        desktop.set_outputs(vec![nickel_file::desktop::DesktopOutput {
+            id: "primary".into(), primary: true, scale: 1.0,
+            work_area: nickel_file::desktop::Rect { x: 0.0, y: 0.0, width: 96.0, height: 112.0 },
+        }]);
+        desktop.layout.reconcile((0..3).map(|index| (
+            nickel_file::FileIdentity(index + 1, 1),
+            nickel_file::FileEntry { display_name_override: None,
+                name: format!("scroll-{index}").into(), path: format!("/desktop/scroll-{index}").into(),
+                is_directory: false, size: None, modified: None,
+            },
+        )).collect());
+        let first = desktop.layout.items()[0].id;
+        desktop.layout.select(first, Default::default());
+        let mut shell = LiveShell::new().unwrap();
+        shell.desktop_host = UiHost::new(desktop, 96, 112);
+        let axis = |discrete: Option<(i32, i32)>| nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Axis {
+            device: nickel_input::DeviceId(1), order: nickel_input::EventOrder(1),
+            delta: nickel_input::Vector { x: 0.0, y: if discrete.is_some() { -0.5 } else { -1.5 } },
+            discrete, position: Some(nickel_input::Point { x: 4.0, y: 4.0 }),
+        });
+        assert!(shell.desktop_input(axis(None)));
+        assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 1.5);
+        shell.desktop_input(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+            device: nickel_input::DeviceId(1), order: nickel_input::EventOrder(2),
+            position: nickel_input::Point { x: 4.0, y: 4.0 }, delta: None,
+        }));
+        assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 1.5);
+        assert!(shell.desktop_input(axis(Some((0, 0)))));
+        assert_eq!(shell.desktop_host.application().overflow_offsets["primary"], 145.5);
+        assert!(shell.desktop_host.application().layout.selected().contains(&first));
+    }

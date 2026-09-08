@@ -153,6 +153,24 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 
 ## Remaining implementation
 
+Desktop scrolling checkpoint: native axis events now take the normalized desktop route before
+generic widget routing. Smithay wheel v120 values become fractional line deltas with the normalized
+sign convention; continuous touchpad values remain logical pixel distances. Integer discrete values
+are compatibility hints, not the authoritative fractional amount. Scrolling does not claim keyboard
+focus or create pointer capture. Existing captures still keep routing on their owning desktop.
+
+The desktop overflow reducer now applies wheel lines at its existing three-cell step rate, while
+pixel deltas remain pixel distances. It no longer reveals the selected item after passive motion or
+scroll events, which previously could undo the user's scroll. Keyboard/button selection paths retain
+reveal. Regression coverage checks half-wheel-step preservation, exact 1.5-pixel movement, no hover
+snapback with a selected item, and runtime scroll delivery without focus/capture changes. This is
+vertical scrolling of the existing overflow plane, not a redesigned desktop layout or touch gesture
+implementation. The initial test compile needed an explicit closure parameter type; after that fix
+both focused scroll-behavior tests passed before the runtime routing regression was added.
+Final scroll checkpoint validation: full Nickel library suite 630 passed, 11 ignored; formatting,
+diff whitespace checks, and strict all-target/all-feature Nickel Clippy passed. Native gesture and
+physical wheel/touchpad acceptance remain outstanding; no running executable was replaced.
+
 Native desktop keyboard checkpoint: after compositor shortcuts run, a focused desktop now receives
 normalized key presses/releases rather than only lossy UI actions. Physical identity uses the existing
 winit scancode converter with Smithay's XKB-minus-eight offset; logical characters come from the

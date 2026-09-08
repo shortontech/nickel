@@ -1726,6 +1726,13 @@ impl LiveShell {
             &event,
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion { .. })
         );
+        // Passive motion and scrolling must not snap the viewport back to the
+        // selected item. Only keyboard/button selection changes request reveal.
+        let reveal_selection = matches!(
+            &event,
+            nickel_input::InputEvent::Key(_)
+                | nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button { .. })
+        );
         let application = self.desktop_host.application_mut();
         let changed = match event {
             nickel_input::InputEvent::Key(key) => application.key(&key),
@@ -1761,14 +1768,19 @@ impl LiveShell {
                 discrete,
                 ..
             }) => {
-                let steps =
-                    discrete.map_or(-delta.y as f32, |(_, vertical)| -vertical as f32 * 3.0);
                 let (cell_width, _) = application.layout.grid();
-                application.scroll_overflow(steps * cell_width)
+                // Fractional wheel lines live in delta, not the truncated integer
+                // hint. Pixel deltas are already logical distances, not cell counts.
+                let distance = if discrete.is_some() {
+                    -delta.y as f32 * 3.0 * cell_width
+                } else {
+                    -delta.y as f32
+                };
+                application.scroll_overflow(distance)
             }
             _ => false,
         };
-        let changed = changed | application.reveal_active();
+        let changed = changed | (reveal_selection && application.reveal_active());
         if changed && coalesce_motion {
             self.desktop_application_dirty = true;
         } else if changed {

@@ -2,7 +2,7 @@
 //!
 //! Hit testing remains owned by InternalUiRuntime. This adapter retains button
 //! edges and seat modifiers before the generic UI path discards those details.
-//! Relative motion deltas and scroll are not owned by this adapter. Button presses
+//! Relative motion deltas are not owned by this adapter. Button presses
 //! claim runtime focus; the session reconciles that ownership with the native seat.
 
 use std::collections::{BTreeSet, HashMap};
@@ -16,6 +16,10 @@ use super::{InternalSurfaceRole, InternalUiRuntime};
 
 pub(crate) enum DesktopPointerAction {
     Motion,
+    Axis {
+        delta: nickel_input::Vector,
+        discrete: Option<(i32, i32)>,
+    },
     Button {
         button: PointerButton,
         edge: KeyEdge,
@@ -44,6 +48,30 @@ mod tests {
             button: PointerButton::Secondary,
             edge,
         }
+    }
+
+    #[test]
+    fn desktop_scroll_routes_without_claiming_focus_or_pointer_capture() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = desktop(&mut runtime);
+        assert!(runtime.desktop_pointer_input(
+            "wheel",
+            (-780.0, -40.0),
+            DesktopPointerAction::Axis {
+                delta: nickel_input::Vector { x: 0.0, y: -0.5 },
+                discrete: Some((0, 0)),
+            },
+            Default::default(),
+            false
+        ));
+        assert!(runtime.focused().is_none());
+        assert!(runtime.desktop_input.capture.is_none());
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0, id);
+        assert!(matches!(&batches[0].1.events[..], [HostEvent::Normalized {
+            input: InputEvent::Pointer(PointerEvent::Axis { delta, discrete: Some((0, 0)), .. }), ..
+        }] if delta.y == -0.5));
     }
 
     #[test]
@@ -537,6 +565,13 @@ impl InternalUiRuntime {
             y: position.1 - f64::from(placement.geometry.1),
         };
         let event = match action {
+            DesktopPointerAction::Axis { delta, discrete } => PointerEvent::Axis {
+                device,
+                order,
+                delta,
+                discrete,
+                position: Some(local),
+            },
             DesktopPointerAction::Motion => PointerEvent::Motion {
                 device,
                 order,

@@ -1304,7 +1304,18 @@ impl NickelSession {
                 let location = pointer.current_location();
                 let client_present =
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
-                if self.internal_ui.scroll_with_client(
+                let modifiers =
+                    desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
+                if self.internal_ui.desktop_pointer_input(
+                    &event.device().id(),
+                    (location.x, location.y),
+                    desktop_axis(
+                        (horizontal_amount, vertical_amount),
+                        (horizontal_amount_discrete, vertical_amount_discrete),
+                    ),
+                    modifiers,
+                    client_present,
+                ) || self.internal_ui.scroll_with_client(
                     (location.x, location.y),
                     horizontal_amount as f32,
                     vertical_amount as f32,
@@ -1452,6 +1463,28 @@ fn axis_amount(continuous: Option<f64>, v120: Option<f64>) -> f64 {
         continuous
     } else {
         v120.unwrap_or(0.0) * 15.0 / 120.0
+    }
+}
+
+fn desktop_axis(
+    continuous: (f64, f64),
+    v120: (Option<f64>, Option<f64>),
+) -> super::internal_ui::DesktopPointerAction {
+    // The normalized contract uses wheel lines when discrete is present, logical
+    // pixels otherwise, with the opposite sign to Smithay's axis values. Preserve
+    // fractional lines in delta; discrete is only the integer compatibility hint.
+    let wheel = v120.0.is_some() || v120.1.is_some();
+    let (x, y) = if wheel {
+        (
+            -v120.0.map_or(continuous.0 / 15.0, |value| value / 120.0),
+            -v120.1.map_or(continuous.1 / 15.0, |value| value / 120.0),
+        )
+    } else {
+        (-continuous.0, -continuous.1)
+    };
+    super::internal_ui::DesktopPointerAction::Axis {
+        delta: nickel_input::Vector { x, y },
+        discrete: wheel.then_some((x as i32, y as i32)),
     }
 }
 
@@ -1643,6 +1676,25 @@ fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_scroll_keeps_fractional_wheel_lines_and_pixel_distances() {
+        use super::super::internal_ui::DesktopPointerAction;
+        let DesktopPointerAction::Axis { delta, discrete } =
+            super::desktop_axis((0.0, 7.5), (None, Some(60.0)))
+        else {
+            panic!("axis event")
+        };
+        assert_eq!(delta.y, -0.5);
+        assert_eq!(discrete, Some((0, 0)));
+        let DesktopPointerAction::Axis { delta, discrete } =
+            super::desktop_axis((0.25, 1.5), (None, None))
+        else {
+            panic!("axis event")
+        };
+        assert_eq!(delta, nickel_input::Vector { x: -0.25, y: -1.5 });
+        assert_eq!(discrete, None);
+    }
+
     #[test]
     fn desktop_keys_keep_physical_identity_separate_from_layout_and_edges() {
         use nickel_input::{DeviceId, EventOrder, KeyEdge, LogicalKey, PhysicalKey};
