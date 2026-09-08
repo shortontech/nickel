@@ -1,4 +1,66 @@
     #[test]
+    fn owned_preview_refresh_moves_pixels_preserves_identity_and_retires_old_images() {
+        let mut cache = HashMap::new();
+        let id = WindowId(42);
+        let source = RgbaImage::from_pixel(240, 135, Rgba([10, 20, 30, 255]));
+        let pixels = source.as_ptr();
+        assert!(super::update_preview_image(&mut cache, id, source));
+        assert_eq!(cache[&id].as_ptr(), pixels, "the incoming pixel allocation is moved");
+        let first = Arc::downgrade(&cache[&id]);
+        let unchanged = (*cache[&id]).clone();
+        assert!(!super::update_preview_image(&mut cache, id, unchanged));
+        assert!(Arc::ptr_eq(&first.upgrade().unwrap(), &cache[&id]));
+        for source in [
+            RgbaImage::from_pixel(240, 135, Rgba([11, 20, 30, 255])),
+            RgbaImage::from_pixel(135, 240, Rgba([11, 20, 30, 255])),
+        ] {
+            let pixels = source.as_ptr();
+            assert!(super::update_preview_image(&mut cache, id, source));
+            assert_eq!(cache[&id].as_ptr(), pixels);
+        }
+        assert!(first.upgrade().is_none());
+        let last = Arc::downgrade(&cache[&id]);
+        super::retain_preview_generation(&mut cache, &[]);
+        assert!(cache.is_empty());
+        assert!(last.upgrade().is_none());
+    }
+
+    #[test]
+    #[ignore = "release-only owned preview refresh comparison"]
+    fn owned_preview_refresh_release_evidence() {
+        use std::hint::black_box;
+        for changing in [false, true] {
+            let mut legacy = HashMap::new();
+            let mut moved = HashMap::new();
+            let mut legacy_time = Duration::ZERO;
+            let mut moved_time = Duration::ZERO;
+            let mut cloned_payload = 0;
+            for index in 0..1000 {
+                let color = if changing { (index % 251) as u8 } else { 17 };
+                let source = RgbaImage::from_pixel(240, 135, Rgba([color, 20, 30, 255]));
+                let incoming = source.clone(); // provider allocations excluded from timing
+                let started = Instant::now();
+                let copy = Arc::new(super::legacy_preview_copy(black_box(&source)));
+                assert_ne!(source.as_ptr(), copy.as_ptr());
+                cloned_payload += source.as_raw().len();
+                if legacy.get(&WindowId(1)).is_none_or(|current: &Arc<RgbaImage>| **current != *copy) {
+                    legacy.insert(WindowId(1), copy);
+                }
+                legacy_time += started.elapsed();
+                let pixels = incoming.as_ptr();
+                let started = Instant::now();
+                let changed = super::update_preview_image(&mut moved, WindowId(1), black_box(incoming));
+                moved_time += started.elapsed();
+                if changed {
+                    assert_eq!(moved[&WindowId(1)].as_ptr(), pixels);
+                }
+                assert_eq!(legacy, moved);
+            }
+            println!("owned-preview changing={changing} frames=1000 legacy={legacy_time:?} moved={moved_time:?} eliminated_pixel_copy_bytes={cloned_payload}; provider allocations, Arc headers, RSS and GPU storage excluded");
+        }
+    }
+
+    #[test]
     fn warm_panel_hover_reuses_task_projection_and_builtin_images() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new((0..10_000).map(|index| crate::model::Application::new(format!("app.{index}"), format!("App {index}"), None, None, None)).collect());
@@ -522,7 +584,7 @@
     #[test]
     fn preview_cache_retains_authoritative_source_aspect_for_ui_containment() {
         let source = RgbaImage::from_pixel(240, 135, Rgba([10, 20, 30, 255]));
-        let normalized = super::normalize_preview_image(&source);
+        let normalized = super::legacy_preview_copy(&source);
 
         assert_eq!(normalized.dimensions(), source.dimensions());
         assert_eq!(normalized.as_raw(), source.as_raw());
@@ -557,7 +619,7 @@
 
     #[test]
     fn preview_cache_churn_releases_previous_group_pixels_and_stays_bounded() {
-        let normalized = Arc::new(super::normalize_preview_image(&RgbaImage::from_pixel(
+        let normalized = Arc::new(super::legacy_preview_copy(&RgbaImage::from_pixel(
             240,
             135,
             Rgba([10, 20, 30, 255]),
@@ -670,7 +732,7 @@
         let preview_churn = p95((0..11)
             .map(|_| {
                 let started = Instant::now();
-                let _ = super::normalize_preview_image(&preview_source);
+                let _ = super::legacy_preview_copy(&preview_source);
                 started.elapsed()
             })
             .collect());
@@ -729,7 +791,7 @@
             if let Some(image) = cache.get(&id) {
                 return Arc::clone(image);
             }
-            let image = Arc::new(super::normalize_preview_image(source));
+            let image = Arc::new(super::legacy_preview_copy(source));
             cache.insert(id, Arc::clone(&image));
             image
         }
@@ -745,7 +807,7 @@
             .collect::<Vec<_>>();
         let expected = sources
             .iter()
-            .map(super::normalize_preview_image)
+            .map(super::legacy_preview_copy)
             .collect::<Vec<_>>();
 
         let mut cold_cached = Vec::with_capacity(SAMPLES);
@@ -764,7 +826,7 @@
             let cached = cached_preview(&mut cache, id, black_box(source));
             cold_cached.push(started.elapsed());
             let started = Instant::now();
-            let bypass = super::normalize_preview_image(black_box(source));
+            let bypass = super::legacy_preview_copy(black_box(source));
             cold_bypass.push(started.elapsed());
             assert_eq!(&*cached, &bypass, "cold cache changed preview pixels");
 
@@ -772,7 +834,7 @@
             let cached = cached_preview(&mut cache, id, black_box(source));
             warm_cached.push(started.elapsed());
             let started = Instant::now();
-            let bypass = super::normalize_preview_image(black_box(source));
+            let bypass = super::legacy_preview_copy(black_box(source));
             warm_bypass.push(started.elapsed());
             assert_eq!(&*cached, &bypass, "warm cache changed preview pixels");
 
@@ -785,9 +847,9 @@
             }
             churn_cached.push(started.elapsed());
             let started = Instant::now();
-            let mut bypass = super::normalize_preview_image(black_box(source));
+            let mut bypass = super::legacy_preview_copy(black_box(source));
             for _ in 1..CHURN_REUSES {
-                bypass = super::normalize_preview_image(black_box(source));
+                bypass = super::legacy_preview_copy(black_box(source));
             }
             churn_bypass.push(started.elapsed());
             assert_eq!(&*cached, &bypass, "generation churn changed preview pixels");
@@ -797,7 +859,7 @@
             let cached = cached_preview(&mut cache, unique_id, black_box(source));
             low_reuse_cached.push(started.elapsed());
             let started = Instant::now();
-            let bypass = super::normalize_preview_image(black_box(source));
+            let bypass = super::legacy_preview_copy(black_box(source));
             low_reuse_bypass.push(started.elapsed());
             assert_eq!(&*cached, &bypass, "low-reuse cache changed preview pixels");
             assert_eq!(&*cached, &expected[index]);

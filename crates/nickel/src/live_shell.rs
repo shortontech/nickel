@@ -1223,15 +1223,8 @@ impl LiveShell {
             retain_preview_generation(&mut self.preview_images, &group.windows);
             for window in group.windows.iter().take(PREVIEW_CACHE_CAPACITY) {
                 if let Some(preview) = self.window_feed.preview(window.id) {
-                    let image = Arc::new(normalize_preview_image(&preview.image));
-                    if self
-                        .preview_images
-                        .get(&window.id)
-                        .is_none_or(|current| **current != *image)
-                    {
-                        self.preview_images.insert(window.id, image);
-                        changed = true;
-                    }
+                    changed |=
+                        update_preview_image(&mut self.preview_images, window.id, preview.image);
                 }
             }
             self.preview_refresh_deadline = Some(preview_refresh_now + PREVIEW_REFRESH_INTERVAL);
@@ -5510,7 +5503,24 @@ fn initial_wallpaper(
     (None, wallpaper, size)
 }
 
-fn normalize_preview_image(image: &image::RgbaImage) -> image::RgbaImage {
+fn update_preview_image(
+    images: &mut HashMap<crate::model::WindowId, Arc<image::RgbaImage>>,
+    window: crate::model::WindowId,
+    image: image::RgbaImage,
+) -> bool {
+    if images
+        .get(&window)
+        .is_some_and(|current| **current == image)
+    {
+        return false;
+    }
+    images.insert(window, Arc::new(image));
+    true
+}
+
+// Historical copying baseline for release comparisons, never a production path.
+#[cfg(test)]
+fn legacy_preview_copy(image: &image::RgbaImage) -> image::RgbaImage {
     image.clone()
 }
 
