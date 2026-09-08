@@ -707,3 +707,19 @@ formatting and diff checks pass. No physical device or live session input was ex
 not establish calibration for rotated outputs, map unconfigured devices, or complete live
 multi-monitor touch acceptance. Earlier first-output limitations now apply to devices without a
 configured libinput output hint, rather than every native touchscreen.
+
+## Isolated GUI gate recovery
+
+`CARGO_BUILD_JOBS=4 cargo build --workspace` passed at `9b27f8f`. To remove the remaining GUI-test
+exclusion without using the user's desktop, downloaded the configured Ubuntu repository's
+`xvfb` package (`2:21.1.22-1ubuntu1`) with `apt-get download` and extracted it with `dpkg-deb -x`
+under `/tmp/nickel-gui-test.Lho6xt`. No system package was installed or global configuration changed.
+The staged executable resolves its dependencies from the existing system libraries.
+
+The previously failing Markdown CLI suite now passes **2 tests**, including the valid/missing
+document startup test, under `xvfb-run -a -s '-screen 0 1280x720x24 -nolisten tcp'`. Its private
+display uses generated Xauthority; Wayland and Nickel session-control environment variables are
+cleared for the child, `WINIT_UNIX_BACKEND=x11` and `LIBGL_ALWAYS_SOFTWARE=1` are scoped to the test.
+The runner stopped its display after completion. This is isolated GUI startup evidence, not native
+Wayland/GPU/audio acceptance. A full workspace no-fail-fast run with **no test-name exclusion** is
+now using the same isolated runner; its terminal result will be recorded separately.
