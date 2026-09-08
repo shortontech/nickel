@@ -67,17 +67,26 @@
     #[test]
     #[ignore = "release-only owned preview refresh comparison"]
     fn owned_preview_refresh_release_evidence() {
+        use crate::allocation_counter::thread_allocation_operations;
         use std::hint::black_box;
         for changing in [false, true] {
             let mut legacy = HashMap::new();
             let mut moved = HashMap::new();
+            // Warm admission and map capacity before sampling refresh work.
+            // Changing frames start at a different color from this cached seed.
+            let seed = RgbaImage::from_pixel(240, 135, Rgba([if changing { 0 } else { 17 }, 20, 30, 255]));
+            legacy.insert(WindowId(1), Arc::new(seed.clone()));
+            moved.insert(WindowId(1), Arc::new(seed));
             let mut legacy_time = Duration::ZERO;
             let mut moved_time = Duration::ZERO;
             let mut cloned_payload = 0;
+            let mut legacy_allocations = 0;
+            let mut moved_allocations = 0;
             for index in 0..1000 {
-                let color = if changing { (index % 251) as u8 } else { 17 };
+                let color = if changing { ((index + 1) % 251) as u8 } else { 17 };
                 let source = RgbaImage::from_pixel(240, 135, Rgba([color, 20, 30, 255]));
                 let incoming = source.clone(); // provider allocations excluded from timing
+                let allocations_before = thread_allocation_operations();
                 let started = Instant::now();
                 let copy = Arc::new(super::legacy_preview_copy(black_box(&source)));
                 assert_ne!(source.as_ptr(), copy.as_ptr());
@@ -86,16 +95,20 @@
                     legacy.insert(WindowId(1), copy);
                 }
                 legacy_time += started.elapsed();
+                legacy_allocations += thread_allocation_operations() - allocations_before;
                 let pixels = incoming.as_ptr();
+                let allocations_before = thread_allocation_operations();
                 let started = Instant::now();
                 let changed = super::update_preview_image(&mut moved, WindowId(1), black_box(incoming));
                 moved_time += started.elapsed();
+                moved_allocations += thread_allocation_operations() - allocations_before;
                 if changed {
                     assert_eq!(moved[&WindowId(1)].as_ptr(), pixels);
                 }
                 assert_eq!(legacy, moved);
             }
-            println!("owned-preview changing={changing} frames=1000 legacy={legacy_time:?} moved={moved_time:?} eliminated_pixel_copy_bytes={cloned_payload}; provider allocations, Arc headers, RSS and GPU storage excluded");
+            assert!(legacy_allocations >= moved_allocations + 1000);
+            println!("owned-preview changing={changing} frames=1000 legacy={legacy_time:?} moved={moved_time:?} eliminated_pixel_copy_bytes={cloned_payload} legacy_allocation_calls={legacy_allocations} moved_allocation_calls={moved_allocations}; allocation calls include Arc/map storage; payload excludes Arc headers; provider allocations, RSS and GPU storage excluded");
         }
     }
 

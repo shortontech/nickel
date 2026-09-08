@@ -326,6 +326,7 @@ mod tests {
     #[test]
     #[ignore = "release-mode stalled-consumer retention evidence"]
     fn status_mailbox_retention_evidence() {
+        use crate::allocation_counter::thread_allocation_operations;
         use std::time::Instant;
         const UPDATES: usize = 1_000;
         const SUBSCRIBERS: usize = 3;
@@ -353,6 +354,7 @@ mod tests {
         let legacy = (0..SUBSCRIBERS)
             .map(|_| std::sync::mpsc::channel())
             .collect::<Vec<_>>();
+        let allocations_before = thread_allocation_operations();
         let started = Instant::now();
         for index in 0..UPDATES {
             for (sender, _) in &legacy {
@@ -362,6 +364,7 @@ mod tests {
             }
         }
         let legacy_time = started.elapsed();
+        let legacy_allocations = thread_allocation_operations() - allocations_before;
         let retained = legacy
             .iter()
             .flat_map(|(_, receiver)| receiver.try_iter())
@@ -378,6 +381,7 @@ mod tests {
                 count.fetch_add(1, Ordering::SeqCst);
             });
         }
+        let allocations_before = thread_allocation_operations();
         let started = Instant::now();
         for index in 0..UPDATES {
             let mut status = template.clone();
@@ -388,6 +392,7 @@ mod tests {
             }
         }
         let mailbox_time = started.elapsed();
+        let mailbox_allocations = thread_allocation_operations() - allocations_before;
         let pending = mailboxes
             .iter()
             .map(|(_, receiver)| {
@@ -406,13 +411,14 @@ mod tests {
         let mailbox_bytes = payload_capacity(status);
         assert_eq!(wakes.load(Ordering::SeqCst), SUBSCRIBERS);
         println!(
-            "status retention updates={UPDATES} subscribers={SUBSCRIBERS} legacy_snapshots={} mailbox_unique_snapshots=1 legacy_payload_capacity_bytes={legacy_bytes} mailbox_payload_capacity_bytes={mailbox_bytes} mailbox_wakes={} legacy_publish={legacy_time:?} mailbox_publish={mailbox_time:?}",
+            "status retention updates={UPDATES} subscribers={SUBSCRIBERS} legacy_snapshots={} mailbox_unique_snapshots=1 legacy_payload_capacity_bytes={legacy_bytes} mailbox_payload_capacity_bytes={mailbox_bytes} mailbox_wakes={} legacy_publish={legacy_time:?} mailbox_publish={mailbox_time:?} legacy_allocation_calls={legacy_allocations} mailbox_allocation_calls={mailbox_allocations}",
             UPDATES * SUBSCRIBERS,
             wakes.load(Ordering::SeqCst)
         );
         // Capacity is the retained device vector and string storage only. Queue
         // nodes, Arc headers, allocator metadata, graph storage and RSS are excluded.
         assert!(mailbox_bytes < legacy_bytes);
+        assert!(mailbox_allocations < legacy_allocations);
     }
 
     #[test]

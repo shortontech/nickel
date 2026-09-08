@@ -588,3 +588,33 @@ source callback replaces frame acquisition while executing production `refresh_f
 admission, comparison, deadline and redraw logic. The fixture checks source allocation identity on
 admission and pixel/dimension replacement, existing Arc identity for equal pixels, and actual
 `close_window_preview` retirement. It does not test the external transport or measure GPU rendering.
+
+The no-fail-fast workspace run is now terminal with exit 0:
+`CARGO_BUILD_JOBS=4 cargo test --workspace --no-fail-fast --quiet -- --skip valid_and_missing_documents_keep_viewer_alive_without_sidecar_files`.
+This includes the 46-test workbench suite and doctests. It is a passing run with one explicit GUI
+exclusion, not a passing unfiltered workspace gate. The full-refresh fixture added during that run
+was separately compiled and passed, followed by strict Nickel all-target/all-feature Clippy.
+
+0223 allocation measurement now uses the existing `CountingSystemAllocator` in the library test
+binary, installed only under `cfg(test)`. Thread-local sampling excludes parallel test/worker
+allocation noise. The stalled workload counts allocation/reallocation calls during publication,
+including cloned source statuses and queue/Arc allocation; channel/waker setup and later collection
+are outside the sample. Retained capacity remains a separate device-vector/string estimate. This
+does not add a shipped allocator, claim process RSS, or measure the entire old relay pipeline.
+
+Release status result: 1,000 updates, 64 devices, three stalled subscribers; historical fanout
+**387,099 allocation calls**, mailbox **130,000**. Retained device/string capacities remain
+40,128,000 bytes across 3,000 historical snapshots versus 13,376 bytes in one shared mailbox payload.
+Mailbox wakes: three. Publication timings in this allocator-instrumented run: 40.695845 ms versus
+4.067046 ms. This is one historical queue stage, not a whole-process before/after measurement.
+Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release status_mailbox_retention_evidence -- --ignored --nocapture`.
+
+0224 warmed release refresh result (1,000 frames, 240×135 RGBA; map admission and provider allocation
+outside sampling): unchanged frames **2,000 → 0 allocation calls**, changing frames **2,000 → 1,000**.
+Both workloads remove 129,600,000 bytes of redundant pixel-copy payload. Counts include Arc/map
+allocations; payload does not include Arc headers. Measured times: unchanged 4.422661 → 2.344318 ms,
+changing 2.101509 → 0.077754 ms. The changing path still allocates one Arc header per replacement;
+the provider still allocates its incoming pixels. No steady-state PSS or GPU saving is inferred.
+Command: `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --release owned_preview_refresh_release_evidence -- --ignored --nocapture`.
+Strict Nickel all-target/all-feature Clippy passed after adding the counters; the subsequent warming
+change is test-only. An all-feature library run checks the allocator-enabled test binary separately.
