@@ -574,3 +574,17 @@ remains pending in an isolated display environment.
 
 The new keyboard protocol compatibility test passed. Full workspace strict Clippy also passed:
 `CARGO_BUILD_JOBS=4 cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+
+The follow-up workspace run excluding the unavailable Markdown GUI test reached another stale
+expectation: the workbench final-completion test expected 44 cache rows, but the new mailbox and
+native readback owners bring the reviewed inventory to 46. Updated that exact expectation and added
+a regression proving each new owner independently rejects final completion when its status remains
+pending, even with all other statuses synthetically admitted. All four focused completion tests and
+strict workbench all-target/all-feature Clippy passed. A no-fail-fast workspace rerun is collecting
+the remaining results; the GUI exclusion remains explicit and no inventory status was promoted.
+
+0224 now has a passing full-refresh fixture, not only a cache-helper test. A narrow owned-preview
+source callback replaces frame acquisition while executing production `refresh_fast_changes`
+admission, comparison, deadline and redraw logic. The fixture checks source allocation identity on
+admission and pixel/dimension replacement, existing Arc identity for equal pixels, and actual
+`close_window_preview` retirement. It does not test the external transport or measure GPU rendering.

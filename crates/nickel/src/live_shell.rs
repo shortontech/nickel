@@ -1086,6 +1086,18 @@ impl LiveShell {
     }
 
     pub(crate) fn refresh_fast_changes(&mut self) -> Vec<SurfaceRole> {
+        self.refresh_fast_changes_with_preview_source(|feed, window| feed.preview(window))
+    }
+
+    // The source transfers an owned frame; refresh owns comparison, admission,
+    // retirement and timing. Keep those policies identical for every provider.
+    fn refresh_fast_changes_with_preview_source(
+        &mut self,
+        mut preview_source: impl FnMut(
+            &platform::WindowFeed,
+            crate::model::WindowId,
+        ) -> Option<crate::model::WindowPreview>,
+    ) -> Vec<SurfaceRole> {
         let mut redraw = Vec::new();
         let mut changed = false;
         #[cfg(target_os = "linux")]
@@ -1224,7 +1236,7 @@ impl LiveShell {
         {
             retain_preview_generation(&mut self.preview_images, &group.windows);
             for window in group.windows.iter().take(PREVIEW_CACHE_CAPACITY) {
-                if let Some(preview) = self.window_feed.preview(window.id) {
+                if let Some(preview) = preview_source(&self.window_feed, window.id) {
                     changed |=
                         update_preview_image(&mut self.preview_images, window.id, preview.image);
                 }

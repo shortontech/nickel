@@ -4636,7 +4636,7 @@ mod tests {
         assert_eq!(
             validate_cache_inventory_with(&admitted, CacheInventoryValidation::FinalCompletion)
                 .expect("synthetic admitted statuses satisfy the completion gate"),
-            44
+            46
         );
         for status in ["pending_measure", "lifecycle_fixed"] {
             let inventory = admitted.replacen("measured_admitted", status, 1);
@@ -4650,6 +4650,29 @@ mod tests {
         let error = validate_cache_inventory_for_final_completion()
             .expect_err("the audit ledger must not claim unmeasured caches are complete");
         assert!(error.to_string().contains("pending_measure"));
+    }
+
+    #[test]
+    fn native_status_and_preview_owners_each_require_completion_evidence() {
+        let admitted = CACHE_INVENTORY.replace("\tpending_measure\t", "\tmeasured_admitted\t");
+        for owner in ["native_system_status_mailbox", "native_preview_readback"] {
+            let original = CACHE_INVENTORY
+                .lines()
+                .find(|line| line.split('\t').next() == Some(owner))
+                .expect("native resource owner must remain inventoried");
+            assert!(original.contains("\tpending_measure\t"));
+            // Admit every other row synthetically, so this owner's missing
+            // evidence must independently keep the completion gate closed.
+            let admitted_row = original.replace("\tpending_measure\t", "\tmeasured_admitted\t");
+            let inventory = admitted.replace(&admitted_row, original);
+            let error = validate_cache_inventory_with(
+                &inventory,
+                CacheInventoryValidation::FinalCompletion,
+            )
+            .expect_err("unmeasured native resources cannot pass final completion");
+            assert!(error.to_string().contains("pending_measure"));
+            assert!(error.to_string().contains(owner));
+        }
     }
 
     #[test]

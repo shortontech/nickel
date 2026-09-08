@@ -1,4 +1,43 @@
     #[test]
+    fn full_preview_refresh_moves_provider_pixels_and_preserves_unchanged_identity() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(Vec::new());
+        let id = WindowId(42);
+        shell.windows = vec![OpenWindow {
+            id,
+            application_id: None,
+            active: true,
+            title: "Preview fixture".into(),
+            state: Default::default(),
+        }];
+        shell.preview_group = Some(0);
+        for (width, color) in [(240, 10), (240, 10), (240, 11), (135, 11)] {
+            let frame = RgbaImage::from_pixel(width, 135, Rgba([color, 20, 30, 255]));
+            let allocation = frame.as_ptr();
+            let previous = shell.preview_images.get(&id).map(Arc::downgrade);
+            let unchanged = shell.preview_images.get(&id).is_some_and(|old| **old == frame);
+            let mut supplied = Some(frame);
+            shell.preview_refresh_deadline = None;
+            shell.refresh_fast_changes_with_preview_source(|_, requested| {
+                assert_eq!(requested, id);
+                Some(crate::model::WindowPreview { window: id, image: supplied.take().unwrap() })
+            });
+            assert!(supplied.is_none());
+            let current = &shell.preview_images[&id];
+            if unchanged {
+                assert!(Arc::ptr_eq(&previous.unwrap().upgrade().unwrap(), current));
+            } else {
+                assert_eq!(current.as_ptr(), allocation);
+                assert!(previous.is_none_or(|previous| previous.upgrade().is_none()));
+            }
+        }
+        let last = Arc::downgrade(&shell.preview_images[&id]);
+        shell.close_window_preview();
+        assert!(shell.preview_images.is_empty());
+        assert!(last.upgrade().is_none());
+    }
+
+    #[test]
     fn owned_preview_refresh_moves_pixels_preserves_identity_and_retires_old_images() {
         let mut cache = HashMap::new();
         let id = WindowId(42);
