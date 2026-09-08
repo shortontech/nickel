@@ -141,6 +141,9 @@ impl InternalShellCoordinator {
     }
 
     pub fn set_outputs(&mut self, outputs: &[InternalOutput]) {
+        // Runtime surfaces are recreated on topology reconciliation. A release
+        // from their former geometry must not activate the replacement keyboard.
+        self.shell.cancel_keyboard_gestures();
         self.shell.retain_panel_outputs(outputs);
         // Reconcile file placement before any surface can render. Creating a desktop
         // slot alone leaves newly enumerated files without a live output assignment.
@@ -521,7 +524,25 @@ impl InternalShellCoordinator {
                 });
         }
         let mut dependent_roles = Vec::new();
+        if entry.role == SurfaceRole::OnScreenKeyboard && batch.window_focused == Some(false) {
+            changed |= self.shell.keyboard_host_input(
+                nickel_input::InputEvent::FocusLost {
+                    order: nickel_input::EventOrder(0),
+                },
+                entry.size.0,
+                entry.size.1,
+            );
+        }
         for event in batch.events {
+            if entry.role == SurfaceRole::OnScreenKeyboard
+                && let nickel_ui::HostEvent::Normalized { input, .. } = event
+            {
+                // Preserve the press-time recipient lease through native release.
+                changed |= self
+                    .shell
+                    .keyboard_host_input(input, entry.size.0, entry.size.1);
+                continue;
+            }
             // Desktop reducers need the original button, key edge, modifier snapshot,
             // and contact identity. Do not fabricate them from lossy UiEvent actions.
             if entry.role == SurfaceRole::Desktop {
@@ -723,6 +744,106 @@ mod tests {
     }
 
     struct StorageHost(Arc<AtomicU8>);
+
+    #[test]
+    fn native_keyboard_normalized_gesture_uses_press_epoch_and_blur_cancels_release() {
+        use nickel_input::{
+            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+        };
+        use nickel_session_protocol::{
+            OnScreenKeyboardInput, OnScreenKeyboardSnapshot, ShellSemanticTarget, WindowId,
+        };
+        struct KeyboardHost(std::sync::Mutex<Vec<(u64, OnScreenKeyboardInput)>>);
+        impl SessionHost for KeyboardHost {
+            fn dispatch(&self, _: ShellCommand) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn keyboard_snapshot(&self) -> Result<OnScreenKeyboardSnapshot, SessionRequestError> {
+                Ok(OnScreenKeyboardSnapshot {
+                    enabled: true,
+                    visible: true,
+                    epoch: 19,
+                    generation: 1,
+                    recipient: Some(WindowId(7)),
+                    ..Default::default()
+                })
+            }
+            fn configure_keyboard(
+                &self,
+                _: bool,
+                _: bool,
+                _: u64,
+                _: bool,
+                _: bool,
+                _: u32,
+            ) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn keyboard_input(
+                &self,
+                epoch: u64,
+                input: OnScreenKeyboardInput,
+            ) -> Result<(), SessionRequestError> {
+                self.0.lock().unwrap().push((epoch, input));
+                Ok(())
+            }
+        }
+        let host = Arc::new(KeyboardHost(std::sync::Mutex::new(Vec::new())));
+        let mut coordinator =
+            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "test".into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 1104,
+            scale: 1.0,
+        }]);
+        coordinator.poll(Instant::now());
+        let id = coordinator
+            .surface(SurfaceRole::OnScreenKeyboard, None)
+            .unwrap()
+            .id;
+        coordinator.scene(id);
+        let target = coordinator
+            .shell
+            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboard {
+                key: "osk-char-97".into(),
+            })
+            .unwrap();
+        let event = |edge| HostBatch {
+            events: vec![nickel_ui::HostEvent::Normalized {
+                input: InputEvent::Pointer(PointerEvent::Button {
+                    device: DeviceId(1),
+                    order: EventOrder(1),
+                    button: PointerButton::Primary,
+                    edge,
+                    position: Some(nickel_input::Point {
+                        x: f64::from(target.x),
+                        y: f64::from(target.y),
+                    }),
+                }),
+                clipboard_text: None,
+            }],
+            ..Default::default()
+        };
+        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+        coordinator.step_slot_changes(id, event(KeyEdge::Released));
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+        );
+        coordinator.step_slot_changes(id, event(KeyEdge::Pressed));
+        coordinator.step_slot_changes(
+            id,
+            HostBatch {
+                window_focused: Some(false),
+                ..Default::default()
+            },
+        );
+        coordinator.step_slot_changes(id, event(KeyEdge::Released));
+        assert_eq!(host.0.lock().unwrap().len(), 1);
+    }
 
     #[test]
     fn native_consumer_controls_use_typed_host_and_only_show_confirmed_limit_values() {

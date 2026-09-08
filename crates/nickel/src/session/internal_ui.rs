@@ -49,6 +49,8 @@ pub enum InternalSurfaceRole {
     Desktop,
     Panel,
     Overlay,
+    /// Interactive overlay that must preserve the text recipient's seat focus.
+    OnScreenKeyboard,
     Application,
 }
 
@@ -1831,7 +1833,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::Desktop => 0,
             InternalSurfaceRole::Application => 1,
             InternalSurfaceRole::Panel => 2,
-            InternalSurfaceRole::Overlay => 3,
+            InternalSurfaceRole::Overlay | InternalSurfaceRole::OnScreenKeyboard => 3,
         }
     }
 
@@ -1839,9 +1841,9 @@ impl InternalUiRuntime {
         match role {
             InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
             InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
-            InternalSurfaceRole::Panel | InternalSurfaceRole::Overlay => {
-                InternalSurfaceLayer::Overlay
-            }
+            InternalSurfaceRole::Panel
+            | InternalSurfaceRole::Overlay
+            | InternalSurfaceRole::OnScreenKeyboard => InternalSurfaceLayer::Overlay,
         }
     }
 

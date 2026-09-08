@@ -66,6 +66,7 @@ impl LiveShell {
                 old.epoch != snapshot.epoch || old.recipient != snapshot.recipient
             }) {
                 self.keyboard_gesture_leases.clear();
+                self.keyboard_resize = None;
                 self.keyboard_host
                     .application_mut()
                     .recipient_changed(snapshot.recipient.is_some());
@@ -127,6 +128,13 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
+        // Only primary clicks activate keyboard keys. Other buttons must neither
+        // replace the primary lease nor consume its release-time recipient epoch.
+        if matches!(&input, InputEvent::Pointer(PointerEvent::Button { button, .. })
+            if *button != nickel_input::PointerButton::Primary)
+        {
+            return false;
+        }
         // The clear strip at the edge facing the app is a resize grip. Consume the
         // whole gesture so its release cannot type a key after the surface moves.
         let resize_event = match &input {
@@ -209,6 +217,7 @@ impl LiveShell {
         let epoch = match &input {
             InputEvent::Pointer(PointerEvent::Button {
                 device,
+                button: nickel_input::PointerButton::Primary,
                 edge: KeyEdge::Pressed,
                 ..
             }) => {
@@ -219,6 +228,7 @@ impl LiveShell {
             }
             InputEvent::Pointer(PointerEvent::Button {
                 device,
+                button: nickel_input::PointerButton::Primary,
                 edge: KeyEdge::Released,
                 ..
             }) => self.keyboard_gesture_leases.remove(&(*device, None)),
@@ -277,6 +287,22 @@ impl LiveShell {
             },
             epoch,
         )
+    }
+
+    pub(crate) fn cancel_keyboard_gestures(&mut self) {
+        self.keyboard_gesture_leases.clear();
+        self.keyboard_resize = None;
+        self.keyboard_host.step(HostBatch {
+            window_focused: Some(false),
+            ..HostBatch::default()
+        });
+        let available = self
+            .keyboard_recipient
+            .as_ref()
+            .is_some_and(|snapshot| snapshot.recipient.is_some());
+        self.keyboard_host
+            .application_mut()
+            .recipient_changed(available);
     }
 
     pub(super) fn keyboard_step(&mut self, batch: HostBatch, epoch: Option<u64>) -> bool {
@@ -386,4 +412,89 @@ fn keyboard_input(key: KeyboardKey, modifiers: VirtualModifiers) -> Option<OnScr
     .filter_map(|(latch, key)| (latch != Latch::Off).then_some(key))
     .collect();
     Some(OnScreenKeyboardInput::Key { keysym, modifiers })
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
+    use nickel_session_protocol::{OnScreenKeyboardSnapshot, ShellSemanticTarget, WindowId};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct Host(Mutex<Vec<(u64, OnScreenKeyboardInput)>>);
+    impl crate::session_host::SessionHost for Host {
+        fn dispatch(&self, _: platform::ShellCommand) -> Result<(), platform::SessionRequestError> {
+            Ok(())
+        }
+        fn keyboard_input(
+            &self,
+            epoch: u64,
+            input: OnScreenKeyboardInput,
+        ) -> Result<(), platform::SessionRequestError> {
+            self.0.lock().unwrap().push((epoch, input));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn primary_keyboard_gesture_keeps_epoch_through_other_buttons_and_cancels_on_topology() {
+        let host = Arc::new(Host::default());
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell.keyboard_recipient = Some(OnScreenKeyboardSnapshot {
+            epoch: 19,
+            generation: 1,
+            recipient: Some(WindowId(7)),
+            enabled: true,
+            visible: true,
+            ..Default::default()
+        });
+        shell
+            .keyboard_host
+            .application_mut()
+            .recipient_changed(true);
+        shell.scene(SurfaceRole::OnScreenKeyboard, 1280, 368);
+        let target = shell
+            .resolve_semantic_target(&ShellSemanticTarget::OnScreenKeyboard {
+                key: "osk-char-97".into(),
+            })
+            .unwrap();
+        let event = |button, edge| {
+            InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                button,
+                edge,
+                position: Some(nickel_input::Point {
+                    x: f64::from(target.x),
+                    y: f64::from(target.y),
+                }),
+            })
+        };
+        for (button, edge) in [
+            (PointerButton::Primary, KeyEdge::Pressed),
+            (PointerButton::Secondary, KeyEdge::Pressed),
+            (PointerButton::Secondary, KeyEdge::Released),
+            (PointerButton::Primary, KeyEdge::Released),
+        ] {
+            shell.keyboard_host_input(event(button, edge), 1280, 368);
+        }
+        assert_eq!(
+            *host.0.lock().unwrap(),
+            vec![(19, OnScreenKeyboardInput::Text { text: "a".into() })]
+        );
+        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
+        // A newer snapshot cannot retarget an already-started gesture. Keeping
+        // the old epoch lets the session authority reject the stale command.
+        shell.keyboard_recipient.as_mut().unwrap().epoch = 20;
+        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
+        assert_eq!(host.0.lock().unwrap().last().unwrap().0, 19);
+        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Pressed), 1280, 368);
+        shell.keyboard_resize = Some((DeviceId(1), None, 2.0));
+        shell.cancel_keyboard_gestures();
+        assert!(shell.keyboard_resize.is_none());
+        assert!(shell.keyboard_gesture_leases.is_empty());
+        shell.keyboard_host_input(event(PointerButton::Primary, KeyEdge::Released), 1280, 368);
+        assert_eq!(host.0.lock().unwrap().len(), 2);
+    }
 }

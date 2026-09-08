@@ -1,9 +1,9 @@
-//! Native desktop pointer and keyboard routing.
+//! Native normalized shell pointer and desktop keyboard routing.
 //!
 //! Hit testing remains owned by InternalUiRuntime. This adapter retains button
 //! edges and seat modifiers before the generic UI path discards those details.
 //! Relative motion deltas are not owned by this adapter. Button presses
-//! claim runtime focus; the session reconciles that ownership with the native seat.
+//! claim runtime focus on the desktop only; the keyboard overlay preserves its recipient.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -48,6 +48,53 @@ mod tests {
             button: PointerButton::Secondary,
             edge,
         }
+    }
+
+    #[test]
+    fn keyboard_pointer_preserves_recipient_and_captures_release_over_clients() {
+        let mut runtime = InternalUiRuntime::default();
+        let recipient = desktop(&mut runtime);
+        runtime.focus_surface(recipient);
+        let keyboard = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::OnScreenKeyboard,
+                geometry: (0, 0, 800, 320),
+                output: None,
+            },
+            1.0,
+        );
+        runtime.drain_routed_events();
+        for (edge, point) in [
+            (KeyEdge::Pressed, (30.0, 80.0)),
+            (KeyEdge::Released, (1000.0, 500.0)),
+        ] {
+            assert!(runtime.desktop_pointer_input(
+                "mouse",
+                point,
+                DesktopPointerAction::Button {
+                    button: PointerButton::Primary,
+                    edge
+                },
+                ModifierState::default(),
+                true
+            ));
+            assert_eq!(runtime.focused(), Some(recipient));
+        }
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 2);
+        assert!(
+            batches
+                .iter()
+                .all(|(id, batch, _)| *id == keyboard && batch.window_focused.is_none())
+        );
+        assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
+            input: InputEvent::Pointer(PointerEvent::Button { edge: KeyEdge::Released, position: Some(position), .. }), ..
+        }] if position.x == 1000.0));
+        assert!(runtime.desktop_input.capture.is_none());
+        // Legacy touch still uses its adapter, but must never acquire text focus.
+        assert!(runtime.touch(1, (30.0, 80.0), crate::session::TouchPhase::Started));
+        assert_eq!(runtime.focused(), Some(recipient));
     }
 
     #[test]
@@ -356,7 +403,7 @@ mod tests {
 
 #[derive(Default)]
 pub(super) struct DesktopInputState {
-    // Allocate identities only for devices that actually reach a desktop. Removal
+    // Allocate identities only for devices that reach a normalized shell surface. Removal
     // retires the name mapping; a reconnect receives a fresh, non-aliased identity.
     devices: HashMap<String, DeviceId>,
     next_device: u64,
@@ -418,13 +465,16 @@ impl InternalUiRuntime {
         // when the desktop is focused again.
         self.desktop_input.pressed_keys.clear();
     }
-    /// Translate a seat hover departure into the desktop's normalized lifecycle.
+    /// Translate a seat hover departure into the shell's normalized lifecycle.
     /// This clears hover, not menu ownership or keyboard focus. Captured motion never
-    /// invokes departure: its target remains the starting desktop until release.
+    /// invokes departure: its target remains the starting surface until release.
     pub(super) fn desktop_pointer_leave(&mut self, id: InternalSurfaceId) -> bool {
         if !self.presentation.get(&id).is_some_and(|surface| {
             surface.external_scene.is_some()
-                && surface.placement.role == InternalSurfaceRole::Desktop
+                && matches!(
+                    surface.placement.role,
+                    InternalSurfaceRole::Desktop | InternalSurfaceRole::OnScreenKeyboard
+                )
         }) {
             return false;
         }
@@ -486,7 +536,7 @@ impl InternalUiRuntime {
         }
     }
 
-    /// Return true when this event belongs to a desktop, including swallowed
+    /// Return true when this event belongs to a normalized shell surface, including swallowed
     /// releases for retired captures. False leaves routing to the generic UI/client
     /// path. Positions are compositor-logical; scale must not be applied again.
     pub(crate) fn desktop_pointer_input(
@@ -498,7 +548,7 @@ impl InternalUiRuntime {
         client_present: bool,
     ) -> bool {
         // Capture precedes hit testing so crossing a client or panel does not
-        // transfer the release half of an existing desktop gesture to that target.
+        // transfer the release half of an existing shell gesture to that target.
         let target = self
             .desktop_input
             .capture
@@ -515,7 +565,10 @@ impl InternalUiRuntime {
             .filter(|surface| {
                 surface.visible
                     && surface.external_scene.is_some()
-                    && surface.placement.role == InternalSurfaceRole::Desktop
+                    && matches!(
+                        surface.placement.role,
+                        InternalSurfaceRole::Desktop | InternalSurfaceRole::OnScreenKeyboard
+                    )
             })
             .map(|surface| surface.placement.clone());
         if !captured && placement.is_none() {
@@ -523,7 +576,7 @@ impl InternalUiRuntime {
         }
 
         // Share hover ownership with generic widgets. Switching from a panel to
-        // a desktop must cancel the panel before delivering the desktop motion.
+        // a normalized surface must cancel the panel before delivering motion.
         if placement.is_some() && self.hovered != Some(id) {
             if let Some(previous) = self.hovered {
                 self.dispatch_ui(previous, nickel_ui::UiEvent::PointerCancelled);
@@ -558,7 +611,7 @@ impl InternalUiRuntime {
         let Some(placement) = placement else {
             return true;
         };
-        // Desktop reducers consume whole-surface local coordinates. Panel work-area
+        // Shell reducers consume whole-surface local coordinates. Panel work-area
         // reservations are already handled by the coordinator's viewport projection.
         let local = nickel_input::Point {
             x: position.0 - f64::from(placement.geometry.0),
@@ -588,13 +641,15 @@ impl InternalUiRuntime {
         };
         // A desktop interaction needs a real focus owner so client activation or
         // Alt-Tab can blur it later. Merely painting a menu cannot establish this.
-        if matches!(
-            event,
-            PointerEvent::Button {
-                edge: KeyEdge::Pressed,
-                ..
-            }
-        ) {
+        if placement.role == InternalSurfaceRole::Desktop
+            && matches!(
+                event,
+                PointerEvent::Button {
+                    edge: KeyEdge::Pressed,
+                    ..
+                }
+            )
+        {
             self.focus_surface(id);
         }
         // Snapshot modifiers with the event: reading them later during queue drain

@@ -6272,6 +6272,7 @@ fn internal_shell_surface_placement(
     let role = match surface_role {
         SurfaceRole::Desktop => InternalSurfaceRole::Desktop,
         SurfaceRole::Panel => InternalSurfaceRole::Panel,
+        SurfaceRole::OnScreenKeyboard => InternalSurfaceRole::OnScreenKeyboard,
         _ => InternalSurfaceRole::Overlay,
     };
     crate::session::InternalSurfacePlacement {
