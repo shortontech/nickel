@@ -324,6 +324,98 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "release-mode stalled-consumer retention evidence"]
+    fn status_mailbox_retention_evidence() {
+        use std::time::Instant;
+        const UPDATES: usize = 1_000;
+        const SUBSCRIBERS: usize = 3;
+        let template = super::super::AudioStatus {
+            available: true,
+            devices: (0..64)
+                .map(|index| super::super::AudioDeviceStatus {
+                    id: format!("device-{index:04}-{}", "i".repeat(32)),
+                    name: format!("Speaker {index:04} {}", "n".repeat(96)),
+                    is_default: index == 0,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let payload_capacity = |status: &super::super::AudioStatus| {
+            status.devices.capacity() * std::mem::size_of::<super::super::AudioDeviceStatus>()
+                + status
+                    .devices
+                    .iter()
+                    .map(|device| device.id.capacity() + device.name.capacity())
+                    .sum::<usize>()
+        };
+        // Reproduce one historical unbounded fanout stage, not the entire former
+        // relay pipeline. Nothing consumes either workload until publication ends.
+        let legacy = (0..SUBSCRIBERS)
+            .map(|_| std::sync::mpsc::channel())
+            .collect::<Vec<_>>();
+        let started = Instant::now();
+        for index in 0..UPDATES {
+            for (sender, _) in &legacy {
+                let mut status = template.clone();
+                status.volume_percent = (index % 101) as u8;
+                sender.send(status).unwrap();
+            }
+        }
+        let legacy_time = started.elapsed();
+        let retained = legacy
+            .iter()
+            .flat_map(|(_, receiver)| receiver.try_iter())
+            .collect::<Vec<_>>();
+        let legacy_bytes = retained.iter().map(payload_capacity).sum::<usize>();
+        assert_eq!(retained.len(), UPDATES * SUBSCRIBERS);
+        drop(retained);
+
+        let mailboxes = (0..SUBSCRIBERS).map(|_| channel()).collect::<Vec<_>>();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        for (_, receiver) in &mailboxes {
+            let count = wakes.clone();
+            receiver.set_waker(move || {
+                count.fetch_add(1, Ordering::SeqCst);
+            });
+        }
+        let started = Instant::now();
+        for index in 0..UPDATES {
+            let mut status = template.clone();
+            status.volume_percent = (index % 101) as u8;
+            let update = Arc::new(SystemStatusUpdate::Audio(status));
+            for (sender, _) in &mailboxes {
+                sender.send(update.clone()).unwrap();
+            }
+        }
+        let mailbox_time = started.elapsed();
+        let pending = mailboxes
+            .iter()
+            .map(|(_, receiver)| {
+                receiver.shared.pending.lock().unwrap().slots[0]
+                    .clone()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            pending
+                .iter()
+                .all(|update| Arc::ptr_eq(update, &pending[0]))
+        );
+        let (status, _) = audio_state(pending[0].as_ref()).unwrap();
+        assert_eq!(status.volume_percent, ((UPDATES - 1) % 101) as u8);
+        let mailbox_bytes = payload_capacity(status);
+        assert_eq!(wakes.load(Ordering::SeqCst), SUBSCRIBERS);
+        println!(
+            "status retention updates={UPDATES} subscribers={SUBSCRIBERS} legacy_snapshots={} mailbox_unique_snapshots=1 legacy_payload_capacity_bytes={legacy_bytes} mailbox_payload_capacity_bytes={mailbox_bytes} mailbox_wakes={} legacy_publish={legacy_time:?} mailbox_publish={mailbox_time:?}",
+            UPDATES * SUBSCRIBERS,
+            wakes.load(Ordering::SeqCst)
+        );
+        // Capacity is the retained device vector and string storage only. Queue
+        // nodes, Arc headers, allocator metadata, graph storage and RSS are excluded.
+        assert!(mailbox_bytes < legacy_bytes);
+    }
+
+    #[test]
     fn publish_racing_drain_delivers_final_state() {
         let (sender, receiver) = channel();
         let worker = std::thread::spawn(move || {
