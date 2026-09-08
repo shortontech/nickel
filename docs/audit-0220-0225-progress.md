@@ -802,3 +802,28 @@ Nickel: **671 passed, 12 ignored**; nickel-ui: **336 passed, 2 ignored**. Strict
 all-target/all-feature Clippy was rerun after the hidden-control guard and passed; formatting and
 diff checks passed. The integrated keyboard worktree was clean, with no remaining agent build,
 before cleanup of its checkout and 3.3 GiB disposable target cache. Its branch/commit are preserved.
+
+## Native preview work diagnostics (0225)
+
+The cache-diagnostics response now includes `native_preview_work`, a fixed-size counter snapshot.
+Current pending count and texture/PBO payload bytes are derived from the actual pending owner at
+query time, so retirement reports zero without requiring every exit path to clear a mirrored gauge.
+Successful admission records peak combined logical pending payload. This separates retained GPU-side
+texture/readback payload from the existing completed CPU preview-cache accounting; it does not
+estimate driver allocations or process RSS.
+
+Counters cover turns, unsignaled polls, submissions/failures, successful installs, failed map/size
+validation, stale/context/renderer-loss/lock cancellation, and timeouts. Cumulative submit and map/copy
+CPU wall time include failed calls; successful completion age includes event-loop scheduling delay
+and must not be described as GPU elapsed time. The snapshot is exposed on explicit diagnostics
+queries without normal-level per-frame logging, additional workers, or retained timing samples.
+Protocol defaults accept older payloads without the new field, with a passing roundtrip/default test.
+
+This is partial diagnostics completion, not native acceptance: overlay rebuild/upload timings,
+per-output frame/input latency distributions, full event-loop fault-injection scenarios and controlled
+GPU/DisplayLink measurements remain required. Existing trace records retain window identity; the
+new snapshot is aggregate per current native backend lifetime and does not attribute output latency.
+
+Verification: all-feature Nickel preview tests **49 passed, 2 ignored**; diagnostics protocol test
+**1 passed**; all-feature compilation and strict workspace all-target/all-feature Clippy passed.
+Formatting and diff checks passed. No live preview stress or desktop change was performed.

@@ -298,6 +298,20 @@ impl NickelSession {
                         internal_shell_wallpaper_bytes: shell_images.wallpaper_bytes as u64,
                         preview_entries: u16::try_from(self.preview_frames.len())
                             .unwrap_or(u16::MAX),
+                        native_preview_work: {
+                            #[cfg(feature = "backend-udev")]
+                            {
+                                self.native
+                                    .as_ref()
+                                    .map_or_else(Default::default, |native| {
+                                        native.native_preview_diagnostics()
+                                    })
+                            }
+                            #[cfg(not(feature = "backend-udev"))]
+                            {
+                                Default::default()
+                            }
+                        },
                         preview_capacity: u16::try_from(PREVIEW_ENTRY_CAPACITY).unwrap_or(u16::MAX),
                         preview_bytes: self.preview_bytes() as u64,
                         preview_byte_capacity: PREVIEW_BYTE_CAPACITY as u64,

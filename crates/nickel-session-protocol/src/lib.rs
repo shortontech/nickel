@@ -482,8 +482,33 @@ pub enum ServerMessage {
     Event(Event),
 }
 
+/// Native optional-preview work only. Byte counts are logical texture/PBO
+/// payload, not driver allocations or process RSS. Times are CPU wall time;
+/// completion age includes scheduling delay and is not a GPU timer query.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NativePreviewWorkDiagnostics {
+    pub pending_count: u16,
+    pub pending_texture_bytes: u64,
+    pub pending_readback_bytes: u64,
+    pub peak_pending_payload_bytes: u64,
+    pub turns: u64,
+    pub pending_polls: u64,
+    pub submissions: u64,
+    pub submission_failures: u64,
+    pub readback_failures: u64,
+    pub completions: u64,
+    pub cancellations: u64,
+    pub timeouts: u64,
+    pub submit_cpu_us: u64,
+    pub map_copy_cpu_us: u64,
+    pub completion_age_us: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CacheDiagnostics {
+    #[serde(default)]
+    pub native_preview_work: NativePreviewWorkDiagnostics,
     #[serde(default)]
     pub internal_ui_surfaces: u16,
     #[serde(default)]
@@ -1271,6 +1296,33 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_preview_work_diagnostics_preserve_old_payload_compatibility() {
+        let mut old = serde_json::to_value(super::CacheDiagnostics::default()).unwrap();
+        old.as_object_mut().unwrap().remove("native_preview_work");
+        let decoded: super::CacheDiagnostics = serde_json::from_value(old).unwrap();
+        assert_eq!(decoded.native_preview_work, Default::default());
+
+        let work = super::NativePreviewWorkDiagnostics {
+            pending_count: 1,
+            pending_texture_bytes: 129_600,
+            pending_readback_bytes: 129_600,
+            peak_pending_payload_bytes: 259_200,
+            submissions: 3,
+            completions: 2,
+            ..Default::default()
+        };
+        let encoded = serde_json::to_vec(&work).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<super::NativePreviewWorkDiagnostics>(&encoded).unwrap(),
+            work
+        );
+        assert_eq!(
+            serde_json::from_str::<super::NativePreviewWorkDiagnostics>("{}").unwrap(),
+            Default::default()
+        );
+    }
+
     #[test]
     fn keyboard_internal_recipient_is_optional_and_distinct_from_window_identity() {
         let legacy = super::OnScreenKeyboardSnapshot {

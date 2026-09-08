@@ -60,9 +60,24 @@ pub(super) struct NativePreviewWork {
     pending: Option<PendingPreview>,
     timer: Option<RegistrationToken>,
     last_capture: HashMap<WindowId, Instant>,
+    diagnostics: nickel_session_protocol::NativePreviewWorkDiagnostics,
 }
 
 impl UdevData {
+    pub(crate) fn native_preview_diagnostics(
+        &self,
+    ) -> nickel_session_protocol::NativePreviewWorkDiagnostics {
+        let mut result = self.preview_work.diagnostics;
+        if let Some(pending) = &self.preview_work.pending {
+            let (width, height) = pending.submission.dimensions;
+            let payload = u64::from(width) * u64::from(height) * 4;
+            result.pending_count = 1;
+            result.pending_texture_bytes = payload;
+            result.pending_readback_bytes = payload;
+        }
+        result
+    }
+
     pub(crate) fn retain_native_preview_interest(
         &mut self,
         admitted: &HashSet<WindowId>,
@@ -115,6 +130,7 @@ impl NickelSession {
             return false;
         };
         let now = Instant::now();
+        native.preview_work.diagnostics.turns += 1;
         // Owner generations prevent a recycled EGL handle from accepting a
         // completion from a removed/recreated renderer or topology generation.
         let renderer_generation = (
@@ -124,6 +140,8 @@ impl NickelSession {
         let mut changed = false;
         let keep_polling = (|| {
             if self.locked || !native.activity.is_active() {
+                native.preview_work.diagnostics.cancellations +=
+                    u64::from(native.preview_work.pending.is_some());
                 native.preview_work.pending = None;
                 native.preview_work.last_capture.clear();
                 return false;
@@ -141,14 +159,17 @@ impl NickelSession {
                     || pending.submission.fence.is_reached(),
                 ) {
                     Readiness::Stale => {
+                        native.preview_work.diagnostics.cancellations += 1;
                         self.defer_preview_capture(pending.id);
                         native.preview_work.pending = None;
                     }
                     Readiness::Pending => {
+                        native.preview_work.diagnostics.pending_polls += 1;
                         // Readiness polling must not render outputs or call map.
                         return true;
                     }
                     Readiness::TimedOut => {
+                        native.preview_work.diagnostics.timeouts += 1;
                         let id = pending.id;
                         tracing::trace!(
                             ?id,
@@ -168,6 +189,7 @@ impl NickelSession {
                 Ok(renderer) => renderer,
                 Err(error) => {
                     if let Some(pending) = native.preview_work.pending.take() {
+                        native.preview_work.diagnostics.cancellations += 1;
                         self.preview_renderer_failed(pending.id);
                     }
                     self.preview_renderer_unavailable(now);
@@ -199,14 +221,21 @@ impl NickelSession {
                                 },
                             );
                             changed = true;
+                            native.preview_work.diagnostics.completions += 1;
+                            native.preview_work.diagnostics.completion_age_us +=
+                                elapsed_micros(pending.started);
                             tracing::trace!(id = ?pending.id, map_copy_us = elapsed_micros(map_started), submitted_elapsed_us = elapsed_micros(pending.started), "preview readback installed");
                         } else {
+                            native.preview_work.diagnostics.readback_failures += 1;
                             self.preview_renderer_failed(pending.id);
                         }
                     } else {
+                        native.preview_work.diagnostics.readback_failures += 1;
                         self.preview_renderer_failed(pending.id);
                     }
+                    native.preview_work.diagnostics.map_copy_cpu_us += elapsed_micros(map_started);
                 } else {
+                    native.preview_work.diagnostics.cancellations += 1;
                     self.defer_preview_capture(pending.id);
                 }
                 // Texture and mapping drops enqueue renderer-owned cleanup; no
@@ -242,13 +271,21 @@ impl NickelSession {
             };
             native.preview_work.last_capture.insert(id, now);
             let submitted_at = Instant::now();
-            match submit_preview(renderer, &window) {
+            let submission = submit_preview(renderer, &window);
+            native.preview_work.diagnostics.submit_cpu_us += elapsed_micros(submitted_at);
+            match submission {
                 Some(submission) => {
                     // Logical payload, not driver allocation size: one texture
                     // and one PBO, each no larger than 240 * 135 * 4 bytes.
                     let payload = usize::from(submission.dimensions.0)
                         * usize::from(submission.dimensions.1)
                         * 4;
+                    native.preview_work.diagnostics.submissions += 1;
+                    native.preview_work.diagnostics.peak_pending_payload_bytes = native
+                        .preview_work
+                        .diagnostics
+                        .peak_pending_payload_bytes
+                        .max(payload as u64 * 2);
                     tracing::trace!(
                         ?id,
                         submit_us = elapsed_micros(submitted_at),
@@ -269,6 +306,7 @@ impl NickelSession {
                     true
                 }
                 None => {
+                    native.preview_work.diagnostics.submission_failures += 1;
                     self.preview_renderer_failed(id);
                     deferred
                 }
