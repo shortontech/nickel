@@ -858,3 +858,12 @@ those. The asynchronous store comment was updated to state the actual caller-val
 Verification: all-feature preview suite **50 passed, 2 ignored**; coordinator suite **15 passed**;
 strict Nickel all-target/all-feature Clippy, formatting and diff checks passed. No live desktop
 restart, binary replacement, input injection or preview stress was performed.
+
+## Hover presentation-owner retirement verification
+
+Extended the native delivery fixture through production `window_preview_scene`, not just the image
+map. It now proves that the rendered frame retains replaced/retired pixels until scene refresh,
+then releases their last strong ownership. Closing with a populated rendered frame drops both the
+image map and presentation host immediately. Changed thumbnail dimensions preserve the semantic
+activation target's bounds. The focused all-feature test passed. This is host/display-list ownership
+evidence, not proof of GPU texture retirement or live input latency.

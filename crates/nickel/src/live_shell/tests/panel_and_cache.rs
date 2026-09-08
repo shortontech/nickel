@@ -40,6 +40,7 @@
     #[cfg(target_os = "linux")]
     #[test]
     fn native_preview_delivery_preserves_unchanged_pixels_and_retires_hidden_cards() {
+        use crate::window_preview::PreviewAction;
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());
         let id = WindowId(42);
@@ -54,15 +55,31 @@
         }));
         let first = Arc::downgrade(&shell.preview_images[&id]);
         assert_eq!(shell.preview_images[&id].as_raw(), image.as_raw());
+        assert!(!shell.window_preview_scene().is_empty());
+        let activation = shell.preview_frame.as_ref().unwrap().semantic_bounds(PreviewAction::Activate(id)).unwrap();
         assert!(!shell.sync_native_preview_pixels(|_| Some((240, 135, image.as_raw()))));
         assert!(Arc::ptr_eq(&first.upgrade().unwrap(), &shell.preview_images[&id]));
         let replacement = RgbaImage::from_pixel(135, 240, Rgba([11, 20, 30, 255]));
         assert!(shell.sync_native_preview_pixels(|_| Some((135, 240, replacement.as_raw()))));
+        // The displayed frame may keep old pixels until its scene is rebuilt.
+        // Cache retirement alone is not proof that presentation released them.
+        assert!(first.upgrade().is_some());
+        assert!(!shell.window_preview_scene().is_empty());
         assert!(first.upgrade().is_none());
         assert_eq!(shell.preview_images[&id].dimensions(), (135, 240));
+        assert_eq!(shell.preview_frame.as_ref().unwrap().semantic_bounds(PreviewAction::Activate(id)), Some(activation));
+        let last = Arc::downgrade(&shell.preview_images[&id]);
         assert!(shell.sync_native_preview_pixels(|_| None));
         assert!(shell.preview_images.is_empty());
+        assert!(last.upgrade().is_some());
+        assert!(!shell.window_preview_scene().is_empty());
+        assert!(last.upgrade().is_none());
+        assert!(shell.sync_native_preview_pixels(|_| Some((240, 135, image.as_raw()))));
+        let closing = Arc::downgrade(&shell.preview_images[&id]);
+        assert!(!shell.window_preview_scene().is_empty());
         shell.close_window_preview();
+        assert!(shell.preview_frame.is_none());
+        assert!(closing.upgrade().is_none());
         assert!(shell.native_preview_windows().is_empty());
         assert!(!shell.sync_native_preview_pixels(|_| panic!("hidden preview cannot request pixels")));
     }
