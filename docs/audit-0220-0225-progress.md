@@ -690,3 +690,20 @@ agent is adding mixed-operation coverage and correcting that path. Async complet
 also needs transaction-aware retirement so closure cannot overwrite success or retire a newer read.
 These are review findings, not claims of completed clipboard behavior. The product text limit still
 awaits the user's choice; the suggested 16 MiB cap has not been treated as approved.
+
+## Configured native touch output mapping (0220/0222)
+
+The libinput boundary now carries `Device::output_name()` for touch down/motion into the generic
+session input adapter. That metadata is absent from Smithay's generic Device trait and was
+previously discarded. Normal and recovery touch routing resolve the named output's existing logical
+geometry, without applying scale twice. An explicitly mapped but absent output fails closed instead
+of redirecting touch to an unrelated monitor. The ordinary input entry point remains unchanged for
+other backends, and devices without a libinput mapping retain the previous first-output fallback.
+No per-device mapping cache or new settings policy was introduced.
+
+A passing session adapter test covers the named second output, 1.5× scale, negative logical origin,
+and removal without fallback. All-feature compilation, strict Nickel all-target/all-feature Clippy,
+formatting and diff checks pass. No physical device or live session input was exercised. This does
+not establish calibration for rotated outputs, map unconfigured devices, or complete live
+multi-monitor touch acceptance. Earlier first-output limitations now apply to devices without a
+configured libinput output hint, rather than every native touchscreen.

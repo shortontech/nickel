@@ -1128,7 +1128,18 @@ pub fn init_udev(
         .map_err(|()| "libinput rejected the active seat")?;
     let input = LibinputInputBackend::new(libinput.clone());
     event_loop.handle().insert_source(input, |event, _, data| {
-        if let Some(vt) = data.process_input_event(event)
+        use smithay::backend::input::{Event, InputEvent};
+        // Preserve libinput's device/output association at the native boundary;
+        // the backend-neutral Device trait intentionally lacks this metadata.
+        let touch_device = match &event {
+            InputEvent::TouchDown { event } => Some(event.device()),
+            InputEvent::TouchMotion { event } => Some(event.device()),
+            _ => None,
+        };
+        let output_name = touch_device
+            .as_ref()
+            .and_then(|device| device.output_name());
+        if let Some(vt) = data.process_input_event_on_output(event, output_name.as_deref())
             && let Some(native) = data.native.as_mut()
             && let Err(error) = native.session.change_vt(vt)
         {

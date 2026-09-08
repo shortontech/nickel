@@ -7028,6 +7028,41 @@ mod protocol_tests {
     }
 
     #[test]
+    fn touch_output_hint_uses_named_logical_geometry_and_never_falls_back_after_removal() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        for (name, scale_120) in [("fallback", 120), ("touchscreen", 180)] {
+            session
+                .apply_test_output(TestOutput::Connect {
+                    name: name.into(),
+                    logical_width: 800,
+                    logical_height: 600,
+                    scale_120,
+                    transform: OutputTransform::Normal,
+                })
+                .unwrap();
+        }
+        let output = session
+            .space
+            .outputs()
+            .find(|output| output.name() == "touchscreen")
+            .unwrap()
+            .clone();
+        session.space.map_output(&output, (-800, -120));
+        let geometry = session.touch_output_geometry(Some("touchscreen")).unwrap();
+        assert_eq!(geometry.loc, (-800, -120).into());
+        assert_eq!(geometry.size, (800, 600).into());
+        assert_ne!(session.touch_output_geometry(None).unwrap(), geometry);
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "touchscreen".into(),
+            })
+            .unwrap();
+        assert!(session.touch_output_geometry(Some("touchscreen")).is_none());
+        assert!(session.touch_output_geometry(None).is_some());
+    }
+
+    #[test]
     fn keyboard_reservation_resize_and_close_change_only_the_owner_output() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();

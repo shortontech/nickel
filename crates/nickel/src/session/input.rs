@@ -374,6 +374,27 @@ impl NickelSession {
     }
 
     pub fn process_input_event<I: InputBackend>(&mut self, event: InputEvent<I>) -> Option<i32> {
+        self.process_input_event_on_output(event, None)
+    }
+
+    pub(crate) fn touch_output_geometry(
+        &self,
+        output_name: Option<&str>,
+    ) -> Option<Rectangle<i32, Logical>> {
+        // A device's explicit mapping is authoritative. Losing that output must
+        // not redirect touches to an unrelated client on the fallback monitor.
+        let output = match output_name {
+            Some(name) => self.space.outputs().find(|output| output.name() == name)?,
+            None => self.space.outputs().next()?,
+        };
+        self.space.output_geometry(output)
+    }
+
+    pub(crate) fn process_input_event_on_output<I: InputBackend>(
+        &mut self,
+        event: InputEvent<I>,
+        output_name: Option<&str>,
+    ) -> Option<i32> {
         use smithay::backend::input::{Device, DeviceCapability};
         match &event {
             InputEvent::DeviceAdded { device }
@@ -461,8 +482,7 @@ impl NickelSession {
                     return None;
                 }
                 InputEvent::TouchDown { event, .. } => {
-                    let output = self.space.outputs().next()?;
-                    let geometry = self.space.output_geometry(output)?;
+                    let geometry = self.touch_output_geometry(output_name)?;
                     let position =
                         event.position_transformed(geometry.size) + geometry.loc.to_f64();
                     let output = crate::session::shell_layout::Geometry {
@@ -1353,8 +1373,7 @@ impl NickelSession {
                 pointer.frame(self);
             }
             InputEvent::TouchDown { event, .. } => {
-                let output = self.space.outputs().next()?;
-                let geometry = self.space.output_geometry(output)?;
+                let geometry = self.touch_output_geometry(output_name)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
                 let client_present =
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
@@ -1410,8 +1429,7 @@ impl NickelSession {
                 );
             }
             InputEvent::TouchMotion { event, .. } => {
-                let output = self.space.outputs().next()?;
-                let geometry = self.space.output_geometry(output)?;
+                let geometry = self.touch_output_geometry(output_name)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
                 if self.internal_ui.normalized_touch_input(
                     &event.device().id(),
