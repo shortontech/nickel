@@ -658,3 +658,23 @@ delivery assertion alone does not prove asynchronous device property acknowledgm
 The companion unavailable-server test proves an empty disconnected command source stops after one
 failed connection attempt. Focused audio tests: **4 passed, 2 live PipeWire tests ignored**. No live
 volume or mute command was issued.
+
+## Audio command acknowledgment ordering follow-up
+
+The connection loop drained multiple commands before dispatching more PipeWire events, while each
+relative adjustment/toggle read the last observed graph. Two queued +5 commands could therefore
+both derive 55 from an observed 50 rather than deriving 55 then 60. Queue preservation alone does
+not solve this asynchronous read/modify/write gap.
+
+The worker now waits for the matching core sync sequence after a command, explicitly enumerates
+the effective sink's properties, and processes another matching roundtrip before consuming the next
+command. Graph locks are released before event dispatch. This uses the existing audio worker, one
+completion slot and no compositor wait or new thread. Each roundtrip has a two-second deadline;
+dispatch errors/timeouts leave the attempted command consumed and reconnect without replay, since
+the server may already have applied a toggle. The pending-head reconnect rule still preserves later
+commands. UI status remains derived from received graph properties, not requested target values.
+
+Synthetic acknowledgment tests cover distinct sequences, property updates between two relative
+adjustments, an old sequence that cannot satisfy a new wait, immediate timeout, and dispatch failure
+without a retry. Real server/device acknowledgment behavior and held-key throughput still need
+live validation; these tests do not simulate the full PipeWire protocol or assert hardware success.

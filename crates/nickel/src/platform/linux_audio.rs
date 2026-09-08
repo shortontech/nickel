@@ -2,12 +2,13 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use pipewire_native::{
     self as pipewire,
     context::Context,
+    core::{Core, CoreEvents},
     main_loop::MainLoop,
     properties::Properties,
     proxy::{
@@ -188,6 +189,15 @@ fn run_connection(
         .ok_or_else(|| "could not create PipeWire main loop".to_owned())?;
     let context = Context::new(&main_loop, Properties::new()).map_err(|error| error.to_string())?;
     let core = context.connect(None).map_err(|error| error.to_string())?;
+    let completed = Arc::new(Mutex::new(None));
+    let completion = Arc::clone(&completed);
+    let mut events = CoreEvents::default();
+    events.done = Some(Box::new(move |id, sequence| {
+        if id == 0 {
+            *completion.lock().unwrap() = Some(sequence);
+        }
+    }));
+    core.add_listener(events);
     let registry = core.registry().map_err(|error| error.to_string())?;
     let graph = Arc::new(Mutex::new(Graph::default()));
     let listener_graph = Arc::clone(&graph);
@@ -286,12 +296,69 @@ fn run_connection(
                 .map(Ok)
                 .unwrap_or_else(|| commands.try_recv())
             {
-                Ok(command) => apply_command(command, &graph)?,
+                Ok(command) => {
+                    apply_command(command, &graph)?;
+                    audio_roundtrip(&core, &main_loop, &completed)?;
+                    // Relative commands must not all read the pre-burst graph.
+                    // Refresh properties, then process the matching roundtrip
+                    // before deriving the next adjustment. This wait is confined
+                    // to the existing audio worker, never the compositor loop.
+                    let node = {
+                        let current = graph
+                            .lock()
+                            .map_err(|_| "PipeWire graph lock was poisoned")?;
+                        effective_sink(&current)?.node.clone()
+                    };
+                    node.enum_params(0, Some(ParamType::Props), 0, u32::MAX, None)
+                        .map_err(|error| error.to_string())?;
+                    audio_roundtrip(&core, &main_loop, &completed)?;
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
             }
         }
     }
+}
+
+fn audio_roundtrip(
+    core: &Core,
+    main_loop: &MainLoop,
+    completed: &Mutex<Option<u32>>,
+) -> Result<(), String> {
+    *completed
+        .lock()
+        .map_err(|_| "PipeWire completion lock was poisoned")? = None;
+    let sequence = core.sync().map_err(|error| error.to_string())?;
+    wait_for_audio_ack(
+        sequence,
+        Duration::from_secs(2),
+        || *completed.lock().unwrap(),
+        |timeout| {
+            main_loop
+                .iterate(Some(timeout))
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
+fn wait_for_audio_ack(
+    sequence: u32,
+    timeout: Duration,
+    mut completed: impl FnMut() -> Option<u32>,
+    mut dispatch: impl FnMut(Duration) -> Result<(), String>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    while completed() != Some(sequence) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            // The attempted command may already have reached the server. Fail
+            // the connection without replaying it and risking a second toggle.
+            return Err("PipeWire command acknowledgment timed out".into());
+        }
+        dispatch(remaining.min(Duration::from_millis(50)))?;
+    }
+    Ok(())
 }
 
 fn update_props(
@@ -590,6 +657,58 @@ mod tests {
             |_| {},
         );
         assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn audio_ack_requires_matching_sequence_and_dispatches_observed_properties() {
+        use std::cell::Cell;
+        let completed = Cell::new(Some(4));
+        let observed = Cell::new(50);
+        let mut requested = Vec::new();
+        for sequence in [5, 6] {
+            let target = observed.get() + 5;
+            requested.push(target);
+            super::wait_for_audio_ack(
+                sequence,
+                Duration::from_secs(1),
+                || completed.get(),
+                |timeout| {
+                    assert!(timeout <= Duration::from_millis(50));
+                    observed.set(target);
+                    completed.set(Some(sequence));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        }
+        assert_eq!(requested, [55, 60]);
+        assert_eq!(observed.get(), 60);
+        assert!(
+            super::wait_for_audio_ack(
+                7,
+                Duration::ZERO,
+                || completed.get(),
+                |_| { panic!("expired acknowledgment must not dispatch or replay a command") }
+            )
+            .unwrap_err()
+            .contains("timed out")
+        );
+    }
+
+    #[test]
+    fn audio_ack_propagates_connection_failure_without_retrying_dispatch() {
+        let mut calls = 0;
+        let result = super::wait_for_audio_ack(
+            1,
+            Duration::from_secs(1),
+            || None,
+            |_| {
+                calls += 1;
+                Err("disconnected".into())
+            },
+        );
+        assert_eq!(result, Err("disconnected".into()));
+        assert_eq!(calls, 1);
     }
 
     #[test]
