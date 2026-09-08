@@ -68,8 +68,10 @@ impl NickelSession {
         let handled = self
             .internal_ui
             .pointer_motion_with_client((position.x, position.y), client_present);
+        // Leaving an internal surface can queue cancellation even when the new
+        // target is a client and this motion itself is not internally handled.
+        self.flush_internal_shell_input();
         if handled {
-            self.flush_internal_shell_input();
             self.request_output_redraw();
         }
         handled
@@ -694,12 +696,15 @@ impl NickelSession {
                     );
                     return None;
                 }
-                if self.internal_ui.pointer_button_with_client(
+                let internally_handled = self.internal_ui.pointer_button_with_client(
                     (location.x, location.y),
                     button_state == ButtonState::Pressed,
                     client_present,
-                ) {
-                    self.flush_internal_shell_input();
+                );
+                // A client press can blur the old internal owner without being
+                // consumed by it. Deliver that lifecycle batch before forwarding.
+                self.flush_internal_shell_input();
+                if internally_handled {
                     if button_state == ButtonState::Pressed {
                         self.reconcile_internal_application_focus();
                     }

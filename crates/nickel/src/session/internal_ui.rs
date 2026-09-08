@@ -1372,7 +1372,9 @@ pub struct InternalUiRuntime {
     focused: Option<InternalSurfaceId>,
     hovered: Option<InternalSurfaceId>,
     touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
-    routed_events: Vec<(InternalSurfaceId, UiEvent)>,
+    // Keep the complete batch for coordinator-owned scenes: normalized input and
+    // focus lifecycle facts must survive the same handoff as semantic UI actions.
+    routed_events: Vec<(InternalSurfaceId, HostBatch)>,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
     texture_caches: SharedTextureCaches,
@@ -1639,6 +1641,16 @@ impl InternalUiRuntime {
     }
 
     pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
+        if self
+            .presentation
+            .get(&id)
+            .is_some_and(|surface| surface.external_scene.is_some())
+        {
+            // The SceneSlot supplies identity only. Its reducer cannot apply input
+            // or focus changes to the LiveShell authority owned by the coordinator.
+            self.routed_events.push((id, batch));
+            return true;
+        }
         let Some(surface) = self.surfaces.get_mut(id) else {
             return false;
         };
@@ -1658,7 +1670,7 @@ impl InternalUiRuntime {
         true
     }
 
-    pub fn drain_routed_events(&mut self) -> Vec<(InternalSurfaceId, UiEvent)> {
+    pub fn drain_routed_events(&mut self) -> Vec<(InternalSurfaceId, HostBatch)> {
         std::mem::take(&mut self.routed_events)
     }
 
@@ -1844,17 +1856,6 @@ impl InternalUiRuntime {
     }
 
     fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {
-        self.routed_events.push((id, event.clone()));
-        if self
-            .presentation
-            .get(&id)
-            .is_some_and(|surface| surface.external_scene.is_some())
-        {
-            // Renderer-neutral scenes are owned by the shell coordinator. It
-            // consumes this event after routing and supplies the next scene;
-            // the identity-only SceneSlot must never reduce input itself.
-            return true;
-        }
         self.step(
             id,
             HostBatch {
@@ -2301,6 +2302,66 @@ mod tests {
         fn view(&self, _: ViewContext) -> impl View<Self::Message> {
             Button::new((), "count")
         }
+    }
+
+    #[test]
+    fn coordinator_scene_preserves_normalized_input_and_focus_batches() {
+        let mut runtime = InternalUiRuntime::default();
+        let desktop = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Desktop,
+                geometry: (-800, -120, 800, 600),
+                output: Some("left".into()),
+            },
+            1.5,
+        );
+        let input = nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            device: nickel_input::DeviceId(7),
+            order: nickel_input::EventOrder(29),
+            button: nickel_input::PointerButton::Secondary,
+            edge: nickel_input::KeyEdge::Released,
+            position: Some(nickel_input::Point { x: 13.0, y: 71.0 }),
+        });
+        assert!(runtime.step(
+            desktop,
+            HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: input.clone(),
+                    clipboard_text: None
+                }],
+                ..Default::default()
+            }
+        ));
+        runtime.focus_surface(desktop);
+        runtime.clear_focus();
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 3);
+        assert!(batches.iter().all(|(id, _)| *id == desktop));
+        assert!(
+            matches!(&batches[0].1.events[..], [HostEvent::Normalized { input: actual, .. }] if actual == &input)
+        );
+        assert_eq!(batches[1].1.window_focused, Some(true));
+        assert_eq!(batches[2].1.window_focused, Some(false));
+        assert!(runtime.drain_routed_events().is_empty());
+    }
+
+    #[test]
+    fn hosted_application_input_is_not_duplicated_into_coordinator_queue() {
+        let mut runtime = InternalUiRuntime::default();
+        let application = runtime.insert(
+            Counter(0),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (0, 0, 100, 100),
+                output: None,
+            },
+            1.0,
+        );
+        runtime.focus_surface(application);
+        runtime.keyboard(UiEvent::KeyboardActivate);
+        runtime.clear_focus();
+        assert!(runtime.drain_routed_events().is_empty());
     }
 
     #[test]

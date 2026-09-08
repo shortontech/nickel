@@ -128,12 +128,28 @@ since their matching key releases may be delivered to the newly focused client. 
 state fix, not an explanation or verified fix for the reported terminal `@` input.
 
 The focused coordinator regression passed after these additions. This does **not** yet connect
-Smithay's device ingress: `InternalUiRuntime` still queues lossy `UiEvent`s, and native button routing
-still collapses buttons to pressed/released. Full-fidelity runtime routing, per-device capture,
+Smithay's device ingress: native button routing still collapses buttons to pressed/released.
+Full-fidelity device normalization, per-device capture,
 keyboard ownership, and focus/hotplug cancellation must be completed before native acceptance.
 After the normalized-dispatch and modifier-reset changes, the full Nickel library suite again
 passed (617 passed, 11 ignored), as did formatting, diff whitespace checks, and strict Nickel
 all-target/all-feature Clippy. These checks do not replace the required full-workspace gates.
+
+The runtime-to-coordinator handoff now preserves complete `HostBatch` values rather than extracting
+only `UiEvent`. This retains normalized device payloads and host focus transitions. Coordinator-owned
+scenes enqueue to their actual owner; directly hosted applications reduce locally without adding
+duplicate events to that queue. Runtime contract tests verify exact secondary-button/release/device/
+order/position preservation, ordered focus gain/loss, queue draining, and absence of duplicate local
+application dispatch. The desktop regression also checks modifier cancellation through the host's
+`window_focused=false` batch, not only through a synthetic normalized FocusLost event.
+
+Session focus changes wake the shell and deferred lifecycle batches drain before shell polling,
+outside Smithay keyboard callbacks. Pointer paths flush cancellation/blur even when the next target
+is a client and the runtime does not consume that input. Device ingress still needs its full-fidelity
+adapter and capture policy; preserving batches does not by itself restore all desktop interactions.
+After the final client-transition flush changes, the full Nickel library suite passed (619 passed,
+11 ignored); formatting, diff whitespace checks, and strict all-target/all-feature Nickel Clippy
+also passed. Runtime contract coverage is not physical-device or native desktop acceptance.
 
 ## Remaining implementation
 

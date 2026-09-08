@@ -1081,6 +1081,9 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
+        // Focus may change without another device event. Consume deferred lifecycle
+        // batches here, outside Smithay's focus callback/keyboard lock.
+        self.flush_internal_shell_input();
         self.publish_internal_keyboard_snapshot();
         if self.internal_shell.is_some() {
             let snapshot = self.protocol_snapshot();
@@ -1480,7 +1483,7 @@ impl NickelSession {
             .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
         let shell = self.internal_shell.as_mut().unwrap();
         let mut changed = Vec::new();
-        for (runtime_id, event) in events {
+        for (runtime_id, batch) in events {
             let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
@@ -1490,13 +1493,7 @@ impl NickelSession {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
                 shell.set_panel_context(output, origin);
             }
-            changed.extend(shell.step_slot_changes(
-                shell_id,
-                nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Ui(event)],
-                    ..Default::default()
-                },
-            ));
+            changed.extend(shell.step_slot_changes(shell_id, batch));
         }
         let launcher_is_visible = shell.launcher_visible();
         let _ = shell;
@@ -4690,6 +4687,7 @@ impl NickelSession {
         if !self.internal_ui.focus_surface(surface) {
             return false;
         }
+        self.wake_internal_shell();
         self.schedule_internal_ui_frame();
         true
     }
@@ -4697,6 +4695,7 @@ impl NickelSession {
     /// Blur a compositor-hosted owner before assigning a native seat target.
     pub(crate) fn surrender_internal_focus(&mut self) {
         if self.internal_ui.clear_focus().is_some() {
+            self.wake_internal_shell();
             self.schedule_internal_ui_frame();
         }
     }

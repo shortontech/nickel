@@ -474,6 +474,15 @@ impl InternalShellCoordinator {
             .map(|surface| self.shell.surface_visible(surface.role))
             .collect::<Vec<_>>();
         let mut changed = false;
+        if entry.role == SurfaceRole::Desktop && batch.window_focused == Some(false) {
+            // Host focus changes are lifecycle notifications, not device events;
+            // they still must cancel the production desktop transaction and keys.
+            changed |= self
+                .shell
+                .desktop_input(nickel_input::InputEvent::FocusLost {
+                    order: nickel_input::EventOrder(0),
+                });
+        }
         let mut dependent_roles = Vec::new();
         for event in batch.events {
             // Desktop reducers need the original button, key edge, modifier snapshot,

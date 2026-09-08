@@ -1455,9 +1455,10 @@
                 modifiers: nickel_input::ModifierState::from_sides([nickel_input::Modifier::ControlLeft]),
             })));
             assert!(coordinator.shell_mut().desktop_host.application().modifiers.toggle);
-            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::FocusLost {
-                order: nickel_input::EventOrder(4),
-            }));
+            coordinator.step_slot_changes(left_id, HostBatch {
+                window_focused: Some(false),
+                ..Default::default()
+            });
             assert!(!coordinator.shell_mut().desktop_host.application().modifiers.toggle);
             // Repeated disconnects must retire parked viewports without forgetting
             // the file's original output affinity when that display returns.
