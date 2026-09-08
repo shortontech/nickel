@@ -63,13 +63,15 @@ impl LiveShell {
                 .application_mut()
                 .set_top_docked(snapshot.dock_top);
             if previous.as_ref().is_none_or(|old| {
-                old.epoch != snapshot.epoch || old.recipient != snapshot.recipient
+                old.epoch != snapshot.epoch
+                    || old.recipient != snapshot.recipient
+                    || old.internal_recipient != snapshot.internal_recipient
             }) {
                 self.keyboard_gesture_leases.clear();
                 self.keyboard_resize = None;
                 self.keyboard_host
                     .application_mut()
-                    .recipient_changed(snapshot.recipient.is_some());
+                    .recipient_changed(snapshot.has_recipient());
             }
             let changed = previous.as_ref() != Some(&snapshot);
             let auto_show = enabled && !self.keyboard_visible && snapshot.auto_show_requested;
@@ -299,7 +301,7 @@ impl LiveShell {
         let available = self
             .keyboard_recipient
             .as_ref()
-            .is_some_and(|snapshot| snapshot.recipient.is_some());
+            .is_some_and(|snapshot| snapshot.has_recipient());
         self.keyboard_host
             .application_mut()
             .recipient_changed(available);

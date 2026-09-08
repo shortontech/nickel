@@ -25,6 +25,7 @@ pub(crate) struct OnScreenKeyboardState {
     generation: u64,
     environment_override: bool,
     epoch: u64,
+    internal_recipient: Option<nickel_ui::InternalSurfaceId>,
     enabled: bool,
     pub(crate) visible: bool,
     source: KeyboardSource,
@@ -43,6 +44,7 @@ impl Default for OnScreenKeyboardState {
             environment_override: false,
             touchscreens: Default::default(),
             epoch: 1,
+            internal_recipient: None,
             enabled: false,
             visible: false,
             source: KeyboardSource::new_auxiliary(),
@@ -53,6 +55,7 @@ impl Default for OnScreenKeyboardState {
 impl NickelSession {
     /// One current recipient snapshot shared with the native shell, never a self-RPC.
     pub(crate) fn publish_internal_keyboard_snapshot(&mut self) {
+        self.reconcile_keyboard_internal_recipient();
         let snapshot = self.on_screen_keyboard_snapshot();
         let changed = {
             let mut current = self.internal_keyboard_snapshot.write().unwrap();
@@ -65,6 +68,27 @@ impl NickelSession {
         };
         if changed {
             self.wake_internal_shell();
+        }
+    }
+
+    fn keyboard_internal_recipient(&self) -> Option<nickel_ui::InternalSurfaceId> {
+        let id = self.internal_ui.focused()?;
+        let placement = self.internal_ui.placement(id)?;
+        (self.internal_ui.is_visible(id)
+            && matches!(
+                placement.role,
+                super::InternalSurfaceRole::Application | super::InternalSurfaceRole::Overlay
+            ))
+        .then_some(id)
+    }
+
+    pub(crate) fn reconcile_keyboard_internal_recipient(&mut self) {
+        let recipient = self.keyboard_internal_recipient();
+        if recipient != self.on_screen_keyboard.internal_recipient {
+            // Native-to-native focus changes need not change Smithay's None
+            // focus target. Track their identity separately before leasing input.
+            self.on_screen_keyboard.internal_recipient = recipient;
+            self.on_screen_keyboard_focus_changed();
         }
     }
 
@@ -96,6 +120,7 @@ impl NickelSession {
     }
 
     pub(crate) fn on_screen_keyboard_snapshot(&self) -> OnScreenKeyboardSnapshot {
+        let internal_recipient = self.keyboard_internal_recipient();
         let focus = self
             .seat
             .get_keyboard()
@@ -126,8 +151,16 @@ impl NickelSession {
             touchscreen_present: !self.on_screen_keyboard.touchscreens.is_empty(),
             generation: self.on_screen_keyboard.generation,
             environment_override: self.on_screen_keyboard.environment_override,
-            epoch: self.on_screen_keyboard.epoch,
+            // A read before publication cannot offer the old owner's lease.
+            epoch: self.on_screen_keyboard.epoch.wrapping_add(u64::from(
+                internal_recipient != self.on_screen_keyboard.internal_recipient,
+            )),
             recipient: if self.locked { None } else { recipient },
+            internal_recipient: if self.locked {
+                None
+            } else {
+                internal_recipient.map(|id| id.snapshot_token())
+            },
             text_input_active: text_input_active && !self.locked,
             enabled: self.on_screen_keyboard.enabled,
             visible: self.on_screen_keyboard.visible && !self.locked,
@@ -181,13 +214,43 @@ impl NickelSession {
         epoch: u64,
         input: OnScreenKeyboardInput,
     ) -> Result<(), &'static str> {
+        self.reconcile_keyboard_internal_recipient();
         let snapshot = self.on_screen_keyboard_snapshot();
         if !snapshot.enabled
             || !snapshot.visible
-            || snapshot.recipient.is_none()
+            || !snapshot.has_recipient()
             || snapshot.epoch != epoch
         {
             return Err("on-screen keyboard recipient is no longer available");
+        }
+        if snapshot.internal_recipient.is_some() {
+            let event = match input {
+                OnScreenKeyboardInput::Text { text } => {
+                    if text.is_empty()
+                        || text.chars().count() > 16
+                        || text.chars().any(char::is_control)
+                    {
+                        return Err("invalid on-screen keyboard text");
+                    }
+                    nickel_ui::UiEvent::TextInput(text)
+                }
+                OnScreenKeyboardInput::Key { keysym, modifiers } => {
+                    // The existing internal key adapter has no chord transport.
+                    // Reject unsupported chords instead of turning Ctrl+C into c.
+                    if !modifiers.is_empty() {
+                        return Err("modified internal keyboard input is not supported");
+                    }
+                    super::input::internal_keyboard_event(Keysym::new(keysym), KeyState::Pressed)
+                        .ok_or("key unavailable for the internal recipient")?
+                }
+            };
+            self.internal_ui.keyboard(event);
+            self.flush_internal_shell_input();
+            self.reconcile_internal_application_focus();
+            self.note_input_activity();
+            self.wake_internal_shell();
+            self.schedule_internal_ui_frame();
+            return Ok(());
         }
         let keyboard = self
             .seat

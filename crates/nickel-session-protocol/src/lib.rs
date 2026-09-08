@@ -918,6 +918,10 @@ pub struct OnScreenKeyboardSnapshot {
     pub environment_override: bool,
     pub epoch: u64,
     pub recipient: Option<WindowId>,
+    /// Opaque compositor-hosted surface identity, separate from Wayland window
+    /// IDs. No field contents are exposed; the epoch remains the delivery lease.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub internal_recipient: Option<u64>,
     pub text_input_active: bool,
     pub enabled: bool,
     pub visible: bool,
@@ -934,6 +938,12 @@ pub enum OnScreenKeyboardInput {
         keysym: u32,
         modifiers: Vec<u32>,
     },
+}
+
+impl OnScreenKeyboardSnapshot {
+    pub fn has_recipient(&self) -> bool {
+        self.recipient.is_some() || self.internal_recipient.is_some()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -1332,6 +1332,7 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_application_focus(&mut self) {
+        self.reconcile_keyboard_internal_recipient();
         let Some(surface) = self.internal_ui.focused() else {
             return;
         };
@@ -1339,10 +1340,15 @@ impl NickelSession {
             .internal_ui
             .placement(surface)
             .is_some_and(|placement| {
-                placement.role == super::internal_ui::InternalSurfaceRole::Desktop
+                matches!(
+                    placement.role,
+                    super::internal_ui::InternalSurfaceRole::Desktop
+                        | super::internal_ui::InternalSurfaceRole::Overlay
+                )
             })
         {
-            // Desktop menus own input without a registered application window.
+            // Desktop menus and shell overlays own input without a registered
+            // application window.
             // Clear the old Wayland seat target through the shared focus boundary.
             self.focus_internal_surface(surface);
             return;
@@ -1684,7 +1690,7 @@ impl NickelSession {
         changed
     }
 
-    fn schedule_internal_ui_frame(&mut self) {
+    pub(super) fn schedule_internal_ui_frame(&mut self) {
         self.internal_shell_timer.counters.redraw_requests = self
             .internal_shell_timer
             .counters
@@ -4745,6 +4751,7 @@ impl NickelSession {
         if !self.internal_ui.focus_surface(surface) {
             return false;
         }
+        self.reconcile_keyboard_internal_recipient();
         self.wake_internal_shell();
         self.schedule_internal_ui_frame();
         true
@@ -4753,6 +4760,7 @@ impl NickelSession {
     /// Blur a compositor-hosted owner before assigning a native seat target.
     pub(crate) fn surrender_internal_focus(&mut self) {
         if self.internal_ui.clear_focus().is_some() {
+            self.reconcile_keyboard_internal_recipient();
             self.wake_internal_shell();
             self.schedule_internal_ui_frame();
         }
@@ -6549,6 +6557,114 @@ mod protocol_tests {
         fn title(&self) -> &str {
             "Codex — Nickel"
         }
+    }
+
+    #[test]
+    fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
+        use nickel_session_protocol::OnScreenKeyboardInput;
+        use nickel_ui::{UiEvent, id, ui};
+
+        #[derive(Default)]
+        struct TypingApp(String);
+        impl nickel_ui::Application for TypingApp {
+            type Message = String;
+            fn update(&mut self, text: String) {
+                self.0 = text;
+            }
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<String> {
+                ui! { <TextField id={id!(query)} value={&self.0} on_change={|text| text} /> }
+            }
+            fn title(&self) -> &str {
+                "Keyboard recipient"
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let recipients = [
+            crate::session::InternalSurfaceRole::Application,
+            crate::session::InternalSurfaceRole::Overlay,
+        ]
+        .map(|role| {
+            session.internal_ui.insert(
+                TypingApp::default(),
+                crate::session::InternalSurfacePlacement {
+                    role,
+                    geometry: (0, 0, 640, 480),
+                    output: None,
+                },
+                1.0,
+            )
+        });
+        session.configure_on_screen_keyboard(true, true, 41, false, false, 368);
+        assert!(session.focus_internal_surface(recipients[0]));
+        session.internal_ui.keyboard(UiEvent::FocusNext);
+        let first = session.on_screen_keyboard_snapshot();
+        assert!(first.recipient.is_none());
+        assert_eq!(
+            first.internal_recipient,
+            Some(recipients[0].snapshot_token())
+        );
+        assert_ne!(first.epoch, first.generation);
+        session
+            .deliver_on_screen_keyboard_input(
+                first.epoch,
+                OnScreenKeyboardInput::Text {
+                    text: "hello".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[0])
+                .unwrap()
+                .0,
+            "hello"
+        );
+
+        // Both owners have a None Smithay target. Their distinct native leases
+        // must still reject a release captured before the focus transfer.
+        assert!(session.focus_internal_surface(recipients[1]));
+        session.internal_ui.keyboard(UiEvent::FocusNext);
+        assert!(
+            session
+                .deliver_on_screen_keyboard_input(
+                    first.epoch,
+                    OnScreenKeyboardInput::Text {
+                        text: "stale".into()
+                    }
+                )
+                .is_err()
+        );
+        let second = session.on_screen_keyboard_snapshot();
+        assert_ne!(first.epoch, second.epoch);
+        session
+            .deliver_on_screen_keyboard_input(
+                second.epoch,
+                OnScreenKeyboardInput::Text { text: "new".into() },
+            )
+            .unwrap();
+        assert_eq!(
+            session
+                .internal_ui
+                .application::<TypingApp>(recipients[1])
+                .unwrap()
+                .0,
+            "new"
+        );
+        session.surrender_internal_focus();
+        assert!(!session.on_screen_keyboard_snapshot().has_recipient());
+        assert!(
+            session
+                .deliver_on_screen_keyboard_input(
+                    second.epoch,
+                    OnScreenKeyboardInput::Text {
+                        text: "stale".into()
+                    }
+                )
+                .is_err()
+        );
     }
 
     #[test]

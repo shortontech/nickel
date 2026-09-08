@@ -24,6 +24,15 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InternalSurfaceId(u64);
 
+impl InternalSurfaceId {
+    /// Read-only identity for cross-crate snapshots, not a native window handle.
+    /// There is deliberately no inverse constructor: only the owning surface
+    /// set allocates identities, and consumers cannot use this token to mint one.
+    pub fn snapshot_token(self) -> u64 {
+        self.0
+    }
+}
+
 impl fmt::Display for InternalSurfaceId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         self.0.fmt(formatter)

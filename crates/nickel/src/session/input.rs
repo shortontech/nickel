@@ -44,7 +44,7 @@ fn desktop_modifiers(
     )
 }
 
-fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::UiEvent> {
+pub(super) fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::UiEvent> {
     if state != KeyState::Pressed {
         return None;
     }

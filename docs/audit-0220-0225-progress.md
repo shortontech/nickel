@@ -509,3 +509,18 @@ Additional checks for the 0224 implementation passed:
 - `CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings`.
 
 The release workload used a library test binary; the running release executable was not replaced.
+
+## Native keyboard recipient follow-up
+
+Added a distinct opaque internal-surface recipient token to keyboard snapshots. Native apps and
+shell overlays do not necessarily have a Wayland seat target; their focus transitions now advance
+the keyboard lease independently. The snapshot field is optional/defaulted for older serialized
+snapshots and contains no typed content. Internal delivery reuses the existing UI key adapter and
+host reducers, flushes coordinator input, and schedules native presentation. Shell overlays clear
+the previous client seat target at the shared focus boundary.
+
+A production session/UiHost adapter test verifies text reaches an internal app and an overlay,
+distinct preference generation and recipient epoch, rejection of the first owner's stale input,
+and rejection after focus surrender. This is synthetic adapter evidence, not live typing acceptance.
+Modified internal key chords remain unsupported and explicitly rejected; plain-key navigation and
+text delivery do not establish full chord/clipboard or automatic native text-field activation coverage.
