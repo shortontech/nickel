@@ -441,6 +441,37 @@ non-focus-taking identity, normalized pointer leases/cancellation, primary-butto
 and stale resize cancellation. Geometry and internal application recipient authority remain separate
 required follow-ups; no agent changes have been integrated or accepted yet.
 
+## 0222: native keyboard pointer leases and authoritative geometry
+
+Integrated agent commit `45335a5` as `5c2ef92` after review, following geometry checkpoint `bbfb6b8`.
+The native keyboard now has explicit non-focus-taking surface identity. Normalized pointer edges
+reach the existing `keyboard_host_input` reducer with press-time recipient leases; secondary-button
+noise cannot overwrite a primary lease. Topology reconciliation cancels old gestures, and recipient
+epoch changes clear stale resize ownership. Existing authority rejection remains the final stale
+input check. Generic touch no longer steals text focus, but normalized touch leases are not implemented.
+
+Native placement now uses the authority's output name, dock side and configured height through the
+same `shell_layout::keyboard_area` used by external keyboard surfaces. A missing named owner output
+does not silently relocate typing controls to another output. Coordinator layout dimensions update
+before scene generation; runtime scene geometry, host logical dimensions and scale update without
+destroying the surface ID. This also fixes the previous `relocate` path silently rejecting scene size
+changes. Retaining identity is necessary for an in-progress keyboard resize gesture.
+
+New placement/runtime contracts cover top/bottom docking, configured height, negative output origin,
+fractional scale without double conversion, missing output, and in-place scene resizing. The agent's
+production semantic-key test covers unequal generation/epoch, press/release delivery and blur
+cancellation; its runtime test checks focus preservation and captured release across a client.
+After integration, the full Nickel library suite passed 649 tests with 12 ignored, and strict
+all-target/all-feature Nickel Clippy passed. The follow-up semantic typing test at resized coordinator
+geometry also passed. No live typing, touch, controller, internal-app recipient, or complete preference
+acceptance is claimed. Specs remain active.
+
+The clean completed keyboard worktree and disposable test artifacts were removed after integration;
+its branch and commits remain preserved. The isolated Smithay no-wait API worktree is still active.
+The native preview guard now requires both ExportFence and Fencing, because shared-context texture
+import/draw has its own synchronous fallback without Fencing. The vendor/API patch is not integrated
+yet, so the runtime fence-export fallback remains open in the primary checkout.
+
 Additional checks for the 0224 implementation passed:
 
 - `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib live_shell::tests --quiet`: 88 passed, 3 ignored.

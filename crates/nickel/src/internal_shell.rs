@@ -804,6 +804,15 @@ mod tests {
             .surface(SurfaceRole::OnScreenKeyboard, None)
             .unwrap()
             .id;
+        // The session supplies authority geometry before rendering. Resolve a
+        // production key after resize so both its hit target and input dispatch
+        // use the new dimensions, not the output-derived default role height.
+        assert!(coordinator.set_surface_size(id, (1280, 280)));
+        assert!(!coordinator.set_surface_size(id, (1280, 280)));
+        assert_eq!(
+            coordinator.surfaces.get(id).unwrap().logical_size(),
+            (1280, 280)
+        );
         coordinator.scene(id);
         let target = coordinator
             .shell
