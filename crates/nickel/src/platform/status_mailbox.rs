@@ -14,6 +14,7 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 struct Pending {
     slots: [Option<Arc<SystemStatusUpdate>>; 4],
     wake: Option<Wake>,
+    audio_activity: super::AudioActivity,
 }
 
 #[derive(Default)]
@@ -51,7 +52,7 @@ impl StatusSender {
     pub(crate) fn send(&self, update: Arc<SystemStatusUpdate>) -> Result<(), ()> {
         let shared = self.0.upgrade().ok_or(())?;
         let slot = match update.as_ref() {
-            SystemStatusUpdate::Audio(_) => 0,
+            SystemStatusUpdate::Audio(_) | SystemStatusUpdate::AudioWithActivity { .. } => 0,
             SystemStatusUpdate::Network(_) => 1,
             SystemStatusUpdate::Bluetooth(_) => 2,
             SystemStatusUpdate::ShellSettingsChanged => 3,
@@ -59,6 +60,28 @@ impl StatusSender {
         let (retired, wake) = {
             let mut pending = shared.pending.lock().unwrap();
             let needs_wake = pending.slots.iter().all(Option::is_none);
+            // Keep feedback facts, not intermediate device lists. A volume/mute
+            // round trip still deserves feedback, but an availability round trip
+            // must not make a reconnect look like a user volume adjustment.
+            if let Some((next, incoming)) = audio_state(update.as_ref()) {
+                if let Some((previous, _)) = pending.slots[0].as_deref().and_then(audio_state) {
+                    let availability_changed = previous.available != next.available;
+                    let value_changed = previous.available
+                        && next.available
+                        && (previous.volume_percent != next.volume_percent
+                            || previous.muted != next.muted);
+                    if availability_changed {
+                        pending.audio_activity.value_changed = false;
+                    }
+                    pending.audio_activity.availability_changed |= availability_changed;
+                    pending.audio_activity.value_changed |= value_changed;
+                }
+                pending.audio_activity.availability_changed |= incoming.availability_changed;
+                if incoming.availability_changed {
+                    pending.audio_activity.value_changed = false;
+                }
+                pending.audio_activity.value_changed |= incoming.value_changed;
+            }
             let retired = pending.slots[slot].replace(update);
             (retired, needs_wake.then(|| pending.wake.clone()).flatten())
         };
@@ -100,11 +123,26 @@ impl StatusReceiver {
     }
 
     pub(crate) fn drain(&self) -> Vec<SystemStatusUpdate> {
-        let slots = std::mem::take(&mut self.shared.pending.lock().unwrap().slots);
+        let (slots, activity) = {
+            let mut pending = self.shared.pending.lock().unwrap();
+            (
+                std::mem::take(&mut pending.slots),
+                std::mem::take(&mut pending.audio_activity),
+            )
+        };
         slots
             .into_iter()
             .flatten()
             .map(Arc::unwrap_or_clone)
+            .map(|update| match update {
+                SystemStatusUpdate::Audio(status)
+                | SystemStatusUpdate::AudioWithActivity { status, .. }
+                    if activity != super::AudioActivity::default() =>
+                {
+                    SystemStatusUpdate::AudioWithActivity { status, activity }
+                }
+                update => update,
+            })
             .collect()
     }
 
@@ -113,13 +151,29 @@ impl StatusReceiver {
     pub(crate) fn recv(&self) -> SystemStatusUpdate {
         let mut pending = self.shared.pending.lock().unwrap();
         loop {
-            if let Some(slot) = pending.slots.iter_mut().find(|slot| slot.is_some()) {
+            if let Some((index, slot)) = pending
+                .slots
+                .iter_mut()
+                .enumerate()
+                .find(|(_, slot)| slot.is_some())
+            {
                 let update = slot.take().unwrap();
+                if index == 0 {
+                    pending.audio_activity = Default::default();
+                }
                 drop(pending);
                 return Arc::unwrap_or_clone(update);
             }
             pending = self.shared.ready.wait(pending).unwrap();
         }
+    }
+}
+
+fn audio_state(update: &SystemStatusUpdate) -> Option<(&super::AudioStatus, super::AudioActivity)> {
+    match update {
+        SystemStatusUpdate::Audio(status) => Some((status, Default::default())),
+        SystemStatusUpdate::AudioWithActivity { status, activity } => Some((status, *activity)),
+        _ => None,
     }
 }
 

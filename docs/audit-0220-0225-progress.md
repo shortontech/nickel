@@ -176,10 +176,22 @@ real calloop wake/rearm/source removal. Full Nickel library suite passed: 636 pa
 Formatting, diff whitespace checks, and strict all-target/all-feature Nickel Clippy passed.
 
 Remaining 0223 requirements: release allocation/retention measurements, reviewed ownership inventory,
-full-workspace gates, and native media/OSD acceptance under coalesced bursts. In particular, final-state
-coalescing can hide intermediate volume/mute transitions that return to the previously observed value;
-the feedback contract needs explicit integration coverage before this specification can be archived.
-No idle-RSS saving, allocation-count reduction, or complete media-feedback preservation is claimed.
+full-workspace gates, and native media/OSD acceptance under coalesced bursts.
+No idle-RSS saving, allocation-count reduction, or complete physical media-feedback acceptance is claimed.
+
+Coalesced feedback follow-up: the audio slot now retains two bounded activity facts along with its
+latest snapshot. Volume/mute changes within a pending burst survive a return to the prior observed
+value; availability transitions reset that value activity so reconnect-only changes remain silent.
+The consumer displays the final observed state and invalidates the OSD even when the snapshot equals
+its previous value. Coalesced unavailability also retires an already-visible OSD unless subsequent
+available value activity warrants fresh feedback. No intermediate device lists or command history
+are retained. Comments specify this distinction between replaceable state and feedback facts.
+
+A mailbox-to-LiveShell regression verifies volume and mute round trips, the final OSD label, and
+reconnect suppression/retirement. Full Nickel library suite: 637 passed, 11 ignored. Formatting,
+diff whitespace checks, and strict all-target/all-feature Nickel Clippy passed. Physical media-key
+repeat and compositor-visible presentation still need live acceptance; ordered command queues were
+not modified by this feedback change.
 
 ## Remaining implementation (all specs)
 

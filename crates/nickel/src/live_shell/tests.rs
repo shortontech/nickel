@@ -132,6 +132,57 @@ fn queued_keyboard_auto_show_does_not_recursively_query_the_unacknowledged_snaps
 }
 
 #[test]
+fn coalesced_audio_feedback_uses_latest_state_and_suppresses_reconnect_only_changes() {
+    let mut shell = LiveShell::new().unwrap();
+    let status = |available, volume_percent, muted| AudioStatus {
+        available,
+        volume_percent,
+        muted,
+        devices: Vec::new(),
+    };
+    shell.apply_system_status_update(SystemStatusUpdate::Audio(status(true, 31, false)));
+    let (sender, receiver) = crate::platform::status_mailbox::channel();
+    for snapshot in [status(true, 36, false), status(true, 31, false)] {
+        sender
+            .send(Arc::new(SystemStatusUpdate::Audio(snapshot)))
+            .unwrap();
+    }
+    let updates = receiver.drain();
+    assert_eq!(updates.len(), 1);
+    assert!(shell.apply_system_status_update(updates.into_iter().next().unwrap()));
+    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
+    shell.volume_osd_scene(320, 88);
+    assert!(
+        shell
+            .volume_osd_host
+            .application()
+            .label
+            .starts_with("Volume 31%")
+    );
+    // A hidden unavailable/available transition must not turn a different device's
+    // initial volume into apparent user feedback.
+    for snapshot in [status(false, 0, false), status(true, 50, false)] {
+        sender
+            .send(Arc::new(SystemStatusUpdate::Audio(snapshot)))
+            .unwrap();
+    }
+    for update in receiver.drain() {
+        shell.apply_system_status_update(update);
+    }
+    assert!(!shell.surface_visible(SurfaceRole::VolumeOsd));
+    for snapshot in [status(true, 50, true), status(true, 50, false)] {
+        sender
+            .send(Arc::new(SystemStatusUpdate::Audio(snapshot)))
+            .unwrap();
+    }
+    for update in receiver.drain() {
+        assert!(shell.apply_system_status_update(update));
+    }
+    assert!(shell.surface_visible(SurfaceRole::VolumeOsd));
+    assert!(!shell.audio.muted);
+}
+
+#[test]
 fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
     let mut shell = LiveShell::new().unwrap();
     let mut status = AudioStatus {

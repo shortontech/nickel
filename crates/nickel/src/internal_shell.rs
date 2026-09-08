@@ -411,7 +411,8 @@ impl InternalShellCoordinator {
         update: crate::platform::SystemStatusUpdate,
     ) -> Vec<InternalSurfaceId> {
         let roles: Option<&[SurfaceRole]> = match &update {
-            crate::platform::SystemStatusUpdate::Audio(_) => {
+            crate::platform::SystemStatusUpdate::Audio(_)
+            | crate::platform::SystemStatusUpdate::AudioWithActivity { .. } => {
                 Some(&[SurfaceRole::ControlCenter, SurfaceRole::VolumeOsd])
             }
             crate::platform::SystemStatusUpdate::Network(_)

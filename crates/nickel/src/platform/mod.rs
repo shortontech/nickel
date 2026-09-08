@@ -99,7 +99,19 @@ pub enum SystemStatusUpdate {
     Network(NetworkStatus),
     Bluetooth(BluetoothStatus),
     Audio(AudioStatus),
+    AudioWithActivity {
+        status: AudioStatus,
+        activity: AudioActivity,
+    },
     ShellSettingsChanged,
+}
+
+/// Bounded feedback facts from snapshots replaced before the consumer drained.
+/// Value activity is reset on availability changes so reconnect alone is silent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AudioActivity {
+    pub value_changed: bool,
+    pub availability_changed: bool,
 }
 
 pub fn system_status_receiver() -> status_mailbox::StatusReceiver {

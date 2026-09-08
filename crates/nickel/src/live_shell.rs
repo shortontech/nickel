@@ -1359,6 +1359,10 @@ impl LiveShell {
         &mut self,
         update: platform::SystemStatusUpdate,
     ) -> bool {
+        let activity = match &update {
+            platform::SystemStatusUpdate::AudioWithActivity { activity, .. } => *activity,
+            _ => Default::default(),
+        };
         match update {
             platform::SystemStatusUpdate::Network(status) => {
                 if self.network == status {
@@ -1376,22 +1380,26 @@ impl LiveShell {
                     true
                 }
             }
-            platform::SystemStatusUpdate::Audio(status) => {
+            platform::SystemStatusUpdate::Audio(status)
+            | platform::SystemStatusUpdate::AudioWithActivity { status, .. } => {
                 let value_changed = self.audio.volume_percent != status.volume_percent
                     || self.audio.muted != status.muted;
                 let show = self.audio_status_observed
                     && self.audio.available
                     && status.available
-                    && value_changed;
+                    && (activity.value_changed
+                        || (!activity.availability_changed && value_changed));
                 self.audio_status_observed = true;
                 let changed = self.audio != status;
                 self.audio = status;
                 if show {
                     self.volume_osd_until = Some(Instant::now() + Duration::from_millis(1500));
-                } else if !self.audio.available {
+                } else if !self.audio.available
+                    || (activity.availability_changed && !activity.value_changed)
+                {
                     return self.volume_osd_until.take().is_some() || changed;
                 }
-                changed
+                changed || show
             }
             platform::SystemStatusUpdate::ShellSettingsChanged => self.refresh_system(),
         }
