@@ -1358,13 +1358,25 @@ impl NickelSession {
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
                 let client_present =
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
-                if self.internal_ui.touch_with_client(
+                let normalized = self.internal_ui.normalized_touch_input(
+                    &event.device().id(),
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),
                     crate::session::TouchPhase::Started,
                     client_present,
-                ) {
+                );
+                if normalized
+                    || self.internal_ui.touch_with_client(
+                        i32::from(event.slot()) as u64,
+                        (location.x, location.y),
+                        crate::session::TouchPhase::Started,
+                        client_present,
+                    )
+                {
                     self.flush_internal_shell_input();
+                    if normalized {
+                        self.reconcile_internal_application_focus();
+                    }
                     self.request_output_redraw();
                     return None;
                 }
@@ -1401,7 +1413,13 @@ impl NickelSession {
                 let output = self.space.outputs().next()?;
                 let geometry = self.space.output_geometry(output)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
-                if self.internal_ui.touch(
+                if self.internal_ui.normalized_touch_input(
+                    &event.device().id(),
+                    i32::from(event.slot()) as u64,
+                    (location.x, location.y),
+                    crate::session::TouchPhase::Moved,
+                    false,
+                ) || self.internal_ui.touch(
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),
                     crate::session::TouchPhase::Moved,
@@ -1423,7 +1441,13 @@ impl NickelSession {
                 );
             }
             InputEvent::TouchUp { event, .. } => {
-                if self.internal_ui.touch(
+                if self.internal_ui.normalized_touch_input(
+                    &event.device().id(),
+                    i32::from(event.slot()) as u64,
+                    (0.0, 0.0),
+                    crate::session::TouchPhase::Ended,
+                    false,
+                ) || self.internal_ui.touch(
                     i32::from(event.slot()) as u64,
                     (0.0, 0.0),
                     crate::session::TouchPhase::Ended,
@@ -1445,7 +1469,11 @@ impl NickelSession {
             }
             InputEvent::TouchFrame { .. } => self.seat.get_touch().unwrap().frame(self),
             InputEvent::TouchCancel { .. } => {
-                if self.internal_ui.cancel_touches() {
+                // Match the seat-wide Smithay cancellation below, and deliver
+                // normalized cancellations before another input batch can run.
+                let normalized = self.internal_ui.cancel_normalized_touches(None);
+                if self.internal_ui.cancel_touches() | normalized {
+                    self.flush_internal_shell_input();
                     self.request_output_redraw();
                 }
                 self.active_touch_slots.clear();

@@ -1565,6 +1565,7 @@ impl InternalUiRuntime {
     }
 
     pub fn remove(&mut self, id: InternalSurfaceId) -> bool {
+        self.retire_normalized_touch_surface(id);
         if self.focused == Some(id) {
             self.clear_focus();
         }
@@ -1583,6 +1584,9 @@ impl InternalUiRuntime {
 
     /// Show or hide a hosted surface without destroying its application state.
     pub fn set_visible(&mut self, id: InternalSurfaceId, visible: bool) -> bool {
+        if !visible {
+            self.retire_normalized_touch_surface(id);
+        }
         let changed = {
             let Some(surface) = self.presentation.get_mut(&id) else {
                 return false;

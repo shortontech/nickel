@@ -1,7 +1,7 @@
-//! Native normalized shell pointer and desktop keyboard routing.
+//! Native normalized shell pointer/touch and desktop keyboard routing.
 //!
 //! Hit testing remains owned by InternalUiRuntime. This adapter retains button
-//! edges and seat modifiers before the generic UI path discards those details.
+//! edges, touch identities, and seat modifiers before the generic UI path discards them.
 //! Relative motion deltas are not owned by this adapter. Button presses
 //! claim runtime focus on the desktop only; the keyboard overlay preserves its recipient.
 
@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use nickel_input::{
     DeviceId, EventOrder, InputEvent, KeyEdge, ModifierState, PointerButton, PointerEvent,
+    TouchEvent, TouchId,
 };
 use nickel_ui::{HostBatch, HostEvent, InternalSurfaceId};
 
@@ -48,6 +49,94 @@ mod tests {
             button: PointerButton::Secondary,
             edge,
         }
+    }
+
+    #[test]
+    fn normalized_touch_keeps_device_contacts_capture_and_last_release_position() {
+        use crate::session::TouchPhase::*;
+        let mut runtime = InternalUiRuntime::default();
+        let id = desktop(&mut runtime);
+        for source in ["touch-a", "touch-b"] {
+            assert!(runtime.normalized_touch_input(source, 0, (-780.0, -40.0), Started, false));
+        }
+        assert_eq!(runtime.focused(), Some(id));
+        let batches = runtime.drain_routed_events();
+        let devices = batches
+            .iter()
+            .filter_map(|(_, batch, _)| match &batch.events[..] {
+                [
+                    HostEvent::Normalized {
+                        input:
+                            InputEvent::Touch(TouchEvent::Started {
+                                device,
+                                contact,
+                                position,
+                                ..
+                            }),
+                        ..
+                    },
+                ] => {
+                    assert_eq!(*contact, TouchId(0));
+                    assert_eq!(position.x, 20.0);
+                    Some(*device)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(devices.len(), 2);
+        assert_ne!(devices[0], devices[1]);
+        assert!(runtime.normalized_touch_input("touch-a", 0, (20.0, 30.0), Moved, true));
+        assert!(runtime.normalized_touch_input("touch-a", 0, (0.0, 0.0), Ended, true));
+        let batches = runtime.drain_routed_events();
+        assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
+            input: InputEvent::Touch(TouchEvent::Ended { position, .. }), ..
+        }] if position.x == 820.0 && position.y == 150.0));
+        assert_eq!(runtime.desktop_input.touches.len(), 1);
+        runtime.remove_desktop_pointer_device("touch-b");
+        assert!(runtime.desktop_input.touches.is_empty());
+        assert!(matches!(
+            &runtime.drain_routed_events()[0].1.events[..],
+            [HostEvent::Normalized {
+                input: InputEvent::Touch(TouchEvent::Cancelled { .. }),
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn normalized_keyboard_touch_never_focuses_and_retirement_swallows_old_contact_tail() {
+        use crate::session::TouchPhase::*;
+        let mut runtime = InternalUiRuntime::default();
+        let recipient = desktop(&mut runtime);
+        runtime.focus_surface(recipient);
+        let keyboard = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::OnScreenKeyboard,
+                geometry: (0, 0, 800, 320),
+                output: None,
+            },
+            1.0,
+        );
+        assert!(runtime.normalized_touch_input("touch", 3, (30.0, 80.0), Started, true));
+        assert_eq!(runtime.focused(), Some(recipient));
+        runtime.drain_routed_events();
+        runtime.remove(keyboard);
+        assert!(matches!(
+            &runtime.drain_routed_events()[0].1.events[..],
+            [HostEvent::Normalized {
+                input: InputEvent::Touch(TouchEvent::Cancelled {
+                    contact: TouchId(3),
+                    ..
+                }),
+                ..
+            }]
+        ));
+        assert!(runtime.normalized_touch_input("touch", 3, (-780.0, -40.0), Moved, false));
+        assert!(runtime.normalized_touch_input("touch", 3, (0.0, 0.0), Ended, false));
+        assert!(runtime.drain_routed_events().is_empty());
+        assert!(runtime.desktop_input.touches.is_empty());
+        assert!(!runtime.normalized_touch_input("touch", 4, (-780.0, -40.0), Started, true));
     }
 
     #[test]
@@ -403,6 +492,9 @@ mod tests {
 
 #[derive(Default)]
 pub(super) struct DesktopInputState {
+    // A contact belongs to its physical device, not merely the backend slot number.
+    // Retired targets remain tombstones until Up, preventing release-through clicks.
+    touches: HashMap<(DeviceId, TouchId), (Option<InternalSurfaceId>, nickel_input::Point)>,
     // Allocate identities only for devices that reach a normalized shell surface. Removal
     // retires the name mapping; a reconnect receives a fresh, non-aliased identity.
     devices: HashMap<String, DeviceId>,
@@ -502,6 +594,7 @@ impl InternalUiRuntime {
     /// Cancel only a transaction involving the removed device. Other devices can
     /// disappear while the seat's pointer is dragging without owning that drag.
     pub(crate) fn remove_desktop_pointer_device(&mut self, source: &str) {
+        self.cancel_normalized_touches(Some(source));
         let state = &mut self.desktop_input;
         let Some(device) = state.devices.remove(source) else {
             return;
@@ -534,6 +627,195 @@ impl InternalUiRuntime {
                 None,
             ));
         }
+    }
+
+    pub(crate) fn normalized_touch_input(
+        &mut self,
+        source: &str,
+        contact: u64,
+        position: (f64, f64),
+        phase: crate::session::TouchPhase,
+        client_present: bool,
+    ) -> bool {
+        use crate::session::TouchPhase;
+        let contact = TouchId(contact);
+        let starting = matches!(phase, TouchPhase::Started);
+        let target = if starting {
+            let Some((id, _)) = self.surface_at(position, client_present) else {
+                return false;
+            };
+            if !self.presentation.get(&id).is_some_and(|surface| {
+                surface.external_scene.is_some()
+                    && matches!(
+                        surface.placement.role,
+                        InternalSurfaceRole::Desktop | InternalSurfaceRole::OnScreenKeyboard
+                    )
+            }) {
+                return false;
+            }
+            Some(id)
+        } else {
+            None
+        };
+        let state = &mut self.desktop_input;
+        let device = if starting {
+            *state.devices.entry(source.to_owned()).or_insert_with(|| {
+                state.next_device += 1;
+                DeviceId(state.next_device)
+            })
+        } else {
+            let Some(device) = state.devices.get(source).copied() else {
+                return false;
+            };
+            device
+        };
+        let key = (device, contact);
+        let (target, previous) = if starting {
+            (target, nickel_input::Point { x: 0.0, y: 0.0 })
+        } else {
+            let Some(capture) = state.touches.get(&key).copied() else {
+                return false;
+            };
+            capture
+        };
+        let terminal = matches!(phase, TouchPhase::Ended | TouchPhase::Cancelled);
+        if terminal {
+            state.touches.remove(&key);
+        }
+        let Some(id) = target else {
+            return true;
+        };
+        let Some((geometry, role)) = self
+            .presentation
+            .get(&id)
+            .filter(|surface| surface.visible)
+            .map(|surface| (surface.placement.geometry, surface.placement.role))
+        else {
+            return true;
+        };
+        // Up has no coordinates. Keep the last location from this contact, never
+        // a shared pointer position or a new hit target under the release.
+        let local = if terminal {
+            previous
+        } else {
+            nickel_input::Point {
+                x: position.0 - f64::from(geometry.0),
+                y: position.1 - f64::from(geometry.1),
+            }
+        };
+        if !terminal {
+            state.touches.insert(key, (Some(id), local));
+        }
+        state.order = state.order.wrapping_add(1);
+        let order = EventOrder(state.order);
+        let input = match phase {
+            TouchPhase::Started => TouchEvent::Started {
+                device,
+                contact,
+                order,
+                position: local,
+            },
+            TouchPhase::Moved => TouchEvent::Moved {
+                device,
+                contact,
+                order,
+                position: local,
+            },
+            TouchPhase::Ended => TouchEvent::Ended {
+                device,
+                contact,
+                order,
+                position: local,
+            },
+            TouchPhase::Cancelled => TouchEvent::Cancelled {
+                device,
+                contact,
+                order,
+            },
+        };
+        if starting && role == InternalSurfaceRole::Desktop {
+            self.focus_surface(id);
+        }
+        self.step(
+            id,
+            HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: InputEvent::Touch(input),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
+        true
+    }
+
+    /// Cancel device-owned contacts without affecting another touchscreen's equal slots.
+    pub(crate) fn cancel_normalized_touches(&mut self, source: Option<&str>) -> bool {
+        let device = source.and_then(|source| self.desktop_input.devices.get(source).copied());
+        if source.is_some() && device.is_none() {
+            return false;
+        }
+        let keys = self
+            .desktop_input
+            .touches
+            .keys()
+            .copied()
+            .filter(|(owner, _)| device.is_none_or(|device| device == *owner))
+            .collect::<Vec<_>>();
+        let handled = !keys.is_empty();
+        for (device, contact) in keys {
+            let (target, _) = self
+                .desktop_input
+                .touches
+                .remove(&(device, contact))
+                .unwrap();
+            if let Some(target) = target {
+                self.dispatch_touch_cancel(target, device, contact);
+            }
+        }
+        handled
+    }
+
+    pub(super) fn retire_normalized_touch_surface(&mut self, id: InternalSurfaceId) {
+        let keys = self
+            .desktop_input
+            .touches
+            .iter()
+            .filter_map(|(key, (target, _))| (*target == Some(id)).then_some(*key))
+            .collect::<Vec<_>>();
+        for (device, contact) in keys {
+            self.desktop_input
+                .touches
+                .get_mut(&(device, contact))
+                .unwrap()
+                .0 = None;
+            self.dispatch_touch_cancel(id, device, contact);
+        }
+    }
+
+    pub(crate) fn retire_normalized_touch_surfaces(&mut self) {
+        let ids = self.presentation.keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            self.retire_normalized_touch_surface(id);
+        }
+    }
+
+    fn dispatch_touch_cancel(&mut self, id: InternalSurfaceId, device: DeviceId, contact: TouchId) {
+        self.desktop_input.order = self.desktop_input.order.wrapping_add(1);
+        self.step(
+            id,
+            HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: InputEvent::Touch(TouchEvent::Cancelled {
+                        device,
+                        contact,
+                        order: EventOrder(self.desktop_input.order),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
     }
 
     /// Return true when this event belongs to a normalized shell surface, including swallowed

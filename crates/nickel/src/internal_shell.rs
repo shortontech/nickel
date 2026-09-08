@@ -852,6 +852,54 @@ mod tests {
         );
         coordinator.step_slot_changes(id, event(KeyEdge::Released));
         assert_eq!(host.0.lock().unwrap().len(), 1);
+        let touch = |started| HostBatch {
+            events: vec![nickel_ui::HostEvent::Normalized {
+                input: InputEvent::Touch(if started {
+                    nickel_input::TouchEvent::Started {
+                        device: DeviceId(2),
+                        contact: nickel_input::TouchId(1),
+                        order: EventOrder(2),
+                        position: nickel_input::Point {
+                            x: f64::from(target.x),
+                            y: f64::from(target.y),
+                        },
+                    }
+                } else {
+                    nickel_input::TouchEvent::Ended {
+                        device: DeviceId(2),
+                        contact: nickel_input::TouchId(1),
+                        order: EventOrder(3),
+                        position: nickel_input::Point {
+                            x: f64::from(target.x),
+                            y: f64::from(target.y),
+                        },
+                    }
+                }),
+                clipboard_text: None,
+            }],
+            ..Default::default()
+        };
+        coordinator.step_slot_changes(id, touch(true));
+        coordinator.step_slot_changes(id, touch(false));
+        assert_eq!(host.0.lock().unwrap().len(), 2);
+        assert_eq!(host.0.lock().unwrap()[1].0, 19);
+        coordinator.step_slot_changes(id, touch(true));
+        coordinator.step_slot_changes(
+            id,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: InputEvent::Touch(nickel_input::TouchEvent::Cancelled {
+                        device: DeviceId(2),
+                        contact: nickel_input::TouchId(1),
+                        order: EventOrder(4),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
+        coordinator.step_slot_changes(id, touch(false));
+        assert_eq!(host.0.lock().unwrap().len(), 2);
     }
 
     #[test]

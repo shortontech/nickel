@@ -1056,6 +1056,10 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
+        // Deliver cancellation while old runtime-to-coordinator identities still
+        // exist. Tombstones retain ownership of eventual releases after rebuild.
+        self.internal_ui.retire_normalized_touch_surfaces();
+        self.flush_internal_shell_input();
         let outputs = self.internal_outputs();
         for id in self
             .internal_shell_surfaces
