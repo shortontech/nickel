@@ -77,6 +77,60 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
     assert_eq!(shell.next_host_deadline(), before);
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn queued_keyboard_auto_show_does_not_recursively_query_the_unacknowledged_snapshot() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    struct PendingKeyboardHost(AtomicUsize);
+    impl crate::session_host::SessionHost for PendingKeyboardHost {
+        fn dispatch(
+            &self,
+            _: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
+        fn keyboard_snapshot(
+            &self,
+        ) -> Result<
+            nickel_session_protocol::OnScreenKeyboardSnapshot,
+            crate::platform::SessionRequestError,
+        > {
+            Ok(nickel_session_protocol::OnScreenKeyboardSnapshot {
+                enabled: true,
+                auto_show_requested: true,
+                epoch: 19,
+                generation: 1,
+                height: 320,
+                recipient: Some(nickel_session_protocol::WindowId(7)),
+                ..Default::default()
+            })
+        }
+        fn configure_keyboard(
+            &self,
+            _: bool,
+            _: bool,
+            _: u64,
+            _: bool,
+            _: bool,
+            _: u32,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let host = Arc::new(PendingKeyboardHost(AtomicUsize::new(0)));
+    let mut shell = LiveShell::new().unwrap();
+    shell.session_host = host.clone();
+    shell.keyboard_override = nickel_core::on_screen_keyboard::KeyboardOverride::Enabled;
+    assert!(shell.refresh_keyboard());
+    assert!(shell.keyboard_enabled);
+    assert!(shell.keyboard_visible);
+    assert!(
+        host.0.load(Ordering::SeqCst) <= 2,
+        "no recursive auto-show requests before authority acknowledgement"
+    );
+}
+
 #[test]
 fn native_audio_feedback_ignores_startup_metadata_and_reconnect_but_shows_value_changes() {
     let mut shell = LiveShell::new().unwrap();

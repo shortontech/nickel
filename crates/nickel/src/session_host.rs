@@ -22,6 +22,38 @@ use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
 pub trait SessionHost: Send + Sync {
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError>;
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        Err(SessionRequestError::Send)
+    }
+    fn configure_keyboard(
+        &self,
+        enabled: bool,
+        visible: bool,
+        generation: u64,
+        environment_override: bool,
+        dock_top: bool,
+        height: u32,
+    ) -> Result<(), SessionRequestError> {
+        let _ = (
+            enabled,
+            visible,
+            generation,
+            environment_override,
+            dock_top,
+            height,
+        );
+        Err(SessionRequestError::Send)
+    }
+    fn keyboard_input(
+        &self,
+        epoch: u64,
+        input: nickel_session_protocol::OnScreenKeyboardInput,
+    ) -> Result<(), SessionRequestError> {
+        let _ = (epoch, input);
+        Err(SessionRequestError::Send)
+    }
     /// Enqueue a consumer action without blocking the compositor on backend I/O.
     /// Success means accepted for delivery, not a confirmed mixer/player change.
     fn consumer_control(&self, control: nickel_session_protocol::ConsumerControl) -> bool {
@@ -48,6 +80,39 @@ pub trait SessionHost: Send + Sync {
 pub struct PlatformSessionHost;
 
 impl SessionHost for PlatformSessionHost {
+    #[cfg(target_os = "linux")]
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        platform::on_screen_keyboard_snapshot()
+    }
+    #[cfg(target_os = "linux")]
+    fn configure_keyboard(
+        &self,
+        enabled: bool,
+        visible: bool,
+        generation: u64,
+        environment_override: bool,
+        dock_top: bool,
+        height: u32,
+    ) -> Result<(), SessionRequestError> {
+        platform::configure_on_screen_keyboard(
+            enabled,
+            visible,
+            generation,
+            environment_override,
+            dock_top,
+            height,
+        )
+    }
+    #[cfg(target_os = "linux")]
+    fn keyboard_input(
+        &self,
+        epoch: u64,
+        input: nickel_session_protocol::OnScreenKeyboardInput,
+    ) -> Result<(), SessionRequestError> {
+        platform::deliver_on_screen_keyboard_input(epoch, input)
+    }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
         #[cfg(target_os = "linux")]
         {
@@ -92,10 +157,52 @@ pub(crate) struct InProcessSessionHost {
     secure_storage_retry: Arc<AtomicBool>,
     projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
     capture: Arc<Mutex<crate::session::InternalCaptureState>>,
+    keyboard: Arc<RwLock<Option<nickel_session_protocol::OnScreenKeyboardSnapshot>>>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionHost for InProcessSessionHost {
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        self.keyboard
+            .read()
+            .map_err(|_| SessionRequestError::Receive)?
+            .clone()
+            .ok_or(SessionRequestError::Receive)
+    }
+    fn configure_keyboard(
+        &self,
+        enabled: bool,
+        visible: bool,
+        generation: u64,
+        environment_override: bool,
+        dock_top: bool,
+        height: u32,
+    ) -> Result<(), SessionRequestError> {
+        self.sender
+            .send(
+                nickel_session_protocol::Command::ConfigureOnScreenKeyboard {
+                    enabled,
+                    visible,
+                    generation,
+                    environment_override,
+                    dock_top,
+                    height,
+                }
+                .into(),
+            )
+            .map_err(|_| SessionRequestError::Send)
+    }
+    fn keyboard_input(
+        &self,
+        epoch: u64,
+        input: nickel_session_protocol::OnScreenKeyboardInput,
+    ) -> Result<(), SessionRequestError> {
+        self.sender
+            .send(nickel_session_protocol::Command::OnScreenKeyboardInput { epoch, input }.into())
+            .map_err(|_| SessionRequestError::Send)
+    }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
         self.sender
             .send(platform::shell_command_payload(command).into())
@@ -186,6 +293,7 @@ pub(crate) fn install_in_process_session_host(
     secure_storage_retry: Arc<AtomicBool>,
     projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
     capture: Arc<Mutex<crate::session::InternalCaptureState>>,
+    keyboard: Arc<RwLock<Option<nickel_session_protocol::OnScreenKeyboardSnapshot>>>,
 ) -> Result<
     InProcessSessionHost,
     smithay::reexports::calloop::InsertError<
@@ -196,6 +304,7 @@ pub(crate) fn install_in_process_session_host(
     loop_handle.insert_source(receiver, |event, _, session| {
         if let smithay::reexports::calloop::channel::Event::Msg(request) = event {
             let _ = session.invoke(request);
+            session.publish_internal_keyboard_snapshot();
         }
     })?;
     Ok(InProcessSessionHost {
@@ -204,6 +313,7 @@ pub(crate) fn install_in_process_session_host(
         secure_storage_retry,
         projection_outputs,
         capture,
+        keyboard,
     })
 }
 
@@ -260,6 +370,7 @@ mod tests {
             secure_storage_retry: Arc::new(AtomicBool::new(false)),
             projection_outputs: Arc::new(RwLock::new(Vec::new())),
             capture: Arc::new(Mutex::new(crate::session::InternalCaptureState::Idle)),
+            keyboard: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -284,12 +395,103 @@ mod tests {
     }
 
     #[test]
+    fn native_keyboard_host_reads_current_snapshot_and_enqueues_epoch_checked_input() {
+        use nickel_session_protocol::{OnScreenKeyboardInput, OnScreenKeyboardSnapshot, WindowId};
+        let (sender, receiver) = channel();
+        let host = host(sender);
+        assert!(host.keyboard_snapshot().is_err());
+        let snapshot = OnScreenKeyboardSnapshot {
+            height: 320,
+            generation: 1,
+            epoch: 19,
+            recipient: Some(WindowId(7)),
+            enabled: true,
+            visible: true,
+            ..Default::default()
+        };
+        *host.keyboard.write().unwrap() = Some(snapshot.clone());
+        assert_eq!(host.keyboard_snapshot().unwrap(), snapshot);
+        host.configure_keyboard(true, true, 1, false, false, 320)
+            .unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SessionAuthorityRequest::Command(Command::ConfigureOnScreenKeyboard {
+                enabled: true,
+                visible: true,
+                generation: 1,
+                environment_override: false,
+                dock_top: false,
+                height: 320,
+            })
+        );
+        let input = OnScreenKeyboardInput::Text { text: "a".into() };
+        host.keyboard_input(19, input.clone()).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SessionAuthorityRequest::Command(Command::OnScreenKeyboardInput { epoch: 19, input })
+        );
+        // Enqueueing does not manufacture an acknowledgement or mutate the recipient.
+        assert_eq!(host.keyboard_snapshot().unwrap(), snapshot);
+        let next = OnScreenKeyboardSnapshot {
+            epoch: 20,
+            recipient: None,
+            ..snapshot
+        };
+        *host.keyboard.write().unwrap() = Some(next.clone());
+        assert_eq!(host.keyboard_snapshot().unwrap(), next);
+        drop(receiver);
+        assert!(
+            host.configure_keyboard(false, false, 1, false, false, 320)
+                .is_err()
+        );
+        assert!(
+            host.keyboard_input(20, OnScreenKeyboardInput::Text { text: "b".into() })
+                .is_err()
+        );
+    }
+
+    #[test]
     fn in_process_host_reports_closed_authority_channel() {
         let (sender, receiver) = channel();
         drop(receiver);
         let host = host(sender);
 
         assert!(host.dispatch(ShellCommand::Show).is_err());
+    }
+
+    #[test]
+    fn native_keyboard_configuration_is_applied_by_the_session_before_snapshot_acknowledgement() {
+        use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
+        let mut event_loop = EventLoop::try_new().unwrap();
+        let mut session =
+            crate::session::NickelSession::new(&mut event_loop, Display::new().unwrap(), true);
+        let host = super::install_in_process_session_host(
+            &event_loop.handle(),
+            session.secure_storage_state_handle(),
+            session.secure_storage_retry_handle(),
+            Arc::clone(&session.internal_projection_outputs),
+            Arc::clone(&session.internal_capture),
+            Arc::clone(&session.internal_keyboard_snapshot),
+        )
+        .unwrap();
+        session.publish_internal_keyboard_snapshot();
+        assert!(!host.keyboard_snapshot().unwrap().enabled);
+        host.configure_keyboard(true, false, 37, false, true, 350)
+            .unwrap();
+        assert!(
+            !host.keyboard_snapshot().unwrap().enabled,
+            "enqueue is not an acknowledgement"
+        );
+        event_loop
+            .dispatch(std::time::Duration::ZERO, &mut session)
+            .unwrap();
+        let acknowledged = host.keyboard_snapshot().unwrap();
+        assert!(acknowledged.enabled);
+        assert!(!acknowledged.visible);
+        assert_eq!(acknowledged.generation, 37);
+        assert_eq!(acknowledged.height, 350);
+        assert!(acknowledged.dock_top);
+        assert_eq!(acknowledged, session.on_screen_keyboard_snapshot());
     }
 
     #[test]

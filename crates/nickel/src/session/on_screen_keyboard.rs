@@ -51,14 +51,35 @@ impl Default for OnScreenKeyboardState {
 }
 
 impl NickelSession {
+    /// One current recipient snapshot shared with the native shell, never a self-RPC.
+    pub(crate) fn publish_internal_keyboard_snapshot(&mut self) {
+        let snapshot = self.on_screen_keyboard_snapshot();
+        let changed = {
+            let mut current = self.internal_keyboard_snapshot.write().unwrap();
+            if current.as_ref() == Some(&snapshot) {
+                false
+            } else {
+                *current = Some(snapshot);
+                true
+            }
+        };
+        if changed {
+            self.wake_internal_shell();
+        }
+    }
+
     pub(crate) fn on_screen_keyboard_focus_changed(&mut self) {
         self.on_screen_keyboard.epoch = self.on_screen_keyboard.epoch.wrapping_add(1);
         self.on_screen_keyboard.auto_show_requested = false;
+        // Smithay can invoke focus callbacks while holding the keyboard lock.
+        // Defer current_focus() reads until the event-loop poll, outside that lock.
+        self.wake_internal_shell();
     }
 
     pub(crate) fn request_on_screen_keyboard(&mut self) {
         self.on_screen_keyboard.auto_show_requested =
             self.on_screen_keyboard.enabled && !self.locked;
+        self.wake_internal_shell();
     }
 
     pub(crate) fn is_on_screen_keyboard_window(&self, window: &Window) -> bool {
@@ -145,6 +166,7 @@ impl NickelSession {
         }
         self.on_screen_keyboard.enabled = enabled;
         self.on_screen_keyboard.visible = visible;
+        self.publish_internal_keyboard_snapshot();
         self.seat.text_input().set_compositor_input_method(enabled);
         self.set_shell_role_visible(ShellRole::OnScreenKeyboard, visible);
         if layout_changed {

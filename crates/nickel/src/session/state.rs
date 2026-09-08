@@ -784,6 +784,8 @@ pub struct NickelSession {
     pub output_capture_request_id: Option<u64>,
     pub(crate) internal_capture: Arc<std::sync::Mutex<InternalCaptureState>>,
     pub(crate) internal_projection_outputs: Arc<std::sync::RwLock<Vec<OutputSnapshot>>>,
+    pub(crate) internal_keyboard_snapshot:
+        Arc<std::sync::RwLock<Option<nickel_session_protocol::OnScreenKeyboardSnapshot>>>,
     pub shell_failure_count: u8,
     pub(crate) recovery_ui: crate::session::recovery_ui::RecoveryUi,
     secure_storage_state: Arc<AtomicU8>,
@@ -828,6 +830,7 @@ impl NickelSession {
         use crate::{internal_shell::InternalShellCoordinator, winit_shell::PanelEdge};
 
         let mut shell = InternalShellCoordinator::new(host, PanelEdge::Bottom)?;
+        self.publish_internal_keyboard_snapshot();
         // Apply updates that were already available without delaying shell
         // construction. Later transitions remain calloop-driven.
         for update in platform_updates.try_iter() {
@@ -930,7 +933,7 @@ impl NickelSession {
     /// Wake the shell once after input or an externally-driven state change.
     /// The callback replaces this immediate wakeup with the next application
     /// deadline (if any).
-    fn wake_internal_shell(&mut self) {
+    pub(super) fn wake_internal_shell(&mut self) {
         if self.internal_shell.is_some() {
             self.arm_internal_shell_timer(Some(Instant::now()));
         }
@@ -1072,6 +1075,7 @@ impl NickelSession {
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
+        self.publish_internal_keyboard_snapshot();
         if self.internal_shell.is_some() {
             let snapshot = self.protocol_snapshot();
             *self.internal_projection_outputs.write().unwrap() = snapshot.outputs.clone();
@@ -2228,6 +2232,7 @@ impl NickelSession {
             output_capture_request_id: None,
             internal_capture: Arc::new(std::sync::Mutex::new(InternalCaptureState::Idle)),
             internal_projection_outputs: Arc::new(std::sync::RwLock::new(Vec::new())),
+            internal_keyboard_snapshot: Arc::new(std::sync::RwLock::new(None)),
             shell_failure_count: 0,
             recovery_ui: crate::session::recovery_ui::RecoveryUi::new(),
             secure_storage_state,

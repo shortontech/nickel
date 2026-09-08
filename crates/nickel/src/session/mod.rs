@@ -84,6 +84,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         state.secure_storage_retry_handle(),
         Arc::clone(&state.internal_projection_outputs),
         Arc::clone(&state.internal_capture),
+        Arc::clone(&state.internal_keyboard_snapshot),
     )?;
     let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
     let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));

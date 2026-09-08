@@ -61,11 +61,44 @@ compositor repeat implementation was preserved, not independently proven by noti
 No physical or virtual media keys were sent to the user's desktop. Spec 0221 remains active pending
 the remaining ingress and native acceptance coverage and full-workspace gates.
 
+## 0222: keyboard authority bridge (partial implementation)
+
+Added keyboard snapshot/configuration/input methods to the typed SessionHost boundary. The native
+host reads one current shared snapshot and enqueues existing typed authority commands; only the
+external PlatformSessionHost uses client RPC. Default unsupported/test hosts fail closed rather than
+silently invoking external transport. Enqueue success does not fabricate a snapshot acknowledgement.
+
+The session publishes on initial shell setup, configuration changes, authority command completion,
+and before shell polling; publication replaces one snapshot and wakes only when changed. Focus and
+auto-show request callbacks only wake the shell: publication is deferred until after Smithay releases
+its keyboard lock. The first full-suite run exposed a deadlock when immediate publication read
+`current_focus()` inside a locked focus callback. After this correction, the previously hung existing
+`background_xwm_teardown_preserves_wayland_and_lock_focus` regression passed in 0.11 seconds.
+LiveShell keyboard operations now use the injected host. The native generic UI arm passes recipient
+epoch rather than preference generation. Show/hide no longer recursively refreshes an unacknowledged
+auto-show snapshot, which could otherwise recurse while the command waits on the same event loop.
+
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib keyboard_ --quiet` passed 17 tests. New cases verify
+snapshot replacement, typed configuration/input payloads, unequal epoch/generation, closed-channel
+errors, actual calloop authority application before snapshot acknowledgement, and nonrecursive queued
+auto-show. These tests do not inject input into the running desktop or modify saved preferences.
+
+After correcting the focus-callback lock ordering, the full
+`CARGO_BUILD_JOBS=4 cargo test -p nickel --lib --quiet` run passed: 616 passed, 11 ignored.
+`cargo fmt --all --check` and `git diff --check` also passed. The running executable was not rebuilt
+or replaced; only development/test artifacts changed.
+`CARGO_BUILD_JOBS=4 cargo clippy -p nickel --all-targets --all-features -- -D warnings` passed.
+
+This is not a complete 0222 implementation: normalized native gesture routing/leases, internal-app
+recipient ownership, authoritative mapped geometry, complete preference/override matrix, and live
+typing acceptance remain. The existing keyboard poll is still present; event-only refresh and command
+admission must be reviewed with 0223 rather than treating a shared snapshot as an unlimited-work budget.
+
 ## Remaining implementation
 
 - 0220: wire native desktop topology, viewport selection, and input to production authorities.
 - 0221: remaining input/backend/native acceptance and final integration gates.
-- 0222: typed keyboard snapshots/effects and correct recipient epochs/gesture leases.
+- 0222: finish gesture leases, native/internal recipient routing, geometry, and acceptance.
 - 0223: bounded latest-state status delivery with race-free wake/rearm.
 - 0225: nonblocking preview scheduling/capture with bounded work and retry backoff.
 

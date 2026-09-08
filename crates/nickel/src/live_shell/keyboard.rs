@@ -11,7 +11,7 @@ impl LiveShell {
     pub(super) fn refresh_keyboard(&mut self) -> bool {
         #[cfg(target_os = "linux")]
         {
-            let Ok(mut snapshot) = platform::on_screen_keyboard_snapshot() else {
+            let Ok(mut snapshot) = self.session_host.keyboard_snapshot() else {
                 return false;
             };
             let settings = nickel_core::optional_features::OptionalFeatureSettings::load_default();
@@ -33,21 +33,23 @@ impl LiveShell {
                 || snapshot.generation != settings.on_screen_keyboard_generation
                 || snapshot.environment_override != overridden
             {
-                if platform::configure_on_screen_keyboard(
-                    enabled,
-                    self.keyboard_visible && enabled,
-                    settings.on_screen_keyboard_generation,
-                    overridden,
-                    self.keyboard_dock_top,
-                    self.keyboard_height,
-                )
-                .is_err()
+                if self
+                    .session_host
+                    .configure_keyboard(
+                        enabled,
+                        self.keyboard_visible && enabled,
+                        settings.on_screen_keyboard_generation,
+                        overridden,
+                        self.keyboard_dock_top,
+                        self.keyboard_height,
+                    )
+                    .is_err()
                 {
                     return false;
                 }
                 self.keyboard_enabled = enabled;
                 self.keyboard_visible &= enabled;
-                if let Ok(updated) = platform::on_screen_keyboard_snapshot() {
+                if let Ok(updated) = self.session_host.keyboard_snapshot() {
                     snapshot = updated;
                 }
             }
@@ -86,17 +88,19 @@ impl LiveShell {
         let visible = visible && self.keyboard_enabled && !self.locked;
         let visibility_changed = self.keyboard_visible != visible;
         #[cfg(target_os = "linux")]
-        if platform::configure_on_screen_keyboard(
-            self.keyboard_enabled,
-            visible,
-            self.keyboard_recipient
-                .as_ref()
-                .map_or(0, |snapshot| snapshot.generation),
-            self.keyboard_override != nickel_core::on_screen_keyboard::KeyboardOverride::None,
-            self.keyboard_dock_top,
-            self.keyboard_height,
-        )
-        .is_err()
+        if self
+            .session_host
+            .configure_keyboard(
+                self.keyboard_enabled,
+                visible,
+                self.keyboard_recipient
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.generation),
+                self.keyboard_override != nickel_core::on_screen_keyboard::KeyboardOverride::None,
+                self.keyboard_dock_top,
+                self.keyboard_height,
+            )
+            .is_err()
         {
             return false;
         }
@@ -111,7 +115,8 @@ impl LiveShell {
                 .recipient_changed(false);
             self.keyboard_recipient = None;
         }
-        self.refresh_keyboard();
+        // Native configuration is queued. Re-reading the pre-command snapshot here
+        // can recursively re-enter auto-show; the authority wakes us on completion.
         true
     }
 
@@ -299,7 +304,7 @@ impl LiveShell {
                     #[cfg(target_os = "linux")]
                     if let (Some(epoch), Some(input)) = (epoch, keyboard_input(key, modifiers)) {
                         #[cfg(target_os = "linux")]
-                        if platform::deliver_on_screen_keyboard_input(epoch, input).is_err() {
+                        if self.session_host.keyboard_input(epoch, input).is_err() {
                             self.keyboard_host
                                 .application_mut()
                                 .recipient_changed(false);

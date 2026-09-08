@@ -2442,7 +2442,7 @@ impl LiveShell {
                 },
                 self.keyboard_recipient
                     .as_ref()
-                    .map(|recipient| recipient.generation),
+                    .map(|recipient| recipient.epoch),
             ),
             SurfaceRole::Screenshot => match event {
                 UiEvent::PointerMoved(point) => {
