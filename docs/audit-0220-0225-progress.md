@@ -678,3 +678,15 @@ Synthetic acknowledgment tests cover distinct sequences, property updates betwee
 adjustments, an old sequence that cannot satisfy a new wait, immediate timeout, and dispatch failure
 without a retry. Real server/device acknowledgment behavior and held-key throughput still need
 live validation; these tests do not simulate the full PipeWire protocol or assert hardware success.
+
+Post-audio-ordering verification at `a4435d9`: all-feature Nickel library suite **667 passed,
+12 ignored**. Focused audio suite: **6 passed, 2 live tests ignored**; strict Nickel
+all-target/all-feature Clippy passed. No live audio operation was issued.
+
+The isolated native keyboard/clipboard implementation remains unintegrated. Root review identified
+a batch-ordering hazard in its draft admission handling: an earlier rejected cut must not discard
+the ownership result of a later accepted cut after that later operation edits the document. The
+agent is adding mixed-operation coverage and correcting that path. Async completion/closure handling
+also needs transaction-aware retirement so closure cannot overwrite success or retire a newer read.
+These are review findings, not claims of completed clipboard behavior. The product text limit still
+awaits the user's choice; the suggested 16 MiB cap has not been treated as approved.
