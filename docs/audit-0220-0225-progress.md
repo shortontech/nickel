@@ -892,3 +892,30 @@ remain outstanding; this fixes field focus leases, not every outstanding keyboar
 Verification: nickel-ui all-feature library suite **337 passed, 2 ignored**; both focused native
 async-paste/keyboard-lease tests passed; strict workspace all-target/all-feature Clippy, formatting
 and diff checks passed. No live clipboard or input state was exercised.
+
+## Media repeat hold lifetime (0221/0223)
+
+Inspection found that release removed only the held-key flag, leaving the old 600 ms timer queued.
+A quick re-press reused the same epoch, so both old and new timers could see the key held and repeat
+it. Rapid taps could also retain multiple timers until they fired.
+
+Each held consumer control now owns a distinct lease and its optional registration token. Release
+removes that timer immediately; global input reset drains all registrations. Callback validation is
+per hold, so an already-queued stale callback cannot act on a new press, while simultaneous up/down
+holds do not invalidate each other. The original 600 ms delay and 40 ms repeat interval remain;
+non-volume controls still have no repeat timer. No backend command coalescing or second repeat
+authority was added.
+
+The recording-host native test now drives production press/release handling and the actual calloop
+timer. It covers duplicate press suppression, release/re-press lease replacement, stale callback
+eligibility, simultaneous holds, one current repeat, post-release silence, and global cancellation.
+It passed, as did strict workspace all-target/all-feature Clippy. No hardware key or audio change
+was sent. The full isolated workspace run started at `824d3a6` predates this repeat fix and is being
+reported separately rather than represented as validation of code compiled afterward.
+
+The unfiltered workspace run at `824d3a6` finished with exit 0 under the private Xvfb runner:
+`cargo test --workspace --no-fail-fast --quiet`. Nickel **664 passed, 12 ignored**, nickel-ui
+**337 passed, 2 ignored**, workbench **46 passed**, plus remaining workspace suites and doctests.
+No test-name exclusion was applied. This verifies the accumulated keyboard/preview bridge changes
+before the repeat-lifetime follow-up; that follow-up has its separate focused test and Clippy results
+above. Formatting and diff checks also passed after the repeat changes.

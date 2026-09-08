@@ -292,7 +292,7 @@ impl NickelSession {
         self.cancel_consumer_control_repeats();
     }
 
-    fn consumer_control_key(
+    pub(super) fn consumer_control_key(
         &mut self,
         control: nickel_session_protocol::ConsumerControl,
         state: KeyState,
@@ -300,12 +300,19 @@ impl NickelSession {
         use smithay::reexports::calloop::{timer::TimeoutAction, timer::Timer};
 
         if state == KeyState::Released {
-            self.held_consumer_controls.remove(&control);
+            if let Some((_, Some(token))) = self.held_consumer_controls.remove(&control) {
+                self.event_loop_handle.remove(token);
+            }
             return;
         }
-        if !self.held_consumer_controls.insert(control) {
+        if self.held_consumer_controls.contains_key(&control) {
             return;
         }
+        // Each physical hold owns one timer and a distinct lease. A queued
+        // callback from a released hold cannot repeat a newly pressed key.
+        self.consumer_repeat_epoch = self.consumer_repeat_epoch.wrapping_add(1);
+        let epoch = self.consumer_repeat_epoch;
+        self.held_consumer_controls.insert(control, (epoch, None));
         self.notify_consumer_control(control);
         if !matches!(
             control,
@@ -314,26 +321,37 @@ impl NickelSession {
         ) {
             return;
         }
-        let epoch = self.consumer_repeat_epoch;
         let timer = Timer::from_duration(std::time::Duration::from_millis(600));
-        if let Err(error) = self
+        match self
             .event_loop_handle
             .insert_source(timer, move |_, _, session| {
-                if session.consumer_repeat_epoch != epoch
-                    || !session.held_consumer_controls.contains(&control)
-                {
+                if !session.consumer_repeat_is_current(control, epoch) {
                     return TimeoutAction::Drop;
                 }
                 session.notify_consumer_control(control);
                 TimeoutAction::ToDuration(std::time::Duration::from_millis(40))
-            })
-        {
-            tracing::warn!(?error, "failed to schedule consumer-control repeat");
+            }) {
+            Ok(token) => self.held_consumer_controls.get_mut(&control).unwrap().1 = Some(token),
+            Err(error) => tracing::warn!(?error, "failed to schedule consumer-control repeat"),
         }
     }
 
+    pub(super) fn consumer_repeat_is_current(
+        &self,
+        control: nickel_session_protocol::ConsumerControl,
+        epoch: u64,
+    ) -> bool {
+        self.held_consumer_controls
+            .get(&control)
+            .is_some_and(|(current, _)| *current == epoch)
+    }
+
     pub(crate) fn cancel_consumer_control_repeats(&mut self) {
-        self.held_consumer_controls.clear();
+        for (_, (_, token)) in self.held_consumer_controls.drain() {
+            if let Some(token) = token {
+                self.event_loop_handle.remove(token);
+            }
+        }
         self.consumer_repeat_epoch = self.consumer_repeat_epoch.wrapping_add(1);
     }
 

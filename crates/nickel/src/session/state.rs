@@ -751,7 +751,10 @@ pub struct NickelSession {
     pub panel_windows: Vec<Window>,
     pub lock_windows: Vec<Window>,
     pub locked: bool,
-    pub(crate) held_consumer_controls: HashSet<nickel_session_protocol::ConsumerControl>,
+    pub(crate) held_consumer_controls: HashMap<
+        nickel_session_protocol::ConsumerControl,
+        (u64, Option<smithay::reexports::calloop::RegistrationToken>),
+    >,
     pub(crate) consumer_repeat_epoch: u64,
     lock_restore_window: Option<WindowId>,
     shell_focus_restore_window: Option<WindowId>,
@@ -2270,7 +2273,7 @@ impl NickelSession {
             panel_windows: Vec::new(),
             lock_windows: Vec::new(),
             locked: false,
-            held_consumer_controls: HashSet::new(),
+            held_consumer_controls: HashMap::new(),
             consumer_repeat_epoch: 0,
             lock_restore_window: None,
             shell_focus_restore_window: None,
@@ -7401,7 +7404,7 @@ mod protocol_tests {
             }
         }
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
-        let (_event_loop, mut session) = preview_test_session();
+        let (mut event_loop, mut session) = preview_test_session();
         let (_system_tx, system_rx) = crate::platform::status_mailbox::channel();
         let host = Arc::new(RecordingMediaHost(std::sync::Mutex::new(Vec::new())));
         session
@@ -7433,6 +7436,50 @@ mod protocol_tests {
             ]
         );
         assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), focus);
+        use smithay::backend::input::KeyState;
+        let before = host.0.lock().unwrap().len();
+        session.consumer_control_key(ConsumerControl::VolumeUp, KeyState::Pressed);
+        let old = session.held_consumer_controls[&ConsumerControl::VolumeUp].0;
+        session.consumer_control_key(ConsumerControl::VolumeUp, KeyState::Pressed);
+        assert_eq!(host.0.lock().unwrap().len(), before + 1);
+        session.consumer_control_key(ConsumerControl::VolumeUp, KeyState::Released);
+        session.consumer_control_key(ConsumerControl::VolumeUp, KeyState::Pressed);
+        let current = session.held_consumer_controls[&ConsumerControl::VolumeUp].0;
+        assert_ne!(old, current);
+        assert!(!session.consumer_repeat_is_current(ConsumerControl::VolumeUp, old));
+        assert!(session.consumer_repeat_is_current(ConsumerControl::VolumeUp, current));
+        session.consumer_control_key(ConsumerControl::VolumeDown, KeyState::Pressed);
+        assert!(session.consumer_repeat_is_current(ConsumerControl::VolumeUp, current));
+        session.consumer_control_key(ConsumerControl::VolumeDown, KeyState::Released);
+
+        let deadline = Instant::now() + std::time::Duration::from_secs(2);
+        while host.0.lock().unwrap().len() == before + 3 && Instant::now() < deadline {
+            event_loop
+                .dispatch(Some(std::time::Duration::from_millis(10)), &mut session)
+                .unwrap();
+        }
+        assert_eq!(
+            host.0.lock().unwrap().len(),
+            before + 4,
+            "only the current hold repeats"
+        );
+        session.consumer_control_key(ConsumerControl::VolumeUp, KeyState::Released);
+        assert!(session.held_consumer_controls.is_empty());
+        let deadline = Instant::now() + std::time::Duration::from_millis(100);
+        while Instant::now() < deadline {
+            event_loop
+                .dispatch(Some(std::time::Duration::from_millis(10)), &mut session)
+                .unwrap();
+        }
+        assert_eq!(host.0.lock().unwrap().len(), before + 4);
+        session.consumer_control_key(ConsumerControl::VolumeMute, KeyState::Pressed);
+        assert!(
+            session.held_consumer_controls[&ConsumerControl::VolumeMute]
+                .1
+                .is_none()
+        );
+        session.cancel_consumer_control_repeats();
+        assert!(session.held_consumer_controls.is_empty());
     }
 
     impl SessionHost for IdleInternalHost {
