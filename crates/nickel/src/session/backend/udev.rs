@@ -3537,7 +3537,7 @@ fn submit_preview(
                 frame.clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])?;
                 draw_render_elements(frame, 1.0, &elements, &[damage]).map(|_| ())
             },
-            Frame::finish,
+            smithay::backend::renderer::gles::GlesFrame::try_finish,
         )
         .ok()?;
         let region = Rectangle::<i32, Buffer>::from_size((width, height).into());

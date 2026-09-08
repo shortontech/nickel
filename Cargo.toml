@@ -41,6 +41,9 @@ incremental = false
 ui-declarative-macros = { path = "crates/ui-declarative-macros" }
 winit = { path = "vendor/winit" }
 
+[patch."https://github.com/Smithay/smithay.git"]
+smithay = { path = "vendor/smithay" }
+
 [workspace.package]
 edition = "2024"
 license = "MIT OR Apache-2.0"
