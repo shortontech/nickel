@@ -153,6 +153,25 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 
 ## Remaining implementation
 
+Native desktop keyboard checkpoint: after compositor shortcuts run, a focused desktop now receives
+normalized key presses/releases rather than only lossy UI actions. Physical identity uses the existing
+winit scancode converter with Smithay's XKB-minus-eight offset; logical characters come from the
+modified XKB symbol. Unknown identities remain native values instead of being guessed from text.
+Device/order assignment shares the desktop input adapter with pointer events. Repeated backend
+presses are marked as repeats; focus-loss batches clear retained presses, and device removal retires
+that device's entries. This tracks supplied repeats; it does not add or prove a native repeat timer.
+
+A regression exposed missing portable function/keypad mappings in the shared winit adapter. The
+adapter now maps function keys, keypad keys, digits, and page navigation to existing portable enum
+variants. Shared tests cover each added mapping; the native test distinguishes physical A from a
+layout-produced q and verifies keypad Enter, release edges, device identity, and event order.
+Runtime coverage verifies repeated press/release delivery and focus-loss retirement while a key is
+held. The runtime module/state were renamed from desktop_pointer to desktop_input to match their
+combined ownership. These are adapter contracts, not a completed live keyboard acceptance matrix.
+Validation: 30 nickel-input tests passed with winit enabled; full Nickel library suite 627 passed,
+11 ignored. After the module/state rename, all 52 desktop-focused tests passed. Formatting,
+diff whitespace checks, and strict all-target/all-feature Clippy for nickel and nickel-input passed.
+
 Hover/focus follow-up: native desktop input and generic widgets now share runtime hover ownership.
 Moving from a panel into a desktop cancels the old panel hover before desktop motion; leaving an
 uncaptured desktop emits normalized PointerEvent::Leave. Captured motion retains the original target.

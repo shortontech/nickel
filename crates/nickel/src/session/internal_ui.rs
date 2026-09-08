@@ -16,8 +16,8 @@ use nickel_ui::{
 };
 
 use super::backend::InternalUiRendererMode;
-mod desktop_pointer;
-pub(crate) use desktop_pointer::DesktopPointerAction;
+mod desktop_input;
+pub(crate) use desktop_input::DesktopPointerAction;
 use sha2::{Digest, Sha256};
 use smithay::{
     backend::{
@@ -1381,7 +1381,7 @@ pub struct InternalUiRuntime {
         HostBatch,
         Option<nickel_input::ModifierState>,
     )>,
-    desktop_pointer: desktop_pointer::DesktopPointerState,
+    desktop_input: desktop_input::DesktopInputState,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
     texture_caches: SharedTextureCaches,
@@ -1396,7 +1396,7 @@ impl Default for InternalUiRuntime {
             hovered: None,
             touches: BTreeMap::new(),
             routed_events: Vec::new(),
-            desktop_pointer: Default::default(),
+            desktop_input: Default::default(),
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
             texture_caches: SharedTextureCaches::default(),
@@ -1649,6 +1649,9 @@ impl InternalUiRuntime {
     }
 
     pub fn step(&mut self, id: InternalSurfaceId, batch: HostBatch) -> bool {
+        if batch.window_focused == Some(false) {
+            self.clear_desktop_pressed_keys();
+        }
         if self
             .presentation
             .get(&id)

@@ -75,6 +75,103 @@ fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::Ui
     })
 }
 
+/// Normalize physical identity independently of the active XKB layout. Unknown
+/// keys keep their native identity; characters retain XKB's modified symbol.
+fn desktop_key_event(
+    native: (u32, Keysym, KeyState),
+    modifiers: nickel_input::ModifierState,
+    device: nickel_input::DeviceId,
+    order: nickel_input::EventOrder,
+    repeat: bool,
+) -> nickel_input::KeyEvent {
+    use nickel_input::{KeyLocation, LogicalKey, NamedKey, NativeCode, NativeKey, PhysicalKey};
+    use winit::platform::scancode::PhysicalKeyExtScancode;
+    let (raw, sym, state) = native;
+    let physical = raw
+        .checked_sub(8)
+        .map(|scan| {
+            nickel_input::winit::physical_key(winit::keyboard::PhysicalKey::from_scancode(scan))
+        })
+        .unwrap_or_else(|| {
+            PhysicalKey::Native(NativeKey {
+                namespace: "xkb-keycode".into(),
+                code: NativeCode::Numeric(u64::from(raw)),
+            })
+        });
+    let named = match sym.raw() {
+        keysyms::KEY_Return | keysyms::KEY_KP_Enter => Some(NamedKey::Enter),
+        keysyms::KEY_Escape => Some(NamedKey::Escape),
+        keysyms::KEY_Tab | keysyms::KEY_ISO_Left_Tab => Some(NamedKey::Tab),
+        keysyms::KEY_Up => Some(NamedKey::ArrowUp),
+        keysyms::KEY_Down => Some(NamedKey::ArrowDown),
+        keysyms::KEY_Left => Some(NamedKey::ArrowLeft),
+        keysyms::KEY_Right => Some(NamedKey::ArrowRight),
+        keysyms::KEY_Home => Some(NamedKey::Home),
+        keysyms::KEY_End => Some(NamedKey::End),
+        keysyms::KEY_Page_Up => Some(NamedKey::PageUp),
+        keysyms::KEY_Page_Down => Some(NamedKey::PageDown),
+        keysyms::KEY_BackSpace => Some(NamedKey::Backspace),
+        keysyms::KEY_Delete => Some(NamedKey::Delete),
+        keysyms::KEY_Menu => Some(NamedKey::ContextMenu),
+        _ => None,
+    };
+    let logical = named
+        .map(LogicalKey::Named)
+        .or_else(|| {
+            sym.key_char()
+                .filter(|ch| !ch.is_control())
+                .map(|ch| LogicalKey::Character(ch.to_string()))
+        })
+        .unwrap_or_else(|| {
+            LogicalKey::Native(NativeKey {
+                namespace: "xkb-keysym".into(),
+                code: NativeCode::Numeric(u64::from(sym.raw())),
+            })
+        });
+    let location = match &physical {
+        PhysicalKey::Code(
+            KeyCode::ShiftLeft | KeyCode::ControlLeft | KeyCode::AltLeft | KeyCode::SuperLeft,
+        ) => KeyLocation::Left,
+        PhysicalKey::Code(
+            KeyCode::ShiftRight | KeyCode::ControlRight | KeyCode::AltRight | KeyCode::SuperRight,
+        ) => KeyLocation::Right,
+        PhysicalKey::Code(
+            KeyCode::NumpadEnter
+            | KeyCode::Numpad0
+            | KeyCode::Numpad1
+            | KeyCode::Numpad2
+            | KeyCode::Numpad3
+            | KeyCode::Numpad4
+            | KeyCode::Numpad5
+            | KeyCode::Numpad6
+            | KeyCode::Numpad7
+            | KeyCode::Numpad8
+            | KeyCode::Numpad9
+            | KeyCode::NumpadAdd
+            | KeyCode::NumpadSubtract
+            | KeyCode::NumpadMultiply
+            | KeyCode::NumpadDivide
+            | KeyCode::NumpadDecimal,
+        ) => KeyLocation::Numpad,
+        PhysicalKey::Code(_) => KeyLocation::Standard,
+        PhysicalKey::Native(_) => KeyLocation::Unknown,
+    };
+    nickel_input::KeyEvent {
+        device,
+        order,
+        physical,
+        logical,
+        location,
+        edge: if state == KeyState::Pressed {
+            nickel_input::KeyEdge::Pressed
+        } else {
+            nickel_input::KeyEdge::Released
+        },
+        repeat,
+        modifiers,
+    }
+}
+
 impl NickelSession {
     fn route_internal_pointer_motion(
         &mut self,
@@ -533,7 +630,11 @@ impl NickelSession {
                                 return FilterResult::Intercept(None);
                             }
                             if session.internal_ui.focused().is_some() {
-                                if let Some(event) = internal_keyboard_event(sym, state) {
+                                let desktop_handled = session.internal_ui.desktop_keyboard_input(
+                                    &event.device().id(), event.key_code().raw(), state == KeyState::Pressed,
+                                    |device, order, repeat| desktop_key_event((event.key_code().raw(), sym, state), desktop_modifiers(modifiers), device, order, repeat),
+                                );
+                                if !desktop_handled && let Some(event) = internal_keyboard_event(sym, state) {
                                     session.internal_ui.keyboard(event);
                                 }
                                 session.flush_internal_shell_input();
@@ -1542,6 +1643,49 @@ fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn desktop_keys_keep_physical_identity_separate_from_layout_and_edges() {
+        use nickel_input::{DeviceId, EventOrder, KeyEdge, LogicalKey, PhysicalKey};
+        use smithay::input::keyboard::{Keysym, keysyms};
+        let event = super::desktop_key_event(
+            (38, Keysym::new(keysyms::KEY_q), super::KeyState::Released),
+            Default::default(),
+            DeviceId(7),
+            EventOrder(11),
+            false,
+        );
+        // evdev 30 / XKB 38 is physical A, regardless of the layout's q symbol.
+        assert_eq!(
+            event.physical,
+            PhysicalKey::Code(nickel_input::KeyCode::KeyA)
+        );
+        assert_eq!(event.logical, LogicalKey::Character("q".into()));
+        assert_eq!(event.edge, KeyEdge::Released);
+        assert_eq!(event.device, DeviceId(7));
+        assert_eq!(event.order, EventOrder(11));
+        let enter = super::desktop_key_event(
+            (
+                104,
+                Keysym::new(keysyms::KEY_KP_Enter),
+                super::KeyState::Pressed,
+            ),
+            Default::default(),
+            DeviceId(7),
+            EventOrder(12),
+            true,
+        );
+        assert_eq!(
+            enter.physical,
+            PhysicalKey::Code(nickel_input::KeyCode::NumpadEnter)
+        );
+        assert_eq!(enter.location, nickel_input::KeyLocation::Numpad);
+        assert_eq!(
+            enter.logical,
+            LogicalKey::Named(nickel_input::NamedKey::Enter)
+        );
+        assert!(enter.repeat);
+    }
+
     use smithay::utils::{Point, Rectangle};
 
     use smithay::input::keyboard::{Keysym, keysyms};

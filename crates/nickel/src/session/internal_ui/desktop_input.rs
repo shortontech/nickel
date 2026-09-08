@@ -1,4 +1,4 @@
-//! Native button and absolute-position motion routing for desktop scenes.
+//! Native desktop pointer and keyboard routing.
 //!
 //! Hit testing remains owned by InternalUiRuntime. This adapter retains button
 //! edges and seat modifiers before the generic UI path discards those details.
@@ -44,6 +44,53 @@ mod tests {
             button: PointerButton::Secondary,
             edge,
         }
+    }
+
+    #[test]
+    fn desktop_keyboard_repeat_state_retires_on_focus_loss() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = desktop(&mut runtime);
+        runtime.focus_surface(id);
+        runtime.drain_routed_events();
+        for (pressed, expected_repeat) in
+            [(true, false), (true, true), (false, false), (true, false)]
+        {
+            assert!(runtime.desktop_keyboard_input(
+                "keyboard",
+                116,
+                pressed,
+                |device, order, repeat| {
+                    assert_eq!(repeat, expected_repeat);
+                    nickel_input::KeyEvent {
+                        device,
+                        order,
+                        repeat,
+                        physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::ArrowDown),
+                        logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::ArrowDown),
+                        location: nickel_input::KeyLocation::Standard,
+                        edge: if pressed {
+                            KeyEdge::Pressed
+                        } else {
+                            KeyEdge::Released
+                        },
+                        modifiers: Default::default(),
+                    }
+                }
+            ));
+        }
+        let events = runtime.drain_routed_events();
+        assert_eq!(events.len(), 4);
+        assert!(
+            matches!(&events[2].1.events[..], [HostEvent::Normalized { input: InputEvent::Key(key), .. }] if key.edge == KeyEdge::Released)
+        );
+        assert!(!runtime.desktop_input.pressed_keys.is_empty());
+        runtime.clear_focus();
+        assert!(
+            !runtime.desktop_keyboard_input("keyboard", 116, true, |_, _, _| panic!(
+                "unfocused desktop must not normalize keys"
+            ))
+        );
+        assert!(runtime.desktop_input.pressed_keys.is_empty());
     }
 
     #[test]
@@ -147,7 +194,7 @@ mod tests {
         assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
             input: InputEvent::Pointer(PointerEvent::Motion { position, .. }), ..
         }] if *position == nickel_input::Point { x: 1000.0, y: 420.0 }));
-        assert!(runtime.desktop_pointer.capture.is_none());
+        assert!(runtime.desktop_input.capture.is_none());
         assert!(!runtime.desktop_pointer_input(
             "mouse",
             (200.0, 300.0),
@@ -181,7 +228,7 @@ mod tests {
             true
         ));
         assert!(runtime.drain_routed_events().is_empty());
-        assert!(runtime.desktop_pointer.capture.is_none());
+        assert!(runtime.desktop_input.capture.is_none());
     }
 
     #[test]
@@ -241,7 +288,7 @@ mod tests {
         );
         runtime.drain_routed_events();
         runtime.remove_desktop_pointer_device("other");
-        assert!(runtime.desktop_pointer.capture.is_some());
+        assert!(runtime.desktop_input.capture.is_some());
         assert!(runtime.drain_routed_events().is_empty());
         runtime.desktop_pointer_input(
             "owner",
@@ -250,7 +297,7 @@ mod tests {
             Default::default(),
             true,
         );
-        assert!(runtime.desktop_pointer.capture.is_none());
+        assert!(runtime.desktop_input.capture.is_none());
     }
 
     #[test]
@@ -266,8 +313,8 @@ mod tests {
         );
         runtime.drain_routed_events();
         runtime.remove_desktop_pointer_device("mouse");
-        assert!(runtime.desktop_pointer.capture.is_none());
-        assert!(runtime.desktop_pointer.devices.is_empty());
+        assert!(runtime.desktop_input.capture.is_none());
+        assert!(runtime.desktop_input.devices.is_empty());
         let batches = runtime.drain_routed_events();
         assert!(matches!(
             &batches[0].1.events[..],
@@ -280,19 +327,69 @@ mod tests {
 }
 
 #[derive(Default)]
-pub(super) struct DesktopPointerState {
+pub(super) struct DesktopInputState {
     // Allocate identities only for devices that actually reach a desktop. Removal
     // retires the name mapping; a reconnect receives a fresh, non-aliased identity.
     devices: HashMap<String, DeviceId>,
     next_device: u64,
     order: u64,
     last_device: Option<DeviceId>,
+    pressed_keys: BTreeSet<(DeviceId, u32)>,
     // One logical seat pointer owns a drag, even when several physical devices
     // contribute button edges. Track each pair so releases cannot escape to clients.
     capture: Option<(InternalSurfaceId, BTreeSet<(DeviceId, PointerButton)>)>,
 }
 
 impl InternalUiRuntime {
+    /// Route both key edges only to the focused desktop. The closure performs
+    /// backend conversion after device identity/order and repeat are established.
+    pub(crate) fn desktop_keyboard_input(
+        &mut self,
+        source: &str,
+        raw: u32,
+        pressed: bool,
+        normalize: impl FnOnce(DeviceId, EventOrder, bool) -> nickel_input::KeyEvent,
+    ) -> bool {
+        let Some(id) = self.focused.filter(|id| {
+            self.presentation.get(id).is_some_and(|surface| {
+                surface.visible
+                    && surface.external_scene.is_some()
+                    && surface.placement.role == InternalSurfaceRole::Desktop
+            })
+        }) else {
+            return false;
+        };
+        let state = &mut self.desktop_input;
+        let device = *state.devices.entry(source.to_owned()).or_insert_with(|| {
+            state.next_device += 1;
+            DeviceId(state.next_device)
+        });
+        state.order = state.order.wrapping_add(1);
+        let repeat = if pressed {
+            !state.pressed_keys.insert((device, raw))
+        } else {
+            state.pressed_keys.remove(&(device, raw));
+            false
+        };
+        let key = normalize(device, EventOrder(state.order), repeat);
+        self.step(
+            id,
+            HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: InputEvent::Key(key),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+        );
+        true
+    }
+
+    pub(super) fn clear_desktop_pressed_keys(&mut self) {
+        // Releases can go to the next owner; no old press may become a repeat
+        // when the desktop is focused again.
+        self.desktop_input.pressed_keys.clear();
+    }
     /// Translate a seat hover departure into the desktop's normalized lifecycle.
     /// This clears hover, not menu ownership or keyboard focus. Captured motion never
     /// invokes departure: its target remains the starting desktop until release.
@@ -303,17 +400,17 @@ impl InternalUiRuntime {
         }) {
             return false;
         }
-        let Some(device) = self.desktop_pointer.last_device else {
+        let Some(device) = self.desktop_input.last_device else {
             return false;
         };
-        self.desktop_pointer.order = self.desktop_pointer.order.wrapping_add(1);
+        self.desktop_input.order = self.desktop_input.order.wrapping_add(1);
         self.routed_events.push((
             id,
             HostBatch {
                 events: vec![HostEvent::Normalized {
                     input: InputEvent::Pointer(PointerEvent::Leave {
                         device,
-                        order: EventOrder(self.desktop_pointer.order),
+                        order: EventOrder(self.desktop_input.order),
                     }),
                     clipboard_text: None,
                 }],
@@ -327,10 +424,11 @@ impl InternalUiRuntime {
     /// Cancel only a transaction involving the removed device. Other devices can
     /// disappear while the seat's pointer is dragging without owning that drag.
     pub(crate) fn remove_desktop_pointer_device(&mut self, source: &str) {
-        let state = &mut self.desktop_pointer;
+        let state = &mut self.desktop_input;
         let Some(device) = state.devices.remove(source) else {
             return;
         };
+        state.pressed_keys.retain(|(owner, _)| *owner != device);
         if let Some((id, buttons)) = &mut state.capture {
             if !buttons.iter().any(|(owner, _)| *owner == device) {
                 return;
@@ -374,7 +472,7 @@ impl InternalUiRuntime {
         // Capture precedes hit testing so crossing a client or panel does not
         // transfer the release half of an existing desktop gesture to that target.
         let target = self
-            .desktop_pointer
+            .desktop_input
             .capture
             .as_ref()
             .map(|(id, _)| *id)
@@ -382,7 +480,7 @@ impl InternalUiRuntime {
         let Some(id) = target else {
             return false;
         };
-        let captured = self.desktop_pointer.capture.is_some();
+        let captured = self.desktop_input.capture.is_some();
         let placement = self
             .presentation
             .get(&id)
@@ -405,7 +503,7 @@ impl InternalUiRuntime {
             self.hovered = Some(id);
         }
 
-        let state = &mut self.desktop_pointer;
+        let state = &mut self.desktop_input;
         let device = *state.devices.entry(source.to_owned()).or_insert_with(|| {
             state.next_device += 1;
             DeviceId(state.next_device)
