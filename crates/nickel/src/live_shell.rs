@@ -1559,6 +1559,36 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+        if matches!(
+            event,
+            nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
+        ) {
+            // Pointer position is not interaction focus: briefly moving away must
+            // not dismiss the menu or clear selection. FocusLost below owns that
+            // teardown; Leave only clears visual hover and host pointer state.
+            let application = self.desktop_host.application_mut();
+            let had_hover = application.pointer_seen;
+            application.pointer_seen = false;
+            let outcome = self.desktop_host.step(HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: event,
+                    clipboard_text: None,
+                }],
+                application_changed: had_hover,
+                ..Default::default()
+            });
+            self.desktop_change_token = outcome.change_token;
+            self.desktop_deadline = outcome.next_deadline;
+            return had_hover || outcome.changed;
+        }
+        if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
+            // Focus can leave while another output owns the menu. Clear shared
+            // selection and modifiers before either menu-ownership branch returns;
+            // the corresponding key-up may be delivered to the newly focused client.
+            let application = self.desktop_host.application_mut();
+            application.modifiers = Default::default();
+            application.layout.clear_selection();
+        }
         let menu_belongs_to_active_output = self
             .desktop_host
             .application()
@@ -1609,9 +1639,6 @@ impl LiveShell {
             let application = self.desktop_host.application_mut();
             if matches!(event, nickel_input::InputEvent::FocusLost { .. }) {
                 application.dismiss_context_menu(desktop::DesktopMenuDismissReason::FocusDeparted);
-                // The corresponding key-up may go to the newly focused client.
-                // Never carry a held selection modifier into the next desktop visit.
-                application.modifiers = Default::default();
             }
             application.cancel_pointer_transaction();
             self.desktop_overlay_pointer_capture = None;

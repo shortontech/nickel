@@ -1314,6 +1314,18 @@ impl NickelSession {
         let Some(surface) = self.internal_ui.focused() else {
             return;
         };
+        if self
+            .internal_ui
+            .placement(surface)
+            .is_some_and(|placement| {
+                placement.role == super::internal_ui::InternalSurfaceRole::Desktop
+            })
+        {
+            // Desktop menus own input without a registered application window.
+            // Clear the old Wayland seat target through the shared focus boundary.
+            self.focus_internal_surface(surface);
+            return;
+        }
         let Some(window) = self.internal_window_for_surface(surface) else {
             return;
         };

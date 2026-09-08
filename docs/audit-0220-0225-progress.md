@@ -153,6 +153,25 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 
 ## Remaining implementation
 
+Hover/focus follow-up: native desktop input and generic widgets now share runtime hover ownership.
+Moving from a panel into a desktop cancels the old panel hover before desktop motion; leaving an
+uncaptured desktop emits normalized PointerEvent::Leave. Captured motion retains the original target.
+The desktop clears visual hover on Leave but preserves menu/selection, following the user's final
+clarification. An earlier uncommitted departure-dismissal experiment was removed; it is not policy.
+
+FocusLost instead dismisses the menu, cancels pointer transactions, and clears shared selection and
+selection modifiers, including the early branch where another output owns the menu. Native desktop
+button presses now claim runtime focus; session reconciliation clears the old Wayland seat target
+through the common internal-focus boundary even though the desktop has no application-window ID.
+Runtime tests distinguish pointer departure from client-click blur and check ordered panel/desktop
+hover handoff. Coordinator tests release the secondary button before Leave and then separately
+assert menu/selection teardown on focus loss. Physical Alt-Tab, keyboard navigation, and complete
+native focus acceptance remain unverified; the existing generic keyboard route is still insufficient
+for desktop navigation. Comments record this pointer/focus distinction alongside the implementation.
+Validation: full library suite 625 passed, 11 ignored. After moving shared focus-loss cleanup ahead
+of the cross-output early return, all 50 desktop-focused tests passed; formatting, diff whitespace
+checks, and strict all-target/all-feature Nickel Clippy passed. No running executable was replaced.
+
 Native pointer ingress checkpoint: Smithay motion and button branches now try the desktop adapter
 before the boolean-button UI path. The adapter retains button identity and edge, assigns device
 identities retired on removal, and snapshots aggregate seat modifiers with each batch. The shared

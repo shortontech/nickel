@@ -1870,6 +1870,9 @@ impl InternalUiRuntime {
     }
 
     fn dispatch_ui(&mut self, id: InternalSurfaceId, event: UiEvent) -> bool {
+        if matches!(event, UiEvent::PointerCancelled) && self.desktop_pointer_leave(id) {
+            return true;
+        }
         self.step(
             id,
             HostBatch {

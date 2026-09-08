@@ -1437,13 +1437,27 @@
                 nickel_input::PointerButton::Secondary, nickel_input::KeyEdge::Pressed,
             )));
             assert_eq!(coordinator.shell_mut().desktop_host.application().context_menu.as_ref().unwrap().output, "left");
+            // A captured button pair must finish before the router can emit Leave.
+            coordinator.step_slot_changes(left_id, batch(input(
+                nickel_input::PointerButton::Secondary, nickel_input::KeyEdge::Released,
+            )));
+            coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave {
+                device: nickel_input::DeviceId(1),
+                order: nickel_input::EventOrder(2),
+            })));
+            // Pointer departure alone is not focus loss, even outside the desktop.
+            assert!(!coordinator.shell_mut().desktop_host.application().pointer_seen);
+            assert!(coordinator.shell_mut().desktop_host.application().context_menu.is_some());
+            assert_eq!(coordinator.shell_mut().desktop_host.application().layout.selected().len(), 1);
             // Close the menu before checking the desktop key reducer; menu input
             // deliberately belongs to its own normalized UiHost while it is open.
             coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::FocusLost {
                 order: nickel_input::EventOrder(2),
             }));
             assert!(coordinator.shell_mut().desktop_host.application().context_menu.is_none());
+            assert!(coordinator.shell_mut().desktop_host.inspect().open_overlay.is_none());
             assert!(coordinator.shell_mut().desktop_overlay_pointer_capture.is_none());
+            assert!(coordinator.shell_mut().desktop_host.application().layout.selected().is_empty());
             coordinator.step_slot_changes(left_id, batch(nickel_input::InputEvent::Key(nickel_input::KeyEvent {
                 device: nickel_input::DeviceId(1),
                 order: nickel_input::EventOrder(3),

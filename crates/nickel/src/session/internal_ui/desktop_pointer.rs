@@ -2,8 +2,8 @@
 //!
 //! Hit testing remains owned by InternalUiRuntime. This adapter retains button
 //! edges and seat modifiers before the generic UI path discards those details.
-//! Relative motion deltas, scroll, hover departure, and keyboard focus are not
-//! owned by this adapter; their routing must be coordinated by the session.
+//! Relative motion deltas and scroll are not owned by this adapter. Button presses
+//! claim runtime focus; the session reconciles that ownership with the native seat.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -47,6 +47,62 @@ mod tests {
     }
 
     #[test]
+    fn desktop_and_panel_share_hover_ownership_with_ordered_departure() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = desktop(&mut runtime);
+        let panel = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (-800, -120, 800, 56),
+                output: Some("left".into()),
+            },
+            1.5,
+        );
+        runtime.pointer_motion((-780.0, -100.0));
+        runtime.drain_routed_events();
+        assert!(runtime.desktop_pointer_input(
+            "mouse",
+            (-780.0, 0.0),
+            DesktopPointerAction::Motion,
+            Default::default(),
+            false
+        ));
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0, panel);
+        assert!(matches!(
+            &batches[0].1.events[..],
+            [HostEvent::Ui(nickel_ui::UiEvent::PointerCancelled)]
+        ));
+        assert_eq!(runtime.hovered, Some(id));
+        // The session falls through to generic routing only when desktop routing
+        // declines the new target. That path must deliver one normalized departure.
+        assert!(!runtime.desktop_pointer_input(
+            "mouse",
+            (20.0, 20.0),
+            DesktopPointerAction::Motion,
+            Default::default(),
+            true
+        ));
+        assert!(!runtime.pointer_motion_with_client((20.0, 20.0), true));
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0, id);
+        assert!(matches!(
+            &batches[0].1.events[..],
+            [HostEvent::Normalized {
+                input: InputEvent::Pointer(PointerEvent::Leave {
+                    order: EventOrder(2),
+                    ..
+                }),
+                ..
+            }]
+        ));
+        assert!(runtime.hovered.is_none());
+    }
+
+    #[test]
     fn desktop_pointer_preserves_modifiers_and_capture_over_clients() {
         let mut runtime = InternalUiRuntime::default();
         let id = desktop(&mut runtime);
@@ -80,8 +136,10 @@ mod tests {
             modifiers.clone(),
             true
         ));
-        let batches = runtime.drain_routed_events();
-        assert_eq!(batches.len(), 3);
+        let mut batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 4);
+        assert_eq!(batches.remove(0).1.window_focused, Some(true));
+        assert_eq!(runtime.focused(), Some(id));
         assert!(batches.iter().all(|(target, _, snapshot)| *target == id && snapshot.as_ref() == Some(&modifiers)));
         assert!(matches!(&batches[0].1.events[..], [HostEvent::Normalized {
             input: InputEvent::Pointer(PointerEvent::Button { button: PointerButton::Secondary, edge: KeyEdge::Pressed, position: Some(position), .. }), ..
@@ -112,6 +170,9 @@ mod tests {
         );
         runtime.drain_routed_events();
         runtime.remove(id);
+        let lifecycle = runtime.drain_routed_events();
+        assert_eq!(lifecycle.len(), 1);
+        assert_eq!(lifecycle[0].1.window_focused, Some(false));
         assert!(runtime.desktop_pointer_input(
             "mouse",
             (20.0, 20.0),
@@ -121,6 +182,43 @@ mod tests {
         ));
         assert!(runtime.drain_routed_events().is_empty());
         assert!(runtime.desktop_pointer.capture.is_none());
+    }
+
+    #[test]
+    fn client_press_blurs_desktop_but_pointer_departure_does_not() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = desktop(&mut runtime);
+        for edge in [KeyEdge::Pressed, KeyEdge::Released] {
+            runtime.desktop_pointer_input(
+                "mouse",
+                (-780.0, -40.0),
+                button(edge),
+                Default::default(),
+                false,
+            );
+        }
+        runtime.drain_routed_events();
+        assert!(!runtime.desktop_pointer_input(
+            "mouse",
+            (20.0, 20.0),
+            DesktopPointerAction::Motion,
+            Default::default(),
+            true
+        ));
+        runtime.pointer_motion_with_client((20.0, 20.0), true);
+        assert_eq!(runtime.focused(), Some(id));
+        assert!(
+            runtime
+                .drain_routed_events()
+                .iter()
+                .all(|(_, batch, _)| batch.window_focused.is_none())
+        );
+        assert!(!runtime.pointer_button_with_client((20.0, 20.0), true, true));
+        assert_eq!(runtime.focused(), None);
+        let batches = runtime.drain_routed_events();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].0, id);
+        assert_eq!(batches[0].1.window_focused, Some(false));
     }
 
     #[test]
@@ -188,12 +286,44 @@ pub(super) struct DesktopPointerState {
     devices: HashMap<String, DeviceId>,
     next_device: u64,
     order: u64,
+    last_device: Option<DeviceId>,
     // One logical seat pointer owns a drag, even when several physical devices
     // contribute button edges. Track each pair so releases cannot escape to clients.
     capture: Option<(InternalSurfaceId, BTreeSet<(DeviceId, PointerButton)>)>,
 }
 
 impl InternalUiRuntime {
+    /// Translate a seat hover departure into the desktop's normalized lifecycle.
+    /// This clears hover, not menu ownership or keyboard focus. Captured motion never
+    /// invokes departure: its target remains the starting desktop until release.
+    pub(super) fn desktop_pointer_leave(&mut self, id: InternalSurfaceId) -> bool {
+        if !self.presentation.get(&id).is_some_and(|surface| {
+            surface.external_scene.is_some()
+                && surface.placement.role == InternalSurfaceRole::Desktop
+        }) {
+            return false;
+        }
+        let Some(device) = self.desktop_pointer.last_device else {
+            return false;
+        };
+        self.desktop_pointer.order = self.desktop_pointer.order.wrapping_add(1);
+        self.routed_events.push((
+            id,
+            HostBatch {
+                events: vec![HostEvent::Normalized {
+                    input: InputEvent::Pointer(PointerEvent::Leave {
+                        device,
+                        order: EventOrder(self.desktop_pointer.order),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..Default::default()
+            },
+            None,
+        ));
+        true
+    }
+
     /// Cancel only a transaction involving the removed device. Other devices can
     /// disappear while the seat's pointer is dragging without owning that drag.
     pub(crate) fn remove_desktop_pointer_device(&mut self, source: &str) {
@@ -266,11 +396,21 @@ impl InternalUiRuntime {
             return false;
         }
 
+        // Share hover ownership with generic widgets. Switching from a panel to
+        // a desktop must cancel the panel before delivering the desktop motion.
+        if placement.is_some() && self.hovered != Some(id) {
+            if let Some(previous) = self.hovered {
+                self.dispatch_ui(previous, nickel_ui::UiEvent::PointerCancelled);
+            }
+            self.hovered = Some(id);
+        }
+
         let state = &mut self.desktop_pointer;
         let device = *state.devices.entry(source.to_owned()).or_insert_with(|| {
             state.next_device += 1;
             DeviceId(state.next_device)
         });
+        state.last_device = Some(device);
         state.order = state.order.wrapping_add(1);
         let order = EventOrder(state.order);
         if let DesktopPointerAction::Button { button, edge } = &action {
@@ -313,6 +453,17 @@ impl InternalUiRuntime {
                 edge,
             },
         };
+        // A desktop interaction needs a real focus owner so client activation or
+        // Alt-Tab can blur it later. Merely painting a menu cannot establish this.
+        if matches!(
+            event,
+            PointerEvent::Button {
+                edge: KeyEdge::Pressed,
+                ..
+            }
+        ) {
+            self.focus_surface(id);
+        }
         // Snapshot modifiers with the event: reading them later during queue drain
         // could apply a newer key state to an earlier Ctrl/Shift-click.
         self.routed_events.push((
