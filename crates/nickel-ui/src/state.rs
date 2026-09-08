@@ -207,6 +207,8 @@ pub(crate) struct TextContextSession {
 
 #[derive(Clone, Debug)]
 pub struct UiStateStore {
+    // Async editor effects lease focus transitions, not only a reusable UiId.
+    focus_generation: u64,
     pub(crate) clipboard_text_limit: Option<usize>,
     pub(crate) clipboard_rejected: bool,
     durable: DurableNodeState,
@@ -227,6 +229,7 @@ impl Default for UiStateStore {
 impl UiStateStore {
     pub fn with_retention_frames(retention_frames: u64) -> Self {
         Self {
+            focus_generation: 0,
             clipboard_text_limit: None,
             clipboard_rejected: false,
             durable: DurableNodeState {
@@ -336,7 +339,7 @@ impl UiStateStore {
         let Some((overlay, target)) = self.overlays.stack.pop() else {
             return Invalidation::None;
         };
-        self.navigation.focused = target.clone();
+        self.set_focus(target.clone());
         self.overlays.last_focus_return = Some(FocusReturn {
             overlay,
             target,
@@ -391,7 +394,6 @@ impl UiStateStore {
             .map(|(id, _)| id.clone())
             .collect::<std::collections::HashSet<_>>();
         for owner in [
-            &mut self.navigation.focused,
             &mut self.pointer.hovered,
             &mut self.pointer.pressed,
             &mut self.pointer.captured,
@@ -403,6 +405,9 @@ impl UiStateStore {
             if owner.as_ref().is_some_and(|id| !live.contains(id)) {
                 *owner = None;
             }
+        }
+        if self.focused().is_some_and(|id| !live.contains(id)) {
+            self.set_focus(None);
         }
         if self.navigation.controller_selected.is_none() {
             self.navigation.controller_editing = false;
@@ -432,7 +437,14 @@ impl UiStateStore {
 
     pub(crate) fn set_focus(&mut self, id: Option<UiId>) -> Invalidation {
         self.text.caret_visible = true;
+        if self.navigation.focused != id {
+            self.focus_generation = self.focus_generation.wrapping_add(1);
+        }
         replace_if_changed(&mut self.navigation.focused, id, Invalidation::Paint)
+    }
+
+    pub fn focus_generation(&self) -> u64 {
+        self.focus_generation
     }
 
     pub fn set_hovered(&mut self, id: Option<UiId>) -> Invalidation {
@@ -625,6 +637,7 @@ impl UiStateStore {
     }
 
     pub fn focus_lost(&mut self) -> Invalidation {
+        self.focus_generation = self.focus_generation.wrapping_add(1);
         let pressed = self.pointer.pressed.take().is_some();
         let captured = self.pointer.captured.take().is_some();
         self.text_context = None;
@@ -652,7 +665,7 @@ impl UiStateStore {
 
     pub fn destroy(&mut self) {
         self.durable.entries.clear();
-        self.navigation.focused = None;
+        self.set_focus(None);
         self.pointer.hovered = None;
         self.pointer.pressed = None;
         self.pointer.captured = None;
@@ -669,9 +682,14 @@ impl UiStateStore {
     }
 
     fn clear_ownership_for_missing_entries(&mut self) {
+        if self
+            .focused()
+            .is_some_and(|id| !self.durable.entries.contains_key(id))
+        {
+            self.set_focus(None);
+        }
         let entries = &self.durable.entries;
         for owner in [
-            &mut self.navigation.focused,
             &mut self.pointer.hovered,
             &mut self.pointer.pressed,
             &mut self.pointer.captured,
@@ -715,6 +733,29 @@ fn replace_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_generation_tracks_transfer_return_and_topology_retirement() {
+        let mut store = UiStateStore::default();
+        let first = UiId::from("first");
+        let second = UiId::from("second");
+        store.touch(first.clone());
+        store.touch(second.clone());
+        store.set_focus(Some(first.clone()));
+        let original = store.focus_generation();
+        store.set_focus(Some(first.clone()));
+        store.set_hovered(Some(second.clone()));
+        assert_eq!(store.focus_generation(), original);
+        store.set_focus(Some(second));
+        store.set_focus(Some(first));
+        assert_eq!(store.focus_generation(), original + 2);
+        store.begin_frame();
+        store.reconcile_live_targets();
+        assert!(store.focused().is_none());
+        assert_eq!(store.focus_generation(), original + 3);
+        store.focus_lost();
+        assert_eq!(store.focus_generation(), original + 4);
+    }
 
     #[test]
     fn keyed_state_survives_insertion_reordering_and_short_absence() {

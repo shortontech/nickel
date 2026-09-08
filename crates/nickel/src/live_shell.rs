@@ -2441,6 +2441,20 @@ impl LiveShell {
         outcome
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn shell_field_lease(&self, role: SurfaceRole) -> Option<(nickel_ui::UiId, u64)> {
+        let inspection = match role {
+            SurfaceRole::Launcher if self.run_visible => self.run_host.inspect(),
+            SurfaceRole::Launcher => self.launcher_host.inspect(),
+            SurfaceRole::ControlCenter => self.control_host.inspect(),
+            _ => return None,
+        };
+        Some((
+            inspection.keyboard_focus?,
+            inspection.keyboard_focus_generation,
+        ))
+    }
+
     /// Dispatches compositor-owned semantic UI events through the same hosts and
     /// effect reducers used by the windowed shell.
     pub(crate) fn shell_role_host_ui(

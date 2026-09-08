@@ -867,3 +867,28 @@ then releases their last strong ownership. Closing with a populated rendered fra
 image map and presentation host immediately. Changed thumbnail dimensions preserve the semantic
 activation target's bounds. The focused all-feature test passed. This is host/display-list ownership
 evidence, not proof of GPU texture retirement or live input latency.
+
+## Async native paste field leases (0222)
+
+Closed the previously documented same-surface field-transfer gap. The shared UI state now owns a
+monotonic wrapping focus generation: target changes, focus loss and target retirement invalidate
+leases, while repeated focus of the same live target and pointer hover do not. Overlay focus return
+uses the same setter. Host inspection exposes that generation alongside the existing focused UiId;
+this adds one counter, not a second focus policy or retained event history.
+
+Native asynchronous paste captures the field ID/generation before starting its worker and compares
+them again on calloop completion, in addition to the existing surface and keyboard-epoch checks.
+Hosted applications obtain this lease from their real UiHost; launcher/run/control-center surfaces
+resolve through their coordinator-owned hosts rather than the presentation-only SceneSlot. A source
+cannot paste into another field or silently resume an old paste after focus moves away and back.
+
+A passing real worker/calloop test uses two TextFields and production focus-navigation events.
+Both direct field transfer and away-and-back preserve the same native recipient/keyboard epoch but
+reject delayed bytes without editing either field. The existing successful async-paste and stale
+surface tests also passed. A UI-state regression covers stable focus/hover and topology retirement.
+Clipboard-size policy remains unconfigured, and real external-client interoperability/live acceptance
+remain outstanding; this fixes field focus leases, not every outstanding keyboard acceptance item.
+
+Verification: nickel-ui all-feature library suite **337 passed, 2 ignored**; both focused native
+async-paste/keyboard-lease tests passed; strict workspace all-target/all-feature Clippy, formatting
+and diff checks passed. No live clipboard or input state was exercised.

@@ -1847,6 +1847,17 @@ impl InternalUiRuntime {
         self.focused
     }
 
+    pub(crate) fn focused_field_lease(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Option<(nickel_ui::UiId, u64)> {
+        let inspection = self.surfaces.get(id)?.inspect();
+        Some((
+            inspection.keyboard_focus?,
+            inspection.keyboard_focus_generation,
+        ))
+    }
+
     fn role_order(role: InternalSurfaceRole) -> u8 {
         match role {
             InternalSurfaceRole::Desktop => 0,

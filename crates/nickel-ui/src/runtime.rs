@@ -909,6 +909,8 @@ pub struct HostInspection {
     pub scale_factor: f32,
     pub pointer_icon: PointerIcon,
     pub keyboard_focus: Option<UiId>,
+    /// Changes on focus transfer/loss, including away-and-back to the same ID.
+    pub keyboard_focus_generation: u64,
     /// The semantic target currently owned by production pointer hit testing.
     pub pointer_hover: Option<UiId>,
     pub pointer_capture: Option<UiId>,
@@ -1506,6 +1508,7 @@ impl<A: Application> UiHost<A> {
             scale_factor: self.scale_factor,
             pointer_icon: self.pointer_icon,
             keyboard_focus: self.state.focused().cloned(),
+            keyboard_focus_generation: self.state.focus_generation(),
             pointer_hover: self.state.hovered().cloned(),
             pointer_capture: self.state.captured().cloned(),
             controller_target: self.state.navigation().controller_selected().cloned(),

@@ -19,6 +19,20 @@ pub(crate) struct NativeClipboardState {
 pub(super) const TRANSFER_TIMEOUT: Duration = Duration::from_secs(2);
 
 impl super::state::NickelSession {
+    fn native_field_lease(
+        &self,
+        recipient: nickel_ui::InternalSurfaceId,
+    ) -> Option<(nickel_ui::UiId, u64)> {
+        if let Some((shell_id, _)) = self
+            .internal_shell_surfaces
+            .iter()
+            .find(|(_, runtime)| **runtime == recipient)
+        {
+            return self.internal_shell.as_ref()?.focused_field_lease(*shell_id);
+        }
+        self.internal_ui.focused_field_lease(recipient)
+    }
+
     pub(super) fn dispatch_native_key(
         &mut self,
         epoch: u64,
@@ -143,6 +157,9 @@ impl super::state::NickelSession {
         permit: super::clipboard_transfer::TransferPermit,
     ) -> Result<(), &'static str> {
         use smithay::reexports::calloop::channel;
+        let field = self
+            .native_field_lease(recipient)
+            .ok_or("native paste field is unavailable")?;
         let (sender, receiver) = channel::channel::<Result<String, &'static str>>();
         self.native_clipboard.next_read = self.native_clipboard.next_read.wrapping_add(1);
         let transaction = self.native_clipboard.next_read;
@@ -172,12 +189,14 @@ impl super::state::NickelSession {
                     if let Some((_, token)) = session.native_clipboard.pending_read.take() {
                         session.event_loop_handle.remove(token);
                     }
-                    // A delayed source cannot target a different native surface.
-                    // This lease checks surface identity and authority epoch; it
-                    // does not yet distinguish fields within the same surface.
+                    // A delayed paste belongs to the original field and focus
+                    // generation, not whichever editor receives focus later.
                     let result = result.and_then(|text| {
                         if session.internal_ui.focused() != Some(recipient) {
                             return Err("clipboard paste recipient changed");
+                        }
+                        if session.native_field_lease(recipient).as_ref() != Some(&field) {
+                            return Err("clipboard paste field changed");
                         }
                         session.dispatch_native_key(epoch, event.clone(), Some(text))
                     });

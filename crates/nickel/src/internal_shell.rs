@@ -718,6 +718,14 @@ impl InternalShellCoordinator {
         self.clipboard_result.take()
     }
 
+    pub(crate) fn focused_field_lease(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Option<(nickel_ui::UiId, u64)> {
+        let role = self.entries.iter().find(|entry| entry.id == id)?.role;
+        self.shell.shell_field_lease(role)
+    }
+
     pub fn launcher_visible(&self) -> bool {
         self.shell.surface_visible(SurfaceRole::Launcher)
     }

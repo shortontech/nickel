@@ -6594,6 +6594,92 @@ mod protocol_tests {
     }
 
     #[test]
+    fn asynchronous_native_paste_rejects_field_transfer_and_return() {
+        use nickel_ui::{UiEvent, id, ui};
+        use std::io::Write;
+        #[derive(Default)]
+        struct Fields {
+            first: String,
+            second: String,
+        }
+        impl nickel_ui::Application for Fields {
+            type Message = (bool, String);
+            fn update(&mut self, (second, text): Self::Message) {
+                if second {
+                    self.second = text;
+                } else {
+                    self.first = text;
+                }
+            }
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+                ui! { <Column>
+                    <TextField id={id!(first)} value={&self.first} on_change={|text| (false, text)} />
+                    <TextField id={id!(second)} value={&self.second} on_change={|text| (true, text)} />
+                </Column> }
+            }
+            fn title(&self) -> &str {
+                "Paste field lease"
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        let recipient = session.internal_ui.insert(
+            Fields::default(),
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (0, 0, 640, 480),
+                output: None,
+            },
+            1.0,
+        );
+        session.configure_on_screen_keyboard(true, true, 41, false, false, 368);
+        session.native_clipboard.text_limit = Some(8);
+        session.focus_internal_surface(recipient);
+        session.internal_ui.keyboard(UiEvent::FocusNext);
+        let epoch = session.on_screen_keyboard_snapshot().epoch;
+        let key = crate::session::input::internal_virtual_key(
+            'v' as u32,
+            &[0xffe3],
+            nickel_input::EventOrder(1),
+        )
+        .unwrap();
+        for return_to_original in [false, true] {
+            let original = session.internal_ui.focused_field_lease(recipient).unwrap();
+            let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+            let permit = session.native_clipboard.reads.acquire(1).unwrap();
+            session
+                .begin_native_paste_read(reader.into(), epoch, key.clone(), recipient, 8, permit)
+                .unwrap();
+            session.internal_ui.keyboard(UiEvent::FocusNext);
+            if return_to_original {
+                session.internal_ui.keyboard(UiEvent::FocusNext);
+            }
+            let current = session.internal_ui.focused_field_lease(recipient).unwrap();
+            assert_ne!(original.1, current.1);
+            assert_eq!(original.0 == current.0, return_to_original);
+            assert_eq!(session.on_screen_keyboard_snapshot().epoch, epoch);
+            writer.write_all(b"stale").unwrap();
+            drop(writer);
+            let deadline = Instant::now() + std::time::Duration::from_secs(2);
+            while session.native_clipboard.pending_read.is_some() && Instant::now() < deadline {
+                event_loop
+                    .dispatch(Some(std::time::Duration::from_millis(10)), &mut session)
+                    .unwrap();
+            }
+            assert!(session.native_clipboard.pending_read.is_none());
+            assert_eq!(
+                session.native_clipboard.last_failure.as_deref(),
+                Some("clipboard paste field changed")
+            );
+            let fields = session
+                .internal_ui
+                .application::<Fields>(recipient)
+                .unwrap();
+            assert!(fields.first.is_empty() && fields.second.is_empty());
+        }
+    }
+
+    #[test]
     fn native_keyboard_leases_follow_internal_recipients_without_seat_focus() {
         use nickel_session_protocol::OnScreenKeyboardInput;
         use nickel_ui::{UiEvent, id, ui};
