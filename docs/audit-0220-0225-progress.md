@@ -472,6 +472,36 @@ The native preview guard now requires both ExportFence and Fencing, because shar
 import/draw has its own synchronous fallback without Fencing. The vendor/API patch is not integrated
 yet, so the runtime fence-export fallback remains open in the primary checkout.
 
+## 0225: opt-in no-wait Smithay finalization integrated
+
+Reviewed and integrated agent commit `e7373bf` as `2311248`. The public pinned Smithay API could not
+disable its finalization fallback, so `vendor/smithay` preserves the pinned crate and a narrow
+three-file GLES API patch. `GlesFrame::try_finish` shares normal GL state restoration, target
+synchronization, profiler span closure and cleanup, but returns SyncExportFailed instead of calling
+glFinish on fence-export failure. It also omits potentially synchronous GPU clock calibration.
+The finished flag is set before fallible bookkeeping, so failed consuming finalization cannot make
+Drop repeat that work with the blocking policy. Normal Frame::finish behavior remains unchanged.
+Native preview submission uses try_finish plus both capability guards; nested capture still uses
+its existing synchronous completion/readback path. Opaque driver call latency, null GL FenceSync
+handling, real GPU failure injection, and live input/presentation measurements remain unverified.
+
+The 4.7 MB vendor import contains the crate source/build inputs/licenses, not the full upstream
+workspace. Its two upstream C files are existing GBM feature probes, not new Nickel application
+components. `vendor/smithay/NICKEL-PATCHES.md` records provenance, scope, validation and removal
+criteria. Sixteen existing upstream trailing-whitespace lines are preserved; the upstream-relative
+API patch and Nickel edits are whitespace-clean. No blanket whitespace-check exemption was added.
+
+Agent evidence: both production fallback-policy tests passed; all-feature Nickel preview tests
+47 passed, 2 ignored; strict Clippy passed. After integration, primary Nickel library tests passed
+649 with 12 ignored, strict all-target/all-feature Clippy and formatting passed, and Cargo's inverse
+dependency tree selected exactly one Smithay at `/projects/nickel/vendor/smithay`. These synthetic
+checks do not establish live GPU or native session acceptance. The clean renderer worktree and its
+disposable build artifacts were removed; branch and commits are preserved.
+
+Next isolated implementation: normalized native Desktop/OSK touch device/contact routing and
+cancellation, worktree `/external/.worktrees/nickel-normalized-touch`, branch
+`fix/native-normalized-touch`. The pointer/geometry work does not stand in for touch lease safety.
+
 Additional checks for the 0224 implementation passed:
 
 - `CARGO_BUILD_JOBS=4 cargo test -p nickel --lib live_shell::tests --quiet`: 88 passed, 3 ignored.
