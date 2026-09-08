@@ -1552,6 +1552,12 @@ impl LiveShell {
         }
     }
 
+    pub(crate) fn set_desktop_input_modifiers(&mut self, modifiers: &nickel_input::ModifierState) {
+        self.desktop_host
+            .application_mut()
+            .set_input_modifiers(modifiers);
+    }
+
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
         let menu_belongs_to_active_output = self
             .desktop_host
@@ -1706,7 +1712,9 @@ impl LiveShell {
                     x: position.x as f32,
                     y: position.y as f32,
                 };
-                if edge == nickel_input::KeyEdge::Pressed {
+                if edge == nickel_input::KeyEdge::Pressed
+                    && button == nickel_input::PointerButton::Primary
+                {
                     application.pointer_press(point, false, application.modifiers)
                 } else if button == nickel_input::PointerButton::Primary {
                     application.pointer_release(point, Instant::now())

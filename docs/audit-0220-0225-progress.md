@@ -153,6 +153,28 @@ also passed. Runtime contract coverage is not physical-device or native desktop 
 
 ## Remaining implementation
 
+Native pointer ingress checkpoint: Smithay motion and button branches now try the desktop adapter
+before the boolean-button UI path. The adapter retains button identity and edge, assigns device
+identities retired on removal, and snapshots aggregate seat modifiers with each batch. The shared
+desktop modifier reducer consumes that snapshot before input, including Ctrl held before a desktop
+visit. Primary-button handling no longer aliases unrelated middle/back/forward presses to selection.
+
+Capture keeps a gesture on its starting desktop across client areas and tracks held device/button
+pairs. Removed surfaces swallow outstanding releases without creating replacement scenes; device
+removal cancels only captures involving that device. Four focused contracts cover client-above-
+desktop hit exclusion, negative-origin logical projection without rescaling, secondary-button and
+modifier preservation, capture over clients, surface retirement, device retirement, and unrelated
+device removal. These tests drive the production runtime adapter, not physical input devices.
+
+The comments explicitly scope this adapter to buttons and absolute-position motion. Scroll, hover
+departure, keyboard focus/navigation, touch, and complete capture cancellation still require work;
+no end-to-end native desktop acceptance or terminal-input diagnosis is claimed. In particular,
+remaining generic hover ownership must be reconciled with the new desktop-first motion route.
+Validation for this checkpoint: full Nickel library suite 623 passed, 11 ignored; formatting,
+diff whitespace checks, and strict all-target/all-feature Nickel Clippy passed. No release executable
+was built or replaced. The user independently restarted SDDM during this work; these source changes
+were not installed into that restarted session.
+
 - 0220: complete normalized native desktop input, capture/focus lifecycle, and remaining acceptance.
 - 0221: remaining input/backend/native acceptance and final integration gates.
 - 0222: finish gesture leases, native/internal recipient routing, geometry, and acceptance.

@@ -1483,7 +1483,7 @@ impl NickelSession {
             .is_some_and(crate::internal_shell::InternalShellCoordinator::launcher_visible);
         let shell = self.internal_shell.as_mut().unwrap();
         let mut changed = Vec::new();
-        for (runtime_id, batch) in events {
+        for (runtime_id, batch, modifiers) in events {
             let Some((shell_id, role, output)) = reverse.get(&runtime_id).cloned() else {
                 continue;
             };
@@ -1492,6 +1492,9 @@ impl NickelSession {
             {
                 let origin = output_origins.get(&output).copied().unwrap_or_default();
                 shell.set_panel_context(output, origin);
+            }
+            if let Some(modifiers) = modifiers {
+                shell.set_desktop_input_modifiers(shell_id, &modifiers);
             }
             changed.extend(shell.step_slot_changes(shell_id, batch));
         }

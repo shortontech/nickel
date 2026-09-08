@@ -457,6 +457,23 @@ impl InternalShellCoordinator {
         !self.step_slot_changes(id, batch).is_empty()
     }
 
+    /// Install the seat snapshot on the target viewport before its pointer batch.
+    /// This also handles modifiers pressed before the desktop receives focus.
+    pub fn set_desktop_input_modifiers(
+        &mut self,
+        id: InternalSurfaceId,
+        modifiers: &nickel_input::ModifierState,
+    ) {
+        if self
+            .entries
+            .iter()
+            .any(|entry| entry.id == id && entry.role == SurfaceRole::Desktop)
+            && self.select_desktop_viewport(id).is_some()
+        {
+            self.shell.set_desktop_input_modifiers(modifiers);
+        }
+    }
+
     pub fn step_slot_changes(
         &mut self,
         id: InternalSurfaceId,

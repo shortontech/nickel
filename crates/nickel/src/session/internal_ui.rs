@@ -16,6 +16,8 @@ use nickel_ui::{
 };
 
 use super::backend::InternalUiRendererMode;
+mod desktop_pointer;
+pub(crate) use desktop_pointer::DesktopPointerAction;
 use sha2::{Digest, Sha256};
 use smithay::{
     backend::{
@@ -1374,7 +1376,12 @@ pub struct InternalUiRuntime {
     touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
     // Keep the complete batch for coordinator-owned scenes: normalized input and
     // focus lifecycle facts must survive the same handoff as semantic UI actions.
-    routed_events: Vec<(InternalSurfaceId, HostBatch)>,
+    routed_events: Vec<(
+        InternalSurfaceId,
+        HostBatch,
+        Option<nickel_input::ModifierState>,
+    )>,
+    desktop_pointer: desktop_pointer::DesktopPointerState,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
     texture_caches: SharedTextureCaches,
@@ -1389,6 +1396,7 @@ impl Default for InternalUiRuntime {
             hovered: None,
             touches: BTreeMap::new(),
             routed_events: Vec::new(),
+            desktop_pointer: Default::default(),
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
             texture_caches: SharedTextureCaches::default(),
@@ -1648,7 +1656,7 @@ impl InternalUiRuntime {
         {
             // The SceneSlot supplies identity only. Its reducer cannot apply input
             // or focus changes to the LiveShell authority owned by the coordinator.
-            self.routed_events.push((id, batch));
+            self.routed_events.push((id, batch, None));
             return true;
         }
         let Some(surface) = self.surfaces.get_mut(id) else {
@@ -1670,7 +1678,13 @@ impl InternalUiRuntime {
         true
     }
 
-    pub fn drain_routed_events(&mut self) -> Vec<(InternalSurfaceId, HostBatch)> {
+    pub fn drain_routed_events(
+        &mut self,
+    ) -> Vec<(
+        InternalSurfaceId,
+        HostBatch,
+        Option<nickel_input::ModifierState>,
+    )> {
         std::mem::take(&mut self.routed_events)
     }
 
@@ -2337,7 +2351,7 @@ mod tests {
         runtime.clear_focus();
         let batches = runtime.drain_routed_events();
         assert_eq!(batches.len(), 3);
-        assert!(batches.iter().all(|(id, _)| *id == desktop));
+        assert!(batches.iter().all(|(id, _, _)| *id == desktop));
         assert!(
             matches!(&batches[0].1.events[..], [HostEvent::Normalized { input: actual, .. }] if actual == &input)
         );

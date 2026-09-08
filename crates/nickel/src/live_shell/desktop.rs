@@ -789,14 +789,21 @@ impl DesktopApplication {
         }
     }
 
+    // Keyboard edges and native pointer snapshots share selection policy; neither
+    // path should independently reinterpret Ctrl/Shift additive selection.
+    pub(super) fn set_input_modifiers(&mut self, modifiers: &nickel_input::ModifierState) {
+        use nickel_input::AggregateModifier;
+        self.modifiers = SelectionModifiers {
+            toggle: modifiers.aggregate(AggregateModifier::Control),
+            range: modifiers.aggregate(AggregateModifier::Shift),
+            additive_range: modifiers.aggregate(AggregateModifier::Control)
+                && modifiers.aggregate(AggregateModifier::Shift),
+        };
+    }
+
     pub(super) fn key(&mut self, key: &nickel_input::KeyEvent) -> bool {
         use nickel_input::{AggregateModifier, PhysicalKey};
-        self.modifiers = SelectionModifiers {
-            toggle: key.modifiers.aggregate(AggregateModifier::Control),
-            range: key.modifiers.aggregate(AggregateModifier::Shift),
-            additive_range: key.modifiers.aggregate(AggregateModifier::Control)
-                && key.modifiers.aggregate(AggregateModifier::Shift),
-        };
+        self.set_input_modifiers(&key.modifiers);
         if key.edge != nickel_input::KeyEdge::Pressed {
             return false;
         }

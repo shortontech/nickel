@@ -27,6 +27,23 @@ use crate::session::{
     window_frame::{self, FramePart},
 };
 
+fn desktop_modifiers(
+    modifiers: &smithay::input::keyboard::ModifiersState,
+) -> nickel_input::ModifierState {
+    use nickel_input::AggregateModifier;
+    nickel_input::ModifierState::from_sides_and_unsided(
+        [],
+        [
+            (modifiers.ctrl, AggregateModifier::Control),
+            (modifiers.shift, AggregateModifier::Shift),
+            (modifiers.alt, AggregateModifier::Alt),
+            (modifiers.logo, AggregateModifier::Super),
+        ]
+        .into_iter()
+        .filter_map(|(held, modifier)| held.then_some(modifier)),
+    )
+}
+
 fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::UiEvent> {
     if state != KeyState::Pressed {
         return None;
@@ -62,10 +79,18 @@ impl NickelSession {
     fn route_internal_pointer_motion(
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
+        device: &str,
     ) -> bool {
         let client_present =
             self.client_scene_under(position) && !self.internal_applications_are_foremost();
-        let handled = self
+        let modifiers = desktop_modifiers(&self.seat.get_keyboard().unwrap().modifier_state());
+        let handled = self.internal_ui.desktop_pointer_input(
+            device,
+            (position.x, position.y),
+            super::internal_ui::DesktopPointerAction::Motion,
+            modifiers,
+            client_present,
+        ) || self
             .internal_ui
             .pointer_motion_with_client((position.x, position.y), client_present);
         // Leaving an internal surface can queue cancellation even when the new
@@ -261,6 +286,8 @@ impl NickelSession {
             }
             InputEvent::DeviceRemoved { device } => {
                 self.on_screen_keyboard.touchscreens.remove(&device.id());
+                self.internal_ui.remove_desktop_pointer_device(&device.id());
+                self.flush_internal_shell_input();
             }
             _ => {}
         }
@@ -576,8 +603,8 @@ impl NickelSession {
                             self.constrained_pointer_position(&surface, origin, current, proposed);
                         (position, active.then_some((focus, origin)))
                     });
-                let internal =
-                    constraint_focus.is_none() && self.route_internal_pointer_motion(position);
+                let internal = constraint_focus.is_none()
+                    && self.route_internal_pointer_motion(position, &event.device().id());
                 self.update_frame_cursor(position);
                 let motion_focus = constraint_focus.or_else(|| {
                     (!internal)
@@ -630,8 +657,8 @@ impl NickelSession {
 
                 let serial = SERIAL_COUNTER.next_serial();
 
-                let internal =
-                    constraint_focus.is_none() && self.route_internal_pointer_motion(pos);
+                let internal = constraint_focus.is_none()
+                    && self.route_internal_pointer_motion(pos, &event.device().id());
                 let under = constraint_focus.or_else(|| self.pointer_surface_under(pos));
                 let under = (!internal).then_some(under).flatten();
 
@@ -696,7 +723,30 @@ impl NickelSession {
                     );
                     return None;
                 }
-                let internally_handled = self.internal_ui.pointer_button_with_client(
+                // Preserve native button identity before the generic widget adapter
+                // reduces all buttons to a boolean pressed/released action.
+                let desktop_button = match event.button() {
+                    Some(MouseButton::Left) => nickel_input::PointerButton::Primary,
+                    Some(MouseButton::Right) => nickel_input::PointerButton::Secondary,
+                    Some(MouseButton::Middle) => nickel_input::PointerButton::Middle,
+                    Some(MouseButton::Back) => nickel_input::PointerButton::Back,
+                    Some(MouseButton::Forward) => nickel_input::PointerButton::Forward,
+                    _ => nickel_input::PointerButton::Native(button as u16),
+                };
+                let internally_handled = self.internal_ui.desktop_pointer_input(
+                    &event.device().id(),
+                    (location.x, location.y),
+                    super::internal_ui::DesktopPointerAction::Button {
+                        button: desktop_button,
+                        edge: if button_state == ButtonState::Pressed {
+                            nickel_input::KeyEdge::Pressed
+                        } else {
+                            nickel_input::KeyEdge::Released
+                        },
+                    },
+                    desktop_modifiers(&keyboard.modifier_state()),
+                    client_present,
+                ) || self.internal_ui.pointer_button_with_client(
                     (location.x, location.y),
                     button_state == ButtonState::Pressed,
                     client_present,
