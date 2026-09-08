@@ -933,3 +933,23 @@ Updated active spec status summaries to reflect implemented input/geometry/owner
 measurements without marking live acceptance complete. Spec 0224 remains the only archived spec
 from this set. Native device/output/audio/preview responsiveness acceptance requires coordinated
 testing, and the native clipboard text-size policy remains unanswered/unconfigured.
+
+## Existing installation symlink clarification
+
+Read-only inspection after the release handoff found that `/usr/local/bin/nickel` and `nickel-login`
+already symlink to this checkout's `target/release` executables; Settings and Terminal do likewise.
+Consequently the completed release build **is already the binary selected by the existing Nickel
+login entry**. No install command or session restart occurred, but saying installation was still
+needed was incorrect. The next Nickel login will use the rebuilt executable. No Nickel process was
+running when it was built; Plasma remains the observed active session.
+
+The existing installer also expects `nickel-settings` and `nickel-terminal`, whose linked release
+artifacts were older. Their release build is being refreshed separately; no login selection,
+display-manager configuration or current session is being changed.
+
+`target/release/nickel --available-backends` reports `udev` and exits before session initialization.
+`CARGO_BUILD_JOBS=4 cargo build --release -p nickel-settings -p nickel-terminal` passed.
+The linked release artifacts are now ready for coordinated next-login testing. Initial user-visible
+checks should cover icons/open/menu focus loss, volume change plus OSD expiry, and keyboard invocation
+and typing before attempting animated-window or DisplayLink preview stress. These are pending checks,
+not recorded successes; no unattended input/audio/hotplug test has been authorized or performed.
