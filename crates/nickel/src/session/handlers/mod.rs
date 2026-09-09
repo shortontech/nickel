@@ -96,6 +96,7 @@ impl SeatHandler for NickelSession {
 pub enum SelectionOwner {
     XWayland(smithay::xwayland::xwm::XwmId),
     NativeText(std::sync::Arc<String>),
+    NativeImage(std::sync::Arc<Vec<u8>>),
 }
 
 impl SelectionHandler for NickelSession {
@@ -141,6 +142,14 @@ impl SelectionHandler for NickelSession {
                 ) && let Err(error) = self.send_native_clipboard(fd, text.clone())
                 {
                     tracing::warn!(error, "native clipboard transfer was rejected");
+                }
+                return;
+            }
+            SelectionOwner::NativeImage(png) => {
+                if mime_type == "image/png"
+                    && let Err(error) = self.send_native_image_clipboard(fd, png.clone())
+                {
+                    tracing::warn!(error, "native image clipboard transfer rejected");
                 }
                 return;
             }

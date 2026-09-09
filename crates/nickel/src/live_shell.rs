@@ -467,6 +467,7 @@ struct PanelTaskProjection {
 pub struct LiveShell {
     session_host: Arc<dyn SessionHost>,
     screenshot_capture_pending: bool,
+    pub(crate) screenshot_output: Option<String>,
     host_runtime_samples: HostRuntimeSamples,
     launcher: Launcher,
     window_feed: WindowFeed,
@@ -903,8 +904,9 @@ impl LiveShell {
             56,
         );
         Ok(Self {
-            session_host,
+            session_host: session_host.clone(),
             screenshot_capture_pending: false,
+            screenshot_output: None,
             host_runtime_samples: HostRuntimeSamples::default(),
             launcher,
             window_feed,
@@ -1003,7 +1005,7 @@ impl LiveShell {
             #[cfg(target_os = "linux")]
             secure_storage_query_error,
             requested_codex_project: None,
-            screenshot: ScreenshotTool::default(),
+            screenshot: ScreenshotTool::default().with_session_host(session_host),
             keyboard_host: nickel_ui::UiHost::new(
                 nickel_ui::on_screen_keyboard::KeyboardApp::new(palette),
                 1280,
@@ -2567,7 +2569,7 @@ impl LiveShell {
                     self.screenshot_pointer_pressed(point.x, point.y, width, height)
                 }
                 UiEvent::PointerReleased(_) => self.screenshot_pointer_released(),
-                _ => false,
+                event => self.screenshot_host_event(HostEvent::Ui(event), width, height),
             },
             // These are intentionally passive or hosted outside LiveShell.
             SurfaceRole::Desktop
@@ -2585,6 +2587,9 @@ impl LiveShell {
         height: u32,
     ) -> bool {
         match role {
+            SurfaceRole::Screenshot => {
+                self.screenshot_host_event(HostEvent::Shortcut(shortcut), width, height)
+            }
             SurfaceRole::Launcher => {
                 let outcome = self.launcher_host_event_with_clipboard_limit(
                     HostEvent::Shortcut(shortcut),
@@ -4134,7 +4139,10 @@ impl LiveShell {
     }
 
     pub fn capture_screenshot(&mut self) -> bool {
-        match self.session_host.capture_desktop() {
+        match self
+            .session_host
+            .capture_desktop(self.screenshot_output.as_deref())
+        {
             crate::session_host::DesktopCapturePoll::Pending => {
                 self.screenshot_capture_pending = true;
                 false
@@ -4155,6 +4163,22 @@ impl LiveShell {
                 }
             },
         }
+    }
+
+    pub(crate) fn screenshot_host_event(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if !self.screenshot.visible() {
+            return false;
+        }
+        let changed = self.screenshot.host_event(event, width, height);
+        if !self.screenshot.visible() {
+            self.set_screenshot_focus(false);
+        }
+        changed
     }
 
     pub fn screenshot_pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -4376,6 +4400,21 @@ impl LiveShell {
             self.set_control_visible(false);
         }
         changed || dismissed
+    }
+
+    /// Focus already belongs to the destination; dismissal must not restore
+    /// whichever application was active before this surface opened.
+    pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
+        match role {
+            SurfaceRole::ControlCenter => {
+                self.control_host.application_mut().show_control_center();
+                std::mem::replace(&mut self.control_visible, false)
+            }
+            SurfaceRole::CodexProjectMenu => {
+                std::mem::replace(&mut self.codex_project_menu_visible, false)
+            }
+            _ => false,
+        }
     }
 
     #[allow(dead_code)]
@@ -5183,6 +5222,9 @@ fn window_belongs_to_panel(
 
 impl LiveShell {
     fn sync_control_host(&mut self, width: u32, height: u32) {
+        self.control_host
+            .application_mut()
+            .set_palette(self.palette);
         let supported_projection_modes = supported_projection_modes(self.session_host.as_ref());
         self.control_host.application_mut().sync(
             &self.network,

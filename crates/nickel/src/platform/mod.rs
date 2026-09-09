@@ -502,8 +502,6 @@ mod tests {
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::shell_command_payload;
-#[cfg(target_os = "linux")]
 pub use linux::{
     NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_discovery,
     application_icon, applications, audio_status, bluetooth_status, capture_active_window,
@@ -520,6 +518,8 @@ pub use linux::{
     shell_readiness, show_window_system_menu, toggle_bluetooth_device,
     update_panel_fullscreen_state, wallpaper,
 };
+#[cfg(target_os = "linux")]
+pub(crate) use linux::{capture_output, save_temp_image, shell_command_payload};
 
 #[cfg(target_os = "windows")]
 mod windows;

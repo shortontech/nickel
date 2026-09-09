@@ -484,6 +484,84 @@ mod tests {
     }
 
     #[test]
+    fn project_menu_refresh_does_not_steal_focus_and_blur_hides_its_presentation() {
+        use crate::session::NickelSession;
+        use nickel_ui::{TextField, UiEvent};
+        use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
+        #[derive(Default)]
+        struct InputApp(String);
+        impl Application for InputApp {
+            type Message = String;
+            fn update(&mut self, text: String) {
+                self.0 = text;
+            }
+            fn view(&self, _: ViewContext) -> impl View<String> {
+                TextField::on_change(&self.0, |text| text)
+            }
+        }
+        let mut event_loop = EventLoop::try_new().unwrap();
+        let mut session = NickelSession::new(&mut event_loop, Display::new().unwrap(), false);
+        let menu = session.internal_ui.insert(
+            InputApp::default(),
+            placement(InternalSurfaceRole::Overlay),
+            1.0,
+        );
+        session.internal_ui.set_visible(menu, false);
+        let mut codex = host();
+        codex.project_menu = Some(menu);
+        session.internal_codex = Some(codex);
+        let application = session.internal_ui.insert(
+            InputApp::default(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (800, 0, 300, 300),
+                output: None,
+            },
+            1.0,
+        );
+        for client in [false, true] {
+            session
+                .show_internal_codex_project_menu(CodexSurfacePlacement::default())
+                .unwrap();
+            assert_eq!(session.internal_ui.focused(), Some(menu));
+            session
+                .internal_ui
+                .pointer_button_with_client((900.0, 100.0), true, client);
+            let expected = (!client).then_some(application);
+            assert_eq!(session.internal_ui.focused(), expected);
+            // This is the same refresh invoked on every native shell poll.
+            session
+                .show_internal_codex_project_menu(CodexSurfacePlacement::default())
+                .unwrap();
+            assert_eq!(session.internal_ui.focused(), expected);
+            session.flush_internal_shell_input();
+            assert!(!session.internal_ui.is_visible(menu));
+            assert_eq!(session.internal_ui.focused(), expected);
+            if !client {
+                session
+                    .internal_ui
+                    .keyboard(UiEvent::TextInput("destination".into()));
+                assert_eq!(
+                    session
+                        .internal_ui
+                        .application::<InputApp>(application)
+                        .unwrap()
+                        .0,
+                    "destination"
+                );
+            }
+            assert!(
+                session
+                    .internal_ui
+                    .application::<InputApp>(menu)
+                    .unwrap()
+                    .0
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
     fn project_menu_identity_is_an_internal_surface_id() {
         let mut runtime = InternalUiRuntime::default();
         let id = runtime.insert(TestApp, placement(InternalSurfaceRole::Overlay), 1.0);

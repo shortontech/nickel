@@ -83,6 +83,8 @@ impl super::state::NickelSession {
                 writer.into(),
             )
             .map_err(|_| "XWayland image selection request failed")?;
+        } else if let Some(super::handlers::SelectionOwner::NativeImage(png)) = owner {
+            self.send_native_image_clipboard(writer.into(), png)?;
         } else {
             request_data_device_client_selection(&self.seat, "image/png".into(), writer.into())
                 .map_err(|_| "clipboard PNG is unavailable")?;
@@ -493,6 +495,55 @@ impl super::state::NickelSession {
             }
         }
     }
+    pub(super) fn publish_native_image_clipboard(
+        &mut self,
+        png: Arc<Vec<u8>>,
+    ) -> Result<(), &'static str> {
+        if self.locked {
+            return Err("clipboard is unavailable while locked");
+        }
+        let mime_types = vec!["image/png".into()];
+        smithay::wayland::selection::data_device::set_data_device_selection(
+            &self.display_handle,
+            &self.seat,
+            mime_types.clone(),
+            super::handlers::SelectionOwner::NativeImage(png),
+        );
+        self.native_clipboard.mime_types = mime_types.clone();
+        if let Some((_, xwm)) = self.xwm.as_mut() {
+            xwm.new_selection(
+                smithay::wayland::selection::SelectionTarget::Clipboard,
+                Some(mime_types),
+            )
+            .map_err(|_| "native image clipboard could not be mirrored to XWayland")?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn send_native_image_clipboard(
+        &self,
+        fd: std::os::fd::OwnedFd,
+        png: Arc<Vec<u8>>,
+    ) -> Result<(), &'static str> {
+        let permit = self
+            .native_clipboard
+            .writes
+            .acquire(4)
+            .ok_or("clipboard transfers are busy")?;
+        std::thread::Builder::new()
+            .name("nickel-image-clipboard-write".into())
+            .spawn(move || {
+                let _permit = permit;
+                if let Err(error) =
+                    super::clipboard_transfer::write_bytes(fd, &png, TRANSFER_TIMEOUT)
+                {
+                    tracing::debug!(error, "image clipboard transfer failed");
+                }
+            })
+            .map_err(|_| "clipboard transfer worker unavailable")?;
+        Ok(())
+    }
+
     pub(super) fn publish_native_clipboard(&mut self, text: String) -> Result<(), &'static str> {
         if self.locked {
             return Err("clipboard is unavailable while locked");
@@ -503,6 +554,16 @@ impl super::state::NickelSession {
             .ok_or("native clipboard text limit is not configured")?;
         if text.len() > maximum {
             return Err("clipboard text exceeds transfer limit");
+        }
+        self.publish_native_text_selection(text)
+    }
+
+    pub(super) fn publish_native_text_selection(
+        &mut self,
+        text: String,
+    ) -> Result<(), &'static str> {
+        if self.locked {
+            return Err("clipboard is unavailable while locked");
         }
         smithay::wayland::selection::data_device::set_data_device_selection(
             &self.display_handle,

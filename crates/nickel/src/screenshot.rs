@@ -16,8 +16,6 @@ use nickel_ui::{
     ViewContext,
 };
 
-use crate::platform;
-
 const TOOLBAR_HEIGHT: f32 = 70.0;
 const PREVIEW_PADDING: f32 = 20.0;
 
@@ -343,6 +341,7 @@ impl Application for ScreenshotApp {
 }
 
 pub struct ScreenshotTool {
+    session_host: std::sync::Arc<dyn crate::session_host::SessionHost>,
     host: UiHost<ScreenshotApp>,
     capture_deadline: Option<Instant>,
     pending_pointer: Option<(f32, f32, u32, u32)>,
@@ -352,6 +351,7 @@ pub struct ScreenshotTool {
 impl Default for ScreenshotTool {
     fn default() -> Self {
         Self {
+            session_host: crate::session_host::default_session_host(),
             host: UiHost::new(ScreenshotApp::new(1, 1), 1, 1),
             capture_deadline: None,
             pending_pointer: None,
@@ -361,6 +361,13 @@ impl Default for ScreenshotTool {
 }
 
 impl ScreenshotTool {
+    pub fn with_session_host(
+        mut self,
+        host: std::sync::Arc<dyn crate::session_host::SessionHost>,
+    ) -> Self {
+        self.session_host = host;
+        self
+    }
     pub fn change_token(&self) -> nickel_ui::HostChangeToken {
         let inspection = self.host.inspect();
         nickel_ui::HostChangeToken {
@@ -440,6 +447,60 @@ impl ScreenshotTool {
         app.save_after_confirmation = false;
         app.dirty = true;
         self.host.poll();
+    }
+
+    /// Native hosts use normalized input; region selection shares the existing
+    /// pointer reducers while keyboard and toolbar actions stay on the UI host.
+    pub fn host_event(&mut self, event: HostEvent, width: u32, height: u32) -> bool {
+        use nickel_input::{InputEvent, KeyEdge, PointerButton, PointerEvent};
+        match event {
+            HostEvent::Ui(UiEvent::PointerMoved(point)) => {
+                self.queue_pointer_moved(point.x, point.y, width, height);
+                false
+            }
+            HostEvent::Ui(UiEvent::PointerPressed(point)) => {
+                self.pointer_pressed(point.x, point.y, width, height)
+            }
+            HostEvent::Ui(UiEvent::KeyboardNavigateBack) => self.escape(),
+            HostEvent::Ui(UiEvent::PointerReleased(point)) => {
+                self.queue_pointer_moved(point.x, point.y, width, height);
+                self.pointer_released()
+            }
+            HostEvent::Normalized {
+                input: InputEvent::Pointer(PointerEvent::Motion { position, .. }),
+                ..
+            } => {
+                self.queue_pointer_moved(position.x as f32, position.y as f32, width, height);
+                false
+            }
+            HostEvent::Normalized {
+                input:
+                    InputEvent::Pointer(PointerEvent::Button {
+                        position: Some(position),
+                        button: PointerButton::Primary,
+                        edge,
+                        ..
+                    }),
+                ..
+            } => match edge {
+                KeyEdge::Pressed => {
+                    self.pointer_pressed(position.x as f32, position.y as f32, width, height)
+                }
+                KeyEdge::Released => {
+                    self.queue_pointer_moved(position.x as f32, position.y as f32, width, height);
+                    self.pointer_released()
+                }
+            },
+            event => {
+                self.flush_pointer();
+                self.resize(width, height, None);
+                let outcome = self.host.step(HostBatch {
+                    events: vec![event],
+                    ..HostBatch::default()
+                });
+                outcome.changed | self.apply_effects()
+            }
+        }
     }
 
     pub fn pointer_moved(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -615,7 +676,8 @@ impl ScreenshotTool {
         self.cropped(width, height)
             .ok_or_else(|| "COPY FAILED · NO SELECTION".to_owned())
             .and_then(|image| {
-                platform::copy_image_to_clipboard(image)
+                self.session_host
+                    .copy_image(image)
                     .map(|()| "IMAGE COPIED".to_owned())
                     .map_err(|error| format!("COPY FAILED · {error}"))
             })
@@ -655,7 +717,8 @@ impl ScreenshotTool {
         self.cropped(width, height)
             .ok_or_else(|| "TEMP SAVE FAILED · NO SELECTION".to_owned())
             .and_then(|image| {
-                platform::copy_temp_image_path(&image)
+                self.session_host
+                    .copy_image_path(&image)
                     .map(|path| format!("TEMP PATH COPIED · {}", path.display()))
                     .map_err(|error| format!("TEMP SAVE FAILED · {error}"))
             })

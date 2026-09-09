@@ -62,7 +62,7 @@ pub fn capture_desktop() -> Result<super::DesktopCapture, String> {
     capture_output(None)
 }
 
-fn capture_output(output: Option<&str>) -> Result<super::DesktopCapture, String> {
+pub(crate) fn capture_output(output: Option<&str>) -> Result<super::DesktopCapture, String> {
     use std::os::unix::net::UnixDatagram;
 
     let server = env::var_os(SESSION_CONTROL_ENV)
@@ -271,7 +271,7 @@ pub fn copy_image_to_clipboard(image: image::RgbaImage) -> Result<(), String> {
     queue_wayland_clipboard(ClipboardJob::Image(image))
 }
 
-pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+pub(crate) fn save_temp_image(image: &image::RgbaImage) -> Result<PathBuf, String> {
     let runtime = env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(env::temp_dir);
@@ -283,6 +283,11 @@ pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String>
     image
         .save(&path)
         .map_err(|error| format!("could not save temporary screenshot: {error}"))?;
+    Ok(path)
+}
+
+pub fn copy_temp_image_path(image: &image::RgbaImage) -> Result<PathBuf, String> {
+    let path = save_temp_image(image)?;
     if let Err(error) =
         queue_wayland_clipboard(ClipboardJob::Text(path.to_string_lossy().into_owned()))
     {

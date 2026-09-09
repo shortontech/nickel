@@ -127,9 +127,17 @@ pub(super) fn write_text(
     text: Arc<String>,
     duration: Duration,
 ) -> Result<(), &'static str> {
+    write_bytes(fd, text.as_bytes(), duration)
+}
+
+pub(super) fn write_bytes(
+    fd: OwnedFd,
+    bytes: &[u8],
+    duration: Duration,
+) -> Result<(), &'static str> {
     nonblocking(&fd)?;
     let deadline = Instant::now() + duration;
-    let mut remaining = text.as_bytes();
+    let mut remaining = bytes;
     while !remaining.is_empty() {
         ready(&fd, PollFlags::OUT, deadline)?;
         match write(&fd, remaining) {

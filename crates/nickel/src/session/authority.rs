@@ -15,6 +15,8 @@ use super::NickelSession;
 pub enum SessionAuthorityRequest {
     Query(Query),
     Command(Command),
+    PublishClipboardImage(std::sync::Arc<Vec<u8>>),
+    PublishClipboardText(String),
 }
 
 impl From<Query> for SessionAuthorityRequest {

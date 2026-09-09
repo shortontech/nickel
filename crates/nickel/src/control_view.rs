@@ -4,27 +4,31 @@ use crate::platform::{
     AudioStatus, BluetoothStatus, NetworkStatus, SessionAction, WorkspaceSummary,
 };
 use nickel_core::display_projection::ProjectionMode;
+use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
     Length, LinearGradient, Row, SemanticRole, SemanticTheme, SemanticTokenSet, Slider, Spacer,
     Text, UiHost, VerticalScroll, ViewContext,
 };
 
-const TOP: u32 = 0x202b43;
-const BOTTOM: u32 = 0x111827;
-const CARD: u32 = 0x2b3852;
-const BORDER: u32 = 0x42516c;
-const PRIMARY: u32 = 0xf4f7ff;
-const SECONDARY: u32 = 0xaebbd1;
-const ACCENT: u32 = 0x65b8ff;
 const GOOD: u32 = 0x6ee7a8;
 const WARNING: u32 = 0xf6c76e;
 const HEADER: f32 = 66.0;
 const ROW: f32 = 46.0;
 
-fn control_theme() -> SemanticTheme {
+fn control_theme(palette: ThemePalette) -> SemanticTheme {
     SemanticTheme::from_tokens(SemanticTokenSet::standard(
-        BOTTOM, TOP, CARD, BORDER, BORDER, PRIMARY, SECONDARY, ACCENT, CARD, GOOD, WARNING,
+        palette.background,
+        palette.panel,
+        palette.surface,
+        palette.surface_hover,
+        palette.surface_hover,
+        palette.text,
+        palette.muted,
+        palette.accent,
+        palette.surface,
+        GOOD,
+        WARNING,
     ))
 }
 
@@ -67,6 +71,7 @@ pub struct ControlViewState {
 }
 
 pub struct ControlCenterApp {
+    palette: ThemePalette,
     network: NetworkStatus,
     bluetooth: BluetoothStatus,
     audio: AudioStatus,
@@ -85,6 +90,7 @@ impl ControlCenterApp {
         workspaces: Vec<WorkspaceSummary>,
     ) -> Self {
         Self {
+            palette: ThemePalette::from_appearance(Appearance::default()),
             network,
             bluetooth,
             audio,
@@ -98,6 +104,13 @@ impl ControlCenterApp {
             state: ControlViewState::default(),
             effects: Vec::new(),
             dirty: false,
+        }
+    }
+
+    pub fn set_palette(&mut self, palette: ThemePalette) {
+        if self.palette != palette {
+            self.palette = palette;
+            self.dirty = true;
         }
     }
 
@@ -190,15 +203,7 @@ impl Application for ControlCenterApp {
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
-        control_center_view(
-            &self.network,
-            &self.bluetooth,
-            &self.audio,
-            &self.workspaces,
-            &self.supported_projection_modes,
-            self.state,
-            context,
-        )
+        control_center_view(self, context)
     }
 
     fn poll(&mut self) -> bool {
@@ -212,20 +217,24 @@ struct Card {
     view: AnyView<ControlAction>,
 }
 
-fn control_center_view(
-    network: &NetworkStatus,
-    bluetooth: &BluetoothStatus,
-    audio: &AudioStatus,
-    workspaces: &[WorkspaceSummary],
-    supported_projection_modes: &[ProjectionMode],
-    state: ControlViewState,
-    context: ViewContext,
-) -> AnyView<ControlAction> {
+fn control_center_view(app: &ControlCenterApp, context: ViewContext) -> AnyView<ControlAction> {
+    let ControlCenterApp {
+        palette,
+        network,
+        bluetooth,
+        audio,
+        workspaces,
+        supported_projection_modes,
+        state,
+        ..
+    } = app;
+    let palette = *palette;
     let width = context.viewport.size.width.max(280.0);
     let height = context.viewport.size.height.max(240.0);
     let viewport_height = height - HEADER;
     if state.projection_only {
         return projection_chooser_view(
+            palette,
             state.pending_projection,
             supported_projection_modes,
             width,
@@ -233,27 +242,40 @@ fn control_center_view(
         );
     }
     let cards = vec![
-        wifi(network, state.wifi_expanded),
-        bluetooth_view(bluetooth, state.bluetooth_expanded),
-        audio_view(audio, state.audio_expanded),
-        workspaces_view(workspaces),
+        wifi(palette, network, state.wifi_expanded),
+        bluetooth_view(palette, bluetooth, state.bluetooth_expanded),
+        audio_view(palette, audio, state.audio_expanded),
+        workspaces_view(palette, workspaces),
         card(
+            palette,
             64.0,
             vec![AnyView::new(
                 Row::new()
                     .gap(8.0)
                     .child(
-                        button(action(ControlAction::ToggleShowDesktop), "Show desktop")
-                            .id("show-desktop"),
+                        button(
+                            palette,
+                            action(ControlAction::ToggleShowDesktop),
+                            "Show desktop",
+                        )
+                        .id("show-desktop"),
                     )
                     .child(
-                        button(action(ControlAction::ShowNotifications), "Notifications")
-                            .id("show-notifications"),
+                        button(
+                            palette,
+                            action(ControlAction::ShowNotifications),
+                            "Notifications",
+                        )
+                        .id("show-notifications"),
                     ),
             )],
         ),
-        projection_view(state.pending_projection, supported_projection_modes),
-        session_view(state.pending_session_action),
+        projection_view(
+            palette,
+            state.pending_projection,
+            supported_projection_modes,
+        ),
+        session_view(palette, state.pending_session_action),
     ];
     let content = Column::new()
         .gap(12.0)
@@ -263,7 +285,7 @@ fn control_center_view(
         Column::new()
             .width(width)
             .height(height)
-            .background(LinearGradient::vertical(TOP, BOTTOM))
+            .background(LinearGradient::vertical(palette.panel, palette.background))
             .child(
                 Container::new()
                     .height(HEADER)
@@ -273,35 +295,48 @@ fn control_center_view(
                         bottom: 19.0,
                         left: 16.0,
                     })
-                    .background(TOP)
+                    .background(palette.panel)
                     .child(
                         Text::new("Control Center")
                             .scale(3.0)
                             .bold(true)
-                            .color(PRIMARY),
+                            .color(palette.text),
                     ),
             )
             .child(
                 VerticalScroll::new(ControlAction::ToggleWifiSection, 0.0)
                     .id("control-center-scroll")
-                    .theme(control_theme())
+                    .theme(control_theme(palette))
                     .height(viewport_height)
                     .child(content),
             ),
     )
 }
 
-fn projection_view(pending: Option<ProjectionMode>, supported: &[ProjectionMode]) -> Card {
+fn projection_view(
+    palette: ThemePalette,
+    pending: Option<ProjectionMode>,
+    supported: &[ProjectionMode],
+) -> Card {
     if pending.is_some() {
         return card(
+            palette,
             82.0,
             vec![
-                AnyView::new(Text::new("Keep these display settings?").color(PRIMARY)),
+                AnyView::new(Text::new("Keep these display settings?").color(palette.text)),
                 AnyView::new(
                     Row::new()
                         .gap(8.0)
-                        .child(button(action(ControlAction::CancelProjection), "Revert"))
-                        .child(button(action(ControlAction::ConfirmProjection), "Keep")),
+                        .child(button(
+                            palette,
+                            action(ControlAction::CancelProjection),
+                            "Revert",
+                        ))
+                        .child(button(
+                            palette,
+                            action(ControlAction::ConfirmProjection),
+                            "Keep",
+                        )),
                 ),
             ],
         );
@@ -313,9 +348,10 @@ fn projection_view(pending: Option<ProjectionMode>, supported: &[ProjectionMode]
         ("Second screen", ProjectionMode::ExternalOnly),
     ];
     card(
+        palette,
         96.0,
         vec![
-            AnyView::new(Text::new("Project displays").color(PRIMARY)),
+            AnyView::new(Text::new("Project displays").color(palette.text)),
             AnyView::new(
                 Row::new().gap(6.0).children(
                     modes
@@ -323,6 +359,7 @@ fn projection_view(pending: Option<ProjectionMode>, supported: &[ProjectionMode]
                         .filter(|(_, mode)| supported.contains(mode))
                         .map(|(label, mode)| {
                             AnyView::new(button(
+                                palette,
                                 action(ControlAction::PreviewProjection(mode)),
                                 label,
                             ))
@@ -334,6 +371,7 @@ fn projection_view(pending: Option<ProjectionMode>, supported: &[ProjectionMode]
 }
 
 fn projection_chooser_view(
+    palette: ThemePalette,
     pending: Option<ProjectionMode>,
     supported: &[ProjectionMode],
     width: f32,
@@ -347,44 +385,44 @@ fn projection_chooser_view(
                     Text::new("Project displays")
                         .scale(3.0)
                         .bold(true)
-                        .color(PRIMARY),
+                        .color(palette.text),
                 )
                 .child(
                     Text::new(
                         "No display projection modes are available for the current topology.",
                     )
-                    .color(SECONDARY),
+                    .color(palette.muted),
                 ),
         )
     } else {
-        projection_view(pending, supported).view
+        projection_view(palette, pending, supported).view
     };
     AnyView::new(
         Container::new()
             .width(width.max(280.0))
             .height(height.max(240.0))
             .padding(24.0)
-            .background(LinearGradient::vertical(TOP, BOTTOM))
+            .background(LinearGradient::vertical(palette.panel, palette.background))
             .child(content),
     )
 }
 
-fn card(height: f32, children: Vec<AnyView<ControlAction>>) -> Card {
+fn card(palette: ThemePalette, height: f32, children: Vec<AnyView<ControlAction>>) -> Card {
     Card {
         view: AnyView::new(
             Column::new()
                 .height(height)
                 .padding(14.0)
                 .gap(8.0)
-                .background(CARD)
-                .border(BORDER, 1.0)
+                .background(palette.surface)
+                .border(palette.surface_hover, 1.0)
                 .radius(12.0)
                 .children(children),
         ),
     }
 }
 
-fn title(name: &str, detail: String, color: u32) -> AnyView<ControlAction> {
+fn title(palette: ThemePalette, name: &str, detail: String, color: u32) -> AnyView<ControlAction> {
     AnyView::new(
         Column::new()
             .height(38.0)
@@ -394,7 +432,7 @@ fn title(name: &str, detail: String, color: u32) -> AnyView<ControlAction> {
                     .height(22.0)
                     .scale(2.0)
                     .bold(true)
-                    .color(PRIMARY),
+                    .color(palette.text),
             )
             .child(Text::new(detail).height(15.0).scale(1.0).color(color)),
     )
@@ -404,7 +442,11 @@ fn action(value: ControlAction) -> ControlAction {
     value
 }
 
-fn button(value: ControlAction, label: impl Into<String>) -> Button<ControlAction> {
+fn button(
+    palette: ThemePalette,
+    value: ControlAction,
+    label: impl Into<String>,
+) -> Button<ControlAction> {
     Button::new(value, label)
         .height(32.0)
         .padding(Insets {
@@ -414,13 +456,18 @@ fn button(value: ControlAction, label: impl Into<String>) -> Button<ControlActio
             left: 10.0,
         })
         .radius(7.0)
-        .background(0x34445f)
-        .color(PRIMARY)
-        .focus_background_tint(ACCENT)
-        .controller_focus_background_tint(ACCENT)
+        .background(palette.surface_hover)
+        .color(palette.text)
+        .focus_background_tint(palette.accent)
+        .controller_focus_background_tint(palette.accent)
 }
 
-fn section(id: &str, expanded: bool, value: ControlAction) -> AnyView<ControlAction> {
+fn section(
+    palette: ThemePalette,
+    id: &str,
+    expanded: bool,
+    value: ControlAction,
+) -> AnyView<ControlAction> {
     AnyView::new(
         Button::new(
             action(value),
@@ -433,21 +480,27 @@ fn section(id: &str, expanded: bool, value: ControlAction) -> AnyView<ControlAct
         .id(id)
         .height(34.0)
         .padding(8.0)
-        .background(CARD)
-        .color(SECONDARY)
-        .focus_background_tint(ACCENT)
-        .controller_focus_background_tint(ACCENT),
+        .background(palette.surface)
+        .color(palette.muted)
+        .focus_background_tint(palette.accent)
+        .controller_focus_background_tint(palette.accent),
     )
 }
 
-fn toggle(id: &str, value: bool, enabled: bool, message: ControlAction) -> AnyView<ControlAction> {
+fn toggle(
+    palette: ThemePalette,
+    id: &str,
+    value: bool,
+    enabled: bool,
+    message: ControlAction,
+) -> AnyView<ControlAction> {
     let thumb = || {
         AnyView::new(
             Container::new()
                 .width(18.0)
                 .height(18.0)
                 .radius(9.0)
-                .background(if enabled { PRIMARY } else { SECONDARY }),
+                .background(if enabled { palette.text } else { palette.muted }),
         )
     };
     AnyView::new(
@@ -457,7 +510,11 @@ fn toggle(id: &str, value: bool, enabled: bool, message: ControlAction) -> AnyVi
             .height(24.0)
             .radius(12.0)
             .padding(3.0)
-            .background(if value { ACCENT } else { BORDER })
+            .background(if value {
+                palette.accent
+            } else {
+                palette.surface_hover
+            })
             .semantic_role(SemanticRole::Switch)
             .accessibility_label(id)
             .message(message)
@@ -480,6 +537,7 @@ fn toggle(id: &str, value: bool, enabled: bool, message: ControlAction) -> AnyVi
 }
 
 fn status_row(
+    palette: ThemePalette,
     id: String,
     name: &str,
     detail: String,
@@ -495,14 +553,23 @@ fn status_row(
             left: 8.0,
         })
         .gap(1.0)
-        .background(if selected { 0x344d68 } else { CARD })
+        .background(if selected {
+            palette.accent_soft
+        } else {
+            palette.surface
+        })
         .radius(7.0)
-        .child(Text::new(name).height(20.0).bold(selected).color(PRIMARY))
+        .child(
+            Text::new(name)
+                .height(20.0)
+                .bold(selected)
+                .color(palette.text),
+        )
         .child(
             Text::new(detail)
                 .height(15.0)
                 .scale(0.8)
-                .color(if selected { GOOD } else { SECONDARY }),
+                .color(if selected { GOOD } else { palette.muted }),
         );
     match message {
         Some(message) => AnyView::new(
@@ -517,7 +584,7 @@ fn status_row(
     }
 }
 
-fn wifi(status: &NetworkStatus, expanded: bool) -> Card {
+fn wifi(palette: ThemePalette, status: &NetworkStatus, expanded: bool) -> Card {
     let detail = if !status.available {
         "Unavailable".into()
     } else if !status.enabled {
@@ -537,19 +604,30 @@ fn wifi(status: &NetworkStatus, expanded: bool) -> Card {
                 .height(38.0)
                 .align_items(Align::Start)
                 .child(title(
+                    palette,
                     "Wi-Fi",
                     detail,
-                    if status.connected { GOOD } else { SECONDARY },
+                    if status.connected {
+                        GOOD
+                    } else {
+                        palette.muted
+                    },
                 ))
                 .child(Spacer::flex())
                 .child(toggle(
+                    palette,
                     "wifi-power",
                     status.enabled,
                     status.available,
                     ControlAction::SetWifiEnabled(!status.enabled),
                 )),
         ),
-        section("wifi-section", expanded, ControlAction::ToggleWifiSection),
+        section(
+            palette,
+            "wifi-section",
+            expanded,
+            ControlAction::ToggleWifiSection,
+        ),
     ];
     if expanded {
         children.extend(status.networks.iter().take(8).map(|network| {
@@ -561,6 +639,7 @@ fn wifi(status: &NetworkStatus, expanded: bool) -> Card {
                 format!("{}% SIGNAL", network.signal_percent)
             };
             status_row(
+                palette,
                 format!("wifi-{}", network.id),
                 nonempty(&network.name, "Hidden network"),
                 detail,
@@ -572,12 +651,13 @@ fn wifi(status: &NetworkStatus, expanded: bool) -> Card {
         }));
     }
     card(
+        palette,
         78.0 + usize::from(expanded) as f32 * status.networks.len().min(8) as f32 * ROW,
         children,
     )
 }
 
-fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
+fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: bool) -> Card {
     let connected = status
         .devices
         .iter()
@@ -600,12 +680,14 @@ fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
             Row::new()
                 .height(38.0)
                 .child(title(
+                    palette,
                     "Bluetooth",
                     detail,
-                    if connected > 0 { GOOD } else { SECONDARY },
+                    if connected > 0 { GOOD } else { palette.muted },
                 ))
                 .child(Spacer::flex())
                 .child(toggle(
+                    palette,
                     "bluetooth-power",
                     status.powered,
                     status.available,
@@ -618,6 +700,7 @@ fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
                 .child(if status.available && status.powered {
                     AnyView::new(
                         button(
+                            palette,
                             scan,
                             if status.discovering {
                                 "Stop scan"
@@ -635,19 +718,20 @@ fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
                             .width(116.0)
                             .height(28.0)
                             .radius(14.0)
-                            .background(BORDER)
+                            .background(palette.surface_hover)
                             .child(
                                 Text::new(if status.discovering {
                                     "Stop scan"
                                 } else {
                                     "Scan nearby"
                                 })
-                                .color(SECONDARY),
+                                .color(palette.muted),
                             ),
                     )
                 })
                 .child(Spacer::flex())
                 .child(section(
+                    palette,
                     "bluetooth-section",
                     expanded,
                     ControlAction::ToggleBluetoothSection,
@@ -657,6 +741,7 @@ fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
     if expanded {
         children.extend(status.devices.iter().take(8).map(|device| {
             status_row(
+                palette,
                 format!("bluetooth-{}", device.id),
                 nonempty(&device.name, "Bluetooth device"),
                 (if device.connected {
@@ -675,6 +760,7 @@ fn bluetooth_view(status: &BluetoothStatus, expanded: bool) -> Card {
         }));
     }
     card(
+        palette,
         96.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
         children,
     )
@@ -684,7 +770,7 @@ fn volume(value: f32) -> ControlAction {
     ControlAction::SetAudioVolume((value.clamp(0.0, 1.0) * 100.0).round() as u8)
 }
 
-fn audio_view(status: &AudioStatus, expanded: bool) -> Card {
+fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Card {
     let selected = status
         .devices
         .iter()
@@ -698,22 +784,29 @@ fn audio_view(status: &AudioStatus, expanded: bool) -> Card {
     };
     let mut children = vec![
         title(
+            palette,
             "Audio",
             detail,
-            if status.muted { WARNING } else { SECONDARY },
+            if status.muted { WARNING } else { palette.muted },
         ),
         AnyView::new(
             Slider::on_change(volume, f32::from(status.volume_percent) / 100.0)
-                .colors(BORDER, ACCENT, PRIMARY)
+                .colors(palette.surface_hover, palette.accent, palette.text)
                 .id("audio-volume")
                 .accessibility_label("Audio volume")
                 .width_length(Length::Fill),
         ),
-        section("audio-section", expanded, ControlAction::ToggleAudioSection),
+        section(
+            palette,
+            "audio-section",
+            expanded,
+            ControlAction::ToggleAudioSection,
+        ),
     ];
     if expanded {
         children.extend(status.devices.iter().take(8).map(|device| {
             status_row(
+                palette,
                 format!("audio-{}", device.id),
                 nonempty(&device.name, "Audio device"),
                 (if device.is_default {
@@ -730,12 +823,13 @@ fn audio_view(status: &AudioStatus, expanded: bool) -> Card {
         }));
     }
     card(
+        palette,
         116.0 + usize::from(expanded) as f32 * status.devices.len().min(8) as f32 * ROW,
         children,
     )
 }
 
-fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
+fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Card {
     let mut controls = workspaces
         .iter()
         .take(10)
@@ -743,18 +837,23 @@ fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
         .map(|(index, workspace)| {
             AnyView::new(
                 button(
+                    palette,
                     action(ControlAction::SwitchWorkspace(workspace.id)),
                     (index + 1).to_string(),
                 )
                 .id(format!("workspace-{}", workspace.id))
                 .width(34.0)
                 .height(28.0)
-                .background(if workspace.active { 0x9f3f4a } else { 0x34445f }),
+                .background(if workspace.active {
+                    0x9f3f4a
+                } else {
+                    palette.surface_hover
+                }),
             )
         })
         .collect::<Vec<_>>();
     controls.push(AnyView::new(
-        button(action(ControlAction::CreateWorkspace), "+")
+        button(palette, action(ControlAction::CreateWorkspace), "+")
             .id("workspace-create")
             .width(34.0)
             .height(28.0),
@@ -763,13 +862,18 @@ fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
         && let Some(active) = workspaces.iter().find(|workspace| workspace.active)
     {
         controls.push(AnyView::new(
-            button(action(ControlAction::RemoveWorkspace(active.id)), "−")
-                .id("workspace-remove")
-                .width(34.0)
-                .height(28.0),
+            button(
+                palette,
+                action(ControlAction::RemoveWorkspace(active.id)),
+                "−",
+            )
+            .id("workspace-remove")
+            .width(34.0)
+            .height(28.0),
         ));
     }
     card(
+        palette,
         82.0,
         vec![
             AnyView::new(
@@ -777,18 +881,19 @@ fn workspaces_view(workspaces: &[WorkspaceSummary]) -> Card {
                     .height(22.0)
                     .scale(1.5)
                     .bold(true)
-                    .color(PRIMARY),
+                    .color(palette.text),
             ),
             AnyView::new(Row::new().height(28.0).gap(6.0).children(controls)),
         ],
     )
 }
 
-fn session_view(pending: Option<SessionAction>) -> Card {
+fn session_view(palette: ThemePalette, pending: Option<SessionAction>) -> Card {
     if let Some(pending) = pending {
         let cancel = action(ControlAction::CancelSessionAction);
         let confirm = action(ControlAction::ConfirmSessionAction);
         return card(
+            palette,
             98.0,
             vec![
                 AnyView::new(
@@ -796,20 +901,20 @@ fn session_view(pending: Option<SessionAction>) -> Card {
                         .height(22.0)
                         .scale(1.5)
                         .bold(true)
-                        .color(PRIMARY),
+                        .color(palette.text),
                 ),
                 AnyView::new(
                     Row::new()
                         .height(30.0)
                         .child(
-                            button(cancel, "Cancel")
+                            button(palette, cancel, "Cancel")
                                 .id("session-cancel")
                                 .width(104.0)
                                 .height(30.0),
                         )
                         .child(Spacer::flex())
                         .child(
-                            button(confirm, "Confirm")
+                            button(palette, confirm, "Confirm")
                                 .id("session-confirm")
                                 .width(118.0)
                                 .height(30.0)
@@ -846,9 +951,10 @@ fn session_view(pending: Option<SessionAction>) -> Card {
         .into_iter()
         .enumerate()
         .map(|(index, (label, value))| {
-            AnyView::new(button(action(value), label).id(format!("session-{index}")))
+            AnyView::new(button(palette, action(value), label).id(format!("session-{index}")))
         });
     card(
+        palette,
         174.0,
         vec![
             AnyView::new(
@@ -856,7 +962,7 @@ fn session_view(pending: Option<SessionAction>) -> Card {
                     .height(22.0)
                     .scale(1.5)
                     .bold(true)
-                    .color(PRIMARY),
+                    .color(palette.text),
             ),
             AnyView::new(Grid::fixed(2).height(112.0).gap(8.0).children(controls)),
         ],

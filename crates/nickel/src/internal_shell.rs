@@ -121,6 +121,10 @@ impl InternalShellCoordinator {
         self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
     }
 
+    pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
+        self.shell.dismiss_ephemeral_on_focus_loss(role)
+    }
+
     pub fn apply_codex_projection(
         &mut self,
         projection: nickel_core::optional_features::CodexAvailabilityProjection,
@@ -589,6 +593,17 @@ impl InternalShellCoordinator {
             );
         }
         for event in batch.events {
+            if entry.role == SurfaceRole::Screenshot {
+                changed |= match event {
+                    nickel_ui::HostEvent::Controller(action) => {
+                        self.shell.screenshot_controller(action)
+                    }
+                    event => self
+                        .shell
+                        .screenshot_host_event(event, entry.size.0, entry.size.1),
+                };
+                continue;
+            }
             if matches!(
                 entry.role,
                 SurfaceRole::Launcher | SurfaceRole::ControlCenter
@@ -806,6 +821,15 @@ impl InternalShellCoordinator {
             .global_shortcut(crate::platform::GlobalShortcut::LockState { locked })
     }
 
+    /// Keep capture and presentation on the output selected at invocation.
+    pub(crate) fn set_screenshot_output(&mut self, output: Option<String>) {
+        self.shell.screenshot_output = output;
+    }
+
+    pub(crate) fn screenshot_output(&self) -> Option<&str> {
+        self.shell.screenshot_output.as_deref()
+    }
+
     /// Deliver a non-consumer compositor shortcut through the same typed shell owner.
     pub fn global_shortcut(&mut self, action: nickel_session_protocol::ShortcutAction) -> bool {
         use crate::platform::{GlobalShortcut, ScreenshotAction};
@@ -865,6 +889,41 @@ mod tests {
     use nickel_core::hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge};
     use std::sync::atomic::{AtomicU8, Ordering};
 
+    #[test]
+    fn ephemeral_focus_loss_hides_control_center_without_requesting_focus_restoration() {
+        #[derive(Default)]
+        struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
+        impl SessionHost for RecordingHost {
+            fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
+                self.0.lock().unwrap().push(command);
+                Ok(())
+            }
+        }
+        let host = Arc::new(RecordingHost::default());
+        let mut coordinator =
+            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "test".into(),
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+        }]);
+        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
+        host.0.lock().unwrap().clear();
+        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter));
+        let control = coordinator
+            .surface(SurfaceRole::ControlCenter, None)
+            .unwrap()
+            .id;
+        assert!(!coordinator.visible(control));
+        assert!(
+            host.0.lock().unwrap().is_empty(),
+            "focus loss must not issue a restore command"
+        );
+    }
+
     struct TestHost;
 
     impl SessionHost for TestHost {
@@ -882,7 +941,10 @@ mod tests {
             Ok(())
         }
 
-        fn capture_desktop(&self) -> crate::session_host::DesktopCapturePoll {
+        fn capture_desktop(
+            &self,
+            _output: Option<&str>,
+        ) -> crate::session_host::DesktopCapturePoll {
             crate::session_host::DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture {
                 image: image::RgbaImage::new(4, 4),
             }))
@@ -1813,6 +1875,131 @@ mod tests {
 
         assert!(coordinator.visible(launcher));
         assert!(!coordinator.scene(launcher).unwrap().is_empty());
+    }
+
+    fn opened_screenshot() -> (InternalShellCoordinator, InternalSurfaceId) {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        coordinator.global_shortcut(nickel_session_protocol::ShortcutAction::ShowScreenshotTool);
+        coordinator.poll(Instant::now() + std::time::Duration::from_millis(100));
+        let id = coordinator
+            .surface(SurfaceRole::Screenshot, None)
+            .unwrap()
+            .id;
+        assert!(coordinator.visible(id));
+        coordinator.step_slot_changes(
+            id,
+            HostBatch {
+                window_focused: Some(true),
+                ..HostBatch::default()
+            },
+        );
+        (coordinator, id)
+    }
+
+    #[test]
+    fn native_screenshot_accepts_escape_and_controller_cancel() {
+        use nickel_input::{
+            DeviceId, EventOrder, InputEvent, KeyEvent, KeyLocation, LogicalKey, ModifierState,
+            NamedKey, PhysicalKey,
+        };
+        for event in [
+            nickel_ui::HostEvent::Normalized {
+                input: InputEvent::Key(KeyEvent {
+                    device: DeviceId(1),
+                    order: EventOrder(1),
+                    physical: PhysicalKey::Code(nickel_input::KeyCode::Escape),
+                    logical: LogicalKey::Named(NamedKey::Escape),
+                    location: KeyLocation::Standard,
+                    edge: nickel_input::KeyEdge::Pressed,
+                    repeat: false,
+                    modifiers: ModifierState::default(),
+                }),
+                clipboard_text: None,
+            },
+            nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape),
+            nickel_ui::HostEvent::Controller(nickel_ui::ControllerAction::Cancel),
+        ] {
+            let (mut coordinator, id) = opened_screenshot();
+            coordinator.step_slot_changes(
+                id,
+                HostBatch {
+                    events: vec![event],
+                    ..HostBatch::default()
+                },
+            );
+            assert!(!coordinator.visible(id));
+        }
+    }
+
+    #[test]
+    fn native_screenshot_drag_confirmation_and_cancel_use_normalized_pointer_input() {
+        use nickel_input::{
+            DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent,
+        };
+        let (mut coordinator, id) = opened_screenshot();
+        let image = coordinator
+            .scene(id)
+            .unwrap()
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Image { bounds, .. } => Some(*bounds),
+                _ => None,
+            })
+            .unwrap();
+        let point = |fraction: f32| nickel_input::Point {
+            x: f64::from(image.origin.x + image.size.width * fraction),
+            y: f64::from(image.origin.y + image.size.height * fraction),
+        };
+        let send = |coordinator: &mut InternalShellCoordinator, position, edge, order| {
+            coordinator.step_slot_changes(
+                id,
+                HostBatch {
+                    events: vec![nickel_ui::HostEvent::Normalized {
+                        input: InputEvent::Pointer(PointerEvent::Button {
+                            device: DeviceId(1),
+                            order: EventOrder(order),
+                            position: Some(position),
+                            button: PointerButton::Primary,
+                            edge,
+                        }),
+                        clipboard_text: None,
+                    }],
+                    ..HostBatch::default()
+                },
+            );
+        };
+        send(&mut coordinator, point(0.25), KeyEdge::Pressed, 1);
+        send(&mut coordinator, point(0.75), KeyEdge::Released, 2);
+        for order in [3, 5] {
+            send(&mut coordinator, point(0.5), KeyEdge::Pressed, order);
+            send(&mut coordinator, point(0.5), KeyEdge::Released, order + 1);
+        }
+        let scene = coordinator.scene(id).unwrap();
+        assert!(scene.iter().any(|command| matches!(command,
+            PaintCommand::Text { text, .. } if text == "SELECTION CONFIRMED")));
+        let cancel = scene
+            .iter()
+            .find_map(|command| match command {
+                PaintCommand::Text { text, bounds, .. } if text == "Cancel" => Some(*bounds),
+                _ => None,
+            })
+            .expect("confirmed selection exposes Cancel");
+        let cancel = nickel_input::Point {
+            x: f64::from(cancel.origin.x + cancel.size.width / 2.0),
+            y: f64::from(cancel.origin.y + cancel.size.height / 2.0),
+        };
+        send(&mut coordinator, cancel, KeyEdge::Pressed, 7);
+        assert!(coordinator.visible(id));
+        send(&mut coordinator, cancel, KeyEdge::Released, 8);
+        assert!(!coordinator.visible(id));
     }
 
     #[test]

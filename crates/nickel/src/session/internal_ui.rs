@@ -25,9 +25,10 @@ use smithay::{
         renderer::{
             Color32F, ImportMem, Renderer,
             element::{
-                Kind,
+                Element, Kind,
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
+                utils::RescaleRenderElement,
             },
         },
     },
@@ -41,6 +42,7 @@ smithay::backend::renderer::element::render_elements! {
     /// Smithay elements emitted by the compositor-owned Nickel UI presenter.
     pub InternalUiRenderElement<R> where R: Renderer + ImportMem;
     Memory=MemoryRenderBufferRenderElement<R>,
+    Text=RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     Solid=SolidColorRenderElement,
 }
 
@@ -382,6 +384,7 @@ enum GpuPrimitive {
     Texture {
         rect: nickel_ui::Rect,
         source: Rectangle<f64, Logical>,
+        text_scale: Option<f32>,
         buffer: MemoryRenderBuffer,
     },
 }
@@ -836,6 +839,7 @@ impl SmithayFrameRenderer {
                     self.primitives.push(GpuPrimitive::Texture {
                         rect,
                         source,
+                        text_scale: None,
                         buffer: texture.buffer,
                     });
                 }
@@ -862,10 +866,14 @@ impl SmithayFrameRenderer {
         let cached = self.text_cache.borrow_mut().get(&key);
         if let Some(texture) = cached {
             self.diagnostics.text_cache_hits = self.diagnostics.text_cache_hits.saturating_add(1);
-            let source = text_source_rect(rect, bounds, texture.width, texture.height);
+            let source = text_source_rect(rect, bounds, scale, texture.width, texture.height);
+            if source.is_empty() {
+                return;
+            }
             self.primitives.push(GpuPrimitive::Texture {
-                rect,
+                rect: text_destination_rect(bounds, source, scale),
                 source,
+                text_scale: Some(scale),
                 buffer: texture.buffer,
             });
             return;
@@ -885,7 +893,9 @@ impl SmithayFrameRenderer {
         self.text_software.render(&[local]);
         let mut bytes = Vec::with_capacity(self.text_software.pixels().len() * 4);
         for pixel in self.text_software.pixels() {
-            bytes.extend_from_slice(&premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]));
+            // SoftwareRenderer already blends into premultiplied RGBA.
+            // Multiplying coverage again darkens antialiased glyph edges.
+            bytes.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
         }
         let (physical_width, physical_height) = self.text_software.size();
         let texture = CachedTexture {
@@ -900,7 +910,10 @@ impl SmithayFrameRenderer {
             width: physical_width,
             height: physical_height,
         };
-        let source = text_source_rect(rect, bounds, texture.width, texture.height);
+        let source = text_source_rect(rect, bounds, scale, texture.width, texture.height);
+        if source.is_empty() {
+            return;
+        }
         // Large one-off labels must not pin a peak-sized private framebuffer
         // for the remaining lifetime of a visible host. Shared textures own
         // their pixels independently and remain valid after suspension.
@@ -919,8 +932,9 @@ impl SmithayFrameRenderer {
             .text_cache_evictions
             .saturating_add(evictions);
         self.primitives.push(GpuPrimitive::Texture {
-            rect,
+            rect: text_destination_rect(bounds, source, scale),
             source,
+            text_scale: Some(scale),
             buffer: texture.buffer,
         });
     }
@@ -1021,9 +1035,7 @@ impl SmithayFrameRenderer {
                             .chunks_exact_mut(4)
                             .zip(&software.pixels()[start..end])
                         {
-                            target.copy_from_slice(&premultiplied_pixel([
-                                pixel.r, pixel.g, pixel.b, pixel.a,
-                            ]));
+                            target.copy_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
                         }
                     }
                 }
@@ -1094,12 +1106,15 @@ impl SmithayFrameRenderer {
                     GpuPrimitive::Texture {
                         rect,
                         source,
+                        text_scale,
                         buffer,
                     } => match MemoryRenderBufferRenderElement::from_buffer(
                         renderer,
                         (
-                            f64::from(location.x) + f64::from(rect.origin.x),
-                            f64::from(location.y) + f64::from(rect.origin.y),
+                            (f64::from(location.x) + f64::from(rect.origin.x))
+                                * f64::from(text_scale.unwrap_or(1.0)),
+                            (f64::from(location.y) + f64::from(rect.origin.y))
+                                * f64::from(text_scale.unwrap_or(1.0)),
                         ),
                         buffer,
                         None,
@@ -1113,7 +1128,23 @@ impl SmithayFrameRenderer {
                         ),
                         Kind::Unspecified,
                     ) {
-                        Ok(element) => Some(element.into()),
+                        Ok(element) => Some(if let Some(scale) = text_scale {
+                            // Smithay sizes ordinary textures in integer logical units.
+                            // Text is already rasterized at output resolution: preserve
+                            // its physical extent instead of fitting it to that rounding.
+                            let geometry = element.geometry(f64::from(*scale).into());
+                            RescaleRenderElement::from_element(
+                                element,
+                                geometry.loc,
+                                (
+                                    source.size.w / f64::from(geometry.size.w),
+                                    source.size.h / f64::from(geometry.size.h),
+                                ),
+                            )
+                            .into()
+                        } else {
+                            element.into()
+                        }),
                         Err(error) => {
                             tracing::warn!(
                                 ?error,
@@ -1347,29 +1378,48 @@ fn text_texture_key(
 fn text_source_rect(
     rect: nickel_ui::Rect,
     bounds: nickel_ui::Rect,
+    scale: f32,
     texture_width: u32,
     texture_height: u32,
 ) -> Rectangle<f64, Logical> {
-    // The raster allocation is rounded up to whole physical pixels. Use its
-    // actual extent for the texture mapping instead of recomputing the ideal
-    // fractional extent from the output scale. In particular, a 153.6 px
-    // layout box owns a 154 px texture: sampling only 153.6 px and stretching
-    // that into Smithay's integer 154 px destination filters every glyph even
-    // on a 1x output. Mapping the complete allocation keeps unclipped text
-    // pixel-for-pixel and applies the same proportional crop at every scale.
-    let scale_x = f64::from(texture_width) / f64::from(bounds.size.width);
-    let scale_y = f64::from(texture_height) / f64::from(bounds.size.height);
+    // Crop on the raster's pixel grid. A proportional crop based on rounded
+    // allocation dimensions changes the glyph scale whenever layout is fractional.
+    let x = ((rect.origin.x - bounds.origin.x) * scale).round().max(0.0);
+    let y = ((rect.origin.y - bounds.origin.y) * scale).round().max(0.0);
+    let right = if rect.origin.x + rect.size.width >= bounds.origin.x + bounds.size.width {
+        texture_width as f32
+    } else {
+        ((rect.origin.x + rect.size.width - bounds.origin.x) * scale)
+            .round()
+            .min(texture_width as f32)
+    };
+    let bottom = if rect.origin.y + rect.size.height >= bounds.origin.y + bounds.size.height {
+        texture_height as f32
+    } else {
+        ((rect.origin.y + rect.size.height - bounds.origin.y) * scale)
+            .round()
+            .min(texture_height as f32)
+    };
     Rectangle::new(
+        (f64::from(x), f64::from(y)).into(),
         (
-            f64::from(rect.origin.x - bounds.origin.x) * scale_x,
-            f64::from(rect.origin.y - bounds.origin.y) * scale_y,
+            f64::from((right - x).max(0.0)),
+            f64::from((bottom - y).max(0.0)),
         )
             .into(),
-        (
-            f64::from(rect.size.width) * scale_x,
-            f64::from(rect.size.height) * scale_y,
-        )
-            .into(),
+    )
+}
+
+fn text_destination_rect(
+    bounds: nickel_ui::Rect,
+    source: Rectangle<f64, Logical>,
+    scale: f32,
+) -> nickel_ui::Rect {
+    nickel_ui::Rect::new(
+        bounds.origin.x + source.loc.x as f32 / scale,
+        bounds.origin.y + source.loc.y as f32 / scale,
+        source.size.w as f32 / scale,
+        source.size.h as f32 / scale,
     )
 }
 
@@ -3263,16 +3313,119 @@ mod tests {
     }
 
     #[test]
-    fn clipped_text_crops_the_pixel_rounded_texture_proportionally() {
+    fn text_upload_preserves_antialiased_glyph_coverage() {
+        use super::memory_test_renderer::MemoryTestRenderer;
+        use smithay::backend::renderer::element::{RenderElement, UnderlyingStorage};
+        let commands = [PaintCommand::Text {
+            bounds: nickel_ui::Rect::new(0.0, 0.0, 160.0, 32.0),
+            text: "catering.html".into(),
+            scale: 1.0,
+            color: 0xffffff,
+            align: nickel_ui::TextAlign::Start,
+            bold: false,
+            wrap: false,
+        }];
+        for mode in [
+            InternalUiRendererMode::Gpu,
+            InternalUiRendererMode::Software,
+        ] {
+            let mut owner = SmithayFrameRenderer::new(160, 32, 1.0, mode);
+            owner
+                .render_frame(RenderFrame {
+                    commands: &commands,
+                    logical_size: (160, 32),
+                    scale_factor: 1.0,
+                    generation: 1,
+                })
+                .unwrap();
+            let mut backend = MemoryTestRenderer::default();
+            let elements = owner.elements(&mut backend, (0, 0).into(), (160, 32));
+            let UnderlyingStorage::Memory(bytes) =
+                elements[0].underlying_storage(&mut backend).unwrap()
+            else {
+                panic!("expected uploaded glyph pixels")
+            };
+            let mut antialiased = 0;
+            for pixel in bytes.chunks_exact(4) {
+                if pixel[3] > 0 && pixel[3] < 255 {
+                    antialiased += 1;
+                    // White glyphs in premultiplied storage have RGB equal to
+                    // coverage, not coverage squared.
+                    assert_eq!(
+                        &pixel[..3],
+                        &[pixel[3]; 3],
+                        "glyph coverage changed in {mode:?}"
+                    );
+                }
+            }
+            assert!(antialiased > 0, "exercise partially covered glyph edges");
+        }
+    }
+
+    #[test]
+    fn presented_text_keeps_one_texel_per_output_pixel_when_clipped_or_scaled() {
+        use super::memory_test_renderer::MemoryTestRenderer;
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for clipped in [false, true] {
+                let mut commands = Vec::new();
+                if clipped {
+                    commands.push(PaintCommand::PushClip(nickel_ui::Rect::new(
+                        12.75, 5.25, 120.3, 13.2,
+                    )));
+                }
+                commands.push(PaintCommand::Text {
+                    bounds: nickel_ui::Rect::new(7.25, 3.5, 153.6, 17.2),
+                    text: "Google Chrome".into(),
+                    scale: 1.0,
+                    color: 0xffffff,
+                    align: nickel_ui::TextAlign::Center,
+                    bold: false,
+                    wrap: false,
+                });
+                if clipped {
+                    commands.push(PaintCommand::PopClip);
+                }
+                let mut owner =
+                    SmithayFrameRenderer::new(200, 40, scale, InternalUiRendererMode::Gpu);
+                let mut renderer = MemoryTestRenderer::default();
+                for generation in [1, 2] {
+                    owner
+                        .render_frame(RenderFrame {
+                            commands: &commands,
+                            logical_size: (200, 40),
+                            scale_factor: scale,
+                            generation,
+                        })
+                        .unwrap();
+                    let elements = owner.elements(&mut renderer, (19, 11).into(), (200, 40));
+                    assert_eq!(elements.len(), 1);
+                    let source = elements[0].src();
+                    let destination = elements[0].geometry(f64::from(scale).into());
+                    assert_eq!(source.loc.x.fract(), 0.0);
+                    assert_eq!(source.loc.y.fract(), 0.0);
+                    assert_eq!(
+                        source.size.w,
+                        f64::from(destination.size.w),
+                        "horizontal resampling at {scale}, clipped={clipped}"
+                    );
+                    assert_eq!(
+                        source.size.h,
+                        f64::from(destination.size.h),
+                        "vertical resampling at {scale}, clipped={clipped}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clipped_text_crops_on_the_raster_pixel_grid() {
         let bounds = nickel_ui::Rect::new(10.0, 5.0, 10.5, 8.5);
         let rect = nickel_ui::Rect::new(12.0, 7.0, 5.0, 4.0);
 
         assert_eq!(
-            text_source_rect(rect, bounds, 14, 11),
-            Rectangle::new(
-                ((2.0 / 10.5) * 14.0, (2.0 / 8.5) * 11.0).into(),
-                ((5.0 / 10.5) * 14.0, (4.0 / 8.5) * 11.0).into(),
-            )
+            text_source_rect(rect, bounds, 1.25, 14, 11),
+            Rectangle::new((3.0, 3.0).into(), (6.0, 5.0).into(),)
         );
     }
 
@@ -3602,7 +3755,7 @@ mod tests {
             let expected: Vec<_> = reference
                 .pixels()
                 .iter()
-                .flat_map(|pixel| premultiplied_pixel([pixel.r, pixel.g, pixel.b, pixel.a]))
+                .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
                 .collect();
             renderer
                 .raster

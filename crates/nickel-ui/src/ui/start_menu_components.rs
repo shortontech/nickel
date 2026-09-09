@@ -531,7 +531,6 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                             theme.surfaces.card,
                             theme.borders.controller_focus,
                         ))
-                        .border(theme.borders.subtle, theme.sizing.border)
                         .child(detail_pane),
                 );
             AnyView::new(if direction == ReadingDirection::RightToLeft {
@@ -547,7 +546,14 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
         };
         let mut root = Column::new().fill_width().fill_height();
         if let Some(header) = header {
-            root = root.child(header);
+            root = root.child(
+                Container::new()
+                    .padding(Insets {
+                        bottom: theme.spacing.content,
+                        ..Insets::default()
+                    })
+                    .child(header),
+            );
         }
         root = root.child(content);
         if let Some(legend) = legend {
@@ -1034,9 +1040,8 @@ impl<Message> LauncherSearchField<Message> {
             Container::new()
                 .fill_width()
                 .min_height(theme.sizing.control_height)
-                .padding(Insets::all(theme.spacing.control))
+                .padding(Insets::all(theme.spacing.content))
                 .background(theme.surfaces.raised)
-                .border(theme.borders.ordinary, theme.sizing.border)
                 .radius(theme.radii.control)
                 .accessibility_label(&placeholder)
                 .accessibility_state(if preedit.is_empty() {

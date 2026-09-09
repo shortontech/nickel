@@ -42,6 +42,12 @@ use std::sync::{
 use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
 pub trait SessionHost: Send + Sync {
+    fn copy_image(&self, image: image::RgbaImage) -> Result<(), String> {
+        platform::copy_image_to_clipboard(image)
+    }
+    fn copy_image_path(&self, image: &image::RgbaImage) -> Result<std::path::PathBuf, String> {
+        platform::copy_temp_image_path(image)
+    }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError>;
     fn keyboard_snapshot(
         &self,
@@ -92,8 +98,17 @@ pub trait SessionHost: Send + Sync {
         #[cfg(not(target_os = "linux"))]
         Err("display projection is unavailable on this platform".into())
     }
-    fn capture_desktop(&self) -> DesktopCapturePoll {
-        DesktopCapturePoll::Ready(platform::capture_desktop())
+    fn capture_desktop(&self, output: Option<&str>) -> DesktopCapturePoll {
+        #[cfg(target_os = "linux")]
+        return DesktopCapturePoll::Ready(match output {
+            Some(_) => platform::capture_output(output),
+            None => platform::capture_desktop(),
+        });
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = output;
+            DesktopCapturePoll::Ready(platform::capture_desktop())
+        }
     }
 }
 
@@ -258,7 +273,44 @@ impl SessionHost for InProcessSessionHost {
         Ok(self.projection_outputs.read().unwrap().clone())
     }
 
-    fn capture_desktop(&self) -> DesktopCapturePoll {
+    fn copy_image(&self, image: image::RgbaImage) -> Result<(), String> {
+        use image::ImageEncoder;
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new_with_quality(
+            &mut png,
+            image::codecs::png::CompressionType::Fast,
+            image::codecs::png::FilterType::Sub,
+        )
+        .write_image(
+            image.as_raw(),
+            image.width(),
+            image.height(),
+            image::ExtendedColorType::Rgba8,
+        )
+        .map_err(|error| error.to_string())?;
+        self.sender
+            .send(SessionAuthorityRequest::PublishClipboardImage(Arc::new(
+                png,
+            )))
+            .map_err(|_| "native clipboard authority is unavailable".into())
+    }
+
+    fn copy_image_path(&self, image: &image::RgbaImage) -> Result<std::path::PathBuf, String> {
+        let path = platform::save_temp_image(image)?;
+        if self
+            .sender
+            .send(SessionAuthorityRequest::PublishClipboardText(
+                path.to_string_lossy().into_owned(),
+            ))
+            .is_err()
+        {
+            let _ = std::fs::remove_file(&path);
+            return Err("native clipboard authority is unavailable".into());
+        }
+        Ok(path)
+    }
+
+    fn capture_desktop(&self, output: Option<&str>) -> DesktopCapturePoll {
         use crate::session::InternalCaptureState;
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         let mut capture = self.capture.lock().unwrap();
@@ -270,7 +322,7 @@ impl SessionHost for InProcessSessionHost {
                 *capture = InternalCaptureState::Pending(path.clone());
                 let request = nickel_session_protocol::Command::CaptureOutput {
                     path: path.to_string_lossy().into_owned(),
-                    output: None,
+                    output: output.map(str::to_owned),
                 };
                 if self.sender.send(request.into()).is_err() {
                     *capture = InternalCaptureState::Idle;
@@ -562,21 +614,41 @@ mod tests {
     }
 
     #[test]
+    fn in_process_screenshot_copy_publishes_image_and_path_through_native_authority() {
+        let (sender, receiver) = channel();
+        let host = host(sender);
+        let image = image::RgbaImage::from_pixel(3, 2, image::Rgba([23, 45, 67, 255]));
+        host.copy_image(image.clone()).unwrap();
+        let SessionAuthorityRequest::PublishClipboardImage(png) = receiver.try_recv().unwrap()
+        else {
+            panic!("image publication")
+        };
+        assert_eq!(image::load_from_memory(&png).unwrap().into_rgba8(), image);
+        let path = host.copy_image_path(&image).unwrap();
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SessionAuthorityRequest::PublishClipboardText(path.to_string_lossy().into_owned())
+        );
+        assert_eq!(image::open(&path).unwrap().into_rgba8(), image);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn in_process_capture_enqueues_typed_request_without_a_reply_socket() {
         let (sender, receiver) = channel();
         let host = host(sender);
 
         assert!(matches!(
-            host.capture_desktop(),
+            host.capture_desktop(Some("secondary")),
             DesktopCapturePoll::Pending
         ));
         let request = receiver.try_recv().expect("typed capture request");
         assert!(matches!(
             request,
-            SessionAuthorityRequest::Command(Command::CaptureOutput { output: None, .. })
+            SessionAuthorityRequest::Command(Command::CaptureOutput { output: Some(ref output), .. }) if output == "secondary"
         ));
         assert!(matches!(
-            host.capture_desktop(),
+            host.capture_desktop(Some("secondary")),
             DesktopCapturePoll::Pending
         ));
     }

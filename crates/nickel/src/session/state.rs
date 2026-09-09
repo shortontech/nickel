@@ -1382,11 +1382,16 @@ impl NickelSession {
             .internal_codex
             .take()
             .ok_or_else(|| "Codex integration is disabled".to_owned())?;
+        let was_visible = host
+            .project_menu()
+            .is_some_and(|id| self.internal_ui.is_visible(id));
         let result = host.ensure_project_menu(&mut self.internal_ui, placement);
         self.internal_codex = Some(host);
         if let Ok(id) = result {
             self.internal_ui.set_visible(id, true);
-            self.focus_internal_surface(id);
+            if !was_visible {
+                self.focus_internal_surface(id);
+            }
         }
         result
     }
@@ -1691,10 +1696,49 @@ impl NickelSession {
         true
     }
 
+    /// Ephemeral surfaces relinquish visibility with keyboard ownership. Reconcile
+    /// both hosted applications and coordinator scenes at the same input boundary.
+    fn dismiss_unfocused_internal_popovers(&mut self) {
+        use crate::winit_shell::SurfaceRole;
+        let focused = self.internal_ui.focused();
+        let menu = self
+            .internal_codex
+            .as_ref()
+            .and_then(|host| host.project_menu())
+            .filter(|id| self.internal_ui.is_visible(*id) && focused != Some(*id));
+        let control_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
+            shell.surfaces().iter().any(|surface| {
+                surface.role == SurfaceRole::ControlCenter
+                    && shell.visible(surface.id)
+                    && self
+                        .internal_shell_surfaces
+                        .get(&surface.id)
+                        .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
+            })
+        });
+        if menu.is_none() && !control_blurred {
+            return;
+        }
+        if let Some(menu) = menu {
+            self.internal_ui.set_visible(menu, false);
+        }
+        if let Some(shell) = self.internal_shell.as_mut() {
+            if menu.is_some() {
+                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::CodexProjectMenu);
+            }
+            if control_blurred {
+                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter);
+            }
+        }
+        self.sync_internal_shell();
+        self.wake_internal_shell();
+    }
+
     pub(crate) fn flush_internal_shell_input(&mut self) {
         self.flush_native_clipboard_results();
         let events = self.internal_ui.drain_routed_events();
         if events.is_empty() || self.internal_shell.is_none() {
+            self.dismiss_unfocused_internal_popovers();
             return;
         }
         let reverse = self
@@ -1800,6 +1844,7 @@ impl NickelSession {
         {
             self.focus_internal_surface(runtime);
         }
+        self.dismiss_unfocused_internal_popovers();
         self.wake_internal_shell();
     }
 
@@ -1856,6 +1901,7 @@ impl NickelSession {
         );
         let entries = shell.surfaces().to_vec();
         let outputs = self.internal_outputs();
+        let mut focus_on_show = None;
         for mut surface in entries {
             // The real ChatApplication host owns this role. LiveShell retains
             // only its visibility policy and must not paint a second shell
@@ -1873,9 +1919,15 @@ impl NickelSession {
                 }
                 continue;
             }
-            let interaction_output = (surface.role == crate::winit_shell::SurfaceRole::VolumeOsd)
-                .then(|| self.preferred_interaction_output_name())
-                .flatten();
+            let interaction_output = match surface.role {
+                crate::winit_shell::SurfaceRole::VolumeOsd => {
+                    self.preferred_interaction_output_name()
+                }
+                crate::winit_shell::SurfaceRole::Screenshot => {
+                    shell.screenshot_output().map(str::to_owned)
+                }
+                _ => None,
+            };
             let mut placement = internal_shell_surface_placement(
                 surface.role,
                 interaction_output.as_deref().or(surface.output.as_deref()),
@@ -1884,6 +1936,16 @@ impl NickelSession {
                 self.launcher_output_name.as_deref(),
             );
             let mut resized = false;
+            if surface.role == crate::winit_shell::SurfaceRole::Screenshot
+                && let Some((output, _, _)) = outputs.iter().find(|(output, _, _)| {
+                    Some(output.name.as_str()) == placement.output.as_deref()
+                })
+            {
+                surface.size = (output.width, output.height);
+                placement.geometry.2 = output.width;
+                placement.geometry.3 = output.height;
+                resized = shell.set_surface_size(surface.id, surface.size);
+            }
             if surface.role == crate::winit_shell::SurfaceRole::OnScreenKeyboard {
                 let Some(keyboard) = internal_keyboard_surface_placement(
                     self.on_screen_keyboard.output_name.as_deref(),
@@ -1929,8 +1991,18 @@ impl NickelSession {
                 .internal_ui
                 .insert_scene(scene, placement, output_scale);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
+            if matches!(
+                surface.role,
+                crate::winit_shell::SurfaceRole::ControlCenter
+                    | crate::winit_shell::SurfaceRole::Screenshot
+            ) {
+                focus_on_show = Some(runtime_id);
+            }
         }
         self.internal_shell = Some(shell);
+        if let Some(surface) = focus_on_show {
+            self.focus_internal_surface(surface);
+        }
         if request_frame {
             self.schedule_internal_ui_frame();
         } else {
@@ -3702,7 +3774,13 @@ impl NickelSession {
         action: nickel_session_protocol::ShortcutAction,
     ) {
         tracing::info!(?action, "global shortcut activated");
+        let screenshot_output = (action
+            == nickel_session_protocol::ShortcutAction::ShowScreenshotTool)
+            .then(|| self.preferred_interaction_output_name());
         if let Some(shell) = self.internal_shell.as_mut() {
+            if let Some(output) = screenshot_output {
+                shell.set_screenshot_output(output);
+            }
             let changed = shell.global_shortcut(action);
             if changed {
                 self.sync_internal_shell();
@@ -8454,6 +8532,228 @@ mod protocol_tests {
         assert!(!session.locked);
         assert!(!session.internal_shell.as_ref().unwrap().visible(lock));
         assert!(!session.internal_shell_surfaces.contains_key(&lock));
+    }
+
+    #[test]
+    fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
+        use crate::session_host::DesktopCapturePoll;
+        use crate::winit_shell::SurfaceRole;
+        use nickel_session_protocol::{InputState, TestInput, TestKey};
+        #[derive(Default)]
+        struct CaptureHost(std::sync::Mutex<Vec<Option<String>>>);
+        impl SessionHost for CaptureHost {
+            fn dispatch(&self, _command: ShellCommand) -> Result<(), SessionRequestError> {
+                Ok(())
+            }
+            fn capture_desktop(&self, output: Option<&str>) -> DesktopCapturePoll {
+                self.0.lock().unwrap().push(output.map(str::to_owned));
+                DesktopCapturePoll::Ready(Ok(crate::platform::DesktopCapture {
+                    image: image::RgbaImage::new(1000, 800),
+                }))
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        for (name, width, height, scale_120) in
+            [("primary", 1280, 720, 120), ("secondary", 1000, 800, 180)]
+        {
+            session
+                .apply_test_output(TestOutput::Connect {
+                    name: name.into(),
+                    logical_width: width,
+                    logical_height: height,
+                    scale_120,
+                    transform: OutputTransform::Normal,
+                })
+                .unwrap();
+        }
+        let secondary = session
+            .space
+            .outputs()
+            .find(|output| output.name() == "secondary")
+            .unwrap()
+            .clone();
+        session.space.map_output(&secondary, (-1000, -120));
+        let geometry = session.space.output_geometry(&secondary).unwrap();
+        let host = Arc::new(CaptureHost::default());
+        let (_sender, receiver) = crate::platform::status_mailbox::channel();
+        session
+            .enable_internal_shell_with_system_updates(host.clone(), receiver)
+            .unwrap();
+        session
+            .inject_test_input(TestInput::PointerMove { x: -900, y: 100 })
+            .unwrap();
+        for state in [InputState::Pressed, InputState::Released] {
+            session
+                .inject_test_input(TestInput::Key {
+                    key: TestKey::PrintScreen,
+                    state,
+                })
+                .unwrap();
+        }
+        // Moving during the capture delay must not change the target display.
+        session
+            .inject_test_input(TestInput::PointerMove { x: 100, y: 100 })
+            .unwrap();
+        let shell = session.internal_shell.as_mut().unwrap();
+        shell.poll(Instant::now() + Duration::from_millis(100));
+        let screenshot = shell.surface(SurfaceRole::Screenshot, None).unwrap().id;
+        assert!(shell.visible(screenshot));
+        assert_eq!(*host.0.lock().unwrap(), vec![Some("secondary".into())]);
+        session.sync_internal_shell();
+        let runtime = session.internal_shell_surfaces[&screenshot];
+        let placement = session.internal_ui.placement(runtime).unwrap();
+        assert_eq!(placement.output.as_deref(), Some("secondary"));
+        assert_eq!(
+            placement.geometry,
+            (
+                geometry.loc.x,
+                geometry.loc.y,
+                geometry.size.w as u32,
+                geometry.size.h as u32
+            )
+        );
+        assert_eq!(session.internal_ui.focused(), Some(runtime));
+    }
+
+    #[test]
+    fn native_screenshot_clipboard_retains_each_payload_for_repeated_paste() {
+        use crate::session::{SessionAuthorityRequest, handlers::SelectionOwner};
+        use smithay::wayland::selection::{
+            SelectionHandler, SelectionTarget, data_device::current_data_device_selection_userdata,
+        };
+        use std::io::Read;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        let image = image::RgbaImage::from_pixel(3, 2, image::Rgba([23, 45, 67, 255]));
+        let mut png = std::io::Cursor::new(Vec::new());
+        image.write_to(&mut png, image::ImageFormat::Png).unwrap();
+        let png = Arc::new(png.into_inner());
+        // Screenshot paths must work even when no text editor owns a copy limit.
+        session.native_clipboard.text_limit = None;
+        for request in [
+            SessionAuthorityRequest::PublishClipboardImage(png.clone()),
+            SessionAuthorityRequest::PublishClipboardText("/tmp/screenshot.png".into()),
+            SessionAuthorityRequest::PublishClipboardImage(png.clone()),
+        ] {
+            assert!(matches!(
+                session.handle_authority_request(request),
+                nickel_session_protocol::ServerMessage::Ack
+            ));
+            let owner = current_data_device_selection_userdata(&session.seat)
+                .unwrap()
+                .clone();
+            let (mime, expected) = match &owner {
+                SelectionOwner::NativeImage(bytes) => ("image/png", bytes.as_slice()),
+                SelectionOwner::NativeText(text) => ("text/plain;charset=utf-8", text.as_bytes()),
+                _ => panic!("clipboard must stay compositor-owned"),
+            };
+            assert!(
+                session
+                    .native_clipboard
+                    .mime_types
+                    .iter()
+                    .any(|value| value == mime)
+            );
+            for _ in 0..3 {
+                let (mut reader, writer) = std::os::unix::net::UnixStream::pair().unwrap();
+                reader
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let seat = session.seat.clone();
+                SelectionHandler::send_selection(
+                    &mut session,
+                    SelectionTarget::Clipboard,
+                    mime.into(),
+                    writer.into(),
+                    seat,
+                    &owner,
+                );
+                let mut received = Vec::new();
+                reader.read_to_end(&mut received).unwrap();
+                assert_eq!(received, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn native_screenshot_claims_keyboard_on_show_and_escape_hides_without_clicking() {
+        use crate::winit_shell::SurfaceRole;
+        use nickel_session_protocol::{InputState, ShortcutAction, TestInput, TestKey};
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let shell = session.internal_shell.as_mut().unwrap();
+        shell.global_shortcut(ShortcutAction::ShowScreenshotTool);
+        shell.poll(Instant::now() + Duration::from_millis(100));
+        let screenshot = shell.surface(SurfaceRole::Screenshot, None).unwrap().id;
+        assert!(shell.visible(screenshot));
+        session.sync_internal_shell();
+        let runtime = session.internal_shell_surfaces[&screenshot];
+        assert_eq!(session.internal_ui.focused(), Some(runtime));
+        for state in [InputState::Pressed, InputState::Released] {
+            session
+                .inject_test_input(TestInput::Key {
+                    key: TestKey::Escape,
+                    state,
+                })
+                .unwrap();
+        }
+        assert!(!session.internal_shell.as_ref().unwrap().visible(screenshot));
+        assert!(!session.internal_ui.is_visible(runtime));
+        assert_ne!(session.internal_ui.focused(), Some(runtime));
+    }
+
+    #[test]
+    fn control_center_hides_on_client_or_internal_focus_transfer_and_stays_hidden() {
+        use crate::winit_shell::SurfaceRole;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let application = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (800, 100, 300, 300),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        for client in [true, false] {
+            session
+                .internal_shell
+                .as_mut()
+                .unwrap()
+                .global_shortcut(nickel_session_protocol::ShortcutAction::ShowControlCenter);
+            session.sync_internal_shell();
+            let control = session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .surface(SurfaceRole::ControlCenter, None)
+                .unwrap()
+                .id;
+            let runtime = session.internal_shell_surfaces[&control];
+            assert_eq!(session.internal_ui.focused(), Some(runtime));
+            assert!(session.internal_shell.as_ref().unwrap().visible(control));
+            let handled =
+                session
+                    .internal_ui
+                    .pointer_button_with_client((900.0, 200.0), true, client);
+            assert_eq!(handled, !client);
+            session.flush_internal_shell_input();
+            assert!(!session.internal_shell.as_ref().unwrap().visible(control));
+            assert!(!session.internal_ui.is_visible(runtime));
+            assert_eq!(
+                session.internal_ui.focused(),
+                (!client).then_some(application)
+            );
+            session.flush_internal_shell_input();
+            session.sync_internal_shell();
+            assert!(!session.internal_shell.as_ref().unwrap().visible(control));
+            assert_eq!(
+                session.internal_ui.focused(),
+                (!client).then_some(application)
+            );
+        }
     }
 
     #[test]

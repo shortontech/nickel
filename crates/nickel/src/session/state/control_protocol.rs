@@ -437,6 +437,18 @@ impl NickelSession {
         request: SessionAuthorityRequest,
     ) -> ServerMessage {
         match request {
+            SessionAuthorityRequest::PublishClipboardImage(png) => {
+                match self.publish_native_image_clipboard(png) {
+                    Ok(()) => ServerMessage::Ack,
+                    Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
+                }
+            }
+            SessionAuthorityRequest::PublishClipboardText(text) => {
+                match self.publish_native_text_selection(text) {
+                    Ok(()) => ServerMessage::Ack,
+                    Err(error) => protocol_error(ErrorCode::InvalidRequest, error),
+                }
+            }
             SessionAuthorityRequest::Query(query) => self.handle_protocol_query(query),
             SessionAuthorityRequest::Command(command) => {
                 self.handle_protocol_command(command, None, 0)

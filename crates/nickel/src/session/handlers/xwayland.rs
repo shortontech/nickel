@@ -613,6 +613,14 @@ impl XwmHandler for NickelSession {
                     &self.seat,
                 )
                 .map(|owner| owner.clone());
+            if let Some(SelectionOwner::NativeImage(png)) = &owner {
+                if mime_type == "image/png"
+                    && let Err(error) = self.send_native_image_clipboard(fd, png.clone())
+                {
+                    tracing::warn!(error, "native image clipboard XWayland transfer rejected");
+                }
+                return;
+            }
             if let Some(SelectionOwner::NativeText(text)) = owner {
                 if matches!(
                     mime_type.as_str(),
