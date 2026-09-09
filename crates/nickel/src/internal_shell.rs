@@ -301,6 +301,14 @@ impl InternalShellCoordinator {
             .is_some_and(|surface| self.shell.surface_visible(surface.role))
     }
 
+    #[cfg(any(target_os = "linux", test))]
+    pub fn resolve_semantic_target(
+        &self,
+        target: &nickel_session_protocol::ShellSemanticTarget,
+    ) -> Option<nickel_session_protocol::ResolvedShellTarget> {
+        self.shell.resolve_semantic_target(target)
+    }
+
     /// Bind a desktop viewport for either rendering or normalized input. Keeping
     /// this projection in one place prevents input from using the last drawn output.
     fn select_desktop_viewport(&mut self, id: InternalSurfaceId) -> Option<()> {
@@ -523,6 +531,10 @@ impl InternalShellCoordinator {
         }
     }
 
+    pub fn set_file_clipboard_available(&mut self, available: bool) {
+        self.shell.set_file_clipboard_available(available);
+    }
+
     pub fn step_slot_changes(
         &mut self,
         id: InternalSurfaceId,
@@ -540,6 +552,23 @@ impl InternalShellCoordinator {
             .map(|surface| self.shell.surface_visible(surface.role))
             .collect::<Vec<_>>();
         let mut changed = false;
+        if let Some(focused) = batch.window_focused
+            && !matches!(
+                entry.role,
+                SurfaceRole::Desktop | SurfaceRole::OnScreenKeyboard
+            )
+        {
+            changed |= self.shell.shell_role_host_ui(
+                entry.role,
+                if focused {
+                    nickel_ui::UiEvent::FocusGained
+                } else {
+                    nickel_ui::UiEvent::FocusLost
+                },
+                entry.size.0,
+                entry.size.1,
+            );
+        }
         if entry.role == SurfaceRole::Desktop && batch.window_focused == Some(false) {
             // Host focus changes are lifecycle notifications, not device events;
             // they still must cancel the production desktop transaction and keys.
@@ -615,6 +644,15 @@ impl InternalShellCoordinator {
                 if let nickel_ui::HostEvent::Normalized { input, .. } = event {
                     changed |= self.shell.desktop_input(input);
                 }
+                continue;
+            }
+            if let nickel_ui::HostEvent::Shortcut(shortcut) = event {
+                changed |= self.shell.shell_role_host_shortcut(
+                    entry.role,
+                    shortcut,
+                    entry.size.0,
+                    entry.size.1,
+                );
                 continue;
             }
             let nickel_ui::HostEvent::Ui(event) = event else {
@@ -759,6 +797,13 @@ impl InternalShellCoordinator {
     pub fn consumer_control(&mut self, control: nickel_session_protocol::ConsumerControl) -> bool {
         self.shell
             .global_shortcut(crate::platform::GlobalShortcut::ConsumerControl(control))
+    }
+
+    /// Keep the compositor-owned lock scene synchronized with the session's
+    /// authoritative security state.
+    pub fn set_lock_state(&mut self, locked: bool) -> bool {
+        self.shell
+            .global_shortcut(crate::platform::GlobalShortcut::LockState { locked })
     }
 
     /// Deliver a non-consumer compositor shortcut through the same typed shell owner.
@@ -1334,6 +1379,48 @@ mod tests {
             .id;
         assert!(!coordinator.scene(panel).unwrap().is_empty());
         assert!(coordinator.shell_mut().surface_visible(SurfaceRole::Panel));
+    }
+
+    #[test]
+    fn native_launcher_focus_gain_restores_search_after_scene_creation() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+        }]);
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        coordinator.scene(launcher).unwrap();
+        assert!(coordinator.focused_field_lease(launcher).is_none());
+        coordinator.step_slot(
+            launcher,
+            HostBatch {
+                window_focused: Some(true),
+                ..HostBatch::default()
+            },
+        );
+        assert!(coordinator.focused_field_lease(launcher).is_some());
+        coordinator.step_slot(
+            launcher,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(nickel_ui::UiEvent::TextInput(
+                    "konsole".into(),
+                ))],
+                ..HostBatch::default()
+            },
+        );
+        assert!(
+            coordinator
+                .scene(launcher)
+                .unwrap()
+                .iter()
+                .any(|command| matches!(
+                    command, PaintCommand::Text { text, .. } if text == "konsole"
+                ))
+        );
     }
 
     #[test]

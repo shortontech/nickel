@@ -31,6 +31,22 @@ pub use host::FileHostAdapter;
 pub use internal_windows::{FileWindowAction, FileWindowCoordinator, FileWindowRequest};
 pub use watch::DirectoryWatch;
 
+/// Shared file-drag threshold in logical pixels. Hosts choose placement or
+/// native transfer, but small pointer jitter must never start either operation.
+pub fn file_drag_offset(
+    origin: nickel_ui::Point,
+    cursor: nickel_ui::Point,
+) -> Option<nickel_ui::Point> {
+    let offset = nickel_ui::Point {
+        x: cursor.x - origin.x,
+        y: cursor.y - origin.y,
+    };
+    (offset.x.is_finite()
+        && offset.y.is_finite()
+        && offset.x * offset.x + offset.y * offset.y >= 36.0)
+        .then_some(offset)
+}
+
 pub fn desktop_directory() -> PathBuf {
     platform::places()
         .into_iter()
@@ -50,11 +66,182 @@ pub fn open_path(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Starts Linux association handling without waiting for the launched application.
+/// The caller owns the child and must reap it with try_wait outside input dispatch.
+#[cfg(target_os = "linux")]
+pub fn spawn_open_path(path: &Path) -> Result<std::process::Child, String> {
+    match open_target_kind(path) {
+        OpenTargetKind::Launcher => {
+            platform::spawn_launcher(path).map_err(|error| error.to_string())
+        }
+        OpenTargetKind::Document => {
+            nickel_platform::spawn_with_default(path).map_err(|error| error.to_string())
+        }
+    }
+}
+
+/// Shared nonblocking association ownership for desktop and file-manager hosts.
+/// Helpers can live as long as their application; polling never waits for exit.
+#[cfg(target_os = "linux")]
+pub struct FileLaunches<Context> {
+    children: Vec<(PathBuf, Context, std::process::Child)>,
+}
+
+#[cfg(target_os = "linux")]
+impl<Context> Default for FileLaunches<Context> {
+    fn default() -> Self {
+        Self {
+            children: Vec::new(),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<Context> Drop for FileLaunches<Context> {
+    fn drop(&mut self) {
+        let mut children: Vec<_> = self.children.drain(..).map(|(_, _, child)| child).collect();
+        if children.is_empty() {
+            return;
+        }
+        // Closing an embedded file window must neither kill its launched apps
+        // nor leave unreaped children in the compositor. Only retiring owners
+        // need this small, temporary reaper; live owners use their normal poll.
+        if let Err(error) = std::thread::Builder::new()
+            .name("file-launch-retirement".into())
+            .stack_size(64 * 1024)
+            .spawn(move || {
+                while !children.is_empty() {
+                    children.retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+                    if !children.is_empty() {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                    }
+                }
+            })
+        {
+            tracing::warn!(%error, "could not start retired file-launch reaper");
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl<Context> FileLaunches<Context> {
+    pub fn is_empty(&self) -> bool {
+        self.children.is_empty()
+    }
+
+    pub fn start(&mut self, path: PathBuf, context: Context) -> Result<(), String> {
+        self.start_with(path, context, spawn_open_path)
+    }
+
+    /// Host injection boundary used by adapter-contract tests without launching
+    /// the user's real associations. Ownership is identical to production.
+    pub fn start_with(
+        &mut self,
+        path: PathBuf,
+        context: Context,
+        spawn: impl FnOnce(&Path) -> Result<std::process::Child, String>,
+    ) -> Result<(), String> {
+        if self.children.len() >= 32 {
+            return Err(
+                "Too many pending application launches; close an opened application and retry"
+                    .into(),
+            );
+        }
+        let child = spawn(&path)?;
+        self.children.push((path, context, child));
+        Ok(())
+    }
+
+    pub fn poll(&mut self) -> Vec<(PathBuf, Context, Result<(), String>)> {
+        let mut completed = Vec::new();
+        let mut index = 0;
+        while index < self.children.len() {
+            let result = match self.children[index].2.try_wait() {
+                Ok(None) => {
+                    index += 1;
+                    continue;
+                }
+                Ok(Some(status)) if status.success() => Ok(()),
+                Ok(Some(status)) => Err(format!("launcher exited with {status}")),
+                Err(error) => Err(format!("could not collect launcher result: {error}")),
+            };
+            let (path, context, _) = self.children.swap_remove(index);
+            completed.push((path, context, result));
+        }
+        completed
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum OpenTargetKind {
     #[cfg(target_os = "linux")]
     Launcher,
     Document,
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod launch_tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    struct Fixture(FileLaunches<()>);
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Clean up even when an assertion fails while the helper is blocked.
+            for (_, _, child) in &mut self.0.children {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
+    #[test]
+    fn shared_document_launch_does_not_wait_and_reaps_success() {
+        let mut fixture = Fixture(FileLaunches::default());
+        fixture
+            .0
+            .start_with("document.txt".into(), (), |_| {
+                Command::new("/bin/cat")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .spawn()
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert!(fixture.0.poll().is_empty());
+        assert!(!fixture.0.is_empty());
+        assert!(fixture.0.children[0].2.try_wait().unwrap().is_none());
+        drop(fixture.0.children[0].2.stdin.take());
+        // Waiting is restricted to test synchronization, never production polling.
+        fixture.0.children[0].2.wait().unwrap();
+        assert_eq!(fixture.0.poll(), vec![("document.txt".into(), (), Ok(()))]);
+        assert!(fixture.0.is_empty());
+    }
+
+    #[test]
+    fn shared_document_launch_reports_late_and_immediate_failure() {
+        let mut fixture = Fixture(FileLaunches::default());
+        assert!(
+            fixture
+                .0
+                .start_with("missing".into(), (), |_| Err("missing helper".into()))
+                .is_err()
+        );
+        assert!(fixture.0.is_empty());
+        fixture
+            .0
+            .start_with("document.txt".into(), (), |_| {
+                Command::new("/bin/false")
+                    .spawn()
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        fixture.0.children[0].2.wait().unwrap();
+        let results = fixture.0.poll();
+        assert_eq!(results.len(), 1);
+        assert!(results[0].2.is_err());
+        assert!(fixture.0.is_empty());
+    }
 }
 
 fn open_target_kind(path: &Path) -> OpenTargetKind {
@@ -127,10 +314,6 @@ pub fn paste_native_file_clipboard(destination: &Path) -> Result<usize, String> 
     } else {
         Err(format!("{} item(s) failed", report.failed.len()))
     }
-}
-
-pub fn native_file_clipboard_available() -> bool {
-    platform::read_file_clipboard().is_ok_and(|(_, paths)| !paths.is_empty())
 }
 
 pub fn directory_is_writable(path: &Path) -> bool {

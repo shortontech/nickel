@@ -953,3 +953,124 @@ The linked release artifacts are now ready for coordinated next-login testing. I
 checks should cover icons/open/menu focus loss, volume change plus OSD expiry, and keyboard invocation
 and typing before attempting animated-window or DisplayLink preview stress. These are pending checks,
 not recorded successes; no unattended input/audio/hotplug test has been authorized or performed.
+
+## Desktop activation freeze: confirmed synchronous association wait
+
+The first native login acceptance attempt exposed a desktop freeze on file activation.
+During the user's temporary debugger grant, the compositor main-thread stack showed
+`wait4 -> Command::status -> open_with_default -> open_path -> DesktopApplication::activate`
+inside native pointer dispatch. The `xdg-open` child was waiting for its launched application.
+Low CPU and stable memory were consistent with a blocked compositor, not a allocation leak.
+The debugger detached successfully; the temporary privilege was subsequently revoked.
+
+Linux desktop activation now spawns the association helper and retains its owned child.
+The existing desktop poll uses `try_wait` to reap completion and surface late failures;
+input dispatch never waits for application exit. Both document and `.desktop` launch paths
+use this ownership contract. At most 32 outstanding launch helpers are retained. The older
+synchronous APIs remain available to compatibility callers, explicitly documented as unsuitable
+for event loops. Comments record the helper-lifetime invariant and child ownership.
+
+Focused regression tests cover a helper held alive by an open input pipe, successful reaping,
+late nonzero exit, and immediate spawn failure, without invoking real file associations.
+The separate report that folder activation did not show a window remains unverified; this
+change does not claim to fix folder presentation. The user restarted the session and is
+waiting outside Nickel for the replacement release build. No session restart was performed
+by this fix.
+
+Verification: all-feature Nickel library tests passed (676 passed, 12 ignored), including
+the three new launch regressions. Strict Clippy passed for Nickel, nickel-file and
+nickel-platform across all targets/features; formatting and diff whitespace checks passed.
+`CARGO_BUILD_JOBS=4 cargo build --release -p nickel` completed successfully. Native login
+acceptance, including opening the previously freezing file, remains pending.
+
+## Follow-up: shared file input, folder admission and desktop drag cost
+
+The user's next login confirmed that file activation no longer froze the compositor,
+but folder windows were not visible and desktop dragging was slow. Launch inspection
+showed that the Markdown document did reach `xdg-open`, which selected Afterplay.
+Follow-up read-only queries corrected the initial association diagnosis: `xdg-mime`
+classified this file as `application/x-genesis-rom`, while GIO correctly reported
+`text/markdown`; the configured Markdown default was Kate. Shared default activation
+now prefers `gio open`, with `xdg-open` only when GIO is unavailable. Properties MIME
+inspection uses the same GIO authority. No preferred-application setting was changed.
+
+Implemented fixes:
+
+- Internal file windows now enter the canonical application registry with the
+  `nickel-file` identity. Open/reopen raises and restores them; close removes both
+  registry and coordinator identities. DRM layering now puts unfocused internal
+  applications above the desktop, matching the nested backend.
+- Application-owned normalized input runs through `UiHost` for native and embedded
+  windows, including focus-loss cleanup. File input no longer depends on the
+  standalone `FileHostAdapter`; that adapter retains native window services.
+- The shared `FilePlaneItem` exposes the existing captured drag-message lifecycle.
+  File drags begin on the first press/motion, not on click state created after release,
+  and emit one offer per gesture. Embedded local folder drops enter the existing
+  native-drop transfer queue. Standalone Wayland drags own a small shared-memory
+  icon until completion/cancellation, rather than starting with no visual feedback.
+- Desktop and file-manager Linux activation use `FileLaunches`, including `.desktop`
+  routing, nonblocking completion, bounded outstanding helpers and late failures.
+  Closing an embedded owner hands surviving children to a temporary small-stack
+  reaper rather than killing their applications or waiting on the compositor.
+- Both hosts use the same logical-pixel drag threshold. Desktop motion previews the
+  unsnapped offset; grid collision resolution and persistence happen only on release.
+- Desktop wallpaper views use an owned generation instead of hashing all pixels
+  on every rebuild. Native texture lookup memoizes content hashes by weak immutable
+  image identity, capped at the existing image-cache entry limit. Changed images
+  still rehash; metadata does not retain CPU pixel buffers.
+
+Regression coverage includes first-press shared hit testing, one offer per gesture,
+embedded normalized-input/focus cleanup, embedded local drop destination and payload,
+folder open/focus/minimize/close/reopen admission, continuous visible desktop preview
+with release-only layout commit, shared launcher completion/failure, and unchanged
+image hash reuse with copy-on-write invalidation and weak ownership.
+
+An isolated Xvfb workspace run passed before the final wallpaper-cache/local-drop
+follow-up; focused tests for those changes passed separately. Final all-feature
+Nickel/File library tests, strict Clippy and release refresh are recorded below when
+complete. No display-manager restart or unattended live drag/drop was performed.
+Cross-window drag/drop involving compositor-owned surfaces still lacks the complete
+native protocol bridge; the embedded drop coverage above is local to a file window.
+Live acceptance and the remaining specifications are not marked complete.
+
+Final verification: all-feature Nickel library tests passed (675 passed, 12 ignored),
+File library tests passed (178 passed), and default-association tests passed (12 passed,
+1 ignored). Strict Clippy passed for Nickel, File, Platform and UI across all targets
+and features; formatting and diff checks passed. The release refresh for both
+`nickel` and `nickel-file` completed successfully after the GIO classification fix.
+The executable reports the native `udev` backend. The running session was not restarted;
+its existing process continues until the user elects to restart into the new build.
+
+## Native desktop motion still stalled after the first follow-up build
+
+The user confirmed file/folder opening now works, but dragging on the desktop
+still severely slows the pointer. The prior wallpaper changes did not address
+the synchronous scheduling boundary:
+
+`route_internal_pointer_motion -> flush_internal_shell_input -> sync_internal_shell_changes`
+rebuilt the scene for each motion sample. `schedule_internal_ui_frame` then called
+`render_all_outputs` inline, which both rendered all DRM devices and installed a
+3.05-second follow-up timer per call. This bypassed the backend's existing single
+pending render request and made the supposedly coalesced desktop path synchronous.
+
+Desktop motion now updates production state immediately and retains only changed
+desktop identities for the next frame. Both native and nested render entry points
+consume those identities once before drawing. Non-motion events flush pending state
+immediately, preserving click/release/focus ordering; topology reconciliation clears
+retired pending identities. Internal UI scheduling now uses the existing bounded
+per-device render timer, paced against output refresh, rather than the synchronous
+multi-output repaint helper. Consuming deferred work during a frame does not request
+another frame merely because the scene changed.
+
+The production-routing regression drives 1,000 pointer motions: scene generation
+stays unchanged during input, advances once at the frame boundary, stays unchanged
+on a second idle flush, and focus loss is processed immediately. Shell timer-arm
+count does not grow during the burst. This is scheduling evidence, not a live
+latency measurement or proof that every remaining rendering cost is eliminated.
+No debugger privileges, session restart, or automated live pointer input were used.
+
+Verification: all-feature Nickel library tests passed (676 passed, 12 ignored),
+including the motion-burst regression. Strict all-target/all-feature Nickel Clippy,
+workspace formatting, and diff whitespace checks passed. The refreshed release
+build completed and reports the native `udev` backend. Live desktop drag latency
+still needs retesting after the user restarts into this build.

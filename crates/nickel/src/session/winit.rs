@@ -177,6 +177,7 @@ pub fn init_winit(
                 }
                 WinitEvent::Focus(true) => {}
                 WinitEvent::Redraw => {
+                    state.flush_desktop_scenes_for_frame();
                     backend
                         .window()
                         .set_cursor(smithay::reexports::winit::cursor::Cursor::Icon(

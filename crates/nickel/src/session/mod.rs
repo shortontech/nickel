@@ -70,6 +70,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     nickel_logging::init("nickel")?;
 
     let arguments = backend::SessionArguments::parse(std::env::args_os().skip(1))?;
+    if !test_control_allowed(
+        arguments.backend == backend::BackendKind::Udev,
+        arguments.test_control,
+        std::env::var_os("NICKEL_ALLOW_NATIVE_TEST_CONTROL").as_deref(),
+    ) {
+        return Err("native --test-control requires NICKEL_ALLOW_NATIVE_TEST_CONTROL=1".into());
+    }
     let mut event_loop: EventLoop<'static, NickelSession> = EventLoop::try_new()?;
 
     let display: Display<NickelSession> = Display::new()?;
@@ -90,7 +97,16 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&state.internal_capture),
         Arc::clone(&state.internal_keyboard_snapshot),
     )?;
-    let secure_storage_required = arguments.backend == backend::BackendKind::Udev;
+    let secure_storage_required = secure_storage_required(
+        arguments.backend == backend::BackendKind::Udev,
+        std::env::var_os("NICKEL_SECURE_STORAGE_REQUIRED").as_deref(),
+    );
+    if arguments.backend == backend::BackendKind::Udev && !secure_storage_required {
+        tracing::warn!(
+            variable = "NICKEL_SECURE_STORAGE_REQUIRED",
+            "secure storage startup gate disabled by environment"
+        );
+    }
     let secure_storage_may_start = Arc::new(AtomicBool::new(!secure_storage_required));
     let monitor_secure_storage_state = state.secure_storage_state_handle();
     let monitor_secure_storage_retry = state.secure_storage_retry_handle();
@@ -285,6 +301,18 @@ fn secure_storage_startup_timed_out(
         && elapsed >= SECURE_STORAGE_STARTUP_TIMEOUT
 }
 
+fn secure_storage_required(native_backend: bool, configured: Option<&std::ffi::OsStr>) -> bool {
+    native_backend && configured != Some(std::ffi::OsStr::new("0"))
+}
+
+fn test_control_allowed(
+    native_backend: bool,
+    requested: bool,
+    configured: Option<&std::ffi::OsStr>,
+) -> bool {
+    !native_backend || !requested || configured == Some(std::ffi::OsStr::new("1"))
+}
+
 pub(crate) fn shell_recovery_visible_for(failures: u8) -> bool {
     failures >= 3
 }
@@ -308,7 +336,8 @@ mod tests {
     };
 
     use super::{
-        USER_SESSION_ENVIRONMENT, secure_storage_startup_timed_out, wait_for_secure_storage_start,
+        USER_SESSION_ENVIRONMENT, secure_storage_required, secure_storage_startup_timed_out,
+        test_control_allowed, wait_for_secure_storage_start,
     };
 
     #[test]
@@ -371,5 +400,27 @@ mod tests {
             SecureStorageState::Unavailable,
             Duration::from_secs(300)
         ));
+    }
+
+    #[test]
+    fn native_secure_storage_gate_requires_an_explicit_zero_to_disable() {
+        use std::ffi::OsStr;
+
+        assert!(secure_storage_required(true, None));
+        assert!(secure_storage_required(true, Some(OsStr::new("1"))));
+        assert!(secure_storage_required(true, Some(OsStr::new("false"))));
+        assert!(!secure_storage_required(true, Some(OsStr::new("0"))));
+        assert!(!secure_storage_required(false, None));
+    }
+
+    #[test]
+    fn native_test_control_requires_an_explicit_one_to_enable() {
+        use std::ffi::OsStr;
+
+        assert!(!test_control_allowed(true, true, None));
+        assert!(!test_control_allowed(true, true, Some(OsStr::new("0"))));
+        assert!(test_control_allowed(true, true, Some(OsStr::new("1"))));
+        assert!(test_control_allowed(true, false, None));
+        assert!(test_control_allowed(false, true, None));
     }
 }

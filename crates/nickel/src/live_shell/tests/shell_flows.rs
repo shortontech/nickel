@@ -99,6 +99,86 @@
     }
 
     #[test]
+    fn first_launcher_open_accepts_typing_after_native_scene_layout() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher.set_codex_available(true);
+        shell.apply_session_launcher_visibility(true);
+        shell.scene(SurfaceRole::Launcher, 960, 720);
+        shell.launcher_host_ui(UiEvent::TextInput("konsole".into()), 960, 720);
+        assert_eq!(shell.launcher.query(), "konsole");
+    }
+
+    #[test]
+    fn launcher_submit_opens_the_keyboard_focused_dashboard_project() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher.set_codex_available(true);
+        shell.set_dashboard_projects(crate::launcher::DashboardSection::Ready(vec![
+            crate::launcher::DashboardProject {
+                id: "nickel".into(),
+                name: "Nickel".into(),
+                roots: Vec::new(),
+                chat_count: Some(1),
+                activity: crate::launcher::ProjectActivity::Idle,
+                last_used_at: None,
+            },
+        ]));
+        shell.apply_session_launcher_visibility(true);
+        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
+        let target = shell
+            .launcher_host
+            .unique_semantic_target_for_message(&LauncherAction::OpenProject("nickel".into()))
+            .expect("Nickel project row");
+        for event in [
+            UiEvent::KeyboardNavigateDown,
+            UiEvent::KeyboardNavigateDown,
+            UiEvent::KeyboardNavigateDown,
+            UiEvent::KeyboardNavigateDown,
+        ] {
+            shell.launcher_host_ui(event, 920, 680);
+        }
+        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
+        assert!(shell.take_requested_codex_project().is_none());
+        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
+        assert_eq!(shell.take_requested_codex_project().as_deref(), Some("nickel"));
+    }
+
+    #[test]
+    fn launcher_submit_dispatches_the_keyboard_focused_dashboard_application() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.launcher = crate::launcher::Launcher::new(vec![crate::model::Application::new(
+            "org.kde.konsole".into(),
+            "Konsole".into(),
+            None,
+            None,
+            Some(vec!["nickel-test-command-that-does-not-exist".into()]),
+        )]);
+        shell.apply_session_launcher_visibility(true);
+        shell.launcher_host_event_with_clipboard_limit(HostEvent::Poll, 920, 680, None);
+        let target = shell
+            .launcher_host
+            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                "org.kde.konsole".into(),
+            ))
+            .expect("Konsole application row");
+        for event in [
+            UiEvent::KeyboardNavigateDown,
+            UiEvent::KeyboardNavigateDown,
+            UiEvent::KeyboardNavigateRight,
+        ] {
+            shell.launcher_host_ui(event, 920, 680);
+        }
+        assert_eq!(shell.launcher_host.inspect().controller_target, Some(target.id));
+        assert!(!shell.launcher_status.as_deref().unwrap_or_default().starts_with("Could not launch Konsole: "));
+        shell.shell_role_host_shortcut(SurfaceRole::Launcher, Shortcut::Submit, 920, 680);
+        // An intentionally unavailable executable proves the production launch
+        // action ran without spawning a real application during this test.
+        assert!(
+            shell.launcher_status.as_deref().unwrap_or_default()
+                .starts_with("Could not launch Konsole: ")
+        );
+    }
+
+    #[test]
     fn controller_cancel_closes_nested_overlay_before_requesting_launcher_dismissal() {
         assert!(matches!(
             super::launcher_controller_host_event(ControllerAction::Cancel, true),

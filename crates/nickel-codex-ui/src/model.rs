@@ -8,8 +8,9 @@ use std::{
 };
 
 use nickel_codex::{
-    AccountState, ApprovalPolicy, CodexEvent, CommandAction, EventKind, Model, Project,
-    ServerRequestId, Thread, ThreadId, TurnId,
+    AccountState, ApprovalPolicy, CodexEvent, CommandAction, EventKind, LoginChallenge, Model,
+    Project, RemoteControlClient, RemoteControlStatus, RemotePairingChallenge, ServerRequestId,
+    Thread, ThreadId, TurnId,
 };
 use nickel_markdown::{MarkdownDocument, markdown_selection_runs};
 use nickel_ui::{SelectionDocument, SelectionRun};
@@ -190,12 +191,33 @@ pub enum PendingInteraction {
     },
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoginPresentationState {
+    #[default]
+    Idle,
+    Starting,
+    Waiting,
+    Cancelling,
+    Cancelled,
+    Failed,
+}
+
 #[derive(Clone, Debug)]
 pub struct ChatState {
     pub generation: u64,
     pub status: ConnectionStatus,
     pub provenance: String,
     pub account: AccountState,
+    pub login_challenge: Option<LoginChallenge>,
+    pub login_qr: Option<Arc<image::RgbaImage>>,
+    pub login_pending: bool,
+    pub login_status: LoginPresentationState,
+    pub remote_control_status: Option<RemoteControlStatus>,
+    pub remote_pairing: Option<RemotePairingChallenge>,
+    pub remote_pairing_qr: Option<Arc<image::RgbaImage>>,
+    pub remote_clients: Vec<RemoteControlClient>,
+    pub remote_control_pending: bool,
+    pub remote_control_message: Option<String>,
     pub models: Vec<Model>,
     pub selected_model: Option<String>,
     pub selected_reasoning_effort: Option<String>,
@@ -244,6 +266,16 @@ impl Default for ChatState {
             status: ConnectionStatus::Loading,
             provenance: "Locating OpenAI Codex CLI…".into(),
             account: AccountState::default(),
+            login_challenge: None,
+            login_qr: None,
+            login_pending: false,
+            login_status: LoginPresentationState::Idle,
+            remote_control_status: None,
+            remote_pairing: None,
+            remote_pairing_qr: None,
+            remote_clients: Vec::new(),
+            remote_control_pending: false,
+            remote_control_message: None,
             models: Vec::new(),
             selected_model: None,
             selected_reasoning_effort: None,
@@ -422,6 +454,16 @@ impl ChatState {
                 | EventKind::FileChangeDelta { item_id, .. }
                 | EventKind::PlanDelta { item_id, .. }
                 | EventKind::ReasoningDelta { item_id, .. } => item_id.len() <= 4096,
+                EventKind::AccountLoginCompleted { completion } => {
+                    completion
+                        .login_id
+                        .as_ref()
+                        .is_none_or(|value| value.len() <= 1024)
+                        && completion
+                            .error
+                            .as_ref()
+                            .is_none_or(|value| value.len() <= 4096)
+                }
                 _ => true,
             },
             _ => true,
@@ -502,6 +544,72 @@ impl ChatState {
                     self.send_pending = false;
                 }
             }
+            ControllerEvent::LoginStarted(challenge) => {
+                self.login_qr = login_challenge_url(&challenge)
+                    .and_then(|url| render_qr_code(url).ok())
+                    .map(Arc::new);
+                self.login_challenge = Some(challenge);
+                self.login_pending = false;
+                self.login_status = LoginPresentationState::Waiting;
+            }
+            ControllerEvent::LoginCancelled(login_id) => {
+                let matches =
+                    self.login_challenge
+                        .as_ref()
+                        .is_some_and(|challenge| match challenge {
+                            LoginChallenge::Browser {
+                                login_id: active, ..
+                            }
+                            | LoginChallenge::DeviceCode {
+                                login_id: active, ..
+                            } => active == &login_id,
+                        });
+                if matches {
+                    self.login_challenge = None;
+                    self.login_qr = None;
+                }
+                self.login_pending = false;
+                self.login_status = LoginPresentationState::Cancelled;
+            }
+            ControllerEvent::RemoteControlStatus(status) => {
+                if status.status != nickel_codex::RemoteControlConnectionStatus::Connected {
+                    self.remote_pairing = None;
+                    self.remote_pairing_qr = None;
+                }
+                self.remote_control_status = Some(status);
+                self.remote_control_pending = false;
+                self.remote_control_message = None;
+            }
+            ControllerEvent::RemotePairingStarted(challenge) => {
+                self.remote_pairing_qr = render_qr_code(&challenge.pairing_code).ok().map(Arc::new);
+                self.remote_pairing = Some(challenge);
+                self.remote_control_pending = false;
+                self.remote_control_message = Some("Waiting for phone…".into());
+            }
+            ControllerEvent::RemotePairingClaimed => {
+                self.remote_pairing = None;
+                self.remote_pairing_qr = None;
+                self.remote_control_pending = false;
+                self.remote_control_message = Some("Phone paired".into());
+            }
+            ControllerEvent::RemotePairingCancelled => {
+                self.remote_pairing = None;
+                self.remote_pairing_qr = None;
+                self.remote_control_pending = false;
+                self.remote_control_message =
+                    Some("Pairing stopped; the Codex code expires automatically".into());
+            }
+            ControllerEvent::RemotePairingFailed(message) => {
+                self.remote_pairing = None;
+                self.remote_pairing_qr = None;
+                self.remote_control_pending = false;
+                self.remote_control_message = Some(sanitize_diagnostic(&message));
+                self.push_diagnostic(message);
+            }
+            ControllerEvent::RemoteClients(page) => {
+                self.remote_clients = page.data.into_iter().take(100).collect();
+                self.remote_control_pending = false;
+            }
             ControllerEvent::ModelRejected { model, message } => {
                 self.send_pending = false;
                 if self.selected_model.as_deref() == Some(model.as_str()) {
@@ -545,6 +653,11 @@ impl ChatState {
             }
             ControllerEvent::OperationFailed(message) => {
                 self.send_pending = false;
+                self.remote_control_pending = false;
+                if self.login_pending {
+                    self.login_pending = false;
+                    self.login_status = LoginPresentationState::Failed;
+                }
                 self.push_diagnostic(message);
             }
             ControllerEvent::Failure(message) => {
@@ -783,6 +896,35 @@ impl ChatState {
                 request_id,
                 question_ids,
             }),
+            EventKind::AccountLoginCompleted { completion } => {
+                let matches = self.login_challenge.as_ref().is_some_and(|challenge| {
+                    let active = match challenge {
+                        LoginChallenge::Browser { login_id, .. }
+                        | LoginChallenge::DeviceCode { login_id, .. } => login_id,
+                    };
+                    completion.login_id.as_deref() == Some(active.as_str())
+                });
+                if matches {
+                    self.login_challenge = None;
+                    self.login_qr = None;
+                    self.login_pending = false;
+                    if completion.success {
+                        self.login_status = LoginPresentationState::Idle;
+                        if !self.account.authenticated {
+                            self.push_diagnostic(
+                                "Codex reported login completion, but account/read has not confirmed the account".into(),
+                            );
+                        }
+                    } else {
+                        self.login_status = LoginPresentationState::Failed;
+                        self.push_diagnostic(
+                            completion
+                                .error
+                                .unwrap_or_else(|| "Codex login failed".into()),
+                        );
+                    }
+                }
+            }
             EventKind::Error { message } => self.push_diagnostic(message),
             EventKind::Inconsistency { message }
                 if message.starts_with("delta for unknown item ")
@@ -1163,6 +1305,41 @@ impl ChatState {
     }
 }
 
+fn login_challenge_url(challenge: &LoginChallenge) -> Option<&str> {
+    let url = match challenge {
+        LoginChallenge::Browser { auth_url, .. } => auth_url,
+        LoginChallenge::DeviceCode {
+            verification_url, ..
+        } => verification_url,
+    };
+    (url.starts_with("https://") || url.starts_with("http://")).then_some(url)
+}
+
+fn render_qr_code(text: &str) -> Result<image::RgbaImage, qrcode::types::QrError> {
+    const MODULE: u32 = 6;
+    const QUIET: u32 = 4;
+    let code = qrcode::QrCode::new(text.as_bytes())?;
+    let modules = code.width() as u32;
+    let size = (modules + QUIET * 2) * MODULE;
+    let mut image = image::RgbaImage::from_pixel(size, size, image::Rgba([255, 255, 255, 255]));
+    for y in 0..modules {
+        for x in 0..modules {
+            if code[(x as usize, y as usize)] == qrcode::Color::Dark {
+                for pixel_y in 0..MODULE {
+                    for pixel_x in 0..MODULE {
+                        image.put_pixel(
+                            (x + QUIET) * MODULE + pixel_x,
+                            (y + QUIET) * MODULE + pixel_y,
+                            image::Rgba([0, 0, 0, 255]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(image)
+}
+
 pub(crate) fn item_markdown_source(item: &ChatItem) -> &str {
     if item.text.is_empty() {
         if item.complete { "—" } else { "…" }
@@ -1258,6 +1435,129 @@ mod tests {
     use std::{hint::black_box, mem::size_of, time::Instant};
 
     use super::*;
+
+    #[test]
+    fn login_completion_only_consumes_the_matching_challenge() {
+        let mut state = ChatState::default();
+        state.apply(
+            1,
+            ControllerEvent::LoginStarted(LoginChallenge::DeviceCode {
+                login_id: "current".into(),
+                user_code: "ABCD-EFGH".into(),
+                verification_url: "https://example.test/device".into(),
+            }),
+        );
+        assert!(state.login_qr.is_some());
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 1,
+                kind: EventKind::AccountLoginCompleted {
+                    completion: nickel_codex::LoginCompletion {
+                        login_id: Some("stale".into()),
+                        success: true,
+                        error: None,
+                    },
+                },
+            }),
+        );
+        assert!(!state.account.authenticated);
+        assert!(state.login_challenge.is_some());
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 2,
+                kind: EventKind::AccountLoginCompleted {
+                    completion: nickel_codex::LoginCompletion {
+                        login_id: Some("current".into()),
+                        success: true,
+                        error: None,
+                    },
+                },
+            }),
+        );
+        assert!(!state.account.authenticated);
+        assert!(state.login_challenge.is_none());
+        assert!(state.login_qr.is_none());
+    }
+
+    #[test]
+    fn codex_phone_pairing_secret_is_cleared_on_cancel_failure_and_disconnect() {
+        let challenge = || nickel_codex::RemotePairingChallenge {
+            environment_id: "environment-1".into(),
+            expires_at: 42,
+            pairing_code: "opaque-secret-payload".into(),
+            manual_pairing_code: Some("1234".into()),
+        };
+        let mut state = ChatState::default();
+        state.apply(1, ControllerEvent::RemotePairingStarted(challenge()));
+        assert!(state.remote_pairing.is_some());
+        assert!(state.remote_pairing_qr.is_some());
+
+        state.apply(1, ControllerEvent::RemotePairingCancelled);
+        assert!(state.remote_pairing.is_none());
+        assert!(state.remote_pairing_qr.is_none());
+
+        state.apply(1, ControllerEvent::RemotePairingStarted(challenge()));
+        state.apply(1, ControllerEvent::RemotePairingFailed("expired".into()));
+        assert!(state.remote_pairing.is_none());
+        assert!(state.remote_pairing_qr.is_none());
+
+        state.apply(1, ControllerEvent::RemotePairingStarted(challenge()));
+        state.apply(
+            1,
+            ControllerEvent::RemoteControlStatus(nickel_codex::RemoteControlStatus {
+                status: nickel_codex::RemoteControlConnectionStatus::Disabled,
+                server_name: "workstation".into(),
+                installation_id: "installation-1".into(),
+                environment_id: None,
+            }),
+        );
+        assert!(state.remote_pairing.is_none());
+        assert!(state.remote_pairing_qr.is_none());
+    }
+
+    #[test]
+    fn confirmed_account_snapshot_not_completion_establishes_authentication() {
+        let mut state = ChatState::default();
+        state.apply(
+            1,
+            ControllerEvent::LoginStarted(LoginChallenge::Browser {
+                login_id: "current".into(),
+                auth_url: "https://example.test/login".into(),
+            }),
+        );
+        state.apply(
+            1,
+            ControllerEvent::Ready {
+                provenance: "test".into(),
+                account: AccountState {
+                    authenticated: true,
+                    ..Default::default()
+                },
+                models: Vec::new(),
+                projects: Vec::new(),
+                threads: Vec::new(),
+                runtime: HashMap::new(),
+                thread_error: None,
+            },
+        );
+        state.apply(
+            1,
+            ControllerEvent::Protocol(CodexEvent {
+                sequence: 1,
+                kind: EventKind::AccountLoginCompleted {
+                    completion: nickel_codex::LoginCompletion {
+                        login_id: Some("current".into()),
+                        success: true,
+                        error: None,
+                    },
+                },
+            }),
+        );
+        assert!(state.account.authenticated);
+        assert!(state.login_challenge.is_none());
+    }
 
     fn delta(state: &mut ChatState, text: &str) {
         state.apply(

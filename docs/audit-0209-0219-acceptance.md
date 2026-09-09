@@ -2,7 +2,22 @@
 
 Implementation and automated regression coverage are integrated from five isolated worktrees.
 The checklist below records the remaining user-facing acceptance pass; an unchecked item is not a
-claim of success. Specifications remain active until their required evidence is complete.
+claim of success. On 2026-09-07 the user requested archival of specs 0209–0219 after implementation
+and initial live testing. They now reside in `specs/done/`; archival does not mark the remaining
+acceptance checks or cache measurements complete.
+
+## Initial live observations and follow-up
+
+The release build of `6c16784` succeeded and the user restarted their session into that binary.
+Process executable identity was checked against `target/release/nickel`. Initial snapshots showed
+approximately 129 MiB PSS / 161 MiB RSS with two monitors, and 104 MiB PSS / 136 MiB RSS after the
+user unplugged the DisplayLink monitor and restarted. These are Nickel process snapshots, not
+whole-session totals, sustained workload measurements, or controlled attribution to DisplayLink.
+The remaining display's resolution was not verified.
+
+Two follow-ups remain open in [the regression notes](audit-0209-0219-regressions.md): the user reports
+the on-screen keyboard is unavailable, and terminal typing transiently emitted repeated `@`
+characters after reconnecting the second monitor and Alt-Tabbing. Neither cause is confirmed.
 
 ## Automated evidence
 

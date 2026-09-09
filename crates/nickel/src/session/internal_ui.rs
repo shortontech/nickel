@@ -49,6 +49,8 @@ pub enum InternalSurfaceRole {
     Desktop,
     Panel,
     Overlay,
+    /// Foremost compositor paint that never participates in hit testing or focus.
+    PassiveOverlay,
     /// Interactive overlay that must preserve the text recipient's seat focus.
     OnScreenKeyboard,
     Application,
@@ -73,6 +75,16 @@ pub struct InternalSurfacePlacement {
     pub output: Option<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InternalWindowDecoration {
+    pub owner: u64,
+    pub title: String,
+    pub active: bool,
+    pub maximized: bool,
+    pub background: u32,
+    pub foreground: u32,
+}
+
 struct PresentedSurface {
     placement: InternalSurfacePlacement,
     renderer: SmithayFrameRenderer,
@@ -81,6 +93,7 @@ struct PresentedSurface {
     scale_factor: f32,
     visible: bool,
     z_order: u64,
+    decoration: Option<InternalWindowDecoration>,
 }
 
 struct SceneSlot;
@@ -199,6 +212,7 @@ pub struct SmithayFrameRenderer {
     diagnostics: InternalUiRendererDiagnostics,
     renderer_mode: InternalUiRendererMode,
     image_cache: Rc<RefCell<TextureCache<ImageTextureKey>>>,
+    image_hashes: ImageHashes,
     text_cache: Rc<RefCell<TextureCache<TextTextureKey>>>,
     /// Retained until all renderer-specific texture imports succeed. Without
     /// this, an import error can only omit the affected icon from the frame.
@@ -298,6 +312,41 @@ struct ImageTextureKey {
     width: u32,
     height: u32,
     content_hash: [u8; 32],
+}
+
+#[derive(Default)]
+struct ImageHashes {
+    entries: HashMap<usize, (std::sync::Weak<image::RgbaImage>, [u8; 32])>,
+    hashed_bytes: u64,
+}
+
+impl ImageHashes {
+    fn get(&mut self, image: &std::sync::Arc<image::RgbaImage>) -> [u8; 32] {
+        let address = std::sync::Arc::as_ptr(image) as usize;
+        if let Some((owner, hash)) = self.entries.get(&address)
+            && owner
+                .upgrade()
+                .is_some_and(|owner| std::sync::Arc::ptr_eq(&owner, image))
+        {
+            return *hash;
+        }
+        // Weak ownership neither pins pixel buffers nor aliases a reused address.
+        // Arc mutation with a weak observer detaches, so changed pixels rehash.
+        if self.entries.len() >= IMAGE_CACHE_ENTRY_LIMIT {
+            self.entries
+                .retain(|_, (owner, _)| owner.strong_count() != 0);
+            if self.entries.len() >= IMAGE_CACHE_ENTRY_LIMIT {
+                self.entries.clear();
+            }
+        }
+        let hash = content_hash(image.as_raw());
+        self.hashed_bytes = self
+            .hashed_bytes
+            .saturating_add(image.as_raw().len() as u64);
+        self.entries
+            .insert(address, (std::sync::Arc::downgrade(image), hash));
+        hash
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -417,6 +466,7 @@ impl SmithayFrameRenderer {
             diagnostics: InternalUiRendererDiagnostics::default(),
             renderer_mode,
             image_cache: Rc::clone(&caches.images),
+            image_hashes: Default::default(),
             text_cache: Rc::clone(&caches.text),
             import_fallback: None,
         }
@@ -437,6 +487,7 @@ impl SmithayFrameRenderer {
     /// Release regenerable frame-sized state while the owning surface cannot
     /// be presented. Shared texture caches remain available to other surfaces.
     fn suspend(&mut self) {
+        self.image_hashes.entries.clear();
         self.text_software.suspend();
         if let Some(mut software) = self.software.take() {
             software.suspend();
@@ -748,7 +799,7 @@ impl SmithayFrameRenderer {
                         high_density: selected_high_density,
                         width: image.width(),
                         height: image.height(),
-                        content_hash: content_hash(image.as_raw()),
+                        content_hash: self.image_hashes.get(image),
                     };
                     let cached = self.image_cache.borrow_mut().get(&key);
                     let texture = if let Some(texture) = cached {
@@ -1389,6 +1440,7 @@ pub struct InternalUiRuntime {
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
     texture_caches: SharedTextureCaches,
+    frame_icons: Option<crate::session::window_frame::FrameIcons>,
 }
 
 impl Default for InternalUiRuntime {
@@ -1406,6 +1458,7 @@ impl Default for InternalUiRuntime {
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
             texture_caches: SharedTextureCaches::default(),
+            frame_icons: crate::session::window_frame::FrameIcons::load(),
         }
     }
 }
@@ -1433,6 +1486,7 @@ impl InternalUiRuntime {
                 scale_factor: scale,
                 visible: true,
                 z_order: self.next_z_order,
+                decoration: None,
             },
         );
         id
@@ -1551,6 +1605,7 @@ impl InternalUiRuntime {
                 scale_factor: scale,
                 visible: true,
                 z_order: self.next_z_order,
+                decoration: None,
             },
         );
         id
@@ -1584,6 +1639,84 @@ impl InternalUiRuntime {
 
     pub fn placement(&self, id: InternalSurfaceId) -> Option<&InternalSurfacePlacement> {
         self.presentation.get(&id).map(|surface| &surface.placement)
+    }
+
+    pub(crate) fn set_window_decoration(
+        &mut self,
+        id: InternalSurfaceId,
+        decoration: InternalWindowDecoration,
+    ) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        if surface.placement.role != InternalSurfaceRole::Application
+            || surface.decoration.as_ref() == Some(&decoration)
+        {
+            return false;
+        }
+        surface.decoration = Some(decoration);
+        surface.dirty = true;
+        true
+    }
+
+    pub(crate) fn internal_frame_target(
+        &self,
+        point: (f64, f64),
+    ) -> Option<(InternalSurfaceId, crate::session::window_frame::FramePart)> {
+        self.presentation
+            .iter()
+            .filter(|(_, surface)| {
+                surface.visible
+                    && surface.placement.role == InternalSurfaceRole::Application
+                    && surface.decoration.is_some()
+            })
+            .filter_map(|(id, surface)| {
+                let (x, y, width, height) = surface.placement.geometry;
+                crate::session::window_frame::hit_test(
+                    crate::session::shell_layout::Geometry {
+                        x,
+                        y,
+                        width: i32::try_from(width).unwrap_or(i32::MAX),
+                        height: i32::try_from(height).unwrap_or(i32::MAX),
+                    },
+                    point.0.round() as i32,
+                    point.1.round() as i32,
+                )
+                .map(|part| (surface.z_order, *id, part))
+            })
+            .max_by_key(|(z, _, _)| *z)
+            .map(|(_, id, part)| (id, part))
+    }
+
+    pub(crate) fn configure_application(
+        &mut self,
+        id: InternalSurfaceId,
+        placement: InternalSurfacePlacement,
+    ) -> bool {
+        let Some(surface) = self.presentation.get_mut(&id) else {
+            return false;
+        };
+        if surface.placement.role != InternalSurfaceRole::Application {
+            return false;
+        }
+        let resized = surface.placement.geometry.2 != placement.geometry.2
+            || surface.placement.geometry.3 != placement.geometry.3;
+        let changed = surface.placement != placement;
+        surface.placement = placement;
+        if resized {
+            surface.renderer.suspend();
+            surface.dirty = true;
+            if let Some(host) = self.surfaces.get_mut(id) {
+                host.step(HostBatch {
+                    surface_size: Some((
+                        surface.placement.geometry.2,
+                        surface.placement.geometry.3,
+                    )),
+                    ..HostBatch::default()
+                });
+            }
+        }
+        changed
     }
 
     /// Show or hide a hosted surface without destroying its application state.
@@ -1698,6 +1831,26 @@ impl InternalUiRuntime {
 
     pub(crate) fn set_clipboard_limit(&mut self, limit: usize) {
         self.clipboard_limit = limit;
+    }
+
+    pub(crate) fn paste_clipboard_image(
+        &mut self,
+        id: InternalSurfaceId,
+        width: u32,
+        height: u32,
+        rgba: &[u8],
+    ) -> bool {
+        let Some(surface) = self.surfaces.get_mut(id) else {
+            return false;
+        };
+        if surface.paste_clipboard_image(width, height, rgba) {
+            if let Some(presentation) = self.presentation.get_mut(&id) {
+                presentation.dirty = true;
+            }
+            true
+        } else {
+            false
+        }
     }
 
     pub(crate) fn take_clipboard_result(&mut self) -> Option<Result<String, String>> {
@@ -1863,7 +2016,9 @@ impl InternalUiRuntime {
             InternalSurfaceRole::Desktop => 0,
             InternalSurfaceRole::Application => 1,
             InternalSurfaceRole::Panel => 2,
-            InternalSurfaceRole::Overlay | InternalSurfaceRole::OnScreenKeyboard => 3,
+            InternalSurfaceRole::Overlay
+            | InternalSurfaceRole::PassiveOverlay
+            | InternalSurfaceRole::OnScreenKeyboard => 3,
         }
     }
 
@@ -1873,6 +2028,7 @@ impl InternalUiRuntime {
             InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
             InternalSurfaceRole::Panel
             | InternalSurfaceRole::Overlay
+            | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => InternalSurfaceLayer::Overlay,
         }
     }
@@ -1892,6 +2048,7 @@ impl InternalUiRuntime {
             .filter_map(|(id, surface)| {
                 let (x, y, width, height) = surface.placement.geometry;
                 (surface.visible
+                    && surface.placement.role != InternalSurfaceRole::PassiveOverlay
                     && !(client_present
                         && matches!(
                             surface.placement.role,
@@ -1959,7 +2116,9 @@ impl InternalUiRuntime {
         self.presentation.get(&id).is_some_and(|surface| {
             matches!(
                 surface.placement.role,
-                InternalSurfaceRole::Overlay | InternalSurfaceRole::Application
+                InternalSurfaceRole::Desktop
+                    | InternalSurfaceRole::Overlay
+                    | InternalSurfaceRole::Application
             )
         })
     }
@@ -2138,6 +2297,22 @@ impl InternalUiRuntime {
         })
     }
 
+    pub fn submit_or_activate(&mut self) -> bool {
+        self.focused.is_some_and(|id| {
+            let submitted = self.step(
+                id,
+                HostBatch {
+                    events: vec![HostEvent::Shortcut(nickel_ui::Shortcut::Submit)],
+                    ..Default::default()
+                },
+            );
+            if !submitted {
+                self.dispatch_ui(id, UiEvent::KeyboardActivate);
+            }
+            true
+        })
+    }
+
     pub fn cancel_touches(&mut self) -> bool {
         let targets = std::mem::take(&mut self.touches);
         let mut handled = false;
@@ -2235,6 +2410,7 @@ impl InternalUiRuntime {
     where
         R::TextureId: Send + Clone + 'static,
     {
+        let frame_icons = self.frame_icons.clone();
         self.ordered_ids_for_layer(output, layer)
             .into_iter()
             .filter_map(|id| {
@@ -2257,11 +2433,68 @@ impl InternalUiRuntime {
                 }
                 let presentation = self.presentation.get_mut(&id)?;
                 let local = output_local_location(placement.geometry, output_origin);
-                Some(presentation.renderer.elements(
+                let mut content = presentation.renderer.elements(
                     renderer,
                     (local.0.round() as i32, local.1.round() as i32).into(),
                     (placement.geometry.2, placement.geometry.3),
-                ))
+                );
+                let Some(decoration) = presentation.decoration.as_ref() else {
+                    return Some(content);
+                };
+                let width = i32::try_from(placement.geometry.2).unwrap_or(i32::MAX);
+                let titlebar = crate::session::window_frame::render_titlebar_for(
+                    Some(decoration.owner),
+                    width,
+                    &decoration.title,
+                    decoration.background,
+                    decoration.foreground,
+                );
+                let mut framed = Vec::new();
+                let titlebar_y =
+                    local.1.round() as i32 - crate::session::window_frame::TITLEBAR_HEIGHT;
+                if let Some(icons) = frame_icons.as_ref() {
+                    let icon_y = titlebar_y + 8;
+                    let icon_x = local.0.round() as i32 + width;
+                    for (buffer, offset) in [
+                        (&icons.close, 35),
+                        (
+                            if decoration.maximized {
+                                &icons.restore
+                            } else {
+                                &icons.maximize
+                            },
+                            81,
+                        ),
+                        (&icons.minimize, 127),
+                    ] {
+                        if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                            renderer,
+                            ((icon_x - offset) as f64, icon_y as f64),
+                            buffer,
+                            None,
+                            None,
+                            None,
+                            Kind::Unspecified,
+                        ) {
+                            framed.push(element.into());
+                        }
+                    }
+                }
+                if let Some(titlebar) = titlebar
+                    && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        (local.0, f64::from(titlebar_y)),
+                        &titlebar,
+                        None,
+                        None,
+                        Some((width, crate::session::window_frame::TITLEBAR_HEIGHT).into()),
+                        Kind::Unspecified,
+                    )
+                {
+                    framed.push(element.into());
+                }
+                framed.append(&mut content);
+                Some(framed)
             })
             .flatten()
             .collect()
@@ -2287,6 +2520,35 @@ pub enum TouchPhase {
 mod tests {
     use super::*;
     use nickel_ui::{Button, Text, View, ViewContext};
+
+    #[test]
+    fn immutable_image_hash_reuse_skips_pixels_without_retaining_them() {
+        use std::sync::Arc;
+        let mut cache = ImageHashes::default();
+        let mut image = Arc::new(image::RgbaImage::from_pixel(
+            32,
+            32,
+            image::Rgba([1, 2, 3, 255]),
+        ));
+        let first = cache.get(&image);
+        let bytes = cache.hashed_bytes;
+        for _ in 0..100 {
+            assert_eq!(cache.get(&image), first);
+        }
+        assert_eq!(
+            cache.hashed_bytes, bytes,
+            "unchanged drag frames must not scan image pixels"
+        );
+        Arc::make_mut(&mut image).put_pixel(0, 0, image::Rgba([9, 8, 7, 255]));
+        assert_ne!(cache.get(&image), first);
+        assert_eq!(cache.hashed_bytes, bytes * 2);
+        let weak = Arc::downgrade(&image);
+        drop(image);
+        assert!(
+            weak.upgrade().is_none(),
+            "hash metadata must not pin CPU image buffers"
+        );
+    }
 
     struct Label;
     impl Application for Label {
@@ -2413,6 +2675,75 @@ mod tests {
         fn view(&self, _: ViewContext) -> impl View<Self::Message> {
             Button::new((), "count")
         }
+    }
+
+    struct SubmitCounter(usize);
+    impl Application for SubmitCounter {
+        type Message = ();
+        fn update(&mut self, (): ()) {}
+        fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+            if shortcut != nickel_ui::Shortcut::Submit {
+                return false;
+            }
+            self.0 += 1;
+            true
+        }
+        fn view(&self, _: ViewContext) -> impl View<Self::Message> {
+            Text::new("submit")
+        }
+    }
+
+    #[test]
+    fn focused_internal_surface_receives_submit_before_activation_fallback() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(
+            SubmitCounter(0),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (0, 0, 320, 200),
+                output: None,
+            },
+            1.0,
+        );
+        assert!(runtime.focus_surface(id));
+
+        assert!(runtime.submit_or_activate());
+        assert_eq!(runtime.application::<SubmitCounter>(id).unwrap().0, 1);
+    }
+
+    #[test]
+    fn application_decoration_owns_titlebar_and_window_buttons() {
+        let mut runtime = InternalUiRuntime::default();
+        let id = runtime.insert(
+            Counter(0),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Application,
+                geometry: (100, 80, 460, 240),
+                output: None,
+            },
+            1.0,
+        );
+        assert!(runtime.set_window_decoration(
+            id,
+            InternalWindowDecoration {
+                owner: 7,
+                title: "Hosted app".into(),
+                active: true,
+                maximized: false,
+                background: 0xff20_2020,
+                foreground: 0xffff_ffff,
+            }
+        ));
+
+        assert_eq!(
+            runtime.internal_frame_target((120.0, 60.0)),
+            Some((id, crate::session::window_frame::FramePart::Titlebar))
+        );
+        assert_eq!(
+            runtime.internal_frame_target((550.0, 60.0)),
+            Some((id, crate::session::window_frame::FramePart::Close))
+        );
+        assert_eq!(runtime.internal_frame_target((120.0, 100.0)), None);
     }
 
     #[test]

@@ -650,12 +650,15 @@ impl XwmHandler for NickelSession {
     fn new_selection(&mut self, xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
         let mime_types = bounded_selection_mime_types(mime_types);
         match selection {
-            SelectionTarget::Clipboard => set_data_device_selection(
-                &self.display_handle,
-                &self.seat,
-                mime_types,
-                SelectionOwner::XWayland(xwm),
-            ),
+            SelectionTarget::Clipboard => {
+                self.native_clipboard.mime_types.clone_from(&mime_types);
+                set_data_device_selection(
+                    &self.display_handle,
+                    &self.seat,
+                    mime_types,
+                    SelectionOwner::XWayland(xwm),
+                )
+            }
             SelectionTarget::Primary => set_primary_selection(
                 &self.display_handle,
                 &self.seat,
@@ -668,6 +671,7 @@ impl XwmHandler for NickelSession {
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
         match selection {
             SelectionTarget::Clipboard => {
+                self.native_clipboard.mime_types.clear();
                 clear_data_device_selection(&self.display_handle, &self.seat)
             }
             SelectionTarget::Primary => clear_primary_selection(&self.display_handle, &self.seat),

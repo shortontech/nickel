@@ -100,6 +100,31 @@ fn semantic_theme(palette: ThemePalette) -> SemanticTheme {
     ))
 }
 
+fn render_remote_pairing_qr(payload: &str) -> Option<Arc<image::RgbaImage>> {
+    const MODULE: u32 = 6;
+    const QUIET: u32 = 4;
+    let code = qrcode::QrCode::new(payload.as_bytes()).ok()?;
+    let modules = code.width() as u32;
+    let size = (modules + QUIET * 2) * MODULE;
+    let mut image = image::RgbaImage::from_pixel(size, size, image::Rgba([255, 255, 255, 255]));
+    for y in 0..modules {
+        for x in 0..modules {
+            if code[(x as usize, y as usize)] == qrcode::Color::Dark {
+                for py in 0..MODULE {
+                    for px in 0..MODULE {
+                        image.put_pixel(
+                            (x + QUIET) * MODULE + px,
+                            (y + QUIET) * MODULE + py,
+                            image::Rgba([0, 0, 0, 255]),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Some(Arc::new(image))
+}
+
 fn load_wallpaper_preview(
     settings: &WallpaperSettings,
 ) -> Result<Option<nickel_platform::DecodedPreview>, nickel_platform::PreviewDecodeError> {
@@ -556,6 +581,17 @@ enum SettingsMessage {
     CodexExecutablePathChanged(String),
     ApplyCodexExecutable,
     RetryCodexProbe,
+    SetRemoteControlEnabled(bool),
+    ConfirmEnableRemoteControl,
+    CancelEnableRemoteControl,
+    StartRemotePairing,
+    CancelRemotePairing,
+    StopRemoteControlNow,
+    DecideRemoteClient {
+        client_id: String,
+        decision: nickel_session_protocol::RemoteClientDecision,
+    },
+    RevokeRemoteClient(String),
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -1405,6 +1441,112 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
+            SettingsMessage::SetRemoteControlEnabled(enabled) => {
+                self.request_remote_control_enabled(enabled, false);
+            }
+            SettingsMessage::ConfirmEnableRemoteControl => {
+                self.request_remote_control_enabled(true, true);
+            }
+            SettingsMessage::CancelEnableRemoteControl => {
+                self.remote_control_enable_confirmation = false;
+            }
+            SettingsMessage::StartRemotePairing => {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                match session_request(SessionRequest::Command(
+                    SessionCommand::StartRemotePairing { now_unix_secs: now },
+                )) {
+                    Ok(ServerMessage::RemotePairing(pairing)) => {
+                        self.remote_pairing_qr = render_remote_pairing_qr(&pairing.qr_payload);
+                        self.remote_pairing = Some(pairing);
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected pairing response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::CancelRemotePairing => {
+                let _ =
+                    session_request(SessionRequest::Command(SessionCommand::CancelRemotePairing));
+                self.remote_pairing = None;
+                self.remote_pairing_qr = None;
+            }
+            SettingsMessage::StopRemoteControlNow => {
+                match session_request(SessionRequest::Command(
+                    SessionCommand::EmergencyStopRemoteControl,
+                )) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime;
+                        self.remote_pairing = None;
+                        self.remote_pairing_qr = None;
+                        self.remote_control_settings =
+                            nickel_remote_control::RemoteAiControlSettings::load_default()
+                                .unwrap_or_default();
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected remote-control response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::DecideRemoteClient {
+                client_id,
+                decision,
+            } => {
+                let capabilities =
+                    if decision == nickel_session_protocol::RemoteClientDecision::Deny {
+                        Vec::new()
+                    } else {
+                        vec![nickel_session_protocol::RemoteCapability::Observe]
+                    };
+                match session_request(SessionRequest::Command(
+                    SessionCommand::DecideRemoteClient {
+                        client_id,
+                        decision,
+                        capabilities,
+                    },
+                )) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected remote-control response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::RevokeRemoteClient(client_id) => {
+                match session_request(SessionRequest::Command(
+                    SessionCommand::RevokeRemoteClient { client_id },
+                )) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected remote-control response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
             SettingsMessage::PeripheralRefresh => {
                 self.peripheral_snapshot = None;
                 self.load_peripherals();
@@ -1926,6 +2068,44 @@ impl SettingsApp {
                     Ok(ServerMessage::OnScreenKeyboard(snapshot)) => Some(snapshot),
                     _ => None,
                 };
+            match nickel_remote_control::RemoteAiControlSettings::load_default() {
+                Ok(settings) => self.remote_control_settings = settings,
+                Err(error) => {
+                    self.remote_control_settings = Default::default();
+                    self.remote_control_runtime.diagnostic = Some(error.to_string());
+                }
+            }
+            match session_request(SessionRequest::Query(SessionQuery::RemoteControl)) {
+                Ok(ServerMessage::RemoteControl(snapshot)) => {
+                    self.remote_control_runtime = snapshot;
+                }
+                Ok(ServerMessage::Error { message, .. }) => {
+                    self.remote_control_runtime.diagnostic = Some(message);
+                }
+                Ok(_) => {
+                    self.remote_control_runtime.diagnostic =
+                        Some("Unexpected remote-control response".into());
+                }
+                Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+            }
+            let now_unix_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let pairing_expired = self
+                .remote_pairing
+                .as_ref()
+                .is_some_and(|pairing| now_unix_secs > pairing.expires_at);
+            let phone_connected = !self.remote_control_runtime.pending_clients.is_empty();
+            if pairing_expired || phone_connected {
+                self.remote_pairing = None;
+                self.remote_pairing_qr = None;
+                if pairing_expired {
+                    let _ = session_request(SessionRequest::Command(
+                        SessionCommand::CancelRemotePairing,
+                    ));
+                }
+            }
         }
         let disk = OptionalFeatureSettings::load_default();
         let runtime = OptionalFeatureRuntime::load_default();
@@ -1995,6 +2175,68 @@ impl SettingsApp {
             self.codex_feature.capability.diagnostic = Some(format!(
                 "Saved; waiting for the shell to observe the change: {error}"
             ));
+        }
+    }
+
+    fn request_remote_control_enabled(&mut self, enabled: bool, confirmed: bool) {
+        if self.remote_control_settings.requested_enabled == enabled
+            && self.remote_control_runtime.requested_enabled == enabled
+        {
+            return;
+        }
+        if enabled && !confirmed {
+            self.remote_control_enable_confirmation = true;
+            return;
+        }
+        self.remote_control_enable_confirmation = false;
+        let mut requested = self.remote_control_settings.clone();
+        requested.set_requested(enabled);
+        if !self.persistence_enabled {
+            self.remote_control_settings = requested.clone();
+            self.remote_control_runtime.requested_enabled = enabled;
+            self.remote_control_runtime.effective = if enabled {
+                nickel_session_protocol::RemoteControlEffectiveState::Enabled
+            } else {
+                nickel_session_protocol::RemoteControlEffectiveState::Disabled
+            };
+            self.remote_control_runtime.generation = requested.generation;
+            self.remote_control_runtime.acknowledged_generation = requested.generation;
+            return;
+        }
+        match session_request(SessionRequest::Command(
+            SessionCommand::ApplyRemoteControl {
+                requested_enabled: enabled,
+                generation: requested.generation,
+            },
+        )) {
+            Ok(ServerMessage::RemoteControl(runtime)) => {
+                let confirmed = runtime.acknowledged_generation == requested.generation
+                    && ((enabled
+                        && runtime.effective
+                            == nickel_session_protocol::RemoteControlEffectiveState::Enabled)
+                        || (!enabled
+                            && runtime.effective
+                                == nickel_session_protocol::RemoteControlEffectiveState::Disabled));
+                self.remote_control_runtime = runtime;
+                if confirmed {
+                    let saved = nickel_remote_control::RemoteAiControlSettings::default_path()
+                        .and_then(|path| requested.save(path));
+                    match saved {
+                        Ok(()) => self.remote_control_settings = requested,
+                        Err(error) => {
+                            self.remote_control_runtime.diagnostic = Some(error.to_string())
+                        }
+                    }
+                }
+            }
+            Ok(ServerMessage::Error { message, .. }) => {
+                self.remote_control_runtime.diagnostic = Some(message)
+            }
+            Ok(_) => {
+                self.remote_control_runtime.diagnostic =
+                    Some("Unexpected remote-control response".into())
+            }
+            Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
         }
     }
 
@@ -4461,6 +4703,20 @@ mod tests {
     }
 
     #[test]
+    fn sidebar_search_finds_remote_control_by_mcp_and_phone_pairing_terms() {
+        for query in ["MCP", "phone pairing", "desktop control"] {
+            let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+            app.sidebar_query = query.into();
+            let tree = app.build_ui(850.0, 580.0);
+            let destination = SettingsMessage::NavigateTarget(
+                SettingsPage::OptionalFeatures,
+                "optional-feature-remote-control".into(),
+            );
+            assert_eq!(tree.semantic_targets_for_message(&destination).len(), 1);
+        }
+    }
+
+    #[test]
     fn sidebar_search_omits_unimplemented_appearance_destinations() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::Appearance);
         app.sidebar_query = "fonts".into();
@@ -4979,6 +5235,97 @@ mod tests {
                 .len()
                 == 1
         );
+    }
+
+    #[test]
+    fn remote_control_enable_requires_explicit_confirmation() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.remote_control_settings = Default::default();
+        app.remote_control_runtime.requested_enabled = false;
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Disabled;
+
+        app.handle_settings_message(SettingsMessage::SetRemoteControlEnabled(true));
+        assert!(app.remote_control_enable_confirmation);
+        assert!(!app.remote_control_settings.requested_enabled);
+
+        app.handle_settings_message(SettingsMessage::ConfirmEnableRemoteControl);
+        assert!(!app.remote_control_enable_confirmation);
+        assert!(app.remote_control_settings.requested_enabled);
+        assert_eq!(
+            app.remote_control_runtime.effective,
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled
+        );
+        assert_eq!(
+            app.remote_control_runtime.acknowledged_generation,
+            app.remote_control_settings.generation
+        );
+    }
+
+    #[test]
+    fn remote_control_card_exposes_switch_and_pairing_actions() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_settings.set_requested(true);
+        app.remote_control_runtime.requested_enabled = true;
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        let frame = app.build_ui(1100.0, 720.0);
+
+        assert_eq!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::SetRemoteControlEnabled(false))
+                .len(),
+            1
+        );
+        assert_eq!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::StartRemotePairing)
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn pending_remote_client_requires_a_local_scoped_decision() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.pending_clients =
+            vec![nickel_session_protocol::RemotePendingClientSnapshot {
+                id: "pending-client".into(),
+                label: "Unverified phone".into(),
+                requested: vec![
+                    nickel_session_protocol::RemoteCapability::Observe,
+                    nickel_session_protocol::RemoteCapability::KeyboardInput,
+                ],
+                connected_at: 42,
+            }];
+        let frame = app.build_ui(1100.0, 720.0);
+        for decision in [
+            nickel_session_protocol::RemoteClientDecision::Deny,
+            nickel_session_protocol::RemoteClientDecision::AllowOnce,
+        ] {
+            assert_eq!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::DecideRemoteClient {
+                        client_id: "pending-client".into(),
+                        decision,
+                    })
+                    .len(),
+                1
+            );
+        }
+        assert!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::DecideRemoteClient {
+                    client_id: "pending-client".into(),
+                    decision: nickel_session_protocol::RemoteClientDecision::Remember,
+                })
+                .is_empty()
+        );
+        assert!(frame.semantic_nodes().iter().all(|node| {
+            node.name.as_deref() != Some("Allow once (Keyboard Input)")
+                && node.name.as_deref() != Some("Remember (Keyboard Input)")
+        }));
     }
 
     #[test]

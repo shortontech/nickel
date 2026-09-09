@@ -208,7 +208,12 @@ impl Selector {
             .tempdir()?;
         let mut output = command(&candidate.path);
         let output = output
-            .args(["app-server", "generate-json-schema", "--out"])
+            .args([
+                "app-server",
+                "generate-json-schema",
+                "--experimental",
+                "--out",
+            ])
             .arg(schema_dir.path())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

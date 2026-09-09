@@ -496,12 +496,8 @@ pub(crate) fn home_directory() -> PathBuf {
 
 #[cfg(target_os = "linux")]
 pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
-    if !launcher.exists() {
-        return Err(OpenPathError::TargetMissing);
-    }
-    std::process::Command::new("gio")
-        .args([std::ffi::OsStr::new("launch"), launcher.as_os_str()])
-        .status()
+    spawn_launcher(launcher)?
+        .wait()
         .map_err(spawn_open_error)
         .and_then(|status| {
             status
@@ -509,6 +505,17 @@ pub(crate) fn open_launcher(launcher: &Path) -> Result<(), OpenPathError> {
                 .then_some(())
                 .ok_or_else(|| OpenPathError::Platform(format!("gio launch exited with {status}")))
         })
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn spawn_launcher(launcher: &Path) -> Result<std::process::Child, OpenPathError> {
+    if !launcher.exists() {
+        return Err(OpenPathError::TargetMissing);
+    }
+    std::process::Command::new("gio")
+        .args([std::ffi::OsStr::new("launch"), launcher.as_os_str()])
+        .spawn()
+        .map_err(spawn_open_error)
 }
 
 #[cfg(target_os = "linux")]

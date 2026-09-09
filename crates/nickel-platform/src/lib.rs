@@ -1,6 +1,8 @@
 //! Shared native platform adapters used by Nickel applications.
 
 mod default_apps;
+#[cfg(target_os = "linux")]
+pub use default_apps::spawn_with_default;
 mod maintenance;
 mod media;
 mod peripherals;

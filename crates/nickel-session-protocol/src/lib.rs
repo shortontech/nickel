@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 24;
+pub const PROTOCOL_VERSION: u16 = 25;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -61,6 +61,7 @@ pub enum Query {
     ShellRuntimeDiagnostics,
     Workspaces,
     ShellBehavior,
+    RemoteControl,
     Preview {
         window: WindowId,
     },
@@ -109,6 +110,23 @@ pub enum Command {
     ReloadShellSettings,
     ApplyShellBehavior {
         transaction: ShellBehaviorTransaction,
+    },
+    ApplyRemoteControl {
+        requested_enabled: bool,
+        generation: u64,
+    },
+    StartRemotePairing {
+        now_unix_secs: u64,
+    },
+    CancelRemotePairing,
+    EmergencyStopRemoteControl,
+    DecideRemoteClient {
+        client_id: String,
+        decision: RemoteClientDecision,
+        capabilities: Vec<RemoteCapability>,
+    },
+    RevokeRemoteClient {
+        client_id: String,
     },
     ToggleLauncher,
     SetLauncherVisible {
@@ -335,6 +353,10 @@ pub enum ShellSemanticTarget {
         output: Option<String>,
         interaction: PointerInteraction,
     },
+    PanelControlCenter {
+        output: Option<String>,
+    },
+    ControlCenterLock,
     PreviewWindow {
         window: WindowId,
         action: PreviewTargetAction,
@@ -477,6 +499,8 @@ pub enum ServerMessage {
     ShellRuntimeDiagnostics(ShellRuntimeDiagnostics),
     Workspaces(WorkspaceState),
     ShellBehavior(ShellBehaviorSnapshot),
+    RemoteControl(RemoteControlSnapshot),
+    RemotePairing(RemotePairingSnapshot),
     Preview(PreviewFrame),
     ShellSemanticTarget(ResolvedShellTarget),
     Event(Event),
@@ -868,6 +892,71 @@ pub struct ShellBehaviorSnapshot {
     pub all_windows_on_every_bar: bool,
     pub desktop_count: u8,
     pub topology_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteControlEffectiveState {
+    Disabled,
+    Enabled,
+    Rejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteControlSnapshot {
+    pub requested_enabled: bool,
+    pub effective: RemoteControlEffectiveState,
+    pub generation: u64,
+    pub acknowledged_generation: u64,
+    pub endpoint: String,
+    pub diagnostic: Option<String>,
+    pub pending_clients: Vec<RemotePendingClientSnapshot>,
+    pub granted_clients: Vec<RemoteGrantedClientSnapshot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteClientDecision {
+    Deny,
+    AllowOnce,
+    Remember,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteCapability {
+    Observe,
+    WindowManagement,
+    SettingsRead,
+    SettingsChange,
+    ApplicationLaunch,
+    PointerInput,
+    KeyboardInput,
+    ScreenCapture,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePendingClientSnapshot {
+    pub id: String,
+    pub label: String,
+    pub requested: Vec<RemoteCapability>,
+    pub connected_at: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteGrantedClientSnapshot {
+    pub id: String,
+    pub label: String,
+    pub capabilities: Vec<RemoteCapability>,
+    pub remembered: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePairingSnapshot {
+    pub ceremony_id: String,
+    pub qr_payload: String,
+    pub short_code: String,
+    pub expires_at: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

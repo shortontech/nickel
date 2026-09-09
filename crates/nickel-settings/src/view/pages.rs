@@ -773,6 +773,231 @@ impl SettingsApp {
                     .is_some_and(|runtime| runtime.enabled),
             ),
         );
+        let remote_effective = self.remote_control_runtime.effective;
+        let remote_switch = match remote_effective {
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled => SwitchState::On,
+            nickel_session_protocol::RemoteControlEffectiveState::Disabled
+                if !self.remote_control_settings.requested_enabled =>
+            {
+                SwitchState::Off
+            }
+            nickel_session_protocol::RemoteControlEffectiveState::Disabled
+            | nickel_session_protocol::RemoteControlEffectiveState::Rejected => SwitchState::Mixed,
+        };
+        let remote_confirmation = if self.remote_control_enable_confirmation {
+            AnyView::new(
+                SettingsRow::new(
+                    theme,
+                    "Allow remote AI control?",
+                    "Approved clients may observe windows and request input, focus, launch, capture, or safe setting capabilities. Press both physical Control keys to stop everything.",
+                )
+                .trailing(ui! { <Row width={190.0} gap={8.0}>
+                    {Button::semantic(theme, SettingsMessage::ConfirmEnableRemoteControl,
+                        "Enable", ButtonPresentation::Primary).width(88.0)}
+                    {Button::semantic(theme, SettingsMessage::CancelEnableRemoteControl,
+                        "Cancel", ButtonPresentation::Quiet).width(78.0)}
+                </Row> }),
+            )
+        } else {
+            AnyView::new(ui! { <Column /> })
+        };
+        let pairing = if let Some(pairing) = &self.remote_pairing {
+            let qr = self.remote_pairing_qr.as_ref().map_or_else(
+                || AnyView::new(ui! { <Column /> }),
+                |image| {
+                    AnyView::new(
+                        Image::new(64001, image.clone())
+                            .width(240.0)
+                            .height(240.0)
+                            .fit(ImageFit::Contain)
+                            .accessibility_label("Remote-control phone pairing QR code"),
+                    )
+                },
+            );
+            AnyView::new(
+                SettingsCard::titled(
+                    theme,
+                    "Pair a phone",
+                    "Scanning or entering this single-use code creates a pending client. You must still approve its capabilities locally.",
+                )
+                .child(qr)
+                .child(SettingsRow::new(theme, "Short code", pairing.short_code.clone()))
+                .child(SettingsRow::new(
+                    theme,
+                    "Expires",
+                    format!("Unix time {}", pairing.expires_at),
+                ))
+                .child(
+                    Button::semantic(
+                        theme,
+                        SettingsMessage::CancelRemotePairing,
+                        "Cancel pairing",
+                        ButtonPresentation::Secondary,
+                    )
+                    .width(150.0),
+                ),
+            )
+        } else {
+            AnyView::new(ui! { <Column /> })
+        };
+        let pending_clients = self.remote_control_runtime.pending_clients.iter().fold(
+            Column::new().fill_width().gap(12.0),
+            |column, client| {
+                let requested = client
+                    .requested
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let can_observe = client
+                    .requested
+                    .contains(&nickel_session_protocol::RemoteCapability::Observe);
+                column.child(
+                    SettingsCard::titled(
+                        theme,
+                        format!("{} wants to connect", client.label),
+                        "Unverified client identity - local approval required",
+                    )
+                    .child(SettingsRow::new(theme, "Requested", requested))
+                    .child(ui! { <Row gap={8.0}>
+                        {Button::semantic(
+                            theme,
+                            SettingsMessage::DecideRemoteClient {
+                                client_id: client.id.clone(),
+                                decision: nickel_session_protocol::RemoteClientDecision::Deny,
+                            },
+                            "Deny",
+                            ButtonPresentation::Destructive,
+                        ).width(88.0)}
+                        {Button::semantic(
+                            theme,
+                            SettingsMessage::DecideRemoteClient {
+                                client_id: client.id.clone(),
+                                decision: nickel_session_protocol::RemoteClientDecision::AllowOnce,
+                            },
+                            "Allow once (Observe)",
+                            ButtonPresentation::Primary,
+                        ).width(180.0).enabled(can_observe)}
+                    </Row> }),
+                )
+            },
+        );
+        let granted_clients = self.remote_control_runtime.granted_clients.iter().fold(
+            Column::new().fill_width().gap(12.0),
+            |column, client| {
+                let granted = client
+                    .capabilities
+                    .iter()
+                    .map(|capability| format!("{capability:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                column.child(
+                    SettingsCard::titled(
+                        theme,
+                        client.label.clone(),
+                        if client.remembered {
+                            "Remembered client"
+                        } else {
+                            "Allow-once client"
+                        },
+                    )
+                    .child(SettingsRow::new(theme, "Granted", granted))
+                    .child(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::RevokeRemoteClient(client.id.clone()),
+                            "Revoke",
+                            ButtonPresentation::Destructive,
+                        )
+                        .width(110.0),
+                    ),
+                )
+            },
+        );
+        let remote = SettingsCard::titled(
+            theme,
+            "Remote AI Control",
+            "Permission-gated desktop control for Codex and paired devices",
+        )
+        .child(
+            SettingsRow::new(
+                theme,
+                "Enable remote control",
+                match remote_effective {
+                    nickel_session_protocol::RemoteControlEffectiveState::Disabled => "Disabled",
+                    nickel_session_protocol::RemoteControlEffectiveState::Enabled => {
+                        "Listening on loopback"
+                    }
+                    nickel_session_protocol::RemoteControlEffectiveState::Rejected => {
+                        "Change rejected"
+                    }
+                },
+            )
+            .trailing(
+                Switch::with_state_action(
+                    remote_switch,
+                    Some(SettingsMessage::SetRemoteControlEnabled(
+                        remote_effective
+                            != nickel_session_protocol::RemoteControlEffectiveState::Enabled,
+                    )),
+                    theme,
+                )
+                .id("optional-feature-remote-control")
+                .accessibility_label("Enable Remote AI Control"),
+            ),
+        )
+        .child(remote_confirmation)
+        .child(SettingsRow::new(
+            theme,
+            "MCP endpoint",
+            self.remote_control_runtime.endpoint.clone(),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Authorized clients",
+            self.remote_control_runtime
+                .granted_clients
+                .len()
+                .to_string(),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Emergency stop",
+            "Press physical Left Control and Right Control together",
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Health",
+            self.remote_control_runtime
+                .diagnostic
+                .clone()
+                .unwrap_or_else(|| format!("{:?}", remote_effective)),
+        ))
+        .child(
+            Button::semantic(
+                theme,
+                SettingsMessage::StartRemotePairing,
+                "Pair a phone",
+                ButtonPresentation::Secondary,
+            )
+            .width(150.0)
+            .enabled(
+                remote_effective == nickel_session_protocol::RemoteControlEffectiveState::Enabled
+                    && self.remote_pairing.is_none(),
+            ),
+        )
+        .child(
+            Button::semantic(
+                theme,
+                SettingsMessage::StopRemoteControlNow,
+                "Stop now",
+                ButtonPresentation::Destructive,
+            )
+            .width(150.0)
+            .enabled(
+                remote_effective == nickel_session_protocol::RemoteControlEffectiveState::Enabled,
+            ),
+        );
         Column::new()
             .fill_width()
             .grow(1.0)
@@ -780,6 +1005,10 @@ impl SettingsApp {
             .overflow_y(nickel_ui::Overflow::Scroll)
             .child(keyboard.shrink(0.0))
             .child(codex.shrink(0.0))
+            .child(remote.shrink(0.0))
+            .child(pairing)
+            .child(pending_clients)
+            .child(granted_clients)
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

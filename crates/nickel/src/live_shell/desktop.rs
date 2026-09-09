@@ -24,6 +24,7 @@ use crate::file_window_host::FileWindowHost;
 
 pub struct DesktopApplication {
     pub(super) wallpaper: Option<Arc<image::RgbaImage>>,
+    pub(super) wallpaper_generation: u64,
     pub(super) palette: ThemePalette,
     pub(super) browser: Option<DirectoryBrowser>,
     pub(super) watch: Option<DirectoryWatch>,
@@ -36,10 +37,6 @@ pub struct DesktopApplication {
     pub(super) active_scale: f32,
     pub(super) icon_cache: HashMap<std::path::PathBuf, Arc<image::RgbaImage>>,
     pub(super) pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
-    /// Pointer position at which the last snapped desktop move was committed.
-    /// Keeping this separate from every motion event lets ordinary small motion
-    /// accumulate until it crosses a grid-cell boundary.
-    pub(super) drag_commit_position: Option<DesktopPoint>,
     pub(super) selection_start: Option<DesktopPoint>,
     pub(super) pointer_position: DesktopPoint,
     pub(super) pointer_seen: bool,
@@ -56,6 +53,9 @@ pub struct DesktopApplication {
     pub(super) operation_tx: std::sync::mpsc::Sender<Result<String, String>>,
     pub(super) operation_rx: std::sync::mpsc::Receiver<Result<String, String>>,
     pub(super) paste_in_progress: bool,
+    pub(super) file_clipboard_available: bool,
+    #[cfg(target_os = "linux")]
+    pending_launches: nickel_file::FileLaunches<()>,
     pub(super) error: Option<String>,
     pub(super) file_window_host: Arc<dyn FileWindowHost>,
 }
@@ -65,7 +65,6 @@ pub(super) struct DesktopViewportState {
     output_origin: DesktopPoint,
     active_scale: f32,
     pointer_down: Option<(DesktopEntryId, DesktopPoint)>,
-    drag_commit_position: Option<DesktopPoint>,
     selection_start: Option<DesktopPoint>,
     pointer_position: DesktopPoint,
     pointer_seen: bool,
@@ -83,7 +82,6 @@ impl DesktopViewportState {
             output_origin,
             active_scale: active_scale.max(1.0),
             pointer_down: None,
-            drag_commit_position: None,
             selection_start: None,
             pointer_position: DesktopPoint::default(),
             pointer_seen: false,
@@ -201,6 +199,7 @@ impl DesktopApplication {
         }
         Self {
             wallpaper,
+            wallpaper_generation: 0,
             palette,
             browser,
             watch,
@@ -211,7 +210,6 @@ impl DesktopApplication {
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,
-            drag_commit_position: None,
             selection_start: None,
             pointer_position: DesktopPoint::default(),
             pointer_seen: false,
@@ -228,6 +226,9 @@ impl DesktopApplication {
             operation_tx,
             operation_rx,
             paste_in_progress: false,
+            file_clipboard_available: false,
+            #[cfg(target_os = "linux")]
+            pending_launches: Default::default(),
             error: None,
             file_window_host,
         }
@@ -341,10 +342,6 @@ impl DesktopApplication {
             output_origin: std::mem::replace(&mut self.output_origin, viewport.output_origin),
             active_scale: std::mem::replace(&mut self.active_scale, viewport.active_scale),
             pointer_down: std::mem::replace(&mut self.pointer_down, viewport.pointer_down),
-            drag_commit_position: std::mem::replace(
-                &mut self.drag_commit_position,
-                viewport.drag_commit_position,
-            ),
             selection_start: std::mem::replace(&mut self.selection_start, viewport.selection_start),
             pointer_position: std::mem::replace(
                 &mut self.pointer_position,
@@ -513,7 +510,7 @@ impl DesktopApplication {
                 directory_generation: self.directory_generation,
                 selection: self.layout.selected().clone(),
                 workspace: self.workspace,
-                paste_available: hit.is_none() && nickel_file::native_file_clipboard_available(),
+                paste_available: hit.is_none() && self.file_clipboard_available,
                 desktop_writable: hit.is_none()
                     && nickel_file::directory_is_writable(&nickel_file::desktop_directory()),
             });
@@ -523,7 +520,6 @@ impl DesktopApplication {
         if let Some(id) = hit {
             self.layout.select(id, modifiers);
             self.pointer_down = Some((id, local));
-            self.drag_commit_position = Some(local);
             self.selection_start = None;
             self.pointer_dragged = false;
         } else {
@@ -531,7 +527,6 @@ impl DesktopApplication {
                 self.layout.clear_selection();
             }
             self.pointer_down = None;
-            self.drag_commit_position = None;
             self.selection_start = Some(local);
         }
         true
@@ -540,7 +535,7 @@ impl DesktopApplication {
     pub(super) fn pointer_motion(&mut self, local: DesktopPoint) -> bool {
         self.pointer_position = local;
         self.pointer_seen = true;
-        let Some((id, pressed)) = self.pointer_down else {
+        let Some((_, pressed)) = self.pointer_down else {
             let Some(start) = self.selection_start else {
                 return false;
             };
@@ -558,28 +553,23 @@ impl DesktopApplication {
             );
             return true;
         };
-        let committed = self.drag_commit_position.unwrap_or(pressed);
-        let delta = DesktopPoint {
-            x: local.x - committed.x,
-            y: local.y - committed.y,
-        };
-        if delta.x.abs() < 2.0 && delta.y.abs() < 2.0 {
+        if !self.pointer_dragged
+            && nickel_file::file_drag_offset(
+                Point {
+                    x: pressed.x,
+                    y: pressed.y,
+                },
+                Point {
+                    x: local.x,
+                    y: local.y,
+                },
+            )
+            .is_none()
+        {
             return false;
         }
-        let (cell_width, cell_height) = self.layout.grid();
-        if delta.x.abs() < cell_width / 2.0 && delta.y.abs() < cell_height / 2.0 {
-            return false;
-        }
-        let snapped_delta = DesktopPoint {
-            x: (delta.x / cell_width).round() * cell_width,
-            y: (delta.y / cell_height).round() * cell_height,
-        };
-        self.layout
-            .move_group(id, snapped_delta, &self.active_output);
-        self.drag_commit_position = Some(DesktopPoint {
-            x: committed.x + snapped_delta.x,
-            y: committed.y + snapped_delta.y,
-        });
+        // Motion is a transient preview, not a layout transaction. Snapping,
+        // collision resolution and persistence happen once, on release.
         self.pointer_dragged = true;
         true
     }
@@ -591,12 +581,29 @@ impl DesktopApplication {
         let Some((id, pressed)) = self.pointer_down.take() else {
             return false;
         };
-        self.drag_commit_position = None;
         let moved = self.pointer_dragged
-            || (local.x - pressed.x).abs() >= 2.0
-            || (local.y - pressed.y).abs() >= 2.0;
+            || nickel_file::file_drag_offset(
+                Point {
+                    x: pressed.x,
+                    y: pressed.y,
+                },
+                Point {
+                    x: local.x,
+                    y: local.y,
+                },
+            )
+            .is_some();
         self.pointer_dragged = false;
         if moved {
+            self.layout.move_group(
+                id,
+                DesktopPoint {
+                    x: local.x - pressed.x,
+                    y: local.y - pressed.y,
+                },
+                &self.active_output,
+            );
+            self.last_click = None;
             self.save_layout();
         } else if self.last_click.is_some_and(|(last, at)| {
             last == id && now.duration_since(at) <= Duration::from_millis(500)
@@ -611,7 +618,6 @@ impl DesktopApplication {
 
     pub(super) fn cancel_pointer_transaction(&mut self) -> bool {
         let changed = self.pointer_down.take().is_some() || self.selection_start.take().is_some();
-        self.drag_commit_position = None;
         self.pointer_dragged = false;
         changed
     }
@@ -625,7 +631,16 @@ impl DesktopApplication {
                             nickel_file::FileLaunch::Browse(path),
                         ))
                 }
-                DesktopFileAction::Open(path) => nickel_file::open_path(&path),
+                DesktopFileAction::Open(path) => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.start_document_launch(path, nickel_file::spawn_open_path)
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        nickel_file::open_path(&path)
+                    }
+                }
             };
             if let Err(error) = result {
                 let path = self
@@ -640,6 +655,27 @@ impl DesktopApplication {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn start_document_launch(
+        &mut self,
+        path: std::path::PathBuf,
+        spawn: impl FnOnce(&std::path::Path) -> Result<std::process::Child, String>,
+    ) -> Result<(), String> {
+        self.pending_launches.start_with(path, (), spawn)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn poll_document_launches(&mut self) -> bool {
+        let mut changed = false;
+        for (path, (), result) in self.pending_launches.poll() {
+            if let Err(error) = result {
+                self.error = Some(format!("Could not open {}: {error}", path.display()));
+                changed = true;
+            }
+        }
+        changed
+    }
+
     pub(super) fn open_background_context(&mut self, anchor: Option<DesktopPoint>) {
         self.replacing_context_menu();
         self.context_menu = Some(DesktopMenuContext {
@@ -650,7 +686,7 @@ impl DesktopApplication {
             directory_generation: self.directory_generation,
             selection: self.layout.selected().clone(),
             workspace: self.workspace,
-            paste_available: nickel_file::native_file_clipboard_available(),
+            paste_available: self.file_clipboard_available,
             desktop_writable: nickel_file::directory_is_writable(&nickel_file::desktop_directory()),
         });
     }
@@ -684,7 +720,7 @@ impl DesktopApplication {
                 directory_generation: self.directory_generation,
                 selection: self.layout.selected().clone(),
                 workspace: self.workspace,
-                paste_available: nickel_file::native_file_clipboard_available(),
+                paste_available: self.file_clipboard_available,
                 desktop_writable: nickel_file::directory_is_writable(
                     &nickel_file::desktop_directory(),
                 ),
@@ -1490,7 +1526,9 @@ impl nickel_ui::Application for DesktopApplication {
         );
         if let Some(wallpaper) = &self.wallpaper {
             layer = layer.child(
-                Image::new(1, Arc::clone(wallpaper))
+                // Wallpaper changes have an owned generation; dragging an icon
+                // must not fingerprint every wallpaper byte during view rebuild.
+                Image::new_with_generation(1, Arc::clone(wallpaper), self.wallpaper_generation)
                     .width(width)
                     .height(height)
                     .fit(ImageFit::Stretch)
@@ -1510,11 +1548,18 @@ impl nickel_ui::Application for DesktopApplication {
             .enumerate()
         {
             let origin = self.projection_origin();
-            let position = Point {
+            let mut position = Point {
                 x: item.position.x - origin.x,
                 y: item.position.y - origin.y,
             };
             let selected = self.layout.selected().contains(&item.id);
+            if selected
+                && self.pointer_dragged
+                && let Some((_, pressed)) = self.pointer_down
+            {
+                position.x += self.pointer_position.x - pressed.x;
+                position.y += self.pointer_position.y - pressed.y;
+            }
             let focused = self.layout.active() == Some(item.id);
             let icon = self
                 .icon_cache
@@ -1628,6 +1673,10 @@ impl nickel_ui::Application for DesktopApplication {
 
     fn poll(&mut self) -> bool {
         let mut changed = self.refresh_directory(false);
+        #[cfg(target_os = "linux")]
+        {
+            changed |= self.poll_document_launches();
+        }
         while let Ok(result) = self.operation_rx.try_recv() {
             self.paste_in_progress = false;
             self.error = Some(result.unwrap_or_else(|error| error));
@@ -1668,6 +1717,7 @@ impl DesktopApplication {
         let (operation_tx, operation_rx) = std::sync::mpsc::channel();
         Self {
             wallpaper,
+            wallpaper_generation: 0,
             palette,
             file_window_host: crate::file_window_host::default_file_window_host(),
             browser: None,
@@ -1689,7 +1739,6 @@ impl DesktopApplication {
             active_scale: 1.0,
             icon_cache: HashMap::new(),
             pointer_down: None,
-            drag_commit_position: None,
             selection_start: None,
             pointer_position: DesktopPoint::default(),
             pointer_seen: false,
@@ -1706,6 +1755,9 @@ impl DesktopApplication {
             operation_tx,
             operation_rx,
             paste_in_progress: false,
+            file_clipboard_available: false,
+            #[cfg(target_os = "linux")]
+            pending_launches: Default::default(),
             error: None,
         }
     }

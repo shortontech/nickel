@@ -229,6 +229,16 @@ impl SettingsApp {
                 ),
                 SettingsSearchEntry::new(
                     &optional_features_label,
+                    "Remote AI Control",
+                    "Remote · AI · MCP · Codex · automation · desktop control · phone pairing",
+                    "optional-feature-remote-control",
+                    SettingsMessage::NavigateTarget(
+                        SettingsPage::OptionalFeatures,
+                        "optional-feature-remote-control".into(),
+                    ),
+                ),
+                SettingsSearchEntry::new(
+                    &optional_features_label,
                     "On-screen keyboard",
                     "Screen keyboard · touch keyboard · virtual keyboard",
                     "on-screen-keyboard-preview",

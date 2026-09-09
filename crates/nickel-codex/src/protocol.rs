@@ -41,6 +41,78 @@ pub struct AccountState {
     pub email: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoginMethod {
+    Browser,
+    DeviceCode,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum LoginChallenge {
+    Browser {
+        login_id: String,
+        auth_url: String,
+    },
+    DeviceCode {
+        login_id: String,
+        user_code: String,
+        verification_url: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginCompletion {
+    pub login_id: Option<String>,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteControlConnectionStatus {
+    Disabled,
+    Connecting,
+    Connected,
+    Errored,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteControlStatus {
+    pub status: RemoteControlConnectionStatus,
+    pub server_name: String,
+    pub installation_id: String,
+    pub environment_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePairingChallenge {
+    pub environment_id: String,
+    pub expires_at: i64,
+    /// Opaque payload intended for a locally rendered QR code. Never log it.
+    pub pairing_code: String,
+    pub manual_pairing_code: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteControlClient {
+    pub client_id: String,
+    pub display_name: Option<String>,
+    pub device_model: Option<String>,
+    pub device_type: Option<String>,
+    pub platform: Option<String>,
+    pub os_version: Option<String>,
+    pub app_version: Option<String>,
+    pub last_seen_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteControlClientPage {
+    pub data: Vec<RemoteControlClient>,
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Model {
     pub id: String,
@@ -434,6 +506,12 @@ pub enum EventKind {
         question_ids: Vec<String>,
     },
     AccountUpdated,
+    AccountLoginCompleted {
+        completion: LoginCompletion,
+    },
+    RemoteControlStatusChanged {
+        status: RemoteControlStatus,
+    },
     Error {
         message: String,
     },
@@ -447,6 +525,67 @@ pub enum EventKind {
 
 pub trait CodexBackend {
     fn account(&self) -> Result<AccountState, CodexError>;
+    fn start_login(&self, _method: LoginMethod) -> Result<LoginChallenge, CodexError> {
+        Err(CodexError::Unavailable(
+            "account login is not supported by this backend".into(),
+        ))
+    }
+    fn cancel_login(&self, _login_id: &str) -> Result<(), CodexError> {
+        Err(CodexError::Unavailable(
+            "account login is not supported by this backend".into(),
+        ))
+    }
+    fn remote_control_status(&self) -> Result<RemoteControlStatus, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone access is not supported by this backend".into(),
+        ))
+    }
+    fn enable_remote_control(&self, _ephemeral: bool) -> Result<RemoteControlStatus, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone access is not supported by this backend".into(),
+        ))
+    }
+    fn disable_remote_control(&self, _ephemeral: bool) -> Result<RemoteControlStatus, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone access is not supported by this backend".into(),
+        ))
+    }
+    fn start_remote_pairing(
+        &self,
+        _manual_code: bool,
+    ) -> Result<RemotePairingChallenge, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone pairing is not supported by this backend".into(),
+        ))
+    }
+    fn remote_pairing_claimed(
+        &self,
+        _pairing_code: Option<&str>,
+        _manual_pairing_code: Option<&str>,
+    ) -> Result<bool, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone pairing is not supported by this backend".into(),
+        ))
+    }
+    fn remote_control_clients(
+        &self,
+        _environment_id: &str,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<RemoteControlClientPage, CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone access is not supported by this backend".into(),
+        ))
+    }
+    fn revoke_remote_control_client(
+        &self,
+        _environment_id: &str,
+        _client_id: &str,
+    ) -> Result<(), CodexError> {
+        Err(CodexError::Unavailable(
+            "Codex phone access is not supported by this backend".into(),
+        ))
+    }
     fn models(&self) -> Result<Vec<Model>, CodexError>;
     fn list_projects(&self, page: ProjectPage) -> Result<ProjectPageResult, CodexError>;
     fn import_project(&self, project: ImportProject) -> Result<Project, CodexError>;

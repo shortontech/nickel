@@ -29,6 +29,7 @@ use nickel_core::{
 };
 use nickel_file::{DirectoryBrowser, EntrySortKey, FileEntry, SortDirection};
 use nickel_i18n::Localizer;
+#[cfg(not(target_os = "linux"))]
 use nickel_platform::{DefaultLaunchError as OpenPathError, open_with_default};
 use nickel_ui::{
     AnyView, Application, FrameOverlay, Insets, OverlayAnchor, OverlayMenu, OverlayMenuItem,
@@ -72,6 +73,7 @@ pub(crate) fn drop_target_id(prefix: &str, path: &std::path::Path) -> String {
     format!("file-drop-{prefix}-{:016x}", hasher.finish())
 }
 type NavigationResult = (u64, Result<Option<DirectoryBrowser>, String>);
+#[cfg(not(target_os = "linux"))]
 type ActivationResult = (u64, String, Result<(), OpenPathError>);
 type TransferUpdate = (TransferIntent, usize, usize, Option<TransferReport>);
 type RenameResult = (crate::FileIdentity, PathBuf, Result<(), String>);
@@ -93,6 +95,7 @@ pub(crate) struct FileClick {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum FileMessage {
+    EntryDrag(usize, nickel_ui::DragGesture),
     ContextEntry(usize),
     ContextBackground,
     ContextOpen,
@@ -217,6 +220,8 @@ pub struct FileApp {
     pub(crate) native_drop_hover_started: Option<(PathBuf, Instant)>,
     native_drop_intent: TransferIntent,
     pub(crate) outbound_drag: Option<DragOffer>,
+    pub(crate) file_drag_origin: Option<(crate::FileIdentity, Point)>,
+    pub(crate) file_drag_started: bool,
     pub(crate) primary_down: bool,
     pub(crate) transfer_rx: Option<Receiver<TransferUpdate>>,
     transfer_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
@@ -243,8 +248,12 @@ pub struct FileApp {
     pub(crate) properties_edits: Option<crate::properties::PropertyEdits>,
     pub(crate) properties_scroll: f32,
     pub(crate) properties_confirm_close: bool,
+    #[cfg(not(target_os = "linux"))]
     activation_rx: Option<Receiver<ActivationResult>>,
+    #[cfg(not(target_os = "linux"))]
     activation_op: fn(&std::path::Path) -> Result<(), OpenPathError>,
+    #[cfg(target_os = "linux")]
+    launches: crate::FileLaunches<(u64, String)>,
     pub(crate) icons: icons::ArtworkCache,
     pub(crate) icon_rx:
         Option<Receiver<(u64, PathBuf, icons::ArtworkCacheKey, icons::ResolvedArtwork)>>,
@@ -577,6 +586,8 @@ impl FileApp {
             native_drop_hover_started: None,
             native_drop_intent: TransferIntent::Copy,
             outbound_drag: None,
+            file_drag_origin: None,
+            file_drag_started: false,
             primary_down: false,
             transfer_rx: None,
             transfer_cancel: None,
@@ -600,8 +611,12 @@ impl FileApp {
             properties_edits: None,
             properties_scroll: 0.0,
             properties_confirm_close: false,
+            #[cfg(not(target_os = "linux"))]
             activation_rx: None,
+            #[cfg(not(target_os = "linux"))]
             activation_op: open_with_default,
+            #[cfg(target_os = "linux")]
+            launches: Default::default(),
             icons: icons::ArtworkCache::default(),
             icon_rx: None,
             icon_poll_delay: std::time::Duration::from_millis(16),
@@ -873,26 +888,64 @@ impl FileApp {
         if is_directory {
             self.navigate_to(entry.path);
         } else {
-            if self.activation_rx.is_some() {
-                self.status = "Another file is still opening…".into();
-                return;
+            #[cfg(target_os = "linux")]
+            {
+                let label = entry.display_name().to_owned();
+                self.status = match self
+                    .launches
+                    .start(entry.path, (self.active_tab_id, label.clone()))
+                {
+                    Ok(()) => format!("Opening {label} with its default application…"),
+                    Err(error) => format!("Could not open {label}: {error}"),
+                };
             }
-            let label = entry.display_name().to_owned();
-            self.status = format!("Opening {label}…");
-            let path = entry.path;
-            let tab_id = self.active_tab_id;
-            let activation_op = self.activation_op;
-            let (sender, receiver) = mpsc::channel();
-            self.activation_rx = Some(receiver);
-            let _ = std::thread::Builder::new()
-                .name("nickel-file-activation".into())
-                .spawn(move || {
-                    let result = activation_op(&path);
-                    let _ = sender.send((tab_id, label, result));
-                });
+            #[cfg(not(target_os = "linux"))]
+            {
+                if self.activation_rx.is_some() {
+                    self.status = "Another file is still opening…".into();
+                    return;
+                }
+                let label = entry.display_name().to_owned();
+                self.status = format!("Opening {label}…");
+                let path = entry.path;
+                let tab_id = self.active_tab_id;
+                let activation_op = self.activation_op;
+                let (sender, receiver) = mpsc::channel();
+                self.activation_rx = Some(receiver);
+                let _ = std::thread::Builder::new()
+                    .name("nickel-file-activation".into())
+                    .spawn(move || {
+                        let result = activation_op(&path);
+                        let _ = sender.send((tab_id, label, result));
+                    });
+            }
         }
     }
 
+    #[cfg(target_os = "linux")]
+    fn poll_activation(&mut self) -> bool {
+        let completed = self.launches.poll();
+        let changed = !completed.is_empty();
+        for (_, (tab_id, label), result) in completed {
+            let status = match result {
+                Ok(()) => format!("Opened {label}"),
+                Err(error) => format!("Could not open {label}: {error}"),
+            };
+            if tab_id == self.active_tab_id {
+                self.status = status;
+            } else if let Some(tab) = self
+                .tabs
+                .iter_mut()
+                .flatten()
+                .find(|tab| tab.tab_id == tab_id)
+            {
+                tab.status = status;
+            }
+        }
+        changed
+    }
+
+    #[cfg(not(target_os = "linux"))]
     fn poll_activation(&mut self) -> bool {
         let Some(receiver) = self.activation_rx.as_ref() else {
             return false;
@@ -2230,7 +2283,57 @@ impl FileApp {
                 self.places_open = false;
                 self.navigate_to(path);
             }
+            FileMessage::EntryDrag(index, gesture) => {
+                use nickel_ui::DragPhase;
+                match gesture.phase {
+                    DragPhase::Started => {
+                        // Directory watch updates can reorder indices during a
+                        // held gesture. The captured file identity must not change.
+                        self.file_drag_origin = self
+                            .browser
+                            .identity_at(index)
+                            .map(|identity| (identity, gesture.position));
+                        self.file_drag_started = false;
+                        // Preserve an existing group while dragging one of its
+                        // members; selection clicks still finish on release.
+                        if !self.is_index_selected(index) && !self.control_down && !self.shift_down
+                        {
+                            self.select_only(index);
+                        }
+                    }
+                    DragPhase::Moved => self.begin_file_drag_if_threshold(gesture.position),
+                    DragPhase::Ended => {
+                        // Native hosts consume the offer when starting the OS
+                        // drag. An embedded local drop keeps ownership here and
+                        // enters the same validated transfer queue as native drops.
+                        if self
+                            .native_drop_destination
+                            .as_deref()
+                            .is_some_and(|path| path != self.browser.current())
+                            && let Some(offer) = self.outbound_drag.take()
+                        {
+                            self.file_drag_event(nickel_ui::FileDragEvent::ActionChanged(
+                                nickel_ui::FileDragAction::Copy,
+                            ));
+                            for source in offer.sources {
+                                self.file_drag_event(nickel_ui::FileDragEvent::Dropped(
+                                    source.path,
+                                ));
+                            }
+                        }
+                        self.file_drag_origin = None;
+                    }
+                    DragPhase::Cancelled => {
+                        self.file_drag_origin = None;
+                        self.outbound_drag = None;
+                    }
+                }
+            }
             FileMessage::Entry(index) => {
+                if std::mem::take(&mut self.file_drag_started) {
+                    self.last_click = None;
+                    return;
+                }
                 self.context_target = None;
                 self.context_anchor = None;
                 let now = Instant::now();
@@ -2352,25 +2455,18 @@ impl FileApp {
     }
 
     pub(crate) fn begin_file_drag_if_threshold(&mut self, cursor: Point) {
-        if !self.primary_down || self.outbound_drag.is_some() {
+        if self.file_drag_started || self.outbound_drag.is_some() {
             return;
         }
-        let Some(click) = &self.last_click else {
+        let Some((identity, origin)) = self.file_drag_origin else {
             return;
         };
-        let distance =
-            ((click.position.x - cursor.x).powi(2) + (click.position.y - cursor.y).powi(2)).sqrt();
-        if distance < 6.0 {
+        let Some(clicked) = self.browser.index_of_identity(identity) else {
+            return;
+        };
+        if crate::file_drag_offset(origin, cursor).is_none() {
             return;
         }
-        let Some(clicked) = self
-            .browser
-            .entries()
-            .iter()
-            .position(|entry| entry.path == click.path)
-        else {
-            return;
-        };
         if !self.is_index_selected(clicked) {
             return;
         }
@@ -2395,6 +2491,10 @@ impl FileApp {
             })
             .collect();
         self.outbound_drag = DragOffer::bounded(sources).ok();
+        self.file_drag_started = self.outbound_drag.is_some();
+        if self.file_drag_started {
+            self.last_click = None;
+        }
     }
 
     fn commit_rename(&mut self) {
@@ -2680,6 +2780,14 @@ impl FileApp {
 }
 
 impl Application for FileApp {
+    fn adapt_input(
+        host: &mut nickel_ui::UiHost<Self>,
+        input: &nickel_input::InputEvent,
+    ) -> nickel_ui::AdapterOutcome {
+        // All file windows, including embedded ones, use this policy boundary.
+        Self::application_input(host, input)
+    }
+
     type Message = FileMessage;
 
     fn update(&mut self, message: Self::Message) {
@@ -3104,9 +3212,12 @@ impl Application for FileApp {
             self.navigation_rx
                 .as_ref()
                 .map(|_| self.navigation_poll_delay),
+            #[cfg(not(target_os = "linux"))]
             self.activation_rx
                 .as_ref()
                 .map(|_| Duration::from_millis(16)),
+            #[cfg(target_os = "linux")]
+            (!self.launches.is_empty()).then_some(Duration::from_millis(250)),
             self.transfer_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.rename_rx.as_ref().map(|_| Duration::from_millis(16)),
             self.native_drop_deadline

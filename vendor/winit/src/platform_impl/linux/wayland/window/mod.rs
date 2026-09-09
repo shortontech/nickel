@@ -10,7 +10,7 @@ use sctk::reexports::client::protocol::wl_surface::WlSurface;
 use sctk::reexports::client::{Proxy, QueueHandle};
 
 use sctk::compositor::{CompositorState, Region, SurfaceData};
-use sctk::data_device_manager::{data_source::DragSource, DataDeviceManagerState};
+use sctk::data_device_manager::DataDeviceManagerState;
 use sctk::reexports::client::protocol::wl_data_device_manager::DndAction;
 use sctk::reexports::protocols::xdg::activation::v1::client::xdg_activation_v1::XdgActivationV1;
 use sctk::shell::xdg::window::{Window as SctkWindow, WindowDecorations};
@@ -69,7 +69,8 @@ pub struct Window {
     queue_handle: QueueHandle<WinitState>,
 
     data_device_manager: Option<Arc<DataDeviceManagerState>>,
-    file_drag_sources: Arc<Mutex<Vec<(DragSource, Arc<Vec<u8>>)>>>,
+    file_drag_sources: Arc<Mutex<Vec<super::state::FileDragSource>>>,
+    file_drag_pool: Arc<Mutex<sctk::shm::slot::SlotPool>>,
 
     /// Window requests to the event loop.
     window_requests: Arc<WindowRequests>,
@@ -101,6 +102,7 @@ impl Window {
         let display = event_loop_window_target.connection.display();
         let data_device_manager = state.data_device_manager_state.clone();
         let file_drag_sources = state.file_drag_sources.clone();
+        let file_drag_pool = state.custom_cursor_pool.clone();
 
         let size: Size = attributes.inner_size.unwrap_or(LogicalSize::new(800., 600.).into());
 
@@ -234,6 +236,7 @@ impl Window {
             queue_handle,
             data_device_manager,
             file_drag_sources,
+            file_drag_pool,
             xdg_activation,
             attention_requested: Arc::new(AtomicBool::new(false)),
             event_loop_awakener,
@@ -614,8 +617,48 @@ impl Window {
             ["text/uri-list"],
             DndAction::Copy | DndAction::Move,
         );
-        source.start_drag(&device, self.window.wl_surface(), None, serial);
-        self.file_drag_sources.lock().unwrap().push((source, Arc::new(uri_list)));
+        // A small owned document silhouette supplies feedback even when the
+        // application has no thumbnail. It follows the compositor's drag grab.
+        let mut pool = self.file_drag_pool.lock().unwrap();
+        let (buffer, canvas) = pool
+            .create_buffer(
+                32,
+                40,
+                32 * 4,
+                sctk::reexports::client::protocol::wl_shm::Format::Argb8888,
+            )
+            .map_err(|_| {
+                ExternalError::Os(os_error!(OsError::Misc("could not allocate file drag icon")))
+            })?;
+        for (index, pixel) in canvas.chunks_exact_mut(4).enumerate() {
+            let (x, y) = (index % 32, index / 32);
+            let color: u32 = if (3..29).contains(&x) && (2..38).contains(&y) {
+                if x == 3 || x == 28 || y == 2 || y == 37 {
+                    0xff4779b8
+                } else {
+                    0xffeeeeee
+                }
+            } else {
+                0
+            };
+            pixel.copy_from_slice(&color.to_ne_bytes());
+        }
+        let icon = self.compositor.create_surface(&self.queue_handle);
+        if buffer.attach_to(&icon).is_err() {
+            icon.destroy();
+            return Err(ExternalError::Os(os_error!(OsError::Misc(
+                "could not attach file drag icon"
+            ))));
+        }
+        source.start_drag(&device, self.window.wl_surface(), Some(&icon), serial);
+        icon.damage_buffer(0, 0, 32, 40);
+        icon.commit();
+        self.file_drag_sources.lock().unwrap().push(super::state::FileDragSource {
+            source,
+            payload: uri_list,
+            icon,
+            _buffer: buffer,
+        });
         Ok(())
     }
 

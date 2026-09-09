@@ -4,7 +4,239 @@ use crate::session::SessionAuthorityRequest;
 static CONTROL_SOCKET_GENERATION: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+fn remote_capability(
+    capability: nickel_remote_control::Capability,
+) -> nickel_session_protocol::RemoteCapability {
+    use nickel_remote_control::Capability as Source;
+    use nickel_session_protocol::RemoteCapability as Target;
+    match capability {
+        Source::Observe => Target::Observe,
+        Source::WindowManagement => Target::WindowManagement,
+        Source::SettingsRead => Target::SettingsRead,
+        Source::SettingsChange => Target::SettingsChange,
+        Source::ApplicationLaunch => Target::ApplicationLaunch,
+        Source::PointerInput => Target::PointerInput,
+        Source::KeyboardInput => Target::KeyboardInput,
+        Source::ScreenCapture => Target::ScreenCapture,
+    }
+}
+
+fn control_capability(
+    capability: nickel_session_protocol::RemoteCapability,
+) -> nickel_remote_control::Capability {
+    use nickel_remote_control::Capability as Target;
+    use nickel_session_protocol::RemoteCapability as Source;
+    match capability {
+        Source::Observe => Target::Observe,
+        Source::WindowManagement => Target::WindowManagement,
+        Source::SettingsRead => Target::SettingsRead,
+        Source::SettingsChange => Target::SettingsChange,
+        Source::ApplicationLaunch => Target::ApplicationLaunch,
+        Source::PointerInput => Target::PointerInput,
+        Source::KeyboardInput => Target::KeyboardInput,
+        Source::ScreenCapture => Target::ScreenCapture,
+    }
+}
+
 impl NickelSession {
+    pub(crate) fn sync_remote_control_indicators(&mut self) {
+        let grants = self
+            .remote_control
+            .control()
+            .lock()
+            .unwrap()
+            .granted_clients()
+            .collect::<Vec<_>>();
+        if self.locked || grants.is_empty() {
+            for id in self
+                .remote_indicator_surfaces
+                .drain()
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>()
+            {
+                self.internal_ui.remove(id);
+            }
+            self.request_output_redraw();
+            return;
+        }
+        let Some(theme) = self
+            .internal_shell
+            .as_ref()
+            .map(crate::internal_shell::InternalShellCoordinator::semantic_theme)
+        else {
+            return;
+        };
+        let mut capabilities = grants
+            .iter()
+            .flat_map(|client| client.capabilities.iter().copied())
+            .collect::<Vec<_>>();
+        capabilities.sort();
+        capabilities.dedup();
+        let capability_text = capabilities
+            .iter()
+            .map(|capability| format!("{capability:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let subtitle = format!(
+            "{} client{} - {} - Left Ctrl + Right Ctrl stops",
+            grants.len(),
+            if grants.len() == 1 { "" } else { "s" },
+            capability_text
+        );
+        let outputs = self.internal_outputs();
+        let desired = outputs
+            .iter()
+            .map(|(output, origin_x, origin_y)| {
+                let width = 420_u32.min(output.width.saturating_sub(24)).max(1);
+                let height = 64_u32.min(output.height.max(1));
+                let text_width = width.saturating_sub(32).max(1) as f32;
+                let x = origin_x + output.width.saturating_sub(width).saturating_sub(12) as i32;
+                let y = origin_y + 12;
+                let placement = crate::session::InternalSurfacePlacement {
+                    role: crate::session::InternalSurfaceRole::PassiveOverlay,
+                    geometry: (x, y, width, height),
+                    output: Some(output.name.clone()),
+                };
+                let scene = vec![
+                    nickel_ui::backend::PaintCommand::RoundedFill {
+                        rect: nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
+                        color: theme.surfaces.raised,
+                        radius: theme.radii.card,
+                    },
+                    nickel_ui::backend::PaintCommand::Stroke {
+                        rect: nickel_ui::Rect::new(
+                            0.5,
+                            0.5,
+                            width.saturating_sub(1).max(1) as f32,
+                            height.saturating_sub(1).max(1) as f32,
+                        ),
+                        color: theme.accent.ordinary,
+                        width: 1.0,
+                    },
+                    nickel_ui::backend::PaintCommand::Text {
+                        bounds: nickel_ui::Rect::new(16.0, 8.0, text_width, 22.0),
+                        text: "Remote AI Control active".into(),
+                        scale: 1.0,
+                        color: theme.text.primary,
+                        align: nickel_ui::TextAlign::Start,
+                        bold: true,
+                        wrap: false,
+                    },
+                    nickel_ui::backend::PaintCommand::Text {
+                        bounds: nickel_ui::Rect::new(16.0, 32.0, text_width, 22.0),
+                        text: subtitle.clone(),
+                        scale: 0.85,
+                        color: theme.text.secondary,
+                        align: nickel_ui::TextAlign::Start,
+                        bold: false,
+                        wrap: false,
+                    },
+                ];
+                (output.name.clone(), output.scale, placement, scene)
+            })
+            .collect::<Vec<_>>();
+        let desired_names = desired
+            .iter()
+            .map(|(name, _, _, _)| name.clone())
+            .collect::<std::collections::HashSet<_>>();
+        for name in self
+            .remote_indicator_surfaces
+            .keys()
+            .filter(|name| !desired_names.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if let Some(id) = self.remote_indicator_surfaces.remove(&name) {
+                self.internal_ui.remove(id);
+            }
+        }
+        for (name, scale, placement, scene) in desired {
+            if let Some(id) = self.remote_indicator_surfaces.get(&name).copied() {
+                self.internal_ui.configure_scene(id, placement, scale);
+                self.internal_ui.update_scene(id, scene);
+            } else {
+                let id = self.internal_ui.insert_scene(scene, placement, scale);
+                self.remote_indicator_surfaces.insert(name, id);
+            }
+        }
+        self.schedule_internal_ui_frame();
+        self.request_output_redraw();
+    }
+
+    pub(crate) fn emergency_stop_remote_control(&mut self) {
+        let mut settings =
+            nickel_remote_control::RemoteAiControlSettings::load_default().unwrap_or_default();
+        settings.set_requested(false);
+        self.remote_control.emergency_stop_at(settings.generation);
+        if let Err(error) = nickel_remote_control::RemoteAiControlSettings::default_path()
+            .and_then(|path| settings.save(path))
+        {
+            self.remote_control.set_diagnostic(format!(
+                "Remote control stopped, but Disabled could not be saved: {error}"
+            ));
+        }
+        self.sync_remote_control_indicators();
+        self.request_output_redraw();
+    }
+
+    fn remote_control_snapshot(&self) -> ServerMessage {
+        let status = self.remote_control.status();
+        let effective = match status.effective {
+            nickel_remote_control::EffectiveState::Disabled => {
+                nickel_session_protocol::RemoteControlEffectiveState::Disabled
+            }
+            nickel_remote_control::EffectiveState::Enabled => {
+                nickel_session_protocol::RemoteControlEffectiveState::Enabled
+            }
+            nickel_remote_control::EffectiveState::Rejected => {
+                nickel_session_protocol::RemoteControlEffectiveState::Rejected
+            }
+        };
+        let control = self.remote_control.control();
+        let control = control.lock().unwrap();
+        let pending_clients = control
+            .pending_clients()
+            .map(
+                |client| nickel_session_protocol::RemotePendingClientSnapshot {
+                    id: client.id.clone(),
+                    label: client.label.clone(),
+                    requested: client
+                        .requested
+                        .iter()
+                        .copied()
+                        .map(remote_capability)
+                        .collect(),
+                    connected_at: client.connected_at,
+                },
+            )
+            .collect();
+        let granted_clients = control
+            .granted_clients()
+            .map(
+                |client| nickel_session_protocol::RemoteGrantedClientSnapshot {
+                    id: client.id,
+                    label: client.label,
+                    capabilities: client
+                        .capabilities
+                        .into_iter()
+                        .map(remote_capability)
+                        .collect(),
+                    remembered: client.remembered,
+                },
+            )
+            .collect();
+        ServerMessage::RemoteControl(nickel_session_protocol::RemoteControlSnapshot {
+            requested_enabled: status.requested_enabled,
+            effective,
+            generation: status.generation,
+            acknowledged_generation: status.acknowledged_generation,
+            endpoint: status.endpoint.into(),
+            diagnostic: status.diagnostic.clone(),
+            pending_clients,
+            granted_clients,
+        })
+    }
+
     pub(super) fn init_control_socket(
         event_loop: &mut EventLoop<'static, NickelSession>,
     ) -> PathBuf {
@@ -400,6 +632,7 @@ impl NickelSession {
                 let _ = self.refresh_output_topology_generation();
                 ServerMessage::ShellBehavior(self.protocol_shell_behavior())
             }
+            Query::RemoteControl => self.remote_control_snapshot(),
             Query::Preview { window } => {
                 let id = WindowId(window.0);
                 if !self.windows.snapshot().iter().any(|entry| entry.id == id) {
@@ -420,9 +653,20 @@ impl NickelSession {
                 }
                 ServerMessage::Preview(preview)
             }
+            Query::ShellSemanticTarget { target } if self.test_control_enabled => self
+                .internal_shell
+                .as_ref()
+                .and_then(|shell| shell.resolve_semantic_target(&target))
+                .map(ServerMessage::ShellSemanticTarget)
+                .unwrap_or_else(|| {
+                    protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "shell semantic target is unavailable",
+                    )
+                }),
             Query::ShellSemanticTarget { .. } | Query::ShellRuntimeDiagnostics => protocol_error(
                 ErrorCode::InvalidRequest,
-                "shell-only queries are resolved by the nested shell test endpoint",
+                "shell-only query is unavailable on this control endpoint",
             ),
         }
     }
@@ -570,6 +814,89 @@ impl NickelSession {
             SessionCommand::ApplyShellBehavior { transaction } => {
                 return self.apply_shell_behavior_transaction(transaction);
             }
+            SessionCommand::ApplyRemoteControl {
+                requested_enabled,
+                generation,
+            } => {
+                let mut settings = nickel_remote_control::RemoteAiControlSettings::default();
+                settings.requested_enabled = requested_enabled;
+                settings.generation = generation;
+                self.remote_control
+                    .apply(&settings, self.remote_desktop_authority.clone());
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::StartRemotePairing { now_unix_secs } => {
+                return match self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .start_pairing(now_unix_secs)
+                {
+                    Ok(pairing) => ServerMessage::RemotePairing(
+                        nickel_session_protocol::RemotePairingSnapshot {
+                            ceremony_id: pairing.ceremony_id,
+                            qr_payload: pairing.qr_payload,
+                            short_code: pairing.short_code,
+                            expires_at: pairing.expires_at,
+                        },
+                    ),
+                    Err(error) => protocol_error(ErrorCode::InvalidRequest, error.to_string()),
+                };
+            }
+            SessionCommand::CancelRemotePairing => {
+                self.remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .cancel_pairing();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::EmergencyStopRemoteControl => {
+                self.emergency_stop_remote_control();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::DecideRemoteClient {
+                client_id,
+                decision,
+                capabilities,
+            } => {
+                let approval = match decision {
+                    nickel_session_protocol::RemoteClientDecision::Deny => {
+                        nickel_remote_control::Approval::Deny
+                    }
+                    nickel_session_protocol::RemoteClientDecision::AllowOnce => {
+                        nickel_remote_control::Approval::AllowOnce
+                    }
+                    nickel_session_protocol::RemoteClientDecision::Remember => {
+                        nickel_remote_control::Approval::Remember
+                    }
+                };
+                let result = self.remote_control.control().lock().unwrap().approve(
+                    &client_id,
+                    approval,
+                    capabilities.into_iter().map(control_capability).collect(),
+                );
+                if let Err(error) = result {
+                    return protocol_error(ErrorCode::InvalidRequest, error.to_string());
+                }
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::RevokeRemoteClient { client_id } => {
+                if !self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .revoke(&client_id)
+                {
+                    return protocol_error(ErrorCode::InvalidRequest, "client is not granted");
+                }
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
             SessionCommand::ToggleLauncher => self.toggle_launcher(),
             SessionCommand::SetLauncherVisible { visible } => self.set_launcher_visible(visible),
             SessionCommand::SetLauncherVisibleFromController { visible } => {
@@ -581,7 +908,11 @@ impl NickelSession {
             SessionCommand::ShowAnchoredShellRole { role, anchor } => {
                 self.show_anchored_shell_role(role, anchor);
             }
-            SessionCommand::LogOut => self.loop_signal.stop(),
+            SessionCommand::LogOut => {
+                self.remote_control.shutdown_session();
+                self.sync_remote_control_indicators();
+                self.loop_signal.stop();
+            }
             SessionCommand::SessionAction { action } => match action {
                 nickel_session_protocol::SessionAction::RestartShell => {
                     return protocol_error(
@@ -1188,14 +1519,28 @@ impl NickelSession {
                         }
                         crate::winit_shell::SurfaceRole::CodexChat => return None,
                     };
+                    let geometry = shell.visible(surface.id).then(|| {
+                        self.internal_shell_surfaces
+                            .get(&surface.id)
+                            .and_then(|runtime| self.internal_ui.placement(*runtime))
+                            .map_or(
+                                ProtocolGeometry {
+                                    x: 0,
+                                    y: 0,
+                                    width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
+                                    height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
+                                },
+                                |placement| ProtocolGeometry {
+                                    x: placement.geometry.0,
+                                    y: placement.geometry.1,
+                                    width: i32::try_from(placement.geometry.2).unwrap_or(i32::MAX),
+                                    height: i32::try_from(placement.geometry.3).unwrap_or(i32::MAX),
+                                },
+                            )
+                    });
                     Some(ShellSurfaceSnapshot {
                         role,
-                        geometry: shell.visible(surface.id).then_some(ProtocolGeometry {
-                            x: 0,
-                            y: 0,
-                            width: i32::try_from(surface.size.0).unwrap_or(i32::MAX),
-                            height: i32::try_from(surface.size.1).unwrap_or(i32::MAX),
-                        }),
+                        geometry,
                         output: surface.output.clone(),
                     })
                 })

@@ -1,0 +1,27 @@
+[package]
+name = "nickel-remote-control"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Permission and pairing authority for Nickel remote desktop control"
+
+[dependencies]
+getrandom.workspace = true
+axum.workspace = true
+http.workspace = true
+nickel-input = { path = "../nickel-input" }
+nickel-storage = { path = "../nickel-storage" }
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

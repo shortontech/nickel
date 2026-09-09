@@ -14,7 +14,9 @@ nickel-input = { path = "../nickel-input", features = ["winit"] }
 nickel-logging = { path = "../nickel-logging" }
 nickel-platform = { path = "../nickel-platform" }
 nickel-session-protocol = { path = "../nickel-session-protocol" }
+nickel-remote-control = { path = "../nickel-remote-control" }
 image.workspace = true
+qrcode.workspace = true
 resvg.workspace = true
 tracing.workspace = true
 winit.workspace = true

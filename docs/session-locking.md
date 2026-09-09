@@ -14,8 +14,9 @@ The internal shell invokes session authority through a typed in-process channel,
 identity or inherited credentials. Compatibility session-control datagrams still carry Linux peer
 credentials and accept privileged shell commands only from an explicitly supervised rollback shell
 PID. Application launches remove the session socket and token from their environment. An explicitly
-enabled nested `--test-control` session may cross only the lock/unlock boundary for semantic tests;
-it cannot invoke power or logout actions.
+enabled `--test-control` session may cross only the lock/unlock boundary for semantic tests; native
+udev sessions require the additional `NICKEL_ALLOW_NATIVE_TEST_CONTROL=1` environment gate. Test
+control cannot invoke power or logout actions.
 
 In supervised rollback mode, if the shell exits while locked, the compositor remains locked and
 opaque while the supervisor starts a replacement. The replacement receives the locked snapshot,

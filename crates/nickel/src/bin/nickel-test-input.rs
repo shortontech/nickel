@@ -38,6 +38,8 @@ Usage:
   nickel-test-input caches
   nickel-test-input runtime-diagnostics
   nickel-test-input semantic panel-app APPLICATION_ID hover|click [OUTPUT]
+  nickel-test-input semantic control-center open [OUTPUT]
+  nickel-test-input semantic control-center lock
   nickel-test-input semantic preview WINDOW_ID hover|activate|close|menu
   nickel-test-input semantic menu WINDOW_ID close|maximize|minimize
   nickel-test-input semantic screenshot selection-start|selection-end|confirm|copy|save|temp|cancel
@@ -272,6 +274,19 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                     _ => return Err(format!("unknown panel interaction {interaction:?}")),
                 },
             }))
+        }
+        [command, kind, action] | [command, kind, action, _]
+            if command == "semantic" && kind == "control-center" =>
+        {
+            match action.as_str() {
+                "open" => Ok(Parsed::Semantic(ShellSemanticTarget::PanelControlCenter {
+                    output: args.get(3).cloned(),
+                })),
+                "lock" if args.len() == 3 => {
+                    Ok(Parsed::Semantic(ShellSemanticTarget::ControlCenterLock))
+                }
+                _ => Err(format!("unknown control-center action {action:?}")),
+            }
         }
         [command, kind, window, action] if command == "semantic" && kind == "preview" => {
             Ok(Parsed::Semantic(ShellSemanticTarget::PreviewWindow {
@@ -829,7 +844,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (destination, request) = if let Some(target) = semantic {
         let destination = env::var_os("NICKEL_SHELL_TEST_CONTROL")
             .map(PathBuf::from)
-            .ok_or("NICKEL_SHELL_TEST_CONTROL is not set")?;
+            .filter(|path| path.exists())
+            .unwrap_or_else(|| control.clone());
         (
             destination,
             Request::Query(nickel_session_protocol::Query::ShellSemanticTarget { target }),

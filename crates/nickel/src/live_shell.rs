@@ -1814,6 +1814,10 @@ impl LiveShell {
         changed
     }
 
+    pub fn set_file_clipboard_available(&mut self, available: bool) {
+        self.desktop_host.application_mut().file_clipboard_available = available;
+    }
+
     pub fn desktop_controller(&mut self, action: ControllerAction) -> bool {
         let application = self.desktop_host.application_mut();
         let changed = match action {
@@ -2402,19 +2406,8 @@ impl LiveShell {
     }
 
     pub(crate) fn launcher_host_ui(&mut self, event: UiEvent, width: u32, height: u32) -> bool {
-        let status = self.launcher_status_text();
-        self.launcher_host
-            .application_mut()
-            .sync(&self.launcher, self.palette, status);
-        let outcome = self.launcher_host.step(HostBatch {
-            surface_size: Some((width, height)),
-            events: vec![HostEvent::Ui(event)],
-            ..HostBatch::default()
-        });
-        for action in self.launcher_host.application_mut().take_effects() {
-            self.apply_launcher_action(action);
-        }
-        outcome.changed
+        self.launcher_host_event_with_clipboard_limit(HostEvent::Ui(event), width, height, None)
+            .changed
     }
 
     pub(crate) fn control_host_event(
@@ -2581,6 +2574,50 @@ impl LiveShell {
             | SurfaceRole::VolumeOsd
             | SurfaceRole::CodexProjectMenu
             | SurfaceRole::CodexChat => false,
+        }
+    }
+
+    pub(crate) fn shell_role_host_shortcut(
+        &mut self,
+        role: SurfaceRole,
+        shortcut: Shortcut,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        match role {
+            SurfaceRole::Launcher => {
+                let outcome = self.launcher_host_event_with_clipboard_limit(
+                    HostEvent::Shortcut(shortcut),
+                    width,
+                    height,
+                    None,
+                );
+                // Native scene input is queued before this host can report whether
+                // Submit was handled. Perform the activation fallback here, at
+                // the launcher owner, so dashboard rows receive Enter too.
+                if shortcut == Shortcut::Submit && !outcome.changed {
+                    self.launcher_host_event_with_clipboard_limit(
+                        HostEvent::Ui(UiEvent::KeyboardNavigateActivate),
+                        width,
+                        height,
+                        None,
+                    )
+                    .changed
+                } else {
+                    outcome.changed
+                }
+            }
+            SurfaceRole::Lock if self.locked => {
+                let outcome = self.lock_host.step(HostBatch {
+                    surface_size: Some((width, height)),
+                    events: vec![HostEvent::Shortcut(shortcut)],
+                    ..HostBatch::default()
+                });
+                self.lock_change_token = outcome.change_token;
+                self.lock_deadline = outcome.next_deadline;
+                outcome.changed | self.apply_lock_effects()
+            }
+            _ => false,
         }
     }
 
@@ -2817,6 +2854,45 @@ impl LiveShell {
                     x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
                     y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
                     interaction: *interaction,
+                })
+            }
+            ShellSemanticTarget::PanelControlCenter { output } => {
+                let host = if output.is_none() || output == &self.panel_output {
+                    &self.panel_host
+                } else {
+                    self.panel_hosts.get(output)?
+                };
+                let bounds = host
+                    .semantic_targets_for_message(&PanelAction::Control)
+                    .into_iter()
+                    .next()?
+                    .bounds;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::Panel,
+                    output: output.clone(),
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                    interaction: PointerInteraction::LeftClick,
+                })
+            }
+            ShellSemanticTarget::ControlCenterLock => {
+                if !self.control_visible {
+                    return None;
+                }
+                let bounds = self
+                    .control_host
+                    .semantic_targets_for_message(&ControlAction::SessionAction(
+                        crate::platform::SessionAction::Lock,
+                    ))
+                    .into_iter()
+                    .next()?
+                    .bounds;
+                Some(ResolvedShellTarget {
+                    role: ShellRole::ControlCenter,
+                    output: None,
+                    x: (bounds.origin.x + bounds.size.width / 2.0).round() as i32,
+                    y: (bounds.origin.y + bounds.size.height / 2.0).round() as i32,
+                    interaction: PointerInteraction::LeftClick,
                 })
             }
             ShellSemanticTarget::PreviewWindow { window, action } => {
@@ -4211,27 +4287,34 @@ impl LiveShell {
         self.launcher_visible = visible;
         if visible {
             self.control_visible = false;
-            self.focus_launcher_search();
+            self.focus_launcher();
         } else {
             self.run_visible = false;
             self.launcher.clear();
         }
     }
 
-    pub fn focus_launcher_search(&mut self) -> bool {
+    pub fn focus_launcher(&mut self) -> bool {
+        if self.run_visible {
+            return self
+                .run_host
+                .step(HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                })
+                .changed;
+        }
         let status = self.launcher_status_text();
         self.launcher_host
             .application_mut()
             .sync(&self.launcher, self.palette, status);
-        self.launcher_host.step(HostBatch::default());
-        let Ok(search) = self
-            .launcher_host
-            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
-        else {
-            return false;
-        };
-        let outcome = self.launcher_host.request_focus(search.id);
-        outcome.changed && outcome.failures.is_empty()
+        self.launcher_host
+            .step(HostBatch {
+                application_changed: true,
+                window_focused: Some(true),
+                ..HostBatch::default()
+            })
+            .changed
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {
@@ -4486,6 +4569,9 @@ impl LiveShell {
             application.icon_cache.clear();
         }
         application.wallpaper.clone_from(&self.wallpaper);
+        if wallpaper_changed {
+            application.wallpaper_generation = application.wallpaper_generation.wrapping_add(1);
+        }
         application.palette = self.palette;
         let icons_changed = application.prepare_icons();
         let application_changed =

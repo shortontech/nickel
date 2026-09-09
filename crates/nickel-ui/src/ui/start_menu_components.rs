@@ -489,9 +489,6 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                 .fill_height()
                 .grow(1.0)
                 .min_height(0.0);
-            if let Some(header) = header {
-                column = column.child(header);
-            }
             column = column.child(content);
             if let Some(footer) = footer {
                 column = column.child(Spacer::flex()).child(footer);
@@ -504,9 +501,6 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
                 .fill_height()
                 .grow(1.0)
                 .min_height(0.0);
-            if let Some(header) = header {
-                detail_pane = detail_pane.child(header);
-            }
             detail_pane = detail_pane.child(detail);
             if let Some(footer) = detail_footer {
                 detail_pane = detail_pane.child(Spacer::flex()).child(footer);
@@ -551,7 +545,11 @@ impl<Message> Component<Message> for StartMenuShell<Message> {
         } else {
             theme.spacing.content
         };
-        let mut root = Column::new().fill_width().fill_height().child(content);
+        let mut root = Column::new().fill_width().fill_height();
+        if let Some(header) = header {
+            root = root.child(header);
+        }
+        root = root.child(content);
         if let Some(legend) = legend {
             root = root.child(legend);
         }

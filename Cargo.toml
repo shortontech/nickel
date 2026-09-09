@@ -4,6 +4,7 @@ members = [
     "crates/nickel-codex",
     "crates/nickel-codex-fixture",
     "crates/nickel-codex-ui",
+    "crates/nickel-remote-control",
     "crates/nickel-input",
     "crates/nickel-ui",
     "crates/nickel-ui-testkit",
@@ -98,6 +99,15 @@ ureq = "3.4.0"
 unic-langid = "0.9.6"
 proc-macro2 = { version = "1.0.101", features = ["span-locations"] }
 proptest = "1"
+qrcode = { version = "0.14.1", default-features = false }
+getrandom = "0.4.3"
+subtle = "2.6.1"
+axum = "0.8.8"
+http = "1.5.0"
+rmcp = { version = "3.2.0", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
+schemars = "1.2.1"
+tokio = { version = "1.49.0", features = ["macros", "net", "rt-multi-thread", "sync"] }
+tokio-util = "0.7.18"
 tempfile = "3.27.0"
 tar = "0.4.44"
 wgpu = "30.0.0"

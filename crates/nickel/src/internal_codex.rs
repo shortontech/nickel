@@ -167,6 +167,36 @@ impl InternalCodexHost {
             .min()
     }
 
+    pub fn set_theme(
+        &mut self,
+        runtime: &mut InternalUiRuntime,
+        theme: nickel_ui::SemanticTheme,
+    ) -> Vec<InternalSurfaceId> {
+        if self.theme == theme {
+            return Vec::new();
+        }
+        self.theme = theme;
+        let ids = self.surface_ids().collect::<Vec<_>>();
+        let mut changed = Vec::new();
+        for id in ids {
+            if runtime
+                .application_mut::<ChatApplication>(id)
+                .is_some_and(|application| application.set_theme(theme))
+            {
+                runtime.step(
+                    id,
+                    HostBatch {
+                        application_changed: true,
+                        events: vec![nickel_ui::HostEvent::Poll],
+                        ..HostBatch::default()
+                    },
+                );
+                changed.push(id);
+            }
+        }
+        changed
+    }
+
     pub fn ensure_project_menu(
         &mut self,
         runtime: &mut InternalUiRuntime,

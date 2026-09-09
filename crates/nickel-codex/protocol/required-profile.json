@@ -1,10 +1,14 @@
 {
   "profile": 1,
-  "reviewed_codex_version": "0.149.0",
+  "reviewed_codex_version": "0.153.4",
   "schema_family": "codex-app-server-v2",
   "client_requests": [
-    "initialize", "account/read", "model/list", "thread/list", "thread/start",
-    "thread/resume", "turn/start", "turn/interrupt"
+    "initialize", "account/read", "account/login/start", "account/login/cancel",
+    "model/list", "thread/list", "thread/start",
+    "thread/resume", "turn/start", "turn/interrupt",
+    "remoteControl/enable", "remoteControl/disable", "remoteControl/status/read",
+    "remoteControl/pairing/start", "remoteControl/pairing/status",
+    "remoteControl/client/list", "remoteControl/client/revoke"
   ],
   "client_notifications": ["initialized"],
   "server_requests": [
@@ -14,6 +18,7 @@
   "server_notifications": [
     "thread/started", "turn/started", "turn/completed", "item/started", "item/completed",
     "item/agentMessage/delta", "item/commandExecution/outputDelta", "item/fileChange/outputDelta",
-    "item/plan/delta", "item/reasoning/summaryTextDelta", "account/updated", "error"
+    "item/plan/delta", "item/reasoning/summaryTextDelta", "account/updated",
+    "account/login/completed", "remoteControl/status/changed", "error"
   ]
 }

@@ -139,7 +139,8 @@ cargo run -p nickel --no-default-features --features backend-winit -- --backend 
 Live compositor tests may add `--test-control` alongside `--backend winit`. This explicitly enables the
 capability-authenticated `TestInput` protocol command for the nested backend, allowing tests to
 inject semantic keyboard and pointer events through the same Smithay input path as physical
-devices. The flag is rejected by the direct backend and is disabled by default.
+devices. The direct backend additionally requires `NICKEL_ALLOW_NATIVE_TEST_CONTROL=1`; test
+control is disabled by default on both backends.
 Ordinary nested and native sessions do not bind a compatibility control socket or export a
 capability token; compositor-owned shell and file UI use typed in-process authority instead.
 
@@ -210,6 +211,18 @@ Run it from a text VT:
 ```bash
 RUST_LOG=info target/debug/nickel --backend udev
 ```
+
+For an explicitly authorized native TTY test, run these two lines in separate tmux panes (the
+second pane may replace `surfaces` with another `nickel-test-input` command):
+
+```bash
+NICKEL_ALLOW_NATIVE_TEST_CONTROL=1 NICKEL_SECURE_STORAGE_REQUIRED=0 NICKEL_TEST_CONTROL_ENV_FILE=/tmp/nickel-test-control.env target/release/nickel --backend udev --test-control
+nickelas surfaces
+```
+
+`NICKEL_SECURE_STORAGE_REQUIRED=0` is only for an isolated TTY diagnostic without the normal
+wallet service. Remove `/tmp/nickel-test-control.env` after the test; ordinary SDDM sessions must
+not use either override.
 
 Set `NICKEL_DRM_DEVICE=/dev/dri/cardN` to select a specific GPU.
 
@@ -310,8 +323,18 @@ cargo run -p nickel-codex-ui -- --replay crates/nickel-codex-fixture/fixtures/ba
 ```
 
 `nickel-codex-test` emits versioned JSONL on stdout. Installed Codex is preferred only after generated
-schema and initialization compatibility checks; release builds retain a pinned bundled fallback. Nickel
-does not implement Codex authentication or call OpenAI subscription APIs directly.
+schema and initialization compatibility checks; release builds retain a pinned bundled fallback.
+Nickel delegates account authentication to the experimental Codex app-server login RPC and never
+handles passwords or raw OpenAI credentials itself. To test a clean profile without touching the
+ordinary Codex profile, set an absolute child-only override:
+
+```bash
+mkdir -p /absolute/private/test-profile
+NICKEL_CODEX_HOME=/absolute/private/test-profile cargo run -p nickel-codex-ui -- --backend installed
+```
+
+Only the spawned Codex app-server receives `CODEX_HOME`; Nickel, probes, and the parent environment
+remain unchanged.
 
 An authenticated first turn must be started on the same app-server connection that creates its thread;
 subsequent one-shot turns resume the persisted thread explicitly:

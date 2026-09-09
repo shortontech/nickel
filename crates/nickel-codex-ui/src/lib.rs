@@ -677,7 +677,7 @@ mod tests {
         scenario
             .pointer_activate(&Selector::id("root/menu-bar/file-menu"))
             .expect("production semantic menu expansion");
-        for name in ["New conversation", "Refresh"] {
+        for name in ["New conversation", "Refresh", "Phone access…"] {
             scenario
                 .assert_action_available(
                     &Selector::role_name(SemanticRole::MenuItem, name),
@@ -685,6 +685,31 @@ mod tests {
                 )
                 .expect("expanded menu item is semantic and actionable");
         }
+    }
+
+    #[test]
+    fn phone_access_panel_separates_codex_pairing_from_nickel_desktop_authority() {
+        let backend = ReplayBackend::from_json(r#"{"name":"phone-access","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        app.state.account.authenticated = true;
+        app.state.remote_control_status = Some(nickel_codex::RemoteControlStatus {
+            status: nickel_codex::RemoteControlConnectionStatus::Connected,
+            server_name: "workstation".into(),
+            installation_id: "installation-1".into(),
+            environment_id: Some("environment-1".into()),
+        });
+        app.update(ChatMessage::OpenRemoteControl);
+        app.state.remote_control_pending = false;
+        let scenario = Scenario::new(app, 900, 700);
+        scenario
+            .assert_action_available(
+                &Selector::role_name(SemanticRole::Button, "Pair a phone"),
+                nickel_ui::ActionKind::Activate,
+            )
+            .unwrap();
     }
 
     #[test]

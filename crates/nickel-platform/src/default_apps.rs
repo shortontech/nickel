@@ -389,6 +389,18 @@ pub fn association_backend() -> Box<dyn AssociationBackend> {
 pub fn association_target_for_file(path: &Path) -> Result<AssociationTarget, AssociationError> {
     #[cfg(target_os = "linux")]
     {
+        // Use the same MIME authority as activation. xdg-mime's generic
+        // fallback can resolve .md as a Genesis ROM even for a Markdown file.
+        if let Ok(output) = std::process::Command::new("gio")
+            .args(["info", "-a", "standard::content-type", "--"])
+            .arg(path)
+            .env("LC_ALL", "C")
+            .output()
+            && output.status.success()
+            && let Some(mime) = gio_content_type(&String::from_utf8_lossy(&output.stdout))
+        {
+            return Ok(AssociationTarget::mime(mime));
+        }
         let output = std::process::Command::new("xdg-mime")
             .arg("query")
             .arg("filetype")
@@ -407,6 +419,14 @@ pub fn association_target_for_file(path: &Path) -> Result<AssociationTarget, Ass
         .ok_or_else(|| {
             AssociationError("the operating system could not resolve this file type".into())
         })
+}
+
+#[cfg(target_os = "linux")]
+fn gio_content_type(output: &str) -> Option<String> {
+    output.lines().rev().find_map(|line| {
+        let mime = line.trim().strip_prefix("standard::content-type:")?.trim();
+        (!mime.is_empty()).then(|| mime.to_owned())
+    })
 }
 
 /// Opens the Nickel Settings surface backed by this same association service.
@@ -490,8 +510,37 @@ impl fmt::Display for DefaultLaunchError {
     }
 }
 
-/// Opens a validated filesystem target through the operating system's default
-/// association authority. Portable applications receive only typed outcomes.
+/// Starts the default association helper for a validated filesystem target.
+/// The caller owns the child and must reap it; a live helper does not mean failure,
+/// since some associations keep the helper alive until the application exits.
+#[cfg(target_os = "linux")]
+pub fn spawn_with_default(path: &Path) -> Result<std::process::Child, DefaultLaunchError> {
+    if !path.exists() {
+        return Err(DefaultLaunchError::TargetMissing);
+    }
+    // GIO uses the desktop MIME database consistently for classification and
+    // dispatch. Keep xdg-open only as the compatibility fallback when GIO is
+    // absent; neither helper's lifetime is a compositor-thread wait condition.
+    std::process::Command::new("gio")
+        .arg("open")
+        .arg(path)
+        .spawn()
+        .or_else(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                std::process::Command::new("xdg-open").arg(path).spawn()
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => DefaultLaunchError::AssociationMissing,
+            std::io::ErrorKind::PermissionDenied => DefaultLaunchError::PermissionDenied,
+            _ => DefaultLaunchError::Platform(error.to_string()),
+        })
+}
+
+/// Synchronous compatibility API; event-loop callers must use the owned child
+/// API and poll completion because some association helpers stay alive with the app.
 pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
     if !path.exists() {
         return Err(DefaultLaunchError::TargetMissing);
@@ -532,10 +581,8 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
     }
     #[cfg(target_os = "linux")]
     {
-        let program = "xdg-open";
-        let status = std::process::Command::new(program)
-            .arg(path)
-            .status()
+        let status = spawn_with_default(path)?
+            .wait()
             .map_err(|error| match error.kind() {
                 std::io::ErrorKind::NotFound => DefaultLaunchError::AssociationMissing,
                 std::io::ErrorKind::PermissionDenied => DefaultLaunchError::PermissionDenied,
@@ -547,7 +594,7 @@ pub fn open_with_default(path: &Path) -> Result<(), DefaultLaunchError> {
             Err(DefaultLaunchError::AssociationMissing)
         } else {
             Err(DefaultLaunchError::Platform(format!(
-                "{program} exited with {status}"
+                "default application launcher exited with {status}"
             )))
         }
     }
@@ -1429,6 +1476,24 @@ impl AssociationBackend for UnsupportedAssociations {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn gio_mime_attributes_resolve_markdown_without_extension_guessing() {
+        assert_eq!(
+            super::gio_content_type(
+                "uri: file:///document.md\nattributes:\n  standard::content-type: text/markdown\n"
+            ),
+            Some("text/markdown".into())
+        );
+        assert_eq!(
+            super::gio_content_type(
+                "attributes:\n  standard::content-type: application/x-genesis-rom\n"
+            ),
+            Some("application/x-genesis-rom".into())
+        );
+        assert_eq!(super::gio_content_type("attributes:\n"), None);
+    }
+
     use super::*;
 
     #[test]

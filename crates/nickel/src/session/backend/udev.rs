@@ -2,6 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -86,6 +87,7 @@ const BOOTSTRAP_RENDER_TIMEOUT: Duration = Duration::from_secs(30);
 // the compositor event-loop thread in this path indefinitely.
 const EVDI_MIN_RENDER_INTERVAL: Duration = Duration::from_millis(16);
 const SWITCHER_MAX_CARDS: usize = 5;
+static LAST_EXTERNAL_SCENE_SIGNATURE: AtomicU64 = AtomicU64::new(u64::MAX);
 
 fn output_model(connector_name: &str) -> String {
     output_edid(connector_name)
@@ -1308,6 +1310,41 @@ impl NickelSession {
         }
     }
 
+    pub(crate) fn schedule_native_ui_frame(&mut self) {
+        let requests = self
+            .native
+            .as_ref()
+            .map(|native| {
+                native
+                    .devices
+                    .iter()
+                    .map(|(node, device)| {
+                        let refresh = device
+                            .surfaces
+                            .values()
+                            .filter_map(|surface| surface.output.current_mode())
+                            .map(|mode| mode.refresh)
+                            .filter(|refresh| *refresh > 0)
+                            .max()
+                            .unwrap_or(60_000);
+                        let period = Duration::from_nanos(1_000_000_000_000 / refresh as u64);
+                        let delay = device
+                            .last_render_started
+                            .map_or(Duration::ZERO, |started| {
+                                period.saturating_sub(started.elapsed())
+                            });
+                        (*node, delay)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // schedule_render owns a single pending timer per device. Unlike the
+        // immediate repaint helper, input requests do not add delayed retries.
+        for (node, delay) in requests {
+            self.schedule_render(node, delay);
+        }
+    }
+
     pub(crate) fn render_all_outputs(&mut self) {
         self.render_all_outputs_once();
         let nodes = self
@@ -2246,6 +2283,7 @@ impl NickelSession {
     }
 
     fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, _wave: u64) {
+        self.flush_desktop_scenes_for_frame();
         let shell_bootstrapping = self.launcher_window.is_none();
         let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
         identified_outputs.sort_by_key(|output| {
@@ -2373,6 +2411,8 @@ impl NickelSession {
             crate::session::window_frame::retain_titlebars_for_windows(
                 self.surface_windows.values().map(|id| id.0),
             );
+            let mut mapped_external_windows = 0_u32;
+            let mut external_render_elements = 0_u32;
             if let Some(output_geometry) = self.space.output_geometry(&output) {
                 // Space stores windows back-to-front. Build each window and its
                 // frame together, front-to-back, so overlapping frames obey the
@@ -2387,6 +2427,7 @@ impl NickelSession {
                     if !output_geometry.overlaps(bounds) {
                         continue;
                     }
+                    mapped_external_windows = mapped_external_windows.saturating_add(1);
                     let Some(location) = self.space.element_location(window) else {
                         continue;
                     };
@@ -2399,6 +2440,8 @@ impl NickelSession {
                             1.0,
                         );
                     let has_content = !window_elements.is_empty();
+                    external_render_elements = external_render_elements
+                        .saturating_add(u32::try_from(window_elements.len()).unwrap_or(u32::MAX));
                     elements.extend(
                         window_elements
                             .into_iter()
@@ -2518,6 +2561,18 @@ impl NickelSession {
                     }
                 }
             }
+            let external_scene_signature =
+                (u64::from(mapped_external_windows) << 32) | u64::from(external_render_elements);
+            if LAST_EXTERNAL_SCENE_SIGNATURE.swap(external_scene_signature, Ordering::Relaxed)
+                != external_scene_signature
+            {
+                tracing::warn!(
+                    output = %output.name(),
+                    mapped_external_windows,
+                    external_render_elements,
+                    "diagnostic: native external scene composition changed"
+                );
+            }
             if !self.locked
                 && let Some(highlighted) = self.preview_highlight.and_then(|highlight| {
                     self.space.elements().find(|window| {
@@ -2605,7 +2660,6 @@ impl NickelSession {
                     )
                     .into_iter()
                     .map(|element| NativeElement::from(NativeCustomElement::from(element)));
-                elements.extend(background_elements);
                 let application_elements = self
                     .internal_ui
                     .render_elements_for_layer(
@@ -2621,6 +2675,9 @@ impl NickelSession {
                 if !self.internal_applications_are_foremost() {
                     elements.extend(application_elements);
                 }
+                // Backgrounds must remain behind every ordinary application,
+                // including internal windows that have lost foreground focus.
+                elements.extend(background_elements);
                 let mut overlay_elements = self
                     .internal_ui
                     .render_elements_for_layer(

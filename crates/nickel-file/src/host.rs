@@ -92,6 +92,9 @@ fn cancel_transient_input_on_focus_loss(app: &mut FileApp) -> bool {
     app.resizing_details_column = None;
     app.selection_drag = None;
     app.primary_down = false;
+    app.file_drag_origin = None;
+    app.file_drag_started = false;
+    app.outbound_drag = None;
     changed
 }
 
@@ -222,50 +225,13 @@ fn open_drop_hover_target(app: &mut FileApp, now: Instant) -> bool {
     true
 }
 
-impl Default for FileHostAdapter {
-    fn default() -> Self {
-        Self {
-            sync_requested: true,
-            drop_hover_deadline: None,
-        }
-    }
-}
-
-impl HostAdapter<FileApp> for FileHostAdapter {
-    fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
-        session_controller_fence()
-    }
-
-    fn request_text_entry(&mut self, _services: HostServices<'_>) {
-        request_session_text_entry();
-    }
-
-    fn next_deadline(&self, now: Instant) -> Option<Instant> {
-        self.sync_requested
-            .then_some(now)
-            .into_iter()
-            .chain(self.drop_hover_deadline)
-            .min()
-    }
-
-    fn started(
-        &mut self,
-        _host: &mut UiHost<FileApp>,
-        services: HostServices<'_>,
-    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
-        services
-            .window()
-            .set_min_inner_size(Some(LogicalSize::new(560, 360)));
-        set_nickel_file_icon(services.window());
-        Ok(AdapterOutcome::default())
-    }
-
-    fn normalized_input(
-        &mut self,
+impl FileApp {
+    pub(crate) fn application_input(
         host: &mut UiHost<FileApp>,
         event: &InputEvent,
-        _services: HostServices<'_>,
-    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+    ) -> AdapterOutcome {
+        host.application_mut().resolved_grid_columns =
+            host.resolved_grid_columns().unwrap_or(1).max(1);
         let mut changed = false;
         let mut consume = false;
         match event.clone() {
@@ -275,10 +241,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.shift_down = key.modifiers.aggregate(AggregateModifier::Shift);
                 let alt_down = key.modifiers.aggregate(AggregateModifier::Alt);
                 if key.edge != KeyEdge::Pressed || key.repeat {
-                    return Ok(AdapterOutcome::default());
+                    return AdapterOutcome::default();
                 }
                 let PhysicalKey::Code(key) = key.physical else {
-                    return Ok(AdapterOutcome::default());
+                    return AdapterOutcome::default();
                 };
                 if let Some(shortcut) = navigation_shortcut(key, alt_down) {
                     match shortcut {
@@ -286,10 +252,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         NavigationShortcut::Forward => app.go_forward(),
                         NavigationShortcut::Up => app.go_up(),
                     }
-                    return Ok(AdapterOutcome {
+                    return AdapterOutcome {
                         changed: true,
                         ..AdapterOutcome::default()
-                    });
+                    };
                 }
                 if key == KeyCode::Tab
                     && app.control_down
@@ -297,10 +263,10 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         adjacent_tab_index(app.active_tab, app.tabs.len(), app.shift_down)
                 {
                     app.switch_tab(index);
-                    return Ok(AdapterOutcome {
+                    return AdapterOutcome {
                         changed: true,
                         ..AdapterOutcome::default()
-                    });
+                    };
                 }
                 match key {
                     KeyCode::KeyP if app.control_down => {
@@ -410,12 +376,17 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                         host.application().browser.entries().len(),
                     )
                 });
-                let drop_destination =
-                    drop_destination_at(&host.semantic_nodes(), cursor, host.application());
+                // Incoming native drops need semantic destination geometry.
+                // Ordinary hover/outbound motion must not clone the whole tree.
+                let drop_destination = (host.application().drag_hover.is_some()
+                    || host.application().file_drag_started)
+                    .then(|| {
+                        drop_destination_at(&host.semantic_nodes(), cursor, host.application())
+                    })
+                    .flatten();
                 let app = host.application_mut();
                 app.cursor = cursor;
                 changed |= update_drop_hover(app, drop_destination, Instant::now());
-                app.begin_file_drag_if_threshold(cursor);
                 if let Some(entries) = selected_entries {
                     app.selected_entries = entries
                         .into_iter()
@@ -451,20 +422,41 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Primary,
                 edge: KeyEdge::Pressed,
+                position,
                 ..
             }) => {
-                host.application_mut().primary_down = true;
+                let app = host.application_mut();
+                app.primary_down = true;
+                if let Some(position) = position {
+                    app.cursor = Point {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    };
+                }
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Primary,
                 edge: KeyEdge::Released,
+                position,
                 ..
             }) => {
+                if host.application().file_drag_started
+                    && let Some(position) = position
+                {
+                    let destination = drop_destination_at(
+                        &host.semantic_nodes(),
+                        Point {
+                            x: position.x as f32,
+                            y: position.y as f32,
+                        },
+                        host.application(),
+                    );
+                    host.application_mut().native_drop_destination = destination;
+                }
                 let app = host.application_mut();
                 app.resizing_sidebar = false;
                 app.resizing_details_column = None;
                 app.selection_drag = None;
-                app.outbound_drag = None;
                 app.primary_down = false;
                 changed = true;
             }
@@ -494,6 +486,9 @@ impl HostAdapter<FileApp> for FileHostAdapter {
                 app.resizing_details_column = None;
                 app.selection_drag = None;
                 app.primary_down = false;
+                app.file_drag_origin = None;
+                app.file_drag_started = false;
+                app.outbound_drag = None;
                 changed |= had_input_state;
             }
             InputEvent::FocusGained { .. } => {
@@ -502,17 +497,50 @@ impl HostAdapter<FileApp> for FileHostAdapter {
             }
             _ => {}
         }
-        self.sync_requested |= changed;
-        self.drop_hover_deadline = host
-            .application()
-            .native_drop_hover_started
-            .as_ref()
-            .map(|(_, started)| *started + DROP_HOVER_OPEN_DELAY);
-        Ok(AdapterOutcome {
+        AdapterOutcome {
             changed,
             consume,
             exit: host.application().exit_requested,
-        })
+        }
+    }
+}
+
+impl Default for FileHostAdapter {
+    fn default() -> Self {
+        Self {
+            sync_requested: true,
+            drop_hover_deadline: None,
+        }
+    }
+}
+
+impl HostAdapter<FileApp> for FileHostAdapter {
+    fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
+        session_controller_fence()
+    }
+
+    fn request_text_entry(&mut self, _services: HostServices<'_>) {
+        request_session_text_entry();
+    }
+
+    fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        self.sync_requested
+            .then_some(now)
+            .into_iter()
+            .chain(self.drop_hover_deadline)
+            .min()
+    }
+
+    fn started(
+        &mut self,
+        _host: &mut UiHost<FileApp>,
+        services: HostServices<'_>,
+    ) -> Result<AdapterOutcome, Box<dyn std::error::Error>> {
+        services
+            .window()
+            .set_min_inner_size(Some(LogicalSize::new(560, 360)));
+        set_nickel_file_icon(services.window());
+        Ok(AdapterOutcome::default())
     }
 
     fn poll(

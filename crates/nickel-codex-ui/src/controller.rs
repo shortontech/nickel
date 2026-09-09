@@ -10,7 +10,7 @@ use std::{
         mpsc::{self},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 pub fn create_managed_workspace() -> Result<PathBuf, String> {
@@ -43,9 +43,10 @@ fn create_managed_workspace_at(documents: &Path, now: &jiff::Zoned) -> Result<Pa
 
 use nickel_codex::{
     AccountState, ApprovalPolicy, BackendChoice, CodexBackend, CodexClient, CodexEvent,
-    CommandDecision, FileChangeDecision, ImportProject, InteractionResponse, Model, Project,
-    ProjectPage, RemoteHost, ReplayBackend, Selector, ServerRequestId, StartThread, StartTurn,
-    Thread, ThreadId, ThreadPage, ThreadPageResult, UserInputAnswer,
+    CommandDecision, FileChangeDecision, ImportProject, InteractionResponse, LoginChallenge,
+    LoginMethod, Model, Project, ProjectPage, RemoteControlClientPage, RemoteControlStatus,
+    RemoteHost, RemotePairingChallenge, ReplayBackend, Selector, ServerRequestId, StartThread,
+    StartTurn, Thread, ThreadId, ThreadPage, ThreadPageResult, UserInputAnswer,
 };
 
 #[derive(Clone)]
@@ -66,6 +67,17 @@ pub enum BackendMode {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ControllerCommand {
     Refresh,
+    StartLogin(LoginMethod),
+    CancelLogin(String),
+    ReadRemoteControl,
+    EnableRemoteControl,
+    DisableRemoteControl,
+    StartRemotePairing,
+    CancelRemotePairing,
+    RevokeRemoteClient {
+        environment_id: String,
+        client_id: String,
+    },
     LoadThreads,
     NewChat,
     NewChatIn(PathBuf, Option<String>),
@@ -108,6 +120,14 @@ pub enum ControllerEvent {
     ThreadCreated(Thread),
     ThreadSelected(Thread),
     TurnAccepted,
+    LoginStarted(LoginChallenge),
+    LoginCancelled(String),
+    RemoteControlStatus(RemoteControlStatus),
+    RemotePairingStarted(RemotePairingChallenge),
+    RemotePairingClaimed,
+    RemotePairingCancelled,
+    RemotePairingFailed(String),
+    RemoteClients(RemoteControlClientPage),
     ModelRejected {
         model: String,
         message: String,
@@ -319,7 +339,12 @@ fn run_worker(
                     .and_then(|probe| probe.version.clone())
                     .unwrap_or_else(|| "compatible version".into());
                 let provenance = codex_attribution(&version);
-                match CodexClient::spawn(&candidate.path, &cwd) {
+                let isolated_home = std::env::var_os("NICKEL_CODEX_HOME").map(PathBuf::from);
+                let client = match isolated_home.as_deref() {
+                    Some(home) => CodexClient::spawn_with_home(&candidate.path, &cwd, home),
+                    None => CodexClient::spawn(&candidate.path, &cwd),
+                };
+                match client {
                     Ok(client) => (Box::new(client), cwd, provenance, false),
                     Err(error) => {
                         let _ = send(ControllerEvent::Failure(error.to_string()));
@@ -374,6 +399,9 @@ fn run_worker(
     }
     let mut selected_thread = None;
     let mut active_turn = None;
+    let mut active_login_id: Option<String> = None;
+    let mut active_remote_pairing: Option<RemotePairingChallenge> = None;
+    let mut next_remote_pairing_poll = Instant::now();
     let mut new_thread_cwd = cwd.clone();
     let mut new_thread_project_id = None;
 
@@ -400,10 +428,44 @@ fn run_worker(
                 {
                     active_turn = None
                 }
+                nickel_codex::EventKind::AccountLoginCompleted { completion }
+                    if completion.login_id.as_ref() == active_login_id.as_ref() =>
+                {
+                    active_login_id = None;
+                    if completion.success {
+                        let _ = send(current_snapshot());
+                    }
+                }
+                nickel_codex::EventKind::RemoteControlStatusChanged { status } => {
+                    let _ = send(ControllerEvent::RemoteControlStatus(status.clone()));
+                }
                 _ => {}
             }
             if !send(ControllerEvent::Protocol(event)) {
                 return;
+            }
+        }
+        if let Some(pairing) = active_remote_pairing.as_ref()
+            && Instant::now() >= next_remote_pairing_poll
+        {
+            next_remote_pairing_poll = Instant::now() + Duration::from_secs(1);
+            match backend.remote_pairing_claimed(Some(&pairing.pairing_code), None) {
+                Ok(false) => {}
+                Ok(true) => {
+                    let environment_id = pairing.environment_id.clone();
+                    active_remote_pairing = None;
+                    if !send(ControllerEvent::RemotePairingClaimed) {
+                        return;
+                    }
+                    if let Ok(clients) = backend.remote_control_clients(&environment_id, None, 100)
+                    {
+                        let _ = send(ControllerEvent::RemoteClients(clients));
+                    }
+                }
+                Err(error) => {
+                    active_remote_pairing = None;
+                    let _ = send(ControllerEvent::RemotePairingFailed(error.to_string()));
+                }
             }
         }
         let command = if interrupt.swap(false, Ordering::AcqRel) {
@@ -419,6 +481,92 @@ fn run_worker(
             ControllerCommand::Refresh => send(current_snapshot())
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
+            ControllerCommand::StartLogin(method) => {
+                let cancelled = active_login_id
+                    .take()
+                    .map(|previous| backend.cancel_login(&previous))
+                    .unwrap_or(Ok(()));
+                match cancelled {
+                    Err(error) => Err(error.to_string()),
+                    Ok(()) => backend
+                        .start_login(method)
+                        .map(|challenge| {
+                            active_login_id = Some(match &challenge {
+                                LoginChallenge::Browser { login_id, .. }
+                                | LoginChallenge::DeviceCode { login_id, .. } => login_id.clone(),
+                            });
+                            let _ = send(ControllerEvent::LoginStarted(challenge));
+                        })
+                        .map_err(|error| error.to_string()),
+                }
+            }
+            ControllerCommand::CancelLogin(login_id) => {
+                if active_login_id.as_deref() != Some(login_id.as_str()) {
+                    Err("login attempt is no longer active".into())
+                } else {
+                    backend
+                        .cancel_login(&login_id)
+                        .map(|()| {
+                            active_login_id = None;
+                            let _ = send(ControllerEvent::LoginCancelled(login_id));
+                        })
+                        .map_err(|error| error.to_string())
+                }
+            }
+            ControllerCommand::ReadRemoteControl => backend
+                .remote_control_status()
+                .map(|status| {
+                    let environment_id = status.environment_id.clone();
+                    let _ = send(ControllerEvent::RemoteControlStatus(status));
+                    if let Some(environment_id) = environment_id
+                        && let Ok(clients) =
+                            backend.remote_control_clients(&environment_id, None, 100)
+                    {
+                        let _ = send(ControllerEvent::RemoteClients(clients));
+                    }
+                })
+                .map_err(|error| error.to_string()),
+            ControllerCommand::EnableRemoteControl => backend
+                .enable_remote_control(false)
+                .map(|status| {
+                    let _ = send(ControllerEvent::RemoteControlStatus(status));
+                })
+                .map_err(|error| error.to_string()),
+            ControllerCommand::DisableRemoteControl => backend
+                .disable_remote_control(false)
+                .map(|status| {
+                    active_remote_pairing = None;
+                    let _ = send(ControllerEvent::RemoteControlStatus(status));
+                    let _ = send(ControllerEvent::RemoteClients(RemoteControlClientPage {
+                        data: Vec::new(),
+                        next_cursor: None,
+                    }));
+                })
+                .map_err(|error| error.to_string()),
+            ControllerCommand::StartRemotePairing => backend
+                .start_remote_pairing(true)
+                .map(|challenge| {
+                    active_remote_pairing = Some(challenge.clone());
+                    next_remote_pairing_poll = Instant::now() + Duration::from_secs(1);
+                    let _ = send(ControllerEvent::RemotePairingStarted(challenge));
+                })
+                .map_err(|error| error.to_string()),
+            ControllerCommand::CancelRemotePairing => {
+                active_remote_pairing = None;
+                send(ControllerEvent::RemotePairingCancelled)
+                    .then_some(())
+                    .ok_or_else(|| "UI disconnected".to_owned())
+            }
+            ControllerCommand::RevokeRemoteClient {
+                environment_id,
+                client_id,
+            } => backend
+                .revoke_remote_control_client(&environment_id, &client_id)
+                .and_then(|()| backend.remote_control_clients(&environment_id, None, 100))
+                .map(|clients| {
+                    let _ = send(ControllerEvent::RemoteClients(clients));
+                })
+                .map_err(|error| error.to_string()),
             ControllerCommand::LoadThreads => send(snapshot(&*backend, provenance.clone()))
                 .then_some(())
                 .ok_or_else(|| "UI disconnected".to_owned()),
@@ -627,6 +775,20 @@ pub(crate) fn codex_attribution(version: &str) -> String {
 
 fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
     let result = (|| {
+        let account = backend.account()?;
+        if !account.authenticated {
+            return Ok::<_, nickel_codex::CodexError>((
+                account,
+                Vec::new(),
+                Vec::new(),
+                ThreadPageResult {
+                    threads: Vec::new(),
+                    next_cursor: None,
+                    runtime: HashMap::new(),
+                },
+                None,
+            ));
+        }
         let mut projects = list_projects(backend)?;
         let (page, thread_error) = match list_threads(backend) {
             Ok(mut page) => {
@@ -655,7 +817,7 @@ fn snapshot(backend: &dyn CodexBackend, provenance: String) -> ControllerEvent {
             ),
         };
         Ok::<_, nickel_codex::CodexError>((
-            backend.account()?,
+            account,
             backend.models()?,
             projects,
             page,
@@ -1018,6 +1180,7 @@ mod tests {
         let backend = ReplayBackend::from_json(
             r#"{
                 "name":"thread-list-error",
+                "account":{"authenticated":true},
                 "projects":[{"id":"nickel","name":"Nickel","roots":["/projects/nickel"]}],
                 "thread_error":"duplicate thread id"
             }"#,

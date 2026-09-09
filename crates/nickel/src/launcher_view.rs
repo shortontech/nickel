@@ -22,7 +22,7 @@ use nickel_ui::{
     Application as UiApplication, Column, ComponentBuilderExt, Container, ControllerFamily,
     FallbackAvatar, FileGrid, FilePlaneItem, FrameOverlay, Image, InputModality, Insets,
     LauncherSearchField, OverlayAnchor, OverlayMenu, OverlayMenuItem, OverlayStyle,
-    ProjectStatusRow, ReadingDirection, Row, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
+    ProjectStatusRow, ReadingDirection, START_MENU_SINGLE_PANE_BREAKPOINT, SectionHeader,
     SemanticControllerAction, SemanticTheme, Shortcut, ShortcutRow, ShortcutState,
     StartMenuNarrowPane, StartMenuShell, Text, UiId, VerticalScroll, ViewContext,
 };
@@ -64,7 +64,6 @@ fn dashboard_applications(launcher: &Launcher) -> Vec<&Application> {
         }
         LauncherView::Applications | LauncherView::Places => (0..launcher.result_count())
             .filter_map(|index| launcher.result_at(index))
-            .take(24)
             .collect(),
     }
 }
@@ -84,6 +83,7 @@ pub enum LauncherAction {
     ShowNarrowPrimary,
     SetQuery(String),
     SearchScroll,
+    DashboardScroll,
     Dismiss,
 }
 
@@ -368,7 +368,7 @@ pub fn reduce_launcher_action(
             launcher.set_query(&query);
             None
         }
-        LauncherAction::SearchScroll => None,
+        LauncherAction::SearchScroll | LauncherAction::DashboardScroll => None,
         LauncherAction::Dismiss => Some(LauncherShellEffect::Dismiss),
     }
 }
@@ -807,7 +807,6 @@ fn build_dashboard_view_directional(
     let selected = |view| launcher.view() == view;
     let nav_state = |view| ShortcutState {
         selected: selected(view),
-        focused: selected(view),
         ..ShortcutState::default()
     };
     let nav_icon = |icons: &mut LauncherIconCache, name, bytes: &[u8]| {
@@ -816,22 +815,6 @@ fn build_dashboard_view_directional(
 
     let mut sidebar = Column::new()
         .gap(theme.spacing.compact)
-        .child(
-            Row::new()
-                .align_items(nickel_ui::Align::Center)
-                .gap(theme.spacing.control)
-                .child(
-                    structural_icon(
-                        icons,
-                        "nickel",
-                        include_bytes!("../../../assets/icons/start-menu/nickel.svg"),
-                        theme.text.accent,
-                    )
-                    .width(30.0)
-                    .height(30.0),
-                )
-                .child(Text::new("Nickel").color(theme.text.primary).scale(1.25)),
-        )
         .child(ShortcutRow::new_directional(
             theme,
             nav_icon(
@@ -958,6 +941,7 @@ fn build_dashboard_view_directional(
             .accessibility_label(accessible_name)
         }))
         .id("launcher-applications")
+        .scroll_owner("launcher-dashboard-scroll")
         .gap(theme.spacing.control)
         .accessibility_label("Applications");
 
@@ -1106,6 +1090,11 @@ fn build_dashboard_view_directional(
             query_action,
             direction,
         ));
+    let detail = VerticalScroll::new(LauncherAction::DashboardScroll, 0.0)
+        .id("launcher-dashboard-scroll")
+        .theme(theme)
+        .grow(1.0)
+        .child(detail);
     let mut shell = StartMenuShell::new(theme, width, sidebar, detail)
         .direction(direction)
         .header(search)
@@ -1356,13 +1345,95 @@ mod tests {
     }
 
     #[test]
+    fn opening_launcher_focuses_search_and_accepts_typing_without_navigation() {
+        for width in [480, 920] {
+            for direction in [ReadingDirection::LeftToRight, ReadingDirection::RightToLeft] {
+                let mut application = LauncherApplication::new(
+                    Launcher::default(),
+                    LauncherViewState::default(),
+                    LauncherIconCache::new(),
+                    palette(),
+                );
+                application.set_reading_direction(direction);
+                let mut scenario = Scenario::new(application, width, 680);
+                let search = scenario
+                    .host()
+                    .query_unique(&nickel_ui::SemanticSelector::Role(
+                        nickel_ui::SemanticRole::TextField,
+                    ))
+                    .expect("launcher search");
+                scenario.host_mut().step(HostBatch {
+                    window_focused: Some(true),
+                    ..HostBatch::default()
+                });
+                assert_eq!(
+                    scenario.host().inspect().keyboard_focus,
+                    Some(search.id.clone())
+                );
+                scenario.host_mut().step(HostBatch {
+                    events: vec![HostEvent::Normalized {
+                        input: InputEvent::Text(TextEvent::Commit {
+                            device: DeviceId(7),
+                            order: EventOrder(1),
+                            text: "fire".into(),
+                        }),
+                        clipboard_text: None,
+                    }],
+                    ..HostBatch::default()
+                });
+                assert_eq!(scenario.host().application().launcher.query(), "fire");
+                assert_eq!(
+                    scenario.host_mut().application_mut().take_effects(),
+                    [LauncherAction::SetQuery("fire".into())]
+                );
+                assert_eq!(scenario.host().inspect().keyboard_focus, Some(search.id));
+            }
+        }
+    }
+
+    #[test]
+    fn launcher_search_spans_both_panes_without_sidebar_branding() {
+        let host = launcher_host();
+        let search = host
+            .query_unique(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::TextField,
+            ))
+            .expect("launcher search");
+        let home = host
+            .unique_semantic_target_for_message(&LauncherAction::SetView(LauncherView::Favorites))
+            .expect("Home navigation");
+        let application = host
+            .unique_semantic_target_for_message(&LauncherAction::LaunchApplication(
+                "firefox".into(),
+            ))
+            .expect("Home application");
+        assert!(search.bounds.origin.y + search.bounds.size.height <= home.bounds.origin.y);
+        assert!(search.bounds.origin.y + search.bounds.size.height <= application.bounds.origin.y);
+        let header = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.label.as_deref() == Some("Focus application search"))
+            .expect("search header");
+        assert!(header.rect.origin.x <= home.bounds.origin.x);
+        assert!(
+            header.rect.origin.x + header.rect.size.width
+                >= application.bounds.origin.x + application.bounds.size.width
+        );
+        assert!(
+            !accessibility_labels(&host)
+                .iter()
+                .any(|label| label == "Nickel")
+        );
+    }
+
+    #[test]
     fn controller_scenario_switches_peer_panes_and_contains_dpad() {
         let mut scenario = populated_launcher_scenario();
 
         scenario.controller(ControllerAction::Down).unwrap();
         let first_target = controller_target(&scenario);
         assert!(
-            first_target.contains("launcher-search-focus"),
+            first_target.contains("launcher-applications"),
             "selected {first_target}"
         );
         scenario.controller(ControllerAction::PreviousPane).unwrap();
@@ -1617,114 +1688,131 @@ mod tests {
 
     #[test]
     fn keyboard_boundary_and_page_navigation_reveal_and_activate_results() {
-        let mut scenario = populated_search_scenario();
-        for (order, physical, logical) in [
-            (1, KeyCode::ArrowDown, NamedKey::ArrowDown),
-            (2, KeyCode::ArrowDown, NamedKey::ArrowDown),
-            (3, KeyCode::ArrowRight, NamedKey::ArrowRight),
-            (4, KeyCode::PageDown, NamedKey::PageDown),
+        for (mut scenario, expected) in [
+            (
+                populated_search_scenario(),
+                LauncherAction::ActivateResult(29),
+            ),
+            (
+                populated_launcher_scenario(),
+                LauncherAction::LaunchApplication("application-29".into()),
+            ),
         ] {
+            for (order, physical, logical) in [
+                (1, KeyCode::ArrowDown, NamedKey::ArrowDown),
+                (2, KeyCode::ArrowDown, NamedKey::ArrowDown),
+                (3, KeyCode::ArrowRight, NamedKey::ArrowRight),
+                (4, KeyCode::PageDown, NamedKey::PageDown),
+            ] {
+                scenario
+                    .host_mut()
+                    .handle_input(&navigation_key(order, physical, logical), None);
+            }
+            let page_target = controller_target(&scenario);
+            assert!(
+                !page_target.contains("application-00"),
+                "PageDown did not advance the application viewport: {page_target}"
+            );
+
             scenario
                 .host_mut()
-                .handle_input(&navigation_key(order, physical, logical), None);
+                .handle_input(&navigation_key(5, KeyCode::End, NamedKey::End), None);
+            assert!(controller_target(&scenario).contains("application-29"));
+            let last = scenario
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.id.as_str().contains("application-29"))
+                .expect("End retains the last application semantically");
+            assert!(last.bounds.origin.y >= 0.0);
+            assert!(last.bounds.origin.y + last.bounds.size.height <= 680.0);
+            scenario
+                .host_mut()
+                .handle_input(&navigation_key(6, KeyCode::Enter, NamedKey::Enter), None);
+            assert_eq!(
+                scenario.host_mut().application_mut().take_effects(),
+                [expected]
+            );
+
+            scenario
+                .host_mut()
+                .handle_input(&navigation_key(7, KeyCode::Home, NamedKey::Home), None);
+            assert!(controller_target(&scenario).contains("application-00"));
+
+            scenario
+                .host_mut()
+                .handle_input(&navigation_key(8, KeyCode::End, NamedKey::End), None);
+            scenario
+                .host_mut()
+                .handle_input(&navigation_key(9, KeyCode::PageUp, NamedKey::PageUp), None);
+            let page_up_target = controller_target(&scenario);
+            assert!(
+                !page_up_target.contains("application-29"),
+                "PageUp did not move away from the final entry"
+            );
+            scenario.host_mut().handle_input(
+                &navigation_key(10, KeyCode::ArrowUp, NamedKey::ArrowUp),
+                None,
+            );
+            assert_ne!(controller_target(&scenario), page_up_target);
         }
-        let page_target = controller_target(&scenario);
-        assert!(
-            !page_target.contains("application-00"),
-            "PageDown did not advance the application viewport: {page_target}"
-        );
-
-        scenario
-            .host_mut()
-            .handle_input(&navigation_key(5, KeyCode::End, NamedKey::End), None);
-        assert!(controller_target(&scenario).contains("application-29"));
-        let last = scenario
-            .semantic_nodes()
-            .into_iter()
-            .find(|node| node.id.as_str().contains("application-29"))
-            .expect("End retains the last application semantically");
-        assert!(last.bounds.origin.y >= 0.0);
-        assert!(last.bounds.origin.y + last.bounds.size.height <= 680.0);
-        scenario
-            .host_mut()
-            .handle_input(&navigation_key(6, KeyCode::Enter, NamedKey::Enter), None);
-        assert_eq!(
-            scenario.host_mut().application_mut().take_effects(),
-            [LauncherAction::ActivateResult(29)]
-        );
-
-        scenario
-            .host_mut()
-            .handle_input(&navigation_key(7, KeyCode::Home, NamedKey::Home), None);
-        assert!(controller_target(&scenario).contains("application-00"));
-
-        scenario
-            .host_mut()
-            .handle_input(&navigation_key(8, KeyCode::End, NamedKey::End), None);
-        scenario
-            .host_mut()
-            .handle_input(&navigation_key(9, KeyCode::PageUp, NamedKey::PageUp), None);
-        let page_up_target = controller_target(&scenario);
-        assert!(
-            !page_up_target.contains("application-29"),
-            "PageUp did not move away from the final entry"
-        );
-        scenario.host_mut().handle_input(
-            &navigation_key(10, KeyCode::ArrowUp, NamedKey::ArrowUp),
-            None,
-        );
-        assert_ne!(controller_target(&scenario), page_up_target);
     }
 
     #[test]
     fn launcher_wheel_accepts_line_and_pixel_deltas_inside_its_viewport() {
-        let mut scenario = populated_search_scenario();
-        let scroll = scenario
-            .host()
-            .semantic_targets_for_message(&LauncherAction::SearchScroll)
-            .into_iter()
-            .next()
-            .expect("application results expose a scroll viewport");
-        let point = nickel_input::Point {
-            x: f64::from(scroll.bounds.origin.x + scroll.bounds.size.width / 2.0),
-            y: f64::from(scroll.bounds.origin.y + scroll.bounds.size.height / 2.0),
-        };
-        let first_y = |scenario: &Scenario<LauncherApplication>| {
-            scenario
-                .semantic_nodes()
+        for (mut scenario, scroll_action) in [
+            (populated_search_scenario(), LauncherAction::SearchScroll),
+            (
+                populated_launcher_scenario(),
+                LauncherAction::DashboardScroll,
+            ),
+        ] {
+            let scroll = scenario
+                .host()
+                .semantic_targets_for_message(&scroll_action)
                 .into_iter()
-                .find(|node| node.id.as_str().contains("application-00"))
-                .expect("first application remains in the authoritative collection")
-                .bounds
-                .origin
-                .y
-        };
-        let before = first_y(&scenario);
-        scenario.host_mut().handle_input(
-            &InputEvent::Pointer(PointerEvent::Axis {
-                device: DeviceId(1),
-                order: EventOrder(1),
-                delta: Vector { x: 0.0, y: -2.0 },
-                discrete: Some((0, -2)),
-                position: Some(point),
-            }),
-            None,
-        );
-        let after_lines = first_y(&scenario);
-        assert!(after_lines < before);
-        scenario.host_mut().handle_input(
-            &InputEvent::Pointer(PointerEvent::Axis {
-                device: DeviceId(1),
-                order: EventOrder(2),
-                delta: Vector { x: 0.0, y: -2.5 },
-                discrete: None,
-                position: Some(point),
-            }),
-            None,
-        );
-        let after_pixels = first_y(&scenario);
-        assert!(after_pixels < after_lines);
-        assert!((after_lines - after_pixels - 2.5).abs() < 0.01);
+                .next()
+                .expect("application results expose a scroll viewport");
+            let point = nickel_input::Point {
+                x: f64::from(scroll.bounds.origin.x + scroll.bounds.size.width / 2.0),
+                y: f64::from(scroll.bounds.origin.y + scroll.bounds.size.height / 2.0),
+            };
+            let first_y = |scenario: &Scenario<LauncherApplication>| {
+                scenario
+                    .semantic_nodes()
+                    .into_iter()
+                    .find(|node| node.id.as_str().contains("application-00"))
+                    .expect("first application remains in the authoritative collection")
+                    .bounds
+                    .origin
+                    .y
+            };
+            let before = first_y(&scenario);
+            scenario.host_mut().handle_input(
+                &InputEvent::Pointer(PointerEvent::Axis {
+                    device: DeviceId(1),
+                    order: EventOrder(1),
+                    delta: Vector { x: 0.0, y: -2.0 },
+                    discrete: Some((0, -2)),
+                    position: Some(point),
+                }),
+                None,
+            );
+            let after_lines = first_y(&scenario);
+            assert!(after_lines < before);
+            scenario.host_mut().handle_input(
+                &InputEvent::Pointer(PointerEvent::Axis {
+                    device: DeviceId(1),
+                    order: EventOrder(2),
+                    delta: Vector { x: 0.0, y: -2.5 },
+                    discrete: None,
+                    position: Some(point),
+                }),
+                None,
+            );
+            let after_pixels = first_y(&scenario);
+            assert!(after_pixels < after_lines);
+            assert!((after_lines - after_pixels - 2.5).abs() < 0.01);
+        }
     }
 
     #[test]
@@ -2011,6 +2099,39 @@ mod tests {
                 "missing production semantic target for {action:?}"
             );
         }
+    }
+
+    #[test]
+    fn left_click_on_applications_sidebar_opens_the_complete_scrollable_list() {
+        let mut scenario = populated_launcher_scenario();
+        let home = scenario
+            .host()
+            .unique_semantic_target_for_message(&LauncherAction::SetView(LauncherView::Favorites))
+            .unwrap();
+        scenario.pointer_activate(&Selector::id(home.id)).unwrap();
+        scenario.host_mut().application_mut().take_effects();
+        let applications = scenario
+            .host()
+            .unique_semantic_target_for_message(&LauncherAction::SetView(
+                LauncherView::Applications,
+            ))
+            .unwrap();
+        scenario
+            .pointer_activate(&Selector::id(applications.id))
+            .unwrap();
+        assert_eq!(
+            scenario.host().application().launcher.view(),
+            LauncherView::Applications
+        );
+        assert_eq!(
+            scenario.host_mut().application_mut().take_effects(),
+            [LauncherAction::SetView(LauncherView::Applications)]
+        );
+        assert!(scenario.semantic_nodes().iter().any(|node| {
+            node.id
+                .as_str()
+                .ends_with("launcher-applications/application-29")
+        }));
     }
 
     #[test]

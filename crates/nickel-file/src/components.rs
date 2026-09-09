@@ -698,6 +698,13 @@ pub(crate) fn tab(
     }
 }
 
+fn file_entry_drag_message(seed: FileMessage, gesture: nickel_ui::DragGesture) -> FileMessage {
+    let FileMessage::Entry(index) = seed else {
+        return seed;
+    };
+    FileMessage::EntryDrag(index, gesture)
+}
+
 pub(crate) fn grid_item(
     index: usize,
     entry: &FileEntry,
@@ -723,6 +730,7 @@ pub(crate) fn grid_item(
     .controller_focus_background_tint(palette.complement)
     .id(format!("file-entry-{index}"))
     .context_message(FileMessage::ContextEntry(index))
+    .on_drag((FileMessage::Entry(index), file_entry_drag_message))
     .semantic_role(SemanticRole::Button)
     .accessibility_label(entry.display_name())
 }
@@ -761,6 +769,7 @@ pub(crate) fn details_row(
             hover_background={palette.surface_hover} pressed_background={palette.accent_soft}
             padding={Insets { top: 7.0, right: 10.0, bottom: 7.0, left: 10.0 }}
             on_press={FileMessage::Entry(index)} context_message={FileMessage::ContextEntry(index)}
+            on_drag={(FileMessage::Entry(index), file_entry_drag_message)}
             semantic_role={SemanticRole::Button} accessibility_label={entry.display_name()}
             focus_background_tint={palette.accent} controller_focus_background_tint={palette.complement}>
             <Row gap={12.0}>

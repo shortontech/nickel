@@ -3401,7 +3401,9 @@ impl<Message: Clone> UiFrame<Message> {
                     })
             }
             UiEvent::CaretBlink => state.toggle_caret(),
-            UiEvent::FocusGained => state.set_window_focused(true),
+            UiEvent::FocusGained => state
+                .set_window_focused(true)
+                .merge(self.initialize_focus(state)),
             UiEvent::FocusLost => {
                 if let Some(message) = self.cancelled_drag_message(state) {
                     outcome.messages.push(message);
@@ -3707,7 +3709,7 @@ impl<Message: Clone> UiFrame<Message> {
         Invalidation::Paint
     }
 
-    fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+    fn focus_targets(&self) -> Vec<&UiId> {
         let mut ids = self
             .resolved
             .nodes
@@ -3732,6 +3734,48 @@ impl<Message: Clone> UiFrame<Message> {
             .map(|node| &node.id)
             .collect::<Vec<_>>();
         ids.dedup();
+        ids
+    }
+
+    fn initialize_focus(&self, state: &mut UiStateStore) -> Invalidation {
+        // Regaining native ownership must not reset an explicit focus or an
+        // arrow-key selection. Only initialize an interface with no selection.
+        if state.focused().is_some() || state.navigation().controller_selected().is_some() {
+            return Invalidation::None;
+        }
+        // Keyboard entry follows the surface's focus order. A default controller
+        // pane must not skip controls that precede it, such as a search header.
+        let scope = self
+            .active_overlay
+            .as_ref()
+            .map(|(id, _)| id.as_ui_id())
+            .or_else(|| self.resolved.nodes.first().map(|node| &node.id));
+        let ids = self
+            .focus_targets()
+            .into_iter()
+            .filter(|id| scope.is_none_or(|scope| self.is_descendant_or_self(scope, id)))
+            .collect::<Vec<_>>();
+        let entry = scope
+            .and_then(|scope| self.scope_policy(scope))
+            .map(|policy| &policy.entry);
+        let target = match entry {
+            Some(crate::NavigationEntry::Last) => ids.last().copied(),
+            Some(crate::NavigationEntry::Target(target)) => ids
+                .iter()
+                .copied()
+                .find(|id| *id == target)
+                .or_else(|| ids.first().copied()),
+            _ => ids.first().copied(),
+        };
+        target.map_or(Invalidation::None, |target| {
+            state
+                .set_focus(Some(target.clone()))
+                .merge(self.reveal_controller_target(state, target))
+        })
+    }
+
+    fn move_focus(&self, state: &mut UiStateStore, direction: isize) -> Invalidation {
+        let ids = self.focus_targets();
         if ids.is_empty() {
             return state.set_focus(None);
         }

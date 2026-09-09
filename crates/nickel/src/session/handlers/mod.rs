@@ -107,15 +107,21 @@ impl SelectionHandler for NickelSession {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        if let Some((_, xwm)) = self.xwm.as_mut() {
-            let mime_types = source.map(|source| bounded_selection_mime_types(source.mime_types()));
-            if let Err(error) = xwm.new_selection(target, mime_types) {
-                tracing::warn!(
-                    ?error,
-                    ?target,
-                    "failed to mirror Wayland selection to XWayland"
-                );
-            }
+        let mime_types = source
+            .as_ref()
+            .map(|source| bounded_selection_mime_types(source.mime_types()))
+            .unwrap_or_default();
+        if target == SelectionTarget::Clipboard {
+            self.native_clipboard.mime_types.clone_from(&mime_types);
+        }
+        if let Some((_, xwm)) = self.xwm.as_mut()
+            && let Err(error) = xwm.new_selection(target, source.map(|_| mime_types))
+        {
+            tracing::warn!(
+                ?error,
+                ?target,
+                "failed to mirror Wayland selection to XWayland"
+            );
         }
     }
 

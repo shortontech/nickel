@@ -618,7 +618,18 @@ impl NickelSession {
                                 KeyEdge::Released
                             };
                             let outcome = match key_code_from_keysym(sym) {
-                                Some(key) => session.hotkeys.handle(key, edge),
+                                Some(key) => {
+                                    if session.remote_emergency_chord.handle_physical(
+                                        key,
+                                        edge,
+                                        session.remote_control.status().effective
+                                            == nickel_remote_control::EffectiveState::Enabled,
+                                    ) {
+                                        session.emergency_stop_remote_control();
+                                        return FilterResult::Intercept(None);
+                                    }
+                                    session.hotkeys.handle(key, edge)
+                                }
                                 None => session.hotkeys.handle_unmapped(edge),
                             };
                             if outcome.action == Some(HotkeyAction::LockSession) {
@@ -626,10 +637,54 @@ impl NickelSession {
                                 return FilterResult::Intercept(None);
                             }
                             if session.locked {
-                                return if outcome.suppress {
-                                    FilterResult::Intercept(None)
-                                } else {
+                                if outcome.suppress {
+                                    return FilterResult::Intercept(None);
+                                }
+                                // Compositor-owned lock surfaces intentionally clear the native
+                                // seat focus when they take internal focus. Forwarding through
+                                // Smithay therefore has no recipient; deliver physical keys to
+                                // the focused internal lock UI just as we do for other internal
+                                // applications. External session-lock clients still use the
+                                // native forwarding path below.
+                                if session.internal_ui.focused().is_some() {
+                                    let desktop_handled = session.internal_ui.desktop_keyboard_input(
+                                        &event.device().id(),
+                                        event.key_code().raw(),
+                                        state == KeyState::Pressed,
+                                        |device, order, repeat| {
+                                            desktop_key_event(
+                                                (event.key_code().raw(), sym, state),
+                                                desktop_modifiers(modifiers),
+                                                device,
+                                                order,
+                                                repeat,
+                                            )
+                                        },
+                                    );
+                                    if !desktop_handled {
+                                        if state == KeyState::Pressed
+                                            && matches!(
+                                                sym.raw(),
+                                                keysyms::KEY_Return | keysyms::KEY_KP_Enter
+                                            )
+                                        {
+                                            session.internal_ui.submit_or_activate();
+                                        } else if let Some(event) =
+                                            internal_keyboard_event(sym, state)
+                                        {
+                                            session.internal_ui.keyboard(event);
+                                        }
+                                    }
+                                    session.flush_internal_shell_input();
+                                    session.request_output_redraw();
+                                    return FilterResult::Intercept(None);
+                                }
+                                return if session.keyboard_focus_is_lock_surface() {
                                     FilterResult::Forward
+                                } else {
+                                    // Locked sessions fail closed. A stale ordinary-client focus
+                                    // must never receive text intended for the lock screen.
+                                    FilterResult::Intercept(None)
                                 };
                             }
                             match outcome.action {
@@ -704,12 +759,59 @@ impl NickelSession {
                                 return FilterResult::Intercept(None);
                             }
                             if session.internal_ui.focused().is_some() {
+                                if state == KeyState::Pressed
+                                    && (modifiers.ctrl || modifiers.logo)
+                                    && matches!(sym.raw(), keysyms::KEY_v | keysyms::KEY_V)
+                                    && let Some(recipient) = session.internal_ui.focused()
+                                {
+                                    let paste_event = desktop_key_event(
+                                        (event.key_code().raw(), sym, state),
+                                        desktop_modifiers(modifiers),
+                                        nickel_input::DeviceId(0),
+                                        nickel_input::EventOrder(u64::from(time.millis())),
+                                        false,
+                                    );
+                                    match session.request_native_image_paste(recipient) {
+                                        Ok(true) => return FilterResult::Intercept(None),
+                                        Ok(false) => {
+                                            if let Err(error) = session
+                                                .request_native_direct_text_paste(
+                                                    recipient,
+                                                    paste_event,
+                                                )
+                                            {
+                                                tracing::warn!(
+                                                    error,
+                                                    "native clipboard text paste rejected"
+                                                );
+                                                session.native_clipboard.last_failure =
+                                                    Some(error.into());
+                                            }
+                                            return FilterResult::Intercept(None);
+                                        }
+                                        Err(error) => {
+                                            tracing::warn!(error, "native clipboard image paste rejected");
+                                            session.native_clipboard.last_failure =
+                                                Some(error.into());
+                                            return FilterResult::Intercept(None);
+                                        }
+                                    }
+                                }
                                 let desktop_handled = session.internal_ui.desktop_keyboard_input(
                                     &event.device().id(), event.key_code().raw(), state == KeyState::Pressed,
                                     |device, order, repeat| desktop_key_event((event.key_code().raw(), sym, state), desktop_modifiers(modifiers), device, order, repeat),
                                 );
-                                if !desktop_handled && let Some(event) = internal_keyboard_event(sym, state) {
-                                    session.internal_ui.keyboard(event);
+                                if !desktop_handled {
+                                    if state == KeyState::Pressed
+                                        && matches!(
+                                            sym.raw(),
+                                            keysyms::KEY_Return | keysyms::KEY_KP_Enter
+                                        )
+                                    {
+                                        session.internal_ui.submit_or_activate();
+                                    } else if let Some(event) = internal_keyboard_event(sym, state) {
+                                        session.internal_ui.keyboard(event);
+                                    }
                                 }
                                 session.flush_internal_shell_input();
                                 session.request_output_redraw();
@@ -864,9 +966,76 @@ impl NickelSession {
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
                 if event.button() == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
-                    && client_present
+                    && !self.locked
+                    && !pointer.is_grabbed()
+                    && !client_present
+                    && self
+                        .internal_ui
+                        .surface_at((location.x, location.y), true)
+                        .is_none()
+                    && let Some((surface, part)) = self
+                        .internal_ui
+                        .internal_frame_target((location.x, location.y))
+                    && let Some(id) = self.internal_window_for_surface(surface)
                 {
-                    self.dismiss_internal_launcher_for_client_press();
+                    self.activate_window(id);
+                    match part {
+                        FramePart::Close => {
+                            self.suppress_left_button_release = true;
+                            self.close_window(id);
+                        }
+                        FramePart::Minimize => {
+                            self.suppress_left_button_release = true;
+                            self.minimize_window(id);
+                        }
+                        FramePart::Maximize => {
+                            self.suppress_left_button_release = true;
+                            self.maximize_window(id);
+                        }
+                        FramePart::Titlebar => {
+                            let placement = self.internal_ui.placement(surface).cloned()?;
+                            let start_data = GrabStartData {
+                                focus: None,
+                                button,
+                                location,
+                            };
+                            pointer.set_grab(
+                                self,
+                                MoveInternalSurfaceGrab {
+                                    start_data,
+                                    surface,
+                                    initial_location: (placement.geometry.0, placement.geometry.1)
+                                        .into(),
+                                },
+                                serial,
+                                Focus::Clear,
+                            );
+                            pointer.button(
+                                self,
+                                &ButtonEvent {
+                                    button,
+                                    state: button_state,
+                                    serial,
+                                    time: event.time(),
+                                },
+                            );
+                        }
+                        // Internal application resizing is not exposed until the host can
+                        // negotiate live content sizes. Consume the frame border instead of
+                        // leaking the click into the hosted app or a client below it.
+                        FramePart::ResizeNorth
+                        | FramePart::ResizeNorthEast
+                        | FramePart::ResizeEast
+                        | FramePart::ResizeSouthEast
+                        | FramePart::ResizeSouth
+                        | FramePart::ResizeSouthWest
+                        | FramePart::ResizeWest
+                        | FramePart::ResizeNorthWest => {
+                            self.suppress_left_button_release = true;
+                        }
+                    }
+                    self.request_output_redraw();
+                    return None;
                 }
                 if event.button() == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
@@ -908,24 +1077,28 @@ impl NickelSession {
                     Some(MouseButton::Forward) => nickel_input::PointerButton::Forward,
                     _ => nickel_input::PointerButton::Native(button as u16),
                 };
-                let internally_handled = self.internal_ui.desktop_pointer_input(
-                    &event.device().id(),
-                    (location.x, location.y),
-                    super::internal_ui::DesktopPointerAction::Button {
-                        button: desktop_button,
-                        edge: if button_state == ButtonState::Pressed {
-                            nickel_input::KeyEdge::Pressed
-                        } else {
-                            nickel_input::KeyEdge::Released
+                // Once Smithay owns a pointer grab, every following button edge must reach that
+                // grab. Letting an internal surface consume the release here strands Super+drag
+                // in its move grab and leaves the surface attached to the cursor indefinitely.
+                let internally_handled = !pointer.is_grabbed()
+                    && (self.internal_ui.desktop_pointer_input(
+                        &event.device().id(),
+                        (location.x, location.y),
+                        super::internal_ui::DesktopPointerAction::Button {
+                            button: desktop_button,
+                            edge: if button_state == ButtonState::Pressed {
+                                nickel_input::KeyEdge::Pressed
+                            } else {
+                                nickel_input::KeyEdge::Released
+                            },
                         },
-                    },
-                    desktop_modifiers(&keyboard.modifier_state()),
-                    client_present,
-                ) || self.internal_ui.pointer_button_with_client(
-                    (location.x, location.y),
-                    button_state == ButtonState::Pressed,
-                    client_present,
-                );
+                        desktop_modifiers(&keyboard.modifier_state()),
+                        client_present,
+                    ) || self.internal_ui.pointer_button_with_client(
+                        (location.x, location.y),
+                        button_state == ButtonState::Pressed,
+                        client_present,
+                    ));
                 // A client press can blur the old internal owner without being
                 // consumed by it. Deliver that lifecycle batch before forwarding.
                 self.flush_internal_shell_input();
@@ -937,6 +1110,14 @@ impl NickelSession {
                     return None;
                 }
 
+                // Foreground shell surfaces and captured gestures get first refusal.
+                // A client underneath Launcher does not own a click inside Launcher.
+                if event.button() == Some(MouseButton::Left)
+                    && button_state == ButtonState::Pressed
+                    && client_present
+                {
+                    self.dismiss_internal_launcher_for_client_press();
+                }
                 if button_state == ButtonState::Pressed {
                     self.record_interaction_output(pointer.current_location());
                 }

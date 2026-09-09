@@ -172,12 +172,44 @@ impl CodexClient {
         Self::spawn_with_timeout(executable, cwd, Duration::from_secs(15))
     }
 
+    pub fn spawn_with_home(
+        executable: &Path,
+        cwd: &Path,
+        codex_home: &Path,
+    ) -> Result<Self, CodexError> {
+        Self::spawn_with_timeout_and_home(
+            executable,
+            cwd,
+            Duration::from_secs(15),
+            Some(codex_home),
+        )
+    }
+
     pub fn spawn_with_timeout(
         executable: &Path,
         cwd: &Path,
         request_timeout: Duration,
     ) -> Result<Self, CodexError> {
+        Self::spawn_with_timeout_and_home(executable, cwd, request_timeout, None)
+    }
+
+    /// Starts Codex with an optional isolated profile. The override applies only to the
+    /// app-server child; Nickel and compatibility probes retain their ordinary environment.
+    pub fn spawn_with_timeout_and_home(
+        executable: &Path,
+        cwd: &Path,
+        request_timeout: Duration,
+        codex_home: Option<&Path>,
+    ) -> Result<Self, CodexError> {
         let mut child = command(executable);
+        if let Some(codex_home) = codex_home {
+            if !codex_home.is_absolute() {
+                return Err(CodexError::Unavailable(
+                    "isolated CODEX_HOME must be an absolute path".into(),
+                ));
+            }
+            child.env("CODEX_HOME", codex_home);
+        }
         let mut child = child
             .args(["app-server", "--listen", "stdio://"])
             .current_dir(cwd)
@@ -712,9 +744,26 @@ impl CodexClient {
                     delta: string("delta"),
                 }
             }
-            "account/updated" | "account/login/completed" | "account/rateLimits/updated" => {
-                EventKind::AccountUpdated
-            }
+            "account/updated" | "account/rateLimits/updated" => EventKind::AccountUpdated,
+            "account/login/completed" => EventKind::AccountLoginCompleted {
+                completion: crate::LoginCompletion {
+                    login_id: params
+                        .get("loginId")
+                        .and_then(Value::as_str)
+                        .map(Into::into),
+                    success: params
+                        .get("success")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false),
+                    error: params.get("error").and_then(Value::as_str).map(Into::into),
+                },
+            },
+            "remoteControl/status/changed" => match parse_remote_control_status(params.clone()) {
+                Ok(status) => EventKind::RemoteControlStatusChanged { status },
+                Err(error) => EventKind::Inconsistency {
+                    message: error.to_string(),
+                },
+            },
             "error" => EventKind::Error {
                 message: params
                     .get("error")
@@ -981,6 +1030,114 @@ fn turn_input(text: String, images: Vec<crate::TurnImage>) -> Vec<Value> {
     input
 }
 
+fn parse_login_challenge(
+    method: crate::LoginMethod,
+    value: Value,
+) -> Result<crate::LoginChallenge, CodexError> {
+    fn field(value: &Value, name: &str, limit: usize) -> Result<String, CodexError> {
+        let text = value
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty() && text.len() <= limit)
+            .ok_or_else(|| CodexError::Protocol(format!("invalid login response field {name}")))?;
+        Ok(text.into())
+    }
+
+    let response_type = field(&value, "type", 64)?;
+    let login_id = field(&value, "loginId", 1024)?;
+    match (method, response_type.as_str()) {
+        (crate::LoginMethod::Browser, "chatgpt") => Ok(crate::LoginChallenge::Browser {
+            login_id,
+            auth_url: field(&value, "authUrl", 8192)?,
+        }),
+        (crate::LoginMethod::DeviceCode, "chatgptDeviceCode") => {
+            Ok(crate::LoginChallenge::DeviceCode {
+                login_id,
+                user_code: field(&value, "userCode", 128)?,
+                verification_url: field(&value, "verificationUrl", 8192)?,
+            })
+        }
+        _ => Err(CodexError::Protocol(format!(
+            "login response type {response_type:?} did not match request"
+        ))),
+    }
+}
+
+fn bounded_remote_text(value: &Value, name: &str, limit: usize) -> Result<String, CodexError> {
+    value
+        .get(name)
+        .and_then(Value::as_str)
+        .filter(|text| !text.is_empty() && text.len() <= limit)
+        .map(Into::into)
+        .ok_or_else(|| CodexError::Protocol(format!("invalid remote-control field {name}")))
+}
+
+fn optional_bounded_remote_text(
+    value: &Value,
+    name: &str,
+    limit: usize,
+) -> Result<Option<String>, CodexError> {
+    match value.get(name) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) if !text.is_empty() && text.len() <= limit => {
+            Ok(Some(text.clone()))
+        }
+        _ => Err(CodexError::Protocol(format!(
+            "invalid remote-control field {name}"
+        ))),
+    }
+}
+
+fn parse_remote_control_status(value: Value) -> Result<crate::RemoteControlStatus, CodexError> {
+    let status = match bounded_remote_text(&value, "status", 32)?.as_str() {
+        "disabled" => crate::RemoteControlConnectionStatus::Disabled,
+        "connecting" => crate::RemoteControlConnectionStatus::Connecting,
+        "connected" => crate::RemoteControlConnectionStatus::Connected,
+        "errored" => crate::RemoteControlConnectionStatus::Errored,
+        other => {
+            return Err(CodexError::Protocol(format!(
+                "unknown remote-control status {other:?}"
+            )));
+        }
+    };
+    Ok(crate::RemoteControlStatus {
+        status,
+        server_name: bounded_remote_text(&value, "serverName", 512)?,
+        installation_id: bounded_remote_text(&value, "installationId", 1024)?,
+        environment_id: optional_bounded_remote_text(&value, "environmentId", 1024)?,
+    })
+}
+
+fn parse_remote_pairing(value: Value) -> Result<crate::RemotePairingChallenge, CodexError> {
+    Ok(crate::RemotePairingChallenge {
+        environment_id: bounded_remote_text(&value, "environmentId", 1024)?,
+        expires_at: value
+            .get("expiresAt")
+            .and_then(Value::as_i64)
+            .ok_or_else(|| CodexError::Protocol("invalid remote-control field expiresAt".into()))?,
+        pairing_code: bounded_remote_text(&value, "pairingCode", 8192)?,
+        manual_pairing_code: optional_bounded_remote_text(&value, "manualPairingCode", 128)?,
+    })
+}
+
+fn parse_remote_client(value: &Value) -> Result<crate::RemoteControlClient, CodexError> {
+    Ok(crate::RemoteControlClient {
+        client_id: bounded_remote_text(value, "clientId", 1024)?,
+        display_name: optional_bounded_remote_text(value, "displayName", 512)?,
+        device_model: optional_bounded_remote_text(value, "deviceModel", 512)?,
+        device_type: optional_bounded_remote_text(value, "deviceType", 128)?,
+        platform: optional_bounded_remote_text(value, "platform", 128)?,
+        os_version: optional_bounded_remote_text(value, "osVersion", 128)?,
+        app_version: optional_bounded_remote_text(value, "appVersion", 128)?,
+        last_seen_at: match value.get("lastSeenAt") {
+            None | Some(Value::Null) => None,
+            Some(value) => Some(value.as_i64().ok_or_else(|| {
+                CodexError::Protocol("invalid remote-control field lastSeenAt".into())
+            })?),
+        },
+    })
+}
+
 impl CodexBackend for CodexClient {
     fn account(&self) -> Result<AccountState, CodexError> {
         let value = self.request("account/read", json!({"refreshToken": false}))?;
@@ -990,6 +1147,132 @@ impl CodexBackend for CodexClient {
             account_type: account.get("type").and_then(Value::as_str).map(Into::into),
             email: account.get("email").and_then(Value::as_str).map(Into::into),
         })
+    }
+    fn start_login(&self, method: crate::LoginMethod) -> Result<crate::LoginChallenge, CodexError> {
+        let params = match method {
+            crate::LoginMethod::Browser => json!({"type": "chatgpt"}),
+            crate::LoginMethod::DeviceCode => json!({"type": "chatgptDeviceCode"}),
+        };
+        parse_login_challenge(method, self.request("account/login/start", params)?)
+    }
+    fn cancel_login(&self, login_id: &str) -> Result<(), CodexError> {
+        if login_id.is_empty() || login_id.len() > 1024 {
+            return Err(CodexError::Protocol("invalid login id".into()));
+        }
+        self.request("account/login/cancel", json!({"loginId": login_id}))?;
+        Ok(())
+    }
+    fn remote_control_status(&self) -> Result<crate::RemoteControlStatus, CodexError> {
+        parse_remote_control_status(self.request("remoteControl/status/read", json!({}))?)
+    }
+    fn enable_remote_control(
+        &self,
+        ephemeral: bool,
+    ) -> Result<crate::RemoteControlStatus, CodexError> {
+        parse_remote_control_status(
+            self.request("remoteControl/enable", json!({"ephemeral": ephemeral}))?,
+        )
+    }
+    fn disable_remote_control(
+        &self,
+        ephemeral: bool,
+    ) -> Result<crate::RemoteControlStatus, CodexError> {
+        parse_remote_control_status(
+            self.request("remoteControl/disable", json!({"ephemeral": ephemeral}))?,
+        )
+    }
+    fn start_remote_pairing(
+        &self,
+        manual_code: bool,
+    ) -> Result<crate::RemotePairingChallenge, CodexError> {
+        parse_remote_pairing(self.request(
+            "remoteControl/pairing/start",
+            json!({"manualCode": manual_code}),
+        )?)
+    }
+    fn remote_pairing_claimed(
+        &self,
+        pairing_code: Option<&str>,
+        manual_pairing_code: Option<&str>,
+    ) -> Result<bool, CodexError> {
+        let params = match (pairing_code, manual_pairing_code) {
+            (Some(code), None) if !code.is_empty() && code.len() <= 8192 => {
+                json!({"pairingCode": code})
+            }
+            (None, Some(code)) if !code.is_empty() && code.len() <= 128 => {
+                json!({"manualPairingCode": code})
+            }
+            _ => {
+                return Err(CodexError::Protocol(
+                    "provide exactly one valid remote pairing code".into(),
+                ));
+            }
+        };
+        let value = self.request("remoteControl/pairing/status", params)?;
+        value
+            .get("claimed")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| CodexError::Protocol("invalid remote-control field claimed".into()))
+    }
+    fn remote_control_clients(
+        &self,
+        environment_id: &str,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<crate::RemoteControlClientPage, CodexError> {
+        if environment_id.is_empty()
+            || environment_id.len() > 1024
+            || cursor.is_some_and(|cursor| cursor.is_empty() || cursor.len() > 1024)
+            || !(1..=100).contains(&limit)
+        {
+            return Err(CodexError::Protocol(
+                "invalid remote-control client-list parameters".into(),
+            ));
+        }
+        let value = self.request(
+            "remoteControl/client/list",
+            json!({
+                "environmentId": environment_id,
+                "cursor": cursor,
+                "limit": limit,
+            }),
+        )?;
+        let data = value
+            .get("data")
+            .and_then(Value::as_array)
+            .ok_or_else(|| CodexError::Protocol("invalid remote-control field data".into()))?;
+        if data.len() > 100 {
+            return Err(CodexError::Protocol(
+                "remote-control client page exceeded requested bound".into(),
+            ));
+        }
+        Ok(crate::RemoteControlClientPage {
+            data: data
+                .iter()
+                .map(parse_remote_client)
+                .collect::<Result<_, _>>()?,
+            next_cursor: optional_bounded_remote_text(&value, "nextCursor", 1024)?,
+        })
+    }
+    fn revoke_remote_control_client(
+        &self,
+        environment_id: &str,
+        client_id: &str,
+    ) -> Result<(), CodexError> {
+        if environment_id.is_empty()
+            || environment_id.len() > 1024
+            || client_id.is_empty()
+            || client_id.len() > 1024
+        {
+            return Err(CodexError::Protocol(
+                "invalid remote-control client identity".into(),
+            ));
+        }
+        self.request(
+            "remoteControl/client/revoke",
+            json!({"environmentId": environment_id, "clientId": client_id}),
+        )?;
+        Ok(())
     }
     fn models(&self) -> Result<Vec<Model>, CodexError> {
         let mut models = Vec::new();
@@ -1405,6 +1688,57 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn login_challenges_require_the_requested_flow_and_bounded_fields() {
+        assert_eq!(
+            parse_login_challenge(
+                crate::LoginMethod::Browser,
+                json!({"type":"chatgpt","loginId":"login-1","authUrl":"https://example.test/auth"}),
+            )
+            .unwrap(),
+            crate::LoginChallenge::Browser {
+                login_id: "login-1".into(),
+                auth_url: "https://example.test/auth".into(),
+            }
+        );
+        assert_eq!(
+            parse_login_challenge(
+                crate::LoginMethod::DeviceCode,
+                json!({"type":"chatgptDeviceCode","loginId":"login-2","userCode":"ABCD-EFGH","verificationUrl":"https://example.test/device"}),
+            )
+            .unwrap(),
+            crate::LoginChallenge::DeviceCode {
+                login_id: "login-2".into(),
+                user_code: "ABCD-EFGH".into(),
+                verification_url: "https://example.test/device".into(),
+            }
+        );
+        assert!(parse_login_challenge(
+            crate::LoginMethod::Browser,
+            json!({"type":"chatgptDeviceCode","loginId":"login-3","userCode":"1234","verificationUrl":"https://example.test"}),
+        ).is_err());
+        assert!(
+            parse_login_challenge(
+                crate::LoginMethod::Browser,
+                json!({"type":"chatgpt","loginId":"login-4","authUrl":"x".repeat(8193)}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn isolated_profile_override_must_be_absolute_before_process_spawn() {
+        let error = match CodexClient::spawn_with_home(
+            Path::new("/definitely/not/executed"),
+            Path::new("/tmp"),
+            Path::new("relative-profile"),
+        ) {
+            Ok(_) => panic!("relative profile unexpectedly started"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("must be an absolute path"));
+    }
 
     #[test]
     fn remote_outbound_budget_includes_in_flight_and_close_bypasses_saturation() {
@@ -1832,6 +2166,74 @@ mod tests {
         assert_eq!(
             parse_command_action(&json!({"type":"futureAction"})),
             CommandAction::Unknown
+        );
+    }
+
+    #[test]
+    fn remote_control_status_parser_accepts_the_schema_and_rejects_unknown_states() {
+        let parsed = parse_remote_control_status(json!({
+            "status": "connected",
+            "serverName": "workstation",
+            "installationId": "install-1",
+            "environmentId": "environment-1"
+        }))
+        .expect("valid status");
+        assert_eq!(
+            parsed.status,
+            crate::RemoteControlConnectionStatus::Connected
+        );
+        assert_eq!(parsed.environment_id.as_deref(), Some("environment-1"));
+
+        assert!(
+            parse_remote_control_status(json!({
+                "status": "surprising",
+                "serverName": "workstation",
+                "installationId": "install-1"
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_pairing_parser_bounds_secret_bearing_fields() {
+        let challenge = parse_remote_pairing(json!({
+            "environmentId": "environment-1",
+            "expiresAt": 12345,
+            "pairingCode": "opaque-qr-payload",
+            "manualPairingCode": "1234"
+        }))
+        .expect("valid challenge");
+        assert_eq!(challenge.manual_pairing_code.as_deref(), Some("1234"));
+
+        assert!(
+            parse_remote_pairing(json!({
+                "environmentId": "environment-1",
+                "expiresAt": 12345,
+                "pairingCode": "x".repeat(8193)
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn remote_client_parser_preserves_device_metadata_and_bounds_strings() {
+        let client = parse_remote_client(&json!({
+            "clientId": "phone-1",
+            "displayName": "Phone",
+            "platform": "ios",
+            "lastSeenAt": 123
+        }))
+        .expect("valid client");
+        assert_eq!(client.client_id, "phone-1");
+        assert_eq!(client.platform.as_deref(), Some("ios"));
+        assert_eq!(client.last_seen_at, Some(123));
+
+        assert!(
+            parse_remote_client(&json!({
+                "clientId": "phone-1",
+                "displayName": "x".repeat(513)
+            }))
+            .is_err()
         );
     }
 

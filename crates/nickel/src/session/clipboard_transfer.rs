@@ -97,6 +97,31 @@ pub(super) fn read_text(
     }
 }
 
+pub(super) fn read_bytes(
+    fd: OwnedFd,
+    maximum: usize,
+    duration: Duration,
+) -> Result<Vec<u8>, &'static str> {
+    nonblocking(&fd)?;
+    let deadline = Instant::now() + duration;
+    let mut bytes = Vec::new();
+    let mut scratch = [0u8; 16 * 1024];
+    loop {
+        ready(&fd, PollFlags::IN, deadline)?;
+        match read(&fd, &mut scratch) {
+            Ok(0) => return Ok(bytes),
+            Ok(length) => {
+                if length > maximum.saturating_sub(bytes.len()) {
+                    return Err("clipboard payload exceeds transfer limit");
+                }
+                bytes.extend_from_slice(&scratch[..length]);
+            }
+            Err(smithay::reexports::rustix::io::Errno::AGAIN) => continue,
+            Err(_) => return Err("clipboard read failed"),
+        }
+    }
+}
+
 pub(super) fn write_text(
     fd: OwnedFd,
     text: Arc<String>,
@@ -167,5 +192,16 @@ mod tests {
             "hello"
         );
         worker.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn byte_reads_are_bounded() {
+        let (reader, mut writer) = UnixStream::pair().unwrap();
+        writer.write_all(b"12345").unwrap();
+        drop(writer);
+        assert_eq!(
+            read_bytes(reader.into(), 4, Duration::from_secs(1)),
+            Err("clipboard payload exceeds transfer limit")
+        );
     }
 }

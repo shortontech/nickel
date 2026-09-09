@@ -9,6 +9,167 @@ use sha2::{Digest, Sha256};
 
 const MINIMUM_SELECTION_TEXT_CONTRAST: f32 = 4.5;
 
+#[test]
+fn first_press_drag_uses_shared_file_plane_capture_without_a_prior_click() {
+    let (_directory, app) = selection_app(2);
+    let expected = app.browser.entries()[0].path.clone();
+    let mut scenario = Scenario::new(app, 1100, 700);
+    let from = entry_selector(&scenario, "/file-entry-0");
+    let to = entry_selector(&scenario, "/file-entry-1");
+    scenario.pointer_drag(&from, &to).unwrap();
+    let drag = scenario
+        .host_mut()
+        .application_mut()
+        .take_outbound_file_drag()
+        .unwrap();
+    assert_eq!(drag.paths, vec![expected]);
+    assert!(
+        scenario
+            .host_mut()
+            .application_mut()
+            .take_outbound_file_drag()
+            .is_none()
+    );
+    assert!(scenario.host().application().last_click.is_none());
+}
+
+#[test]
+fn embedded_normalized_input_shares_drag_and_focus_cleanup() {
+    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
+    let (_directory, app) = selection_app(2);
+    let mut host = UiHost::new(app, 1100, 700);
+    let target = host
+        .unique_semantic_target_for_message(&FileMessage::Entry(0))
+        .unwrap();
+    let route = host
+        .resolve_effective_target(&target.id, ActionKind::Activate)
+        .unwrap();
+    let position = nickel_input::Point {
+        x: route.point.x as f64,
+        y: route.point.y as f64,
+    };
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            button: PointerButton::Primary,
+            edge: KeyEdge::Pressed,
+            position: Some(position),
+        }),
+        None,
+    );
+    assert!(host.application().primary_down);
+    assert!(host.application().file_drag_origin.is_some());
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(1),
+            order: EventOrder(2),
+            position: nickel_input::Point {
+                x: position.x + 10.0,
+                y: position.y,
+            },
+            delta: None,
+        }),
+        None,
+    );
+    assert!(host.application_mut().take_outbound_file_drag().is_some());
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            position: nickel_input::Point {
+                x: position.x + 20.0,
+                y: position.y,
+            },
+            delta: None,
+        }),
+        None,
+    );
+    assert!(
+        host.application_mut().take_outbound_file_drag().is_none(),
+        "one offer per gesture"
+    );
+    host.step(nickel_ui::HostBatch {
+        window_focused: Some(false),
+        ..Default::default()
+    });
+    assert!(!host.application().primary_down);
+    assert!(host.application().file_drag_origin.is_none());
+    assert!(!host.application().file_drag_started);
+}
+
+#[test]
+fn embedded_local_drop_enters_the_shared_native_transfer_queue() {
+    use nickel_input::{DeviceId, EventOrder, InputEvent, KeyEdge, PointerButton, PointerEvent};
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("source.txt");
+    let destination = directory.path().join("destination");
+    std::fs::write(&source, b"test").unwrap();
+    std::fs::create_dir(&destination).unwrap();
+    let app = FileApp::new(directory.path().into());
+    let source_index = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.path == source)
+        .unwrap();
+    let destination_index = app
+        .browser
+        .entries()
+        .iter()
+        .position(|entry| entry.path == destination)
+        .unwrap();
+    let mut host = UiHost::new(app, 1100, 700);
+    let point = |index| {
+        let target = host
+            .unique_semantic_target_for_message(&FileMessage::Entry(index))
+            .unwrap();
+        let route = host
+            .resolve_effective_target(&target.id, ActionKind::Activate)
+            .unwrap();
+        nickel_input::Point {
+            x: route.point.x as f64,
+            y: route.point.y as f64,
+        }
+    };
+    let (from, to) = (point(source_index), point(destination_index));
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            button: PointerButton::Primary,
+            edge: KeyEdge::Pressed,
+            position: Some(from),
+        }),
+        None,
+    );
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(1),
+            order: EventOrder(2),
+            position: to,
+            delta: None,
+        }),
+        None,
+    );
+    host.handle_input(
+        &InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(1),
+            order: EventOrder(3),
+            button: PointerButton::Primary,
+            edge: KeyEdge::Released,
+            position: Some(to),
+        }),
+        None,
+    );
+    assert_eq!(host.application().native_drop_batch, vec![source]);
+    assert_eq!(
+        host.application().native_drop_batch_destination.as_ref(),
+        Some(&destination)
+    );
+    assert!(host.application().outbound_drag.is_none());
+}
+
 fn selected_indices(app: &FileApp) -> HashSet<usize> {
     app.selected_entries
         .iter()
@@ -170,6 +331,10 @@ fn selection_snapshot_is_stable_visual_order_for_every_consumer() {
         expected
     );
     app.primary_down = true;
+    app.file_drag_origin = Some((
+        app.browser.identity_at(3).unwrap(),
+        nickel_ui::Point { x: 0.0, y: 0.0 },
+    ));
     app.last_click = Some(FileClick {
         path: expected[1].clone(),
         identity: app.browser.identity_at(3),
@@ -2152,11 +2317,15 @@ fn replacement_at_the_same_path_cannot_inherit_a_double_click() {
     std::fs::write(&path, b"replacement").unwrap();
     app.update_message(FileMessage::Entry(0));
 
+    #[cfg(not(target_os = "linux"))]
     assert!(app.activation_rx.is_none());
+    #[cfg(target_os = "linux")]
+    assert!(app.launches.is_empty());
     assert_eq!(app.status, "");
 }
 
 #[test]
+#[cfg(not(target_os = "linux"))]
 fn activation_reports_every_typed_result_and_coalesces_pending_requests() {
     fn success(_: &std::path::Path) -> Result<(), OpenPathError> {
         Ok(())

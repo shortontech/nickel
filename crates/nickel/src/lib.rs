@@ -2510,7 +2510,7 @@ pub fn run() -> Result<(), String> {
                     .surface(surface)
                     .is_some_and(|entry| entry.role() == SurfaceRole::Launcher)
                 {
-                    state.focus_launcher_search();
+                    state.focus_launcher();
                     shell.start_text_input(surface);
                 }
             }

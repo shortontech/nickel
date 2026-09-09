@@ -258,6 +258,70 @@ mod tests {
     }
 
     #[test]
+    fn panel_pointer_events_reach_the_generic_ui_route() {
+        let mut runtime = InternalUiRuntime::default();
+        let panel = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (-800, -120, 800, 56),
+                output: Some("left".into()),
+            },
+            1.5,
+        );
+        let position = (-780.0, -100.0);
+        assert!(!runtime.desktop_pointer_input(
+            "mouse",
+            position,
+            DesktopPointerAction::Motion,
+            Default::default(),
+            true,
+        ));
+        assert!(runtime.pointer_motion_with_client(position, true));
+        for edge in [KeyEdge::Pressed, KeyEdge::Released] {
+            assert!(!runtime.desktop_pointer_input(
+                "mouse",
+                position,
+                DesktopPointerAction::Button {
+                    button: PointerButton::Primary,
+                    edge
+                },
+                Default::default(),
+                true,
+            ));
+            assert!(runtime.pointer_button_with_client(position, edge == KeyEdge::Pressed, true));
+        }
+        let events = runtime
+            .drain_routed_events()
+            .into_iter()
+            .filter(|(id, _, _)| *id == panel)
+            .flat_map(|(_, batch, _)| batch.events)
+            .collect::<Vec<_>>();
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerMoved(_))))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerPressed(_))))
+        );
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(_))
+            ))
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, HostEvent::Normalized { .. }))
+        );
+        assert!(runtime.desktop_input.capture.is_none());
+    }
+
+    #[test]
     fn desktop_and_panel_share_hover_ownership_with_ordered_departure() {
         let mut runtime = InternalUiRuntime::default();
         let id = desktop(&mut runtime);
@@ -430,6 +494,48 @@ mod tests {
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].0, id);
         assert_eq!(batches[0].1.window_focused, Some(false));
+    }
+
+    #[test]
+    fn foreground_shell_overlay_preserves_secondary_button_and_blocks_client_fallthrough() {
+        let mut runtime = InternalUiRuntime::default();
+        let overlay = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Overlay,
+                geometry: (100, 80, 500, 600),
+                output: Some("main".into()),
+            },
+            1.0,
+        );
+
+        assert!(runtime.desktop_pointer_input(
+            "mouse",
+            (160.0, 140.0),
+            DesktopPointerAction::Button {
+                button: PointerButton::Secondary,
+                edge: KeyEdge::Pressed,
+            },
+            Default::default(),
+            true,
+        ));
+        let batches = runtime.drain_routed_events();
+        assert_eq!(runtime.focused(), Some(overlay));
+        assert!(batches.iter().any(|(target, batch, _)| {
+            *target == overlay
+                && matches!(
+                    &batch.events[..],
+                    [HostEvent::Normalized {
+                        input: InputEvent::Pointer(PointerEvent::Button {
+                            button: PointerButton::Secondary,
+                            edge: KeyEdge::Pressed,
+                            position: Some(position),
+                            ..
+                        }),
+                        ..
+                    }] if *position == nickel_input::Point { x: 60.0, y: 60.0 }
+                )
+        }));
     }
 
     #[test]
@@ -847,9 +953,11 @@ impl InternalUiRuntime {
             .filter(|surface| {
                 surface.visible
                     && surface.external_scene.is_some()
-                    && matches!(
+                    // The panel coordinator consumes UiEvent pointer actions. Keep
+                    // its events on the generic route until it supports normalized input.
+                    && !matches!(
                         surface.placement.role,
-                        InternalSurfaceRole::Desktop | InternalSurfaceRole::OnScreenKeyboard
+                        InternalSurfaceRole::Panel | InternalSurfaceRole::PassiveOverlay
                     )
             })
             .map(|surface| surface.placement.clone());
@@ -921,9 +1029,9 @@ impl InternalUiRuntime {
                 edge,
             },
         };
-        // A desktop interaction needs a real focus owner so client activation or
+        // A focusable shell surface needs a real owner so client activation or
         // Alt-Tab can blur it later. Merely painting a menu cannot establish this.
-        if placement.role == InternalSurfaceRole::Desktop
+        if self.surface_accepts_keyboard_focus(id)
             && matches!(
                 event,
                 PointerEvent::Button {

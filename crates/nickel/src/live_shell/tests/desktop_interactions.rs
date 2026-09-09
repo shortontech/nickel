@@ -424,6 +424,34 @@
     #[test]
     fn desktop_secondary_press_opens_overlay_without_hiding_items_on_release_or_motion() {
         let mut shell = LiveShell::new().unwrap();
+        shell.set_file_clipboard_available(true);
+        shell
+            .desktop_host
+            .application_mut()
+            .open_background_context(None);
+        assert!(
+            shell
+                .desktop_host
+                .application()
+                .context_menu
+                .as_ref()
+                .unwrap()
+                .paste_available
+        );
+        shell.set_file_clipboard_available(false);
+        shell
+            .desktop_host
+            .application_mut()
+            .open_background_context(None);
+        assert!(
+            !shell
+                .desktop_host
+                .application()
+                .context_menu
+                .as_ref()
+                .unwrap()
+                .paste_available
+        );
         let point = nickel_input::Point { x: 300.0, y: 300.0 };
         let button = |edge, order| {
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
@@ -955,7 +983,7 @@
     }
 
     #[test]
-    fn desktop_drag_accumulates_small_motion_until_crossing_the_snap_threshold() {
+    fn desktop_drag_previews_motion_and_commits_grid_placement_only_on_release() {
         use std::{ffi::OsString, path::PathBuf};
         let palette = nickel_core::theme::ThemePalette::from_appearance(Default::default());
         let mut desktop = super::DesktopApplication::fixture(None, palette);
@@ -986,17 +1014,23 @@
 
         assert_eq!(
             desktop.layout.items()[0].position.x,
-            item.position.x + desktop.layout.grid().0,
-            "sub-threshold motion events must not be discarded individually"
+            item.position.x,
+            "preview motion must not mutate persisted layout"
         );
+        let bounds = nickel_ui::Rect::new(0.0, 0.0, 1920.0, 1024.0);
+        let frame = nickel_ui::UiFrame::layout(
+            desktop.view(nickel_ui::ViewContext::new(bounds, Default::default())), bounds);
+        let target = frame.semantic_targets_for_message(&super::DesktopMessage::Activate(item.id));
+        assert_eq!(target[0].bounds.origin.x, item.position.x + 49.0,
+            "the visible icon must track unsnapped pointer motion");
         let _ = desktop.pointer_motion(nickel_file::desktop::Point {
             x: start.x + 97.0,
             y: start.y,
         });
         assert_eq!(
             desktop.layout.items()[0].position.x,
-            item.position.x + desktop.layout.grid().0,
-            "crossing one cell must not double-count the next half-cell"
+            item.position.x,
+            "collision resolution must not run for each pointer event"
         );
         let _ = desktop.pointer_motion(nickel_file::desktop::Point {
             x: start.x + 145.0,
@@ -1004,7 +1038,7 @@
         });
         assert_eq!(
             desktop.layout.items()[0].position.x,
-            item.position.x + desktop.layout.grid().0 * 2.0,
+            item.position.x,
         );
         assert!(desktop.pointer_release(
             nickel_file::desktop::Point {
@@ -1013,6 +1047,8 @@
             },
             Instant::now(),
         ));
+        assert_eq!(desktop.layout.items()[0].position.x,
+            item.position.x + desktop.layout.grid().0 * 2.0);
     }
 
     #[test]

@@ -453,6 +453,13 @@ pub trait Application: Sized {
 
     fn update(&mut self, message: Self::Message);
 
+    /// Application input policy shared by native and compositor-owned hosts.
+    /// Runs before ordinary hit testing, once per normalized event; it must not
+    /// recursively dispatch input. Native adapters own only window services.
+    fn adapt_input(_host: &mut UiHost<Self>, _input: &nickel_input::InputEvent) -> AdapterOutcome {
+        AdapterOutcome::default()
+    }
+
     fn message_evidence(&self, _message: &Self::Message) -> MessageEvidence {
         MessageEvidence {
             type_name: std::any::type_name::<Self::Message>(),
@@ -473,6 +480,11 @@ pub trait Application: Sized {
     /// an ordinary UI transition. Applications therefore never need to retain
     /// a frame or mutate [`UiStateStore`] to reconcile focus after rebuilding.
     fn take_focus_request(&mut self) -> Option<UiId> {
+        None
+    }
+
+    /// Drains text explicitly offered to the system clipboard by an application update.
+    fn take_clipboard_write(&mut self) -> Option<String> {
         None
     }
 
@@ -1566,6 +1578,22 @@ impl<A: Application> UiHost<A> {
             }
         }
         if let Some(focused) = batch.window_focused {
+            let adapted = A::adapt_input(
+                self,
+                &if focused {
+                    nickel_input::InputEvent::FocusGained {
+                        order: nickel_input::EventOrder(0),
+                    }
+                } else {
+                    nickel_input::InputEvent::FocusLost {
+                        order: nickel_input::EventOrder(0),
+                    }
+                },
+            );
+            if adapted.changed {
+                combined.changed = true;
+                combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
+            }
             let focus = self.dispatch_ui_event(if focused {
                 UiEvent::FocusGained
             } else {
@@ -1822,7 +1850,10 @@ impl<A: Application> UiHost<A> {
         for message in outcome.messages {
             self.application.update(message);
         }
-        let clipboard_text = outcome.clipboard_text;
+        let clipboard_text = self
+            .application
+            .take_clipboard_write()
+            .or(outcome.clipboard_text);
         HostEventOutcome {
             changed,
             invalidation,
@@ -1864,7 +1895,10 @@ impl<A: Application> UiHost<A> {
                     changed,
                     invalidation,
                     messages,
-                    clipboard_text: outcome.clipboard_text,
+                    clipboard_text: self
+                        .application
+                        .take_clipboard_write()
+                        .or(outcome.clipboard_text),
                     semantic_failures: Vec::new(),
                     global_actions: Vec::new(),
                     completion_failures: Vec::new(),
@@ -1930,10 +1964,18 @@ impl<A: Application> UiHost<A> {
         input: &nickel_input::InputEvent,
         clipboard_text: Option<&str>,
     ) -> HostEventOutcome {
+        let adapted = A::adapt_input(self, input);
+        let mut combined = HostEventOutcome::default();
+        if adapted.changed {
+            combined.changed = true;
+            combined.invalidation = Invalidation::Layout;
+        }
+        if adapted.consume {
+            return combined;
+        }
         self.state.set_clipboard_offer(clipboard_text);
         let context = self.input_context();
         let commands = self.input_dispatcher.dispatch_with_context(input, context);
-        let mut combined = HostEventOutcome::default();
         for command in commands {
             let event = match command {
                 InputCommand::Ui(event) => Some(event),
@@ -3362,6 +3404,73 @@ mod tests {
         assert_eq!(
             missing.semantic_failures[0].error,
             SemanticActionError::MissingTarget
+        );
+    }
+
+    #[test]
+    fn first_focus_gain_selects_a_control_and_accepts_text() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        assert!(host.inspect().keyboard_focus.is_none());
+        host.step(HostBatch {
+            window_focused: Some(true),
+            ..HostBatch::default()
+        });
+        assert!(host.inspect().keyboard_focus.is_some());
+        host.handle_event(UiEvent::TextInput("first".into()));
+        assert_eq!(host.application().text, "first");
+    }
+
+    #[test]
+    fn initial_focus_honors_declared_entry_and_preserves_explicit_focus() {
+        let mut host = UiHost::new(NavigationApplication, 320, 120);
+        host.handle_event(UiEvent::FocusGained);
+        assert_eq!(
+            host.inspect().keyboard_focus,
+            Some(UiId::from("root/scope/last"))
+        );
+        host.request_focus(UiId::from("root/scope/first"));
+        host.handle_event(UiEvent::FocusLost);
+        host.handle_event(UiEvent::FocusGained);
+        assert_eq!(
+            host.inspect().keyboard_focus,
+            Some(UiId::from("root/scope/first"))
+        );
+    }
+
+    #[test]
+    fn initial_keyboard_focus_precedes_default_controller_pane_and_skips_disabled_controls() {
+        struct PaneApplication;
+        impl Application for PaneApplication {
+            type Message = ();
+            fn update(&mut self, (): ()) {}
+            fn view(&self, _: ViewContext) -> impl crate::View<()> {
+                Container::new()
+                    .id("layout")
+                    .child(
+                        Button::new((), "Disabled outside")
+                            .id("disabled-outside")
+                            .enabled(false),
+                    )
+                    .child(Button::new((), "Outside").id("outside"))
+                    .child(
+                        Container::new()
+                            .id("pane")
+                            .navigation_scope(NavigationScope::pane(true))
+                            .child(Button::new((), "Disabled").id("disabled").enabled(false))
+                            .child(Button::new((), "First").id("first")),
+                    )
+            }
+        }
+        let mut host = UiHost::new(PaneApplication, 320, 120);
+        host.handle_input(
+            &InputEvent::FocusGained {
+                order: EventOrder(1),
+            },
+            None,
+        );
+        assert_eq!(
+            host.inspect().keyboard_focus,
+            Some(UiId::from("root/layout/outside"))
         );
     }
 

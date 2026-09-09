@@ -743,6 +743,12 @@ impl<Message> FilePlaneItem<Message> {
         self
     }
 
+    /// Use the shared captured-pointer lifecycle, including first-press drags.
+    pub fn on_drag(mut self, gesture: (Message, fn(Message, DragGesture) -> Message)) -> Self {
+        self.container = self.container.on_drag(gesture);
+        self
+    }
+
     pub fn focus_background_tint(mut self, color: Color) -> Self {
         self.container = self.container.focus_background_tint(color);
         self

@@ -34,7 +34,7 @@ use sctk::seat::SeatState;
 use sctk::shell::xdg::window::{Window, WindowConfigure, WindowHandler};
 use sctk::shell::xdg::XdgShell;
 use sctk::shell::WaylandSurface;
-use sctk::shm::slot::SlotPool;
+use sctk::shm::slot::{Buffer, SlotPool};
 use sctk::shm::{Shm, ShmHandler};
 use sctk::subcompositor::SubcompositorState;
 
@@ -81,7 +81,7 @@ pub struct WinitState {
     /// Data-device protocol state and live outbound file drag sources.
     pub data_device_manager_state: Option<Arc<DataDeviceManagerState>>,
     pub data_devices: AHashMap<ObjectId, DataDevice>,
-    pub file_drag_sources: Arc<Mutex<Vec<(DragSource, Arc<Vec<u8>>)>>>,
+    pub(crate) file_drag_sources: Arc<Mutex<Vec<FileDragSource>>>,
     incoming_file_drops: Vec<IncomingFileDrop>,
     file_drag_windows: AHashMap<ObjectId, WindowId>,
 
@@ -447,6 +447,21 @@ impl ProvidesRegistryState for WinitState {
     }
 }
 
+/// Keep the payload and drag icon alive until the compositor finishes or cancels
+/// the transfer. Destroying the icon on either terminal event prevents orphans.
+pub(crate) struct FileDragSource {
+    pub source: DragSource,
+    pub payload: Vec<u8>,
+    pub icon: WlSurface,
+    pub _buffer: Buffer,
+}
+
+impl Drop for FileDragSource {
+    fn drop(&mut self) {
+        self.icon.destroy();
+    }
+}
+
 impl DataSourceHandler for WinitState {
     fn accept_mime(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: Option<String>) {}
 
@@ -462,20 +477,20 @@ impl DataSourceHandler for WinitState {
             return;
         }
         let sources = self.file_drag_sources.lock().unwrap();
-        if let Some((_, payload)) = sources.iter().find(|(item, _)| item.inner() == source) {
+        if let Some(drag) = sources.iter().find(|drag| drag.source.inner() == source) {
             let mut file = File::from(OwnedFd::from(pipe));
-            let _ = file.write_all(payload);
+            let _ = file.write_all(&drag.payload);
         }
     }
 
     fn cancelled(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
-        self.file_drag_sources.lock().unwrap().retain(|(item, _)| item.inner() != source);
+        self.file_drag_sources.lock().unwrap().retain(|drag| drag.source.inner() != source);
     }
 
     fn dnd_dropped(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource) {}
 
     fn dnd_finished(&mut self, _: &Connection, _: &QueueHandle<Self>, source: &WlDataSource) {
-        self.file_drag_sources.lock().unwrap().retain(|(item, _)| item.inner() != source);
+        self.file_drag_sources.lock().unwrap().retain(|drag| drag.source.inner() != source);
     }
 
     fn action(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &WlDataSource, _: DndAction) {}
