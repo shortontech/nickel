@@ -10146,6 +10146,44 @@ mod protocol_tests {
     }
 
     #[test]
+    fn remote_codex_owner_creates_hidden_menu_and_tears_down_every_owned_surface() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let mut settings = nickel_core::optional_features::OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 41,
+            ..Default::default()
+        };
+        session.apply_remote_codex_preference(&settings).unwrap();
+        assert!(session.internal_codex.is_none());
+        assert_eq!(session.remote_codex_runtime_generation, 41);
+
+        settings.codex_enabled = true;
+        settings.codex_generation = 42;
+        session.apply_remote_codex_preference(&settings).unwrap();
+        let owned = session
+            .internal_codex
+            .as_ref()
+            .unwrap()
+            .surface_ids()
+            .collect::<Vec<_>>();
+        assert_eq!(owned.len(), 1);
+        assert!(!session.internal_ui.is_visible(owned[0]));
+        assert_eq!(session.remote_codex_runtime_generation, 42);
+
+        settings.codex_enabled = false;
+        settings.codex_generation = 43;
+        session.apply_remote_codex_preference(&settings).unwrap();
+        assert!(session.internal_codex.is_none());
+        assert!(
+            owned
+                .into_iter()
+                .all(|id| !session.internal_ui.is_visible(id))
+        );
+        assert_eq!(session.remote_codex_runtime_generation, 43);
+    }
+
+    #[test]
     #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
     fn shell_capture_evidence_excludes_hidden_retired_and_trusted_surfaces() {
         use nickel_remote_control::leases::ResourceId;

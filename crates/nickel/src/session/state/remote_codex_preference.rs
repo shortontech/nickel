@@ -124,7 +124,7 @@ fn snapshot(session: &NickelSession, read: &PreparedRead, observed_at_us: u64) -
 }
 
 impl NickelSession {
-    fn apply_remote_codex_preference(
+    pub(super) fn apply_remote_codex_preference(
         &mut self,
         settings: &OptionalFeatureSettings,
     ) -> Result<(), String> {

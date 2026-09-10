@@ -1323,8 +1323,9 @@ deadline and shared-input idleness at the final rename. The compositor owner
 directly creates or tears down its existing internal Codex host and hidden project
 menu, reports runtime generation and pending state, and refuses disablement while
 chat windows are active. Source selection remains unavailable pending a verified
-source authority. Portable schema, cancellation, preservation and file-ABA tests
-and strict combined Clippy pass. Native compositor lifecycle acceptance remains
+source authority. Portable schema, cancellation, preservation and file-ABA tests,
+plus a real in-process compositor test of host creation, hidden-menu ownership and
+complete teardown, pass. Presented-pixel and active-chat rejection acceptance remain
 open because this host's nested backends cannot reach authenticated test-control
 readiness and the running user session has not been reloaded. The exact source
 inventory now contains 342 Rust sources.
