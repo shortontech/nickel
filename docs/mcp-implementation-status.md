@@ -1288,3 +1288,11 @@ LiveShell configuration path acknowledges the committed generation. Portable
 schema, cancellation, local-replacement, preservation and acknowledgement tests
 and strict combined Clippy pass. Native touchscreen/override/teardown acceptance
 remains open. The exact source inventory now contains 338 Rust sources.
+
+All ShellSettings writers now use the shared stable transaction lock. Appearance
+and shell-behavior preparation retain that lock from their bounded read through
+the final revision-checked rename, so cooperative local settings writes return a
+bounded busy result instead of crossing the remote transaction boundary. The
+revision check still rejects uncooperative file replacement and ABA. Focused
+local/remote exclusion, cancellation, expiry and ABA tests and strict combined
+Clippy pass.

@@ -81,12 +81,16 @@ pub(super) struct PreparedChange {
     previous: PreparedRead,
     requested: ShellSettings,
     staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
 }
 impl PreparedChange {
     pub fn prepare(transaction: &Transaction) -> Result<Self, String> {
         Self::from_read(PreparedRead::prepare()?, transaction)
     }
     fn from_read(previous: PreparedRead, transaction: &Transaction) -> Result<Self, String> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&previous.path)
+            .map_err(|_| UNAVAILABLE)?;
+        previous.current()?;
         if transaction.generation == 0
             || !transaction.prior.valid()
             || preferences(&previous.settings) != transaction.prior
@@ -100,6 +104,7 @@ impl PreparedChange {
             previous,
             requested,
             staged,
+            _lock: lock,
         })
     }
     fn commit(
@@ -317,7 +322,7 @@ mod tests {
                 preferences(&ShellSettings::load(&path).unwrap()),
                 request.prior
             );
-            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
         }
         let staged =
             PreparedChange::from_read(PreparedRead::at(path.clone()).unwrap(), &request).unwrap();
@@ -355,8 +360,8 @@ mod tests {
         let previous = ShellSettings::load(&path).unwrap();
         let mut external = previous.clone();
         external.accent_hue = Some(3);
-        external.save(&path).unwrap();
-        previous.save(&path).unwrap();
+        external.stage(&path).unwrap().commit(|| Ok(())).unwrap();
+        previous.stage(&path).unwrap().commit(|| Ok(())).unwrap();
         assert!(
             prepared
                 .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
@@ -391,5 +396,27 @@ mod tests {
         assert!(serde_json::from_value::<Preferences>(value).is_err());
         fs::write(&path, vec![b'x'; 65537]).unwrap();
         assert!(PreparedRead::at(path).is_err());
+    }
+
+    #[test]
+    fn prepared_appearance_excludes_cooperative_local_writers() {
+        let (_root, path, request) = fixture();
+        let previous = ShellSettings::load(&path).unwrap();
+        let prepared =
+            PreparedChange::from_read(PreparedRead::at(path.clone()).unwrap(), &request).unwrap();
+        let replacement = ShellSettings {
+            idle_lock_seconds: Some(321),
+            ..previous.clone()
+        };
+
+        assert_eq!(
+            replacement.save(&path).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), previous);
+
+        drop(prepared);
+        replacement.save(&path).unwrap();
+        assert_eq!(ShellSettings::load(&path).unwrap(), replacement);
     }
 }

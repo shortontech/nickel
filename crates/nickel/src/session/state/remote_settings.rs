@@ -47,6 +47,7 @@ pub(super) struct PreparedShellBehavior {
     path: PathBuf,
     revision: Option<FileRevision>,
     staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
 }
 
 impl PreparedShellBehavior {
@@ -56,6 +57,7 @@ impl PreparedShellBehavior {
     }
 
     fn prepare_at(path: PathBuf, transaction: &ShellBehaviorTransaction) -> Result<Self, String> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&path).map_err(|_| UNAVAILABLE)?;
         let before = revision(&path).map_err(|_| UNAVAILABLE)?;
         let previous = ShellSettings::load_for_update(&path).map_err(|_| UNAVAILABLE)?;
         if revision(&path).map_err(|_| UNAVAILABLE)? != before {
@@ -72,6 +74,7 @@ impl PreparedShellBehavior {
             path,
             revision: before,
             staged,
+            _lock: lock,
         })
     }
 
@@ -153,7 +156,7 @@ mod tests {
             idle_lock_seconds: Some(71),
             ..ShellSettings::default()
         };
-        changed.save(&path).unwrap();
+        changed.stage(&path).unwrap().commit(|| Ok(())).unwrap();
         assert!(
             prepared
                 .commit(
@@ -185,6 +188,29 @@ mod tests {
         let actual = ShellSettings::load(&path).unwrap();
         assert_eq!(actual.desktop_count, 6);
         assert_eq!(actual.idle_lock_seconds, Some(71));
-        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn prepared_settings_exclude_cooperative_local_writers() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings");
+        let previous = ShellSettings::default();
+        previous.save(&path).unwrap();
+        let prepared = PreparedShellBehavior::prepare_at(path.clone(), &request()).unwrap();
+        let replacement = ShellSettings {
+            idle_lock_seconds: Some(71),
+            ..previous.clone()
+        };
+
+        assert_eq!(
+            replacement.save(&path).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), previous);
+
+        drop(prepared);
+        replacement.save(&path).unwrap();
+        assert_eq!(ShellSettings::load(&path).unwrap(), replacement);
     }
 }

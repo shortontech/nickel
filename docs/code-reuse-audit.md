@@ -211,6 +211,12 @@ no parallel product semantics or remote authorization route.
 
 `nickel-remote-control::appearance` owns typed wire values; `session::state::remote_appearance` stages and reconciles through the existing ShellSettings writer and LiveShell apply path. The shared commit boundary only rechecks atomic cancellation/deadline while authority is already held.
 
+`nickel-core::shell_settings` owns the stable cross-process transaction lock for
+every cooperative ShellSettings save. Remote appearance and shell-behavior
+preparation retain the same lock across bounded read, staging and final checked
+replacement; their production owners add lease and input authority without a
+second persistence protocol.
+
 `nickel-remote-control::wallpaper` owns the path-free wire projection, while
 `nickel-core::wallpaper_settings::PreparedWallpaperSettings` owns locked staging,
 revision comparison and checked replacement for both local and remote callers.

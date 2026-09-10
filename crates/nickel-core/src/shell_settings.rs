@@ -225,6 +225,8 @@ impl ShellSettings {
         path: impl AsRef<Path>,
         check_commit: impl FnOnce() -> io::Result<()>,
     ) -> io::Result<()> {
+        let path = path.as_ref();
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
         self.stage(path)?.commit(check_commit)
     }
 
