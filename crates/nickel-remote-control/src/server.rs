@@ -155,6 +155,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::wallpaper::Snapshot, String> {
         Err("wallpaper transactions are unavailable on this backend".into())
     }
+    fn read_terminal_presentation(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::terminal_presentation::Snapshot, String> {
+        Err("terminal presentation observation is unavailable on this backend".into())
+    }
+    fn terminal_presentation_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::terminal_presentation::Transaction,
+    ) -> Result<crate::terminal_presentation::Snapshot, String> {
+        Err("terminal presentation transactions are unavailable on this backend".into())
+    }
     fn shell_behavior_transaction(
         &self,
         _permit: crate::DesktopPermit,
@@ -876,6 +889,13 @@ struct WallpaperRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TerminalPresentationRequest {
+    lease_id: u64,
+    transaction: crate::terminal_presentation::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WindowActionRequest {
     lease_id: u64,
     window_id: String,
@@ -1461,6 +1481,62 @@ impl McpHandler {
                     .map_err(
                         |_| "wallpaper result uncertain; read current wallpaper before retrying",
                     )?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read typed terminal presentation preferences. Requires Full Control & Debug Nickel. Executable and working-directory values are excluded except for presence booleans. Values apply when production creates a new terminal; existing terminals are unchanged."
+    )]
+    async fn read_terminal_presentation(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::terminal_presentation::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadTerminalPresentation,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_terminal_presentation(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "terminal presentation observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Change terminal font, size, scrollback, cursor, colors and close-on-success through the checked production writer. Requires Full Control & Debug Nickel, fresh generation/prior values and idle shared input. Executable and working-directory values cannot be read or changed and are preserved. Changes apply to new terminals only."
+    )]
+    async fn terminal_presentation_transaction(
+        &self,
+        Parameters(request): Parameters<TerminalPresentationRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::terminal_presentation::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::TerminalPresentationTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.terminal_presentation_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "terminal presentation result uncertain; read current state before retrying"
+                    })?
                     .map(Json)
                 },
             )

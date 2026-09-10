@@ -1254,3 +1254,16 @@ production shell reload after an accepted commit. Portable schema, size, UTF-8,
 cancellation and file-ABA tests pass. Approved native image selection, pixel/decode
 budgets and native visual acceptance remain open. The exact source inventory now
 contains 334 Rust sources.
+
+Terminal settings now reject nonregular, changing, oversized and non-UTF-8
+configuration transport through the shared 64 KiB reader. Full-debug exposes a
+complete typed presentation transaction for font family/size, scrollback, cursor,
+colors and close-on-success. The path-free schema reports only whether a custom
+shell or initial directory exists and preserves those hidden launch-policy values
+through locked staged revision CAS without retaining them in remote generation
+state. The desktop owner rechecks authorization,
+request lifetime, emergency epoch, deadline and shared input immediately before
+rename. Results explicitly apply to newly created terminals; existing terminals
+are unchanged. Portable schema, bounds, cancellation, hidden-field and file-ABA
+tests pass. Native terminal rendering acceptance and a safe typed launch-policy
+contract remain open. The exact source inventory now contains 336 Rust sources.

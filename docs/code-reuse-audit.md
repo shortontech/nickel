@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
-Scope: all 334 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 336 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,7 +62,7 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 334-source inventory is current,
+translations rather than competing product authorities. The exact 336-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
@@ -247,6 +247,9 @@ Native Windows acceptance and UI Automation inspection remain open gates.
 Native accessibility adds one bounded remote-control schema source and four
 Nickel owner/adapter sources (332 total). The wallpaper transaction adds one
 bounded remote-control schema source and one Nickel owner source (334 total).
+The terminal presentation transaction adds one bounded remote-control schema
+source and one Nickel owner source (336 total); it reuses the core terminal
+settings serializer and storage transaction while excluding launch-policy text.
 GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed
 input provenance, while the bounded observer exposes only admitted metadata.
