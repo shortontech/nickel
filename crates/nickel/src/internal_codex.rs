@@ -161,6 +161,10 @@ impl InternalCodexHost {
             .chain(self.chats.iter().map(|chat| chat.id))
     }
 
+    pub fn active_chat_count(&self) -> u32 {
+        self.chats.len().min(u32::MAX as usize) as u32
+    }
+
     pub fn next_deadline(&self, runtime: &InternalUiRuntime) -> Option<Instant> {
         self.surface_ids()
             .filter_map(|id| runtime.surface_deadline(id))

@@ -433,6 +433,70 @@ impl PreparedKeyboardPreference {
     }
 }
 
+/// A Codex-enablement-only replacement which preserves the selected source and
+/// every keyboard field while retaining the stable settings lock through commit.
+pub struct PreparedCodexPreference {
+    path: PathBuf,
+    revision: Option<nickel_storage::RegularFileRevision>,
+    requested: OptionalFeatureSettings,
+    staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
+}
+
+impl PreparedCodexPreference {
+    pub fn prepare(
+        path: PathBuf,
+        prior: &OptionalFeatureSettings,
+        enabled: bool,
+    ) -> io::Result<Self> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&path)?;
+        let revision = nickel_storage::regular_file_revision(&path)?;
+        let current = match OptionalFeatureSettings::load(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && revision.is_none() => {
+                OptionalFeatureSettings::default()
+            }
+            Err(error) => return Err(error),
+        };
+        if nickel_storage::regular_file_revision(&path)? != revision || &current != prior {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "optional feature settings changed",
+            ));
+        }
+        let mut requested = current;
+        requested.codex_enabled = enabled;
+        requested.codex_generation = requested
+            .codex_generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("Codex preference generation exhausted"))?;
+        let staged = stage_write(&path, requested.encode())?;
+        Ok(Self {
+            path,
+            revision,
+            requested,
+            staged,
+            _lock: lock,
+        })
+    }
+
+    pub fn commit(
+        self,
+        check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<OptionalFeatureSettings> {
+        self.staged.commit(|| {
+            if nickel_storage::regular_file_revision(&self.path)? != self.revision {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "optional feature settings changed",
+                ));
+            }
+            check()
+        })?;
+        Ok(self.requested)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OptionalFeatureRuntime {
     pub version: u16,
@@ -1124,5 +1188,57 @@ mod tests {
         assert_eq!(accepted.codex_source, prior.codex_source);
         assert_eq!(accepted.on_screen_keyboard, KeyboardPreference::Enabled);
         assert_eq!(accepted.on_screen_keyboard_generation, 8);
+    }
+
+    #[test]
+    fn staged_codex_change_preserves_source_keyboard_and_rejects_cancel_or_replacement() {
+        use crate::on_screen_keyboard::KeyboardPreference;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("optional-features");
+        let prior = OptionalFeatureSettings {
+            codex_enabled: true,
+            codex_generation: 8,
+            codex_source: CodexSource::Executable("/private/codex".into()),
+            on_screen_keyboard: KeyboardPreference::Disabled,
+            on_screen_keyboard_generation: 12,
+            ..Default::default()
+        };
+        prior.save(&path).unwrap();
+        let cancelled = PreparedCodexPreference::prepare(path.clone(), &prior, false).unwrap();
+        assert!(
+            cancelled
+                .commit(|| Err(io::Error::other("cancelled")))
+                .is_err()
+        );
+        assert_eq!(OptionalFeatureSettings::load(&path).unwrap(), prior);
+
+        let locked = PreparedCodexPreference::prepare(path.clone(), &prior, false).unwrap();
+        assert_eq!(
+            prior.save(&path).unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        drop(locked);
+
+        let stale = PreparedCodexPreference::prepare(path.clone(), &prior, false).unwrap();
+        fs::write(
+            &path,
+            prior.encode().replace(
+                "on_screen_keyboard.generation=12",
+                "on_screen_keyboard.generation=13",
+            ),
+        )
+        .unwrap();
+        assert!(stale.commit(|| Ok(())).is_err());
+        prior.save(&path).unwrap();
+
+        let accepted = PreparedCodexPreference::prepare(path.clone(), &prior, false)
+            .unwrap()
+            .commit(|| Ok(()))
+            .unwrap();
+        assert!(!accepted.codex_enabled);
+        assert_eq!(accepted.codex_generation, 9);
+        assert_eq!(accepted.codex_source, prior.codex_source);
+        assert_eq!(accepted.on_screen_keyboard, KeyboardPreference::Disabled);
+        assert_eq!(accepted.on_screen_keyboard_generation, 12);
     }
 }

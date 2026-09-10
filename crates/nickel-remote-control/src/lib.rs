@@ -15,6 +15,7 @@ mod admission;
 pub mod appearance;
 pub mod application_scale;
 pub mod capture;
+pub mod codex_preference;
 mod connection_watch;
 pub mod launcher_favorites;
 pub use connection_watch::ConnectionCleanupWake;

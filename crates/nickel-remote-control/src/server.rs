@@ -168,6 +168,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::file_icons::Snapshot, String> {
         Err("file icon settings transactions are unavailable on this backend".into())
     }
+    fn read_codex_preference(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::codex_preference::Snapshot, String> {
+        Err("Codex preference observation is unavailable on this backend".into())
+    }
+    fn codex_preference_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::codex_preference::Transaction,
+    ) -> Result<crate::codex_preference::Snapshot, String> {
+        Err("Codex preference transactions are unavailable on this backend".into())
+    }
     fn read_terminal_presentation(
         &self,
         _permit: crate::DesktopPermit,
@@ -923,6 +936,13 @@ struct FileIconsRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct CodexPreferenceRequest {
+    lease_id: u64,
+    transaction: crate::codex_preference::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TerminalPresentationRequest {
     lease_id: u64,
     transaction: crate::terminal_presentation::Transaction,
@@ -1574,6 +1594,62 @@ impl McpHandler {
                     .map_err(|_| {
                         "file icon settings result uncertain; read current state before retrying"
                     })?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read typed Codex enablement, system policy, coarse in-process acknowledgement and active chat count. Requires Full Control & Debug Nickel. Executable paths, source labels, credentials, account state, projects, threads and diagnostics are excluded."
+    )]
+    async fn read_codex_preference(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::codex_preference::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadCodexPreference,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_codex_preference(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "Codex preference observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Enable or disable the compositor-owned Codex integration through the generation-checked production preference writer. Requires Full Control & Debug Nickel, editable system policy, fresh prior state and idle shared input. Disable is rejected while Codex chat windows are open. Source selection, executable paths, credentials and forced policy are excluded."
+    )]
+    async fn codex_preference_transaction(
+        &self,
+        Parameters(request): Parameters<CodexPreferenceRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::codex_preference::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::CodexPreferenceTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.codex_preference_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(
+                        |_| "Codex preference result uncertain; read current state before retrying",
+                    )?
                     .map(Json)
                 },
             )

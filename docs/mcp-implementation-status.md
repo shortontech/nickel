@@ -1313,3 +1313,18 @@ creation, and nested X11 did not reach the authenticated test-control readiness
 barrier even with Mesa/software rendering. Both owned attempts were stopped before
 lease approval or mutation (`file-icons-native-results.txt`). The exact source
 inventory now contains 340 Rust sources.
+
+Full-debug now exposes Codex enablement as a typed, policy-aware preference without
+exposing or accepting executable paths, source labels, credentials, accounts,
+projects, threads or backend payloads. The transaction preserves the existing
+source and all on-screen-keyboard fields, uses the shared bounded optional-feature
+staging and revision CAS, and rechecks lease, emergency epoch, request lifetime,
+deadline and shared-input idleness at the final rename. The compositor owner
+directly creates or tears down its existing internal Codex host and hidden project
+menu, reports runtime generation and pending state, and refuses disablement while
+chat windows are active. Source selection remains unavailable pending a verified
+source authority. Portable schema, cancellation, preservation and file-ABA tests
+and strict combined Clippy pass. Native compositor lifecycle acceptance remains
+open because this host's nested backends cannot reach authenticated test-control
+readiness and the running user session has not been reloaded. The exact source
+inventory now contains 342 Rust sources.

@@ -123,6 +123,21 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::file_icons::Snapshot, String>,
         >,
     },
+    ReadCodexPreference {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_codex_preference::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::codex_preference::Snapshot, String>,
+        >,
+    },
+    CodexPreferenceTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::codex_preference::Transaction,
+        prepared: remote_codex_preference::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::codex_preference::Snapshot, String>,
+        >,
+    },
     ReadTerminalPresentation {
         permit: nickel_remote_control::DesktopPermit,
         prepared: remote_terminal_presentation::PreparedRead,
@@ -652,6 +667,48 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .map_err(|_| "file icon settings queue is busy or stopped")?;
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "file icon settings result uncertain; read current state before retrying".to_owned()
+        })?
+    }
+    fn read_codex_preference(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_codex_preference::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadCodexPreference {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Codex preference queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Codex preference observation timed out")?
+    }
+    fn codex_preference_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::codex_preference::Transaction,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_codex_preference::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::CodexPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Codex preference queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "Codex preference result uncertain; read current state before retrying".to_owned()
         })?
     }
     fn read_terminal_presentation(
@@ -1917,6 +1974,7 @@ pub struct NickelSession {
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
     remote_wallpaper: remote_wallpaper::WallpaperState,
     remote_file_icons: remote_file_icons::FileIconState,
+    remote_codex_runtime_generation: u64,
     remote_terminal_presentation: remote_terminal_presentation::TerminalPresentationState,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
@@ -1995,6 +2053,7 @@ mod remote_appearance;
 mod remote_application_scale;
 #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
 mod remote_capture;
+mod remote_codex_preference;
 mod remote_controller;
 mod remote_diagnostics;
 mod remote_file_icons;
@@ -2617,6 +2676,23 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_file_icons(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadCodexPreference {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_codex_preference(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::CodexPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_codex_preference(&permit, transaction, prepared);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadTerminalPresentation {
@@ -3377,6 +3453,7 @@ impl NickelSession {
         }
         let feature_settings =
             nickel_core::optional_features::OptionalFeatureSettings::load_default();
+        self.remote_codex_runtime_generation = feature_settings.codex_generation;
         let codex_enabled = feature_settings.effective_codex_enabled();
         if codex_enabled {
             use nickel_core::optional_features::{
@@ -5287,6 +5364,7 @@ impl NickelSession {
             remote_launcher_favorites: Default::default(),
             remote_wallpaper: Default::default(),
             remote_file_icons: Default::default(),
+            remote_codex_runtime_generation: 0,
             remote_terminal_presentation: Default::default(),
             remote_desktop_events: Default::default(),
             remote_frame_trace: None,
