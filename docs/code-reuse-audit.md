@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
-Scope: all 332 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 334 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,7 +62,7 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 332-source inventory is current,
+translations rather than competing product authorities. The exact 334-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
@@ -211,6 +211,12 @@ no parallel product semantics or remote authorization route.
 
 `nickel-remote-control::appearance` owns typed wire values; `session::state::remote_appearance` stages and reconciles through the existing ShellSettings writer and LiveShell apply path. The shared commit boundary only rechecks atomic cancellation/deadline while authority is already held.
 
+`nickel-remote-control::wallpaper` owns the path-free wire projection, while
+`nickel-core::wallpaper_settings::PreparedWallpaperSettings` owns locked staging,
+revision comparison and checked replacement for both local and remote callers.
+`session::state::remote_wallpaper` adds lease, generation and input policy without
+duplicating storage or exposing the configured image path.
+
 The retained Windows executable-evidence adapter adds one platform source (311 total). It shares the existing kernel mapped-file verification with local transport, retains file pins independently of process lifetime, and does not promote executable equality into application membership.
 
 The shared bounded D-Bus transport adds one platform source (312 total). It validates frame lengths before delegating parsing to zbus and centralizes authentication, byte, frame and descriptor limits for typed platform consumers.
@@ -239,7 +245,11 @@ the remote owner retains generation, scope, and protected-resource policy.
 Native Windows acceptance and UI Automation inspection remain open gates.
 
 Native accessibility adds one bounded remote-control schema source and four
-Nickel owner/adapter sources (332 total). GTK-shell association and AT-SPI
+Nickel owner/adapter sources (332 total). The wallpaper transaction adds one
+bounded remote-control schema source and one Nickel owner source (334 total).
+GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed
 input provenance, while the bounded observer exposes only admitted metadata.
-GTK menu dispatch acceptance remains an open gate.
+Owned GTK menu dispatch, stale-revocation replacement, Escape and physical
+semantic-action acceptance are recorded in `target/mcp-native-2026-09-10/`;
+native Windows UI Automation acceptance remains an open gate.

@@ -1243,3 +1243,14 @@ snapshot no longer reports the integrated shell semantic-action domain as
 unavailable. External accessibility remains an independently bounded on-demand
 observation and is labelled as not embedded in the coherent snapshot rather than
 reported as wholly absent.
+
+Wallpaper settings now use the shared bounded regular-file reader and a locked,
+revision-checked staged writer. Full-debug exposes a typed, path-free observation
+and transaction for position changes and custom-image reset; the schema neither
+accepts nor returns image paths or contents. Preparation stays on the bounded
+settings worker, and the desktop owner rechecks lease, emergency epoch, request
+lifetime, deadline and shared input immediately before rename, then requests the
+production shell reload after an accepted commit. Portable schema, size, UTF-8,
+cancellation and file-ABA tests pass. Approved native image selection, pixel/decode
+budgets and native visual acceptance remain open. The exact source inventory now
+contains 334 Rust sources.

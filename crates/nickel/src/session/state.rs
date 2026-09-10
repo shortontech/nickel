@@ -95,6 +95,19 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::launcher_favorites::Snapshot, String>,
         >,
     },
+    ReadWallpaper {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_wallpaper::PreparedRead,
+        reply:
+            std::sync::mpsc::SyncSender<Result<nickel_remote_control::wallpaper::Snapshot, String>>,
+    },
+    WallpaperTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::wallpaper::Transaction,
+        prepared: remote_wallpaper::PreparedChange,
+        reply:
+            std::sync::mpsc::SyncSender<Result<nickel_remote_control::wallpaper::Snapshot, String>>,
+    },
     ShellBehavior {
         permit: nickel_remote_control::DesktopPermit,
         transaction: ShellBehaviorTransaction,
@@ -510,6 +523,48 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .map_err(|_| "launcher_favorites queue is busy or stopped")?;
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "launcher_favorites result uncertain; read current launcher_favorites before retrying"
+        })?
+    }
+    fn read_wallpaper(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_wallpaper::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadWallpaper {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "wallpaper queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "wallpaper observation timed out")?
+    }
+    fn wallpaper_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::wallpaper::Transaction,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_wallpaper::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::WallpaperTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "wallpaper queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "wallpaper result uncertain; read current wallpaper before retrying".to_owned()
         })?
     }
     fn shell_behavior_transaction(
@@ -1689,6 +1744,7 @@ pub struct NickelSession {
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
+    remote_wallpaper: remote_wallpaper::WallpaperState,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     remote_event_windows: HashSet<WindowId>,
@@ -1774,6 +1830,7 @@ pub(super) mod remote_launcher_favorites;
 mod remote_pointer;
 mod remote_settings;
 mod remote_shell_actions;
+mod remote_wallpaper;
 mod remote_worker;
 
 #[allow(unused_imports)]
@@ -2350,6 +2407,23 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_launcher_favorites(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadWallpaper {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_wallpaper(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::WallpaperTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_wallpaper(&permit, transaction, prepared);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ShellBehavior {
@@ -4983,6 +5057,7 @@ impl NickelSession {
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),
+            remote_wallpaper: Default::default(),
             remote_desktop_events: Default::default(),
             remote_frame_trace: None,
             remote_event_windows: HashSet::new(),

@@ -43,9 +43,11 @@ pub(crate) enum Method {
     LauncherFavoritesTransaction,
     NativeSemantics,
     NativeApplicationSemantics,
+    ReadWallpaper,
+    WallpaperTransaction,
 }
 
-const METHODS: [&str; 33] = [
+const METHODS: [&str; 35] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -79,6 +81,8 @@ const METHODS: [&str; 33] = [
     "launcher_favorites_transaction",
     "inspect_native_window",
     "inspect_native_application",
+    "read_wallpaper",
+    "wallpaper_transaction",
 ];
 const BOUNDS: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 5.0];
 

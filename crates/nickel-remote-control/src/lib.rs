@@ -36,6 +36,7 @@ pub mod pointer;
 pub mod semantics;
 mod server;
 pub mod trace_audit;
+pub mod wallpaper;
 pub mod window_actions;
 pub use server::{DesktopAuthority, RemoteControlServer, ServerError, WindowSummary};
 mod settings;

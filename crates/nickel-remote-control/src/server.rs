@@ -142,6 +142,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::launcher_favorites::Snapshot, String> {
         Err("launcher_favorites transactions are unavailable on this backend".into())
     }
+    fn read_wallpaper(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::wallpaper::Snapshot, String> {
+        Err("wallpaper observation is unavailable on this backend".into())
+    }
+    fn wallpaper_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::wallpaper::Transaction,
+    ) -> Result<crate::wallpaper::Snapshot, String> {
+        Err("wallpaper transactions are unavailable on this backend".into())
+    }
     fn shell_behavior_transaction(
         &self,
         _permit: crate::DesktopPermit,
@@ -856,6 +869,13 @@ struct LauncherFavoritesRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct WallpaperRequest {
+    lease_id: u64,
+    transaction: crate::wallpaper::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WindowActionRequest {
     lease_id: u64,
     window_id: String,
@@ -1387,6 +1407,59 @@ impl McpHandler {
                     .await
                     .map_err(
                         |_| "launcher_favorites result uncertain; read current launcher_favorites before retrying",
+                    )?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read typed Nickel wallpaper layout state. Requires Full Control & Debug Nickel. Reports only whether a custom image is configured; image paths and contents are excluded. The result is configuration state, not presented pixels."
+    )]
+    async fn read_wallpaper(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::wallpaper::Snapshot>, String> {
+        self.metrics
+            .measure(crate::operation_metrics::Method::ReadWallpaper, async {
+                let permit = self.permit(&context, request.lease_id)?;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    desktop_call(self.desktop.clone(), move |desktop| {
+                        desktop.read_wallpaper(permit)
+                    }),
+                )
+                .await
+                .map_err(|_| "wallpaper observation timed out")?
+                .map(Json)
+            })
+            .await
+    }
+
+    #[tool(
+        description = "Change the typed wallpaper position or reset the custom image through the checked production writer. Requires Full Control & Debug Nickel, a fresh generation/prior snapshot, and idle shared input. Paths and image contents are never accepted. A committed result requests a live shell reload but does not confirm presented pixels."
+    )]
+    async fn wallpaper_transaction(
+        &self,
+        Parameters(request): Parameters<WallpaperRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::wallpaper::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::WallpaperTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.wallpaper_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(
+                        |_| "wallpaper result uncertain; read current wallpaper before retrying",
                     )?
                     .map(Json)
                 },
