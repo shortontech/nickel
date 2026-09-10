@@ -181,6 +181,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::codex_preference::Snapshot, String> {
         Err("Codex preference transactions are unavailable on this backend".into())
     }
+    fn read_idle_preferences(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::idle_preferences::Snapshot, String> {
+        Err("idle preference observation is unavailable on this backend".into())
+    }
+    fn idle_preferences_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::idle_preferences::Transaction,
+    ) -> Result<crate::idle_preferences::Snapshot, String> {
+        Err("idle preference transactions are unavailable on this backend".into())
+    }
     fn read_terminal_presentation(
         &self,
         _permit: crate::DesktopPermit,
@@ -943,6 +956,13 @@ struct CodexPreferenceRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct IdlePreferencesRequest {
+    lease_id: u64,
+    transaction: crate::idle_preferences::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TerminalPresentationRequest {
     lease_id: u64,
     transaction: crate::terminal_presentation::Transaction,
@@ -1649,6 +1669,62 @@ impl McpHandler {
                     .await
                     .map_err(
                         |_| "Codex preference result uncertain; read current state before retrying",
+                    )?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read configured and applied idle dim/suspend timing. Requires Full Control & Debug Nickel. Idle lock, inhibitors, authentication, shutdown and listener policy are excluded."
+    )]
+    async fn read_idle_preferences(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::idle_preferences::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadIdlePreferences,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_idle_preferences(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "idle preference observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Change bounded idle dim/suspend timing through the generation-checked production settings and session owner. Requires Full Control & Debug Nickel, fresh prior state and idle shared input. Idle lock, inhibitors, authentication, shutdown and listener policy are excluded."
+    )]
+    async fn idle_preferences_transaction(
+        &self,
+        Parameters(request): Parameters<IdlePreferencesRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::idle_preferences::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::IdlePreferencesTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.idle_preferences_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(
+                        |_| "idle preference result uncertain; read current state before retrying",
                     )?
                     .map(Json)
                 },

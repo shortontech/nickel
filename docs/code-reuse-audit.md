@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
-Scope: all 342 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 344 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,7 +62,7 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 342-source inventory is current,
+translations rather than competing product authorities. The exact 344-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
@@ -279,6 +279,10 @@ theme values. The Codex enablement transaction adds one remote-control schema an
 one Nickel owner source (342 total). It reuses optional-feature staging and the
 compositor-owned internal Codex host lifecycle; source paths, credentials, backend
 payloads and active-chat closure remain outside the remote schema.
+The idle preference transaction adds one remote-control schema and one Nickel
+owner source (344 total). It reuses ShellSettings persistence and the existing
+session `IdleController`; it exposes only dim and suspend intervals. Lock timing,
+inhibitor ownership, authentication and system power actions remain excluded.
 GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed
 input provenance, while the bounded observer exposes only admitted metadata.

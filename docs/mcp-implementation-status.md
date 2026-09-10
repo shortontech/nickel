@@ -1328,3 +1328,18 @@ and strict combined Clippy pass. Native compositor lifecycle acceptance remains
 open because this host's nested backends cannot reach authenticated test-control
 readiness and the running user session has not been reloaded. The exact source
 inventory now contains 342 Rust sources.
+
+Full-debug now exposes bounded idle dim and suspend preferences through a typed
+transaction while excluding the security-sensitive lock timeout, inhibitor
+ownership, authentication, shutdown/restart and listener controls. Preparation
+uses the shared ShellSettings lock and revision CAS; the desktop owner rechecks
+lease, emergency epoch, request lifetime, deadline, protected focus and complete
+shared-input idleness at the final rename. It then replaces the production
+`IdleController` policy, starts a fresh idle interval so a shortened timeout cannot
+immediately suspend an active session, and undims an already dimmed compositor.
+Snapshots distinguish configured and applied values with a generation and pending
+state. Portable controlled-clock, schema, cooperative-writer, replacement,
+protected-field preservation and acknowledgement tests plus strict combined
+Clippy pass. Native compositor dimming and real suspend acceptance remain open;
+no test may suspend the user's active session. The exact source inventory now
+contains 344 Rust sources.

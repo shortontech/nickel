@@ -45,6 +45,24 @@ impl IdleController {
         }
     }
 
+    pub fn policy(&self) -> IdlePolicy {
+        self.policy
+    }
+
+    /// Applies a new policy from the production settings owner. The change
+    /// starts a fresh idle interval so shortening a timeout cannot immediately
+    /// dim or suspend a session which was active while settings were edited.
+    pub fn replace_policy(&mut self, policy: IdlePolicy, now: Duration) -> Option<IdleEffect> {
+        self.policy = policy;
+        self.active_at = now;
+        self.lock_requested = false;
+        self.suspend_requested = false;
+        self.dimmed.then(|| {
+            self.dimmed = false;
+            IdleEffect::Undim
+        })
+    }
+
     pub fn note_activity(&mut self, now: Duration) -> Option<IdleEffect> {
         self.active_at = now;
         self.lock_requested = false;
@@ -151,5 +169,23 @@ mod tests {
         let mut idle =
             IdleController::new(IdlePolicy::from_seconds(None, None, None), Duration::ZERO);
         assert!(idle.poll(seconds(u32::MAX.into()), false, false).is_empty());
+    }
+
+    #[test]
+    fn replacing_policy_starts_a_fresh_interval_and_undims() {
+        let mut idle = IdleController::new(
+            IdlePolicy::from_seconds(Some(10), Some(20), Some(30)),
+            Duration::ZERO,
+        );
+        assert_eq!(idle.poll(seconds(10), false, false), [IdleEffect::Dim]);
+        assert_eq!(
+            idle.replace_policy(
+                IdlePolicy::from_seconds(Some(5), Some(20), Some(25)),
+                seconds(12)
+            ),
+            Some(IdleEffect::Undim)
+        );
+        assert!(idle.poll(seconds(16), false, false).is_empty());
+        assert_eq!(idle.poll(seconds(17), false, false), [IdleEffect::Dim]);
     }
 }

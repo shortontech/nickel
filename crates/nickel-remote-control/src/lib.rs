@@ -26,6 +26,7 @@ pub mod diagnostics;
 mod event_subscriptions;
 pub mod file_icons;
 pub mod frame_trace;
+pub mod idle_preferences;
 pub mod keyboard;
 pub mod keyboard_preference;
 pub mod lease_audit;

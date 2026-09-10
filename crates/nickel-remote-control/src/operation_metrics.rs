@@ -53,9 +53,11 @@ pub(crate) enum Method {
     FileIconsTransaction,
     ReadCodexPreference,
     CodexPreferenceTransaction,
+    ReadIdlePreferences,
+    IdlePreferencesTransaction,
 }
 
-const METHODS: [&str; 43] = [
+const METHODS: [&str; 45] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -99,6 +101,8 @@ const METHODS: [&str; 43] = [
     "file_icons_transaction",
     "read_codex_preference",
     "codex_preference_transaction",
+    "read_idle_preferences",
+    "idle_preferences_transaction",
 ];
 const BOUNDS: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 5.0];
 
