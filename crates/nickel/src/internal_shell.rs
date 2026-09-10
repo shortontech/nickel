@@ -117,6 +117,13 @@ impl InternalShellCoordinator {
         self.shell.image_cache_diagnostics()
     }
 
+    pub(crate) fn image_cache_diagnostics_for_previews(
+        &self,
+        allow: impl Fn(crate::model::WindowId) -> bool,
+    ) -> crate::live_shell::ShellImageCacheDiagnostics {
+        self.shell.image_cache_diagnostics_for_previews(allow)
+    }
+
     pub fn codex_project_menu_visible(&self) -> bool {
         self.shell.surface_visible(SurfaceRole::CodexProjectMenu)
     }
@@ -262,6 +269,71 @@ impl InternalShellCoordinator {
             scene_generation: 0,
             commands_copied: 0,
         });
+    }
+
+    pub(crate) fn remote_access_protected(&self, id: InternalSurfaceId) -> bool {
+        self.entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .is_none_or(|entry| {
+                !self.shell.surface_visible(entry.role)
+                    || self.shell.surface_remote_access_protected(entry.role)
+            })
+    }
+
+    pub(crate) fn bounded_shell_semantics(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Result<(u64, Vec<nickel_ui::SemanticNodeSnapshot>), String> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or("shell surface has retired")?;
+        self.shell
+            .bounded_shell_semantics(entry.role, entry.output.as_deref())
+    }
+
+    pub(crate) fn perform_bounded_shell_action(
+        &mut self,
+        id: InternalSurfaceId,
+        generation: u64,
+        node: usize,
+        action: nickel_ui::SemanticAction,
+        clipboard_limit: usize,
+    ) -> Result<crate::live_shell::remote_semantics::RemoteShellOutcome, String> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|entry| entry.id == id)
+            .ok_or("shell surface has retired")?;
+        let outcome = self.shell.perform_bounded_shell_action(
+            entry.role,
+            entry.output.as_deref(),
+            generation,
+            node,
+            action,
+            clipboard_limit,
+        )?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn resolve_remote_installed_launch(
+        &mut self,
+        effect: &crate::live_shell::remote_semantics::RemoteShellEffect,
+    ) -> Result<Option<crate::model::Application>, String> {
+        self.shell.resolve_remote_installed_launch(effect)
+    }
+
+    pub(crate) fn stage_remote_shell_effect(
+        &mut self,
+        effect: crate::live_shell::remote_semantics::RemoteShellEffect,
+    ) -> Result<Vec<crate::platform::ShellCommand>, String> {
+        self.shell.stage_remote_shell_effect(effect)
+    }
+
+    pub(crate) fn apply_control_visibility(&mut self, visible: bool) {
+        self.shell.apply_control_visibility(visible);
     }
 
     pub fn surfaces(&self) -> &[InternalShellSurface] {
@@ -466,6 +538,42 @@ impl InternalShellCoordinator {
             .collect()
     }
 
+    pub(crate) fn launcher_preferences_busy(&self) -> bool {
+        self.shell.launcher_preferences_busy()
+    }
+
+    pub(crate) fn launcher_favorites_match(
+        &self,
+        preferences: &nickel_core::launcher_preferences::LauncherPreferences,
+    ) -> bool {
+        self.shell.launcher_favorites_match(preferences)
+    }
+
+    pub(crate) fn apply_committed_launcher_preferences(
+        &mut self,
+        preferences: nickel_core::launcher_preferences::LauncherPreferences,
+    ) -> Result<Vec<InternalSurfaceId>, String> {
+        self.shell
+            .apply_committed_launcher_preferences(preferences)?;
+        Ok(self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Panel))
+            .map(|entry| entry.id)
+            .collect())
+    }
+
+    /// Apply an already-authorized settings snapshot without rereading its file.
+    pub(crate) fn apply_prepared_shell_settings(
+        &mut self,
+        settings: nickel_core::shell_settings::ShellSettings,
+    ) -> Vec<InternalSurfaceId> {
+        if !self.shell.apply_shell_settings(settings) {
+            return Vec::new();
+        }
+        self.entries.iter().map(|surface| surface.id).collect()
+    }
+
     pub fn apply_system_status_update(
         &mut self,
         update: crate::platform::SystemStatusUpdate,
@@ -661,6 +769,23 @@ impl InternalShellCoordinator {
                 }
                 continue;
             }
+            if let nickel_ui::HostEvent::Normalized { input, .. } = event {
+                match entry.role {
+                    SurfaceRole::WindowPreview => {
+                        dependent_roles
+                            .extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu]);
+                        changed |= self.shell.preview_host_input(input).changed;
+                    }
+                    SurfaceRole::WindowContextMenu => {
+                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview]);
+                        changed |=
+                            self.shell
+                                .window_menu_host_input(input, entry.size.0, entry.size.1);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
             if let nickel_ui::HostEvent::Shortcut(shortcut) = event {
                 changed |= self.shell.shell_role_host_shortcut(
                     entry.role,
@@ -763,6 +888,13 @@ impl InternalShellCoordinator {
         changes
     }
 
+    /// Apply a compositor-owned transition without sending a second IPC request.
+    pub(crate) fn apply_launcher_visibility(&mut self, visible: bool) {
+        if self.launcher_visible() != visible {
+            self.shell.apply_session_launcher_visibility(visible);
+        }
+    }
+
     pub fn toggle_launcher(&mut self) -> bool {
         self.shell.request_launcher_toggle()
     }
@@ -777,6 +909,10 @@ impl InternalShellCoordinator {
     ) -> Option<(nickel_ui::UiId, u64)> {
         let role = self.entries.iter().find(|entry| entry.id == id)?.role;
         self.shell.shell_field_lease(role)
+    }
+
+    pub(crate) fn pointer_interaction_active(&self) -> bool {
+        self.shell.pointer_interaction_active()
     }
 
     pub fn launcher_visible(&self) -> bool {
@@ -830,6 +966,22 @@ impl InternalShellCoordinator {
         self.shell.screenshot_output.as_deref()
     }
 
+    pub(crate) fn window_menu_generation(&self) -> Option<u64> {
+        self.shell.window_menu_generation()
+    }
+
+    pub(crate) fn retire_window_menu(&mut self, generation: u64) -> bool {
+        self.shell.retire_window_menu(generation)
+    }
+
+    pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
+        self.shell.window_menu_geometry()
+    }
+
+    pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
+        self.shell.open_window_menu_at(id, x, y)
+    }
+
     /// Deliver a non-consumer compositor shortcut through the same typed shell owner.
     pub fn global_shortcut(&mut self, action: nickel_session_protocol::ShortcutAction) -> bool {
         use crate::platform::{GlobalShortcut, ScreenshotAction};
@@ -863,13 +1015,21 @@ impl InternalShellCoordinator {
     }
 }
 
+pub(crate) fn launcher_size(width: u32, height: u32) -> (u32, u32) {
+    (width.min(960), height.saturating_sub(PANEL_HEIGHT).min(720))
+}
+
+pub(crate) fn control_center_size(width: u32, height: u32) -> (u32, u32) {
+    (420.min(width), height.saturating_sub(PANEL_HEIGHT))
+}
+
 fn role_size(role: SurfaceRole, width: u32, height: u32, panel_edge: PanelEdge) -> (u32, u32) {
     let _ = panel_edge;
     match role {
         SurfaceRole::Desktop | SurfaceRole::Lock => (width, height),
         SurfaceRole::Panel => (width, PANEL_HEIGHT),
-        SurfaceRole::Launcher => (width.min(960), height.saturating_sub(PANEL_HEIGHT).min(720)),
-        SurfaceRole::ControlCenter => (420.min(width), height.saturating_sub(PANEL_HEIGHT)),
+        SurfaceRole::Launcher => launcher_size(width, height),
+        SurfaceRole::ControlCenter => control_center_size(width, height),
         SurfaceRole::Notification => (420.min(width), 180.min(height)),
         SurfaceRole::VolumeOsd => (420.min(width), 96.min(height)),
         SurfaceRole::WindowPreview => (760.min(width), 520.min(height)),
@@ -1500,6 +1660,79 @@ mod tests {
         assert!(!coordinator.visible(launcher));
         assert!(coordinator.toggle_launcher());
         assert!(coordinator.visible(launcher));
+    }
+
+    #[test]
+    fn remote_accessibility_menu_retirement_cannot_hide_a_replacement() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
+            windows: vec![nickel_session_protocol::WindowSnapshot {
+                id: nickel_session_protocol::WindowId(41),
+                application_id: "owned-test".into(),
+                title: "Owned test".into(),
+                active: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                geometry: None,
+                workspace: nickel_session_protocol::WorkspaceId(1),
+            }],
+            ..Default::default()
+        });
+        assert!(coordinator.open_window_menu_at(41, 20, 30));
+        let old = coordinator.window_menu_generation().unwrap();
+        assert!(coordinator.open_window_menu_at(41, 70, 80));
+        let replacement = coordinator.window_menu_generation().unwrap();
+        assert!(replacement > old);
+        assert!(!coordinator.retire_window_menu(old));
+        assert_eq!(coordinator.window_menu_generation(), Some(replacement));
+        let menu = coordinator
+            .surface(SurfaceRole::WindowContextMenu, None)
+            .unwrap()
+            .id;
+        coordinator.step_slot_changes(
+            menu,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                        device: nickel_input::DeviceId(1),
+                        order: nickel_input::EventOrder(1),
+                        physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::Escape),
+                        logical: nickel_input::LogicalKey::Named(nickel_input::NamedKey::Escape),
+                        location: nickel_input::KeyLocation::Standard,
+                        edge: nickel_input::KeyEdge::Pressed,
+                        repeat: false,
+                        modifiers: nickel_input::ModifierState::default(),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..HostBatch::default()
+            },
+        );
+        assert_eq!(coordinator.window_menu_generation(), None);
+        assert!(coordinator.open_window_menu_at(41, 70, 80));
+        coordinator.step_slot_changes(
+            menu,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Ui(
+                    nickel_ui::UiEvent::KeyboardNavigateBack,
+                )],
+                ..HostBatch::default()
+            },
+        );
+        assert_eq!(coordinator.window_menu_generation(), None);
+        assert!(coordinator.open_window_menu_at(41, 70, 80));
+        let replacement = coordinator.window_menu_generation().unwrap();
+        assert!(coordinator.retire_window_menu(replacement));
+        assert_eq!(coordinator.window_menu_generation(), None);
     }
 
     #[test]

@@ -1,8 +1,10 @@
 //! Primary-GPU preview work, independent of output presentation and target GPUs.
 
 use super::*;
+use crate::session::window_capture::{
+    SubmittedWindowCapture as SubmittedPreview, submit_window_capture,
+};
 use crate::session::window_registry::WindowId;
-use smithay::backend::renderer::{gles::GlesMapping, sync::SyncPoint};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -33,14 +35,6 @@ fn preview_readiness(
     } else {
         Readiness::Pending
     }
-}
-
-pub(super) struct SubmittedPreview {
-    // Keep the draw target alive until the readback has completed or retired.
-    pub(super) texture: GlesTexture,
-    pub(super) mapping: GlesMapping,
-    pub(super) fence: SyncPoint,
-    pub(super) dimensions: (u16, u16),
 }
 
 struct PendingPreview {
@@ -96,7 +90,7 @@ impl UdevData {
 }
 
 impl NickelSession {
-    pub(super) fn schedule_native_preview_work(&mut self) {
+    pub(crate) fn schedule_native_preview_work(&mut self) {
         let Some(native) = self.native.as_ref() else {
             return;
         };
@@ -105,7 +99,9 @@ impl NickelSession {
         }
         if self.locked
             || !native.activity.is_active()
-            || (native.preview_work.pending.is_none() && !self.preview_capture_work_pending())
+            || (native.preview_work.pending.is_none()
+                && !self.preview_capture_work_pending()
+                && !self.remote_capture_pending())
         {
             return;
         }
@@ -143,8 +139,17 @@ impl NickelSession {
                 native.preview_work.diagnostics.cancellations +=
                     u64::from(native.preview_work.pending.is_some());
                 native.preview_work.pending = None;
+                self.cancel_remote_capture("session is not active");
                 native.preview_work.last_capture.clear();
                 return false;
+            }
+            if self.remote_capture_pending() {
+                match native.gpus.single_renderer(&native.primary_gpu) {
+                    Ok(mut primary) => {
+                        self.poll_remote_capture(primary.as_mut(), renderer_generation)
+                    }
+                    Err(_) => self.cancel_remote_capture("capture renderer is unavailable"),
+                }
             }
             native
                 .preview_work
@@ -271,7 +276,10 @@ impl NickelSession {
             };
             native.preview_work.last_capture.insert(id, now);
             let submitted_at = Instant::now();
-            let submission = submit_preview(renderer, &window);
+            let geometry = window.geometry();
+            let submission =
+                crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)
+                    .and_then(|dimensions| submit_window_capture(renderer, &window, dimensions));
             native.preview_work.diagnostics.submit_cpu_us += elapsed_micros(submitted_at);
             match submission {
                 Some(submission) => {
@@ -319,13 +327,14 @@ impl NickelSession {
             self.request_output_redraw();
             self.render_all_outputs_once();
         }
-        keep_polling
+        keep_polling || self.remote_capture_pending()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::sync::SyncPoint;
 
     #[derive(Debug)]
     struct NeverReady;

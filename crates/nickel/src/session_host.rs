@@ -42,6 +42,9 @@ use std::sync::{
 use crate::session::{NickelSession, SessionAuthority, SessionAuthorityRequest};
 
 pub trait SessionHost: Send + Sync {
+    fn stages_effects(&self) -> bool {
+        false
+    }
     fn copy_image(&self, image: image::RgbaImage) -> Result<(), String> {
         platform::copy_image_to_clipboard(image)
     }
@@ -416,6 +419,66 @@ impl SessionHost for TestSessionHost {
 
     fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
         Ok(())
+    }
+}
+
+/// A bounded effect collector installed only during one remote shell reduction.
+/// The owner executes its commands with fresh authority before acknowledging.
+pub(crate) struct StagedSessionHost {
+    original: std::sync::Arc<dyn SessionHost>,
+    commands: std::sync::Mutex<Vec<ShellCommand>>,
+}
+impl StagedSessionHost {
+    pub(crate) fn new(original: std::sync::Arc<dyn SessionHost>) -> Self {
+        Self {
+            original,
+            commands: Default::default(),
+        }
+    }
+    pub(crate) fn take_commands(&self) -> Vec<ShellCommand> {
+        std::mem::take(&mut *self.commands.lock().unwrap())
+    }
+}
+impl SessionHost for StagedSessionHost {
+    fn stages_effects(&self) -> bool {
+        true
+    }
+    fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
+        let mut commands = self
+            .commands
+            .lock()
+            .map_err(|_| SessionRequestError::Send)?;
+        if commands.len() >= 8 {
+            return Err(SessionRequestError::Send);
+        }
+        commands.push(command);
+        Ok(())
+    }
+    fn copy_image(&self, _: image::RgbaImage) -> Result<(), String> {
+        Err("remote image effect unavailable".into())
+    }
+    fn copy_image_path(&self, _: &image::RgbaImage) -> Result<std::path::PathBuf, String> {
+        Err("remote image effect unavailable".into())
+    }
+    fn consumer_control(&self, _: nickel_session_protocol::ConsumerControl) -> bool {
+        false
+    }
+    fn request_secure_storage_retry(&self) -> Result<(), SessionRequestError> {
+        Err(SessionRequestError::Send)
+    }
+    fn capture_desktop(&self, _: Option<&str>) -> DesktopCapturePoll {
+        DesktopCapturePoll::Ready(Err("remote capture effect unavailable".into()))
+    }
+    fn secure_storage_state(&self) -> Result<SecureStorageState, SessionRequestError> {
+        self.original.secure_storage_state()
+    }
+    fn keyboard_snapshot(
+        &self,
+    ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
+        self.original.keyboard_snapshot()
+    }
+    fn projection_outputs(&self) -> Result<Vec<nickel_session_protocol::OutputSnapshot>, String> {
+        self.original.projection_outputs()
     }
 }
 

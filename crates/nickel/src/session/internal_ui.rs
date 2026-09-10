@@ -53,6 +53,8 @@ pub enum InternalSurfaceRole {
     Overlay,
     /// Foremost compositor paint that never participates in hit testing or focus.
     PassiveOverlay,
+    /// Trusted local controls above ordinary overlays, without keyboard focus.
+    TrustedControl,
     /// Interactive overlay that must preserve the text recipient's seat focus.
     OnScreenKeyboard,
     Application,
@@ -131,6 +133,8 @@ pub enum InternalUiPresentationMode {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct InternalUiRendererDiagnostics {
+    pub configured_mode: InternalUiRendererMode,
+    pub fallback_reason: Option<InternalUiFallbackReason>,
     pub gpu_frames: u64,
     pub fallback_frames: u64,
     pub fallback_primitive_count: usize,
@@ -174,6 +178,14 @@ pub struct InternalUiRendererDiagnostics {
     pub fallback_partial_repaints: u64,
     pub text_scratch_bytes: usize,
     pub text_private_cache_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InternalUiFallbackReason {
+    RequestedSoftware,
+    UnsupportedCommands,
+    ElementBudget,
+    TextureImportFailure,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -481,6 +493,7 @@ impl SmithayFrameRenderer {
 
     pub fn diagnostics(&self) -> InternalUiRendererDiagnostics {
         InternalUiRendererDiagnostics {
+            configured_mode: self.renderer_mode,
             text_scratch_bytes: self.text_software.pixel_capacity_bytes(),
             text_private_cache_bytes: self.text_software.cache_diagnostics().live_bytes,
             ..self.diagnostics
@@ -500,6 +513,7 @@ impl SmithayFrameRenderer {
         self.primitives.clear();
         self.import_fallback = None;
         self.mode = InternalUiPresentationMode::GpuSolid;
+        self.diagnostics.fallback_reason = None;
         self.diagnostics.software_frame_bytes = 0;
         self.diagnostics.fallback_raster_bytes = 0;
         self.diagnostics.fallback_primitive_count = 0;
@@ -1050,6 +1064,7 @@ impl SmithayFrameRenderer {
             return false;
         };
         self.mode = InternalUiPresentationMode::RasterFallback;
+        self.diagnostics.fallback_reason = Some(InternalUiFallbackReason::TextureImportFailure);
         self.diagnostics.fallback_frames = self.diagnostics.fallback_frames.saturating_add(1);
         self.diagnostics.fallback_text_count = frame
             .commands
@@ -1200,10 +1215,17 @@ impl FrameRenderer for SmithayFrameRenderer {
 
     fn render_frame(&mut self, frame: RenderFrame<'_>) -> Result<DamageRegion, Self::Error> {
         let estimated_gpu_elements = Self::estimated_gpu_elements(frame.commands);
-        let damage = if self.renderer_mode == InternalUiRendererMode::Gpu
-            && Self::supports_gpu(frame.commands)
-            && estimated_gpu_elements <= MAX_GPU_ELEMENTS_PER_SURFACE
-        {
+        let fallback_reason = if self.renderer_mode == InternalUiRendererMode::Software {
+            Some(InternalUiFallbackReason::RequestedSoftware)
+        } else if !Self::supports_gpu(frame.commands) {
+            Some(InternalUiFallbackReason::UnsupportedCommands)
+        } else if estimated_gpu_elements > MAX_GPU_ELEMENTS_PER_SURFACE {
+            Some(InternalUiFallbackReason::ElementBudget)
+        } else {
+            None
+        };
+        self.diagnostics.fallback_reason = fallback_reason;
+        let damage = if fallback_reason.is_none() {
             self.mode = InternalUiPresentationMode::GpuSolid;
             self.diagnostics.gpu_frames += 1;
             self.diagnostics.fallback_primitive_count = 0;
@@ -1475,6 +1497,7 @@ pub struct InternalUiRuntime {
     clipboard_limit: usize,
     clipboard_result: Option<Result<String, String>>,
     surfaces: InternalSurfaceSet,
+    surfaces_retired: bool,
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
     focused: Option<InternalSurfaceId>,
     hovered: Option<InternalSurfaceId>,
@@ -1499,6 +1522,7 @@ impl Default for InternalUiRuntime {
             clipboard_limit: 0,
             clipboard_result: None,
             surfaces: InternalSurfaceSet::default(),
+            surfaces_retired: false,
             presentation: BTreeMap::new(),
             focused: None,
             hovered: None,
@@ -1554,6 +1578,155 @@ impl InternalUiRuntime {
     /// Mutably access an application hosted by the compositor.
     pub fn application_mut<T: 'static>(&mut self, id: InternalSurfaceId) -> Option<&mut T> {
         self.surfaces.get_mut(id)?.application_mut().downcast_mut()
+    }
+
+    pub fn semantic_nodes(&self, id: InternalSurfaceId) -> Vec<nickel_ui::SemanticNodeSnapshot> {
+        self.surfaces
+            .get(id)
+            .map(|surface| surface.semantic_nodes())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn bounded_application_semantics(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Result<(u64, Vec<nickel_ui::SemanticNodeSnapshot>), String> {
+        let presentation = self.presentation.get(&id).ok_or("surface unavailable")?;
+        if !presentation.visible
+            || presentation.external_scene.is_some()
+            || presentation.placement.role != InternalSurfaceRole::Application
+        {
+            return Err("hosted application semantics unavailable".into());
+        }
+        let host = self.surfaces.get(id).ok_or("surface unavailable")?;
+        let generation = host
+            .resolved_frame_generation()
+            .ok_or("surface generation unavailable")?;
+        let nodes = host
+            .bounded_semantic_nodes(
+                nickel_remote_control::semantics::MAX_RESOLVED_NODES,
+                nickel_remote_control::semantics::MAX_PAYLOAD_BYTES,
+            )
+            .map_err(|error| {
+                match error {
+                    nickel_ui::BoundedSemanticError::ProtectedSurface => "protected surface",
+                    nickel_ui::BoundedSemanticError::BudgetExceeded => {
+                        "semantic projection exceeds budget"
+                    }
+                }
+                .to_owned()
+            })?;
+        Ok((generation, nodes))
+    }
+
+    pub(crate) fn remote_access_protected(&self, id: InternalSurfaceId) -> bool {
+        self.placement(id)
+            .is_none_or(|placement| placement.role == InternalSurfaceRole::TrustedControl)
+            || self
+                .surfaces
+                .get(id)
+                .is_none_or(|surface| surface.remote_access_protected())
+    }
+
+    /// Dispatch against an observed application tree after the caller reserves
+    /// input and validates the current lease, window and surface identities.
+    /// Clipboard effects remain local and use the runtime's current limit.
+    pub fn perform_bounded_application_action(
+        &mut self,
+        id: InternalSurfaceId,
+        tree_generation: u64,
+        ordinal: usize,
+        action: nickel_ui::SemanticAction,
+    ) -> Result<bool, String> {
+        let presentation = self.presentation.get(&id).ok_or("surface unavailable")?;
+        if !presentation.visible
+            || presentation.external_scene.is_some()
+            || presentation.placement.role != InternalSurfaceRole::Application
+        {
+            return Err("hosted application semantics unavailable".into());
+        }
+        if self.remote_access_protected(id) {
+            return Err("protected surface".into());
+        }
+        if self.pointer_interaction_active() || self.desktop_keyboard_interaction_active() {
+            return Err("local surface input is held".into());
+        }
+        let surface = self.surfaces.get_mut(id).ok_or("surface unavailable")?;
+        let mut outcome = surface
+            .perform_bounded_semantic_action(
+                tree_generation,
+                ordinal,
+                action,
+                nickel_remote_control::semantics::MAX_RESOLVED_NODES,
+                nickel_remote_control::semantics::MAX_PAYLOAD_BYTES,
+                Some(self.clipboard_limit),
+            )
+            .map_err(|error| {
+                use nickel_ui::{BoundedSemanticActionError as E, BoundedSemanticError as S};
+                match error {
+                    E::InputBusy => "local surface input is held",
+                    E::StaleGeneration => "stale semantic tree",
+                    E::MissingTarget => "semantic target unavailable",
+                    E::ActionUnavailable => "semantic action unavailable",
+                    E::Snapshot(S::ProtectedSurface) => "protected surface",
+                    E::Snapshot(S::BudgetExceeded) => "semantic projection exceeds budget",
+                }
+                .to_owned()
+            })?;
+        let semantic_failed = !outcome.semantic_failures.is_empty();
+        let effect_failed = !outcome.failures.is_empty() || !outcome.completion_failures.is_empty();
+        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        if outcome.changed {
+            self.mark_dirty(id);
+        }
+        if semantic_failed {
+            return Err("semantic action rejected by application".into());
+        }
+        if effect_failed {
+            return Err(
+                "semantic action completed with a local effect failure; do not retry".into(),
+            );
+        }
+        Ok(outcome.changed)
+    }
+
+    pub(crate) fn remote_application_diagnostic(
+        &self,
+        id: InternalSurfaceId,
+        window: &str,
+    ) -> Option<nickel_remote_control::diagnostics::InternalApplicationDiagnostic> {
+        let presentation = self.presentation.get(&id)?;
+        if presentation.placement.role != InternalSurfaceRole::Application
+            || presentation.external_scene.is_some()
+            || self.remote_access_protected(id)
+        {
+            return None;
+        }
+        let generation = self.surfaces.get(id)?.resolved_frame_generation()?;
+        let (x, y, width, height) = presentation.placement.geometry;
+        Some(
+            nickel_remote_control::diagnostics::InternalApplicationDiagnostic {
+                id: format!("internal:{}", id.snapshot_token()),
+                generation: id.snapshot_token(),
+                window: window.to_owned(),
+                geometry: [
+                    i64::from(x),
+                    i64::from(y),
+                    i64::from(width),
+                    i64::from(height),
+                ],
+                output: presentation
+                    .placement
+                    .output
+                    .as_ref()
+                    .map(|name| name.chars().take(128).collect()),
+                scale_factor: presentation.scale_factor,
+                visible: presentation.visible,
+                resolved_frame_generation: generation,
+                redraw_pending: presentation.dirty,
+                keyboard_focused: self.focused() == Some(id),
+            },
+        )
     }
 
     /// Earliest application-owned wakeup across compositor surfaces.
@@ -1679,12 +1852,38 @@ impl InternalUiRuntime {
             self.clear_focus();
         }
         let removed = self.surfaces.remove(id).is_some();
+        self.surfaces_retired |= removed;
         self.presentation.remove(&id);
         if self.hovered == Some(id) {
             self.hovered = None;
         }
         self.touches.retain(|_, (target, _)| *target != id);
         removed
+    }
+
+    pub(crate) fn take_surface_retirement(&mut self) -> bool {
+        std::mem::take(&mut self.surfaces_retired)
+    }
+
+    /// Resolve only canonical runtime identities; never reconstruct an opaque ID.
+    pub(crate) fn has_surface_identity(&self, identity: &str, generation: u64) -> bool {
+        self.resolve_surface_identity(identity, generation)
+            .is_some()
+    }
+
+    pub(crate) fn resolve_surface_identity(
+        &self,
+        identity: &str,
+        generation: u64,
+    ) -> Option<InternalSurfaceId> {
+        let number = identity.strip_prefix("internal:")?;
+        if number != generation.to_string() {
+            return None;
+        }
+        self.presentation
+            .keys()
+            .find(|id| id.snapshot_token() == generation)
+            .copied()
     }
 
     pub fn placement(&self, id: InternalSurfaceId) -> Option<&InternalSurfacePlacement> {
@@ -1834,17 +2033,20 @@ impl InternalUiRuntime {
         changed
     }
 
-    #[cfg(test)]
     pub(crate) fn scale_factor(&self, id: InternalSurfaceId) -> Option<f32> {
         self.presentation
             .get(&id)
             .map(|surface| surface.scale_factor)
     }
 
-    /// Resize an externally produced scene without replacing its runtime ID.
+    pub(crate) fn redraw_pending(&self, id: InternalSurfaceId) -> Option<bool> {
+        self.presentation.get(&id).map(|surface| surface.dirty)
+    }
+
+    /// Resize a hosted widget or external scene without replacing its runtime ID.
     /// In particular, a keyboard resize gesture must keep its captured target
     /// while scene layout, host geometry and raster scale change together.
-    pub(crate) fn configure_scene(
+    pub(crate) fn configure_surface(
         &mut self,
         id: InternalSurfaceId,
         placement: InternalSurfacePlacement,
@@ -1853,9 +2055,6 @@ impl InternalUiRuntime {
         let Some(surface) = self.presentation.get_mut(&id) else {
             return false;
         };
-        if surface.external_scene.is_none() {
-            return false;
-        }
         let resized = surface.placement.geometry.2 != placement.geometry.2
             || surface.placement.geometry.3 != placement.geometry.3
             || surface.scale_factor != scale;
@@ -1877,6 +2076,10 @@ impl InternalUiRuntime {
             }
         }
         changed
+    }
+
+    pub(crate) fn clipboard_limit(&self) -> usize {
+        self.clipboard_limit
     }
 
     pub(crate) fn set_clipboard_limit(&mut self, limit: usize) {
@@ -2063,6 +2266,7 @@ impl InternalUiRuntime {
 
     fn role_order(role: InternalSurfaceRole) -> u8 {
         match role {
+            InternalSurfaceRole::TrustedControl => 4,
             InternalSurfaceRole::Desktop => 0,
             InternalSurfaceRole::Application => 1,
             InternalSurfaceRole::Panel => 2,
@@ -2076,7 +2280,8 @@ impl InternalUiRuntime {
         match role {
             InternalSurfaceRole::Desktop => InternalSurfaceLayer::Background,
             InternalSurfaceRole::Application => InternalSurfaceLayer::Application,
-            InternalSurfaceRole::Panel
+            InternalSurfaceRole::TrustedControl
+            | InternalSurfaceRole::Panel
             | InternalSurfaceRole::Overlay
             | InternalSurfaceRole::PassiveOverlay
             | InternalSurfaceRole::OnScreenKeyboard => InternalSurfaceLayer::Overlay,
@@ -2412,6 +2617,24 @@ impl InternalUiRuntime {
         ids
     }
 
+    fn ordered_ids_for_layer_filtered(
+        &self,
+        output: &str,
+        layer: Option<InternalSurfaceLayer>,
+        trusted: Option<bool>,
+    ) -> Vec<InternalSurfaceId> {
+        self.ordered_ids_for_layer(output, layer)
+            .into_iter()
+            .filter(|id| {
+                trusted.is_none_or(|trusted| {
+                    self.presentation.get(id).is_some_and(|entry| {
+                        (entry.placement.role == InternalSurfaceRole::TrustedControl) == trusted
+                    })
+                })
+            })
+            .collect()
+    }
+
     /// Prepare a dirty surface and return its Smithay-importable fallback buffer.
     ///
     /// `None` after preparation means the frame is represented by GPU-native
@@ -2449,6 +2672,22 @@ impl InternalUiRuntime {
         self.render_elements_for_layer(renderer, output, output_origin, None)
     }
 
+    /// Render one existing presenter at a surface-local origin, without other scene content.
+    pub(crate) fn capture_elements(
+        &mut self,
+        renderer: &mut smithay::backend::renderer::gles::GlesRenderer,
+        id: InternalSurfaceId,
+    ) -> Vec<InternalUiRenderElement<smithay::backend::renderer::gles::GlesRenderer>> {
+        let _ = self.render_buffer(id);
+        let Some(presentation) = self.presentation.get_mut(&id) else {
+            return Vec::new();
+        };
+        let (_, _, width, height) = presentation.placement.geometry;
+        presentation
+            .renderer
+            .elements(renderer, (0, 0).into(), (width, height))
+    }
+
     /// Build front-to-back render elements for one compositor scene layer.
     pub fn render_elements_for_layer<R: Renderer + ImportMem>(
         &mut self,
@@ -2460,9 +2699,55 @@ impl InternalUiRuntime {
     where
         R::TextureId: Send + Clone + 'static,
     {
+        self.render_elements_filtered(renderer, output, output_origin, layer, None)
+    }
+
+    pub(crate) fn render_elements_without_trusted<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+        layer: Option<InternalSurfaceLayer>,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        self.render_elements_filtered(renderer, output, output_origin, layer, Some(false))
+    }
+
+    pub(crate) fn render_trusted_controls<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
+        self.render_elements_filtered(
+            renderer,
+            output,
+            output_origin,
+            Some(InternalSurfaceLayer::Overlay),
+            Some(true),
+        )
+    }
+
+    /// Build front-to-back render elements for one compositor scene layer.
+    fn render_elements_filtered<R: Renderer + ImportMem>(
+        &mut self,
+        renderer: &mut R,
+        output: &str,
+        output_origin: Point<i32, Logical>,
+        layer: Option<InternalSurfaceLayer>,
+        trusted: Option<bool>,
+    ) -> Vec<InternalUiRenderElement<R>>
+    where
+        R::TextureId: Send + Clone + 'static,
+    {
         let frame_icons = self.frame_icons.clone();
-        self.ordered_ids_for_layer(output, layer)
-            .into_iter()
+        let ids = self.ordered_ids_for_layer_filtered(output, layer, trusted);
+        ids.into_iter()
             .filter_map(|id| {
                 let placement = self.presentation.get(&id)?.placement.clone();
                 if self.presentation.get(&id)?.dirty {
@@ -2666,7 +2951,7 @@ mod tests {
             geometry: (-1920, 592, 1920, 368),
             ..placement(Some("DP-1"))
         };
-        assert!(runtime.configure_scene(id, target.clone(), 1.5));
+        assert!(runtime.configure_surface(id, target.clone(), 1.5));
         assert_eq!(runtime.placement(id), Some(&target));
         assert_eq!(runtime.scale_factor(id), Some(1.5));
         assert_eq!(
@@ -2675,7 +2960,7 @@ mod tests {
         );
         assert_eq!(runtime.surfaces.get(id).unwrap().scale_factor(), 1.5);
         assert_eq!(runtime.surfaces.ids().collect::<Vec<_>>(), vec![id]);
-        assert!(!runtime.configure_scene(id, target, 1.5));
+        assert!(!runtime.configure_surface(id, target, 1.5));
         assert!(runtime.drain_routed_events().is_empty());
     }
 
@@ -2725,6 +3010,96 @@ mod tests {
         fn view(&self, _: ViewContext) -> impl View<Self::Message> {
             Button::new((), "count")
         }
+    }
+
+    #[test]
+    fn bounded_application_action_updates_presentation_and_rejects_stale_or_hidden_tree() {
+        let mut runtime = InternalUiRuntime::default();
+        let mut place = placement(None);
+        place.role = InternalSurfaceRole::Application;
+        let id = runtime.insert(Counter(0), place, 1.0);
+        runtime.render_buffer(id);
+        assert!(!runtime.has_damage());
+        let generation = runtime.bounded_application_semantics(id).unwrap().0;
+        let invoke = || nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate);
+        assert!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .unwrap()
+        );
+        assert_eq!(runtime.application::<Counter>(id).unwrap().0, 1);
+        assert!(runtime.has_damage());
+        assert_eq!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .unwrap_err(),
+            "stale semantic tree"
+        );
+        let generation = runtime.bounded_application_semantics(id).unwrap().0;
+        runtime.set_visible(id, false);
+        assert!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .is_err()
+        );
+        assert_eq!(runtime.application::<Counter>(id).unwrap().0, 1);
+        runtime.set_visible(id, true);
+        runtime.update_scene(id, Vec::new());
+        assert!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .is_err()
+        );
+        assert_eq!(runtime.application::<Counter>(id).unwrap().0, 1);
+    }
+
+    #[test]
+    fn bounded_application_action_routes_clipboard_locally_with_current_limit() {
+        #[derive(Default)]
+        struct CopyApp {
+            copies: usize,
+            pending: bool,
+        }
+        impl Application for CopyApp {
+            type Message = ();
+            fn update(&mut self, (): ()) {
+                self.copies += 1;
+                self.pending = true;
+            }
+            fn view(&self, _: ViewContext) -> impl View<()> {
+                Button::new((), "Copy")
+            }
+            fn take_clipboard_write(&mut self) -> Option<String> {
+                std::mem::take(&mut self.pending).then(|| "local copy".into())
+            }
+        }
+        let mut runtime = InternalUiRuntime::default();
+        let mut place = placement(None);
+        place.role = InternalSurfaceRole::Application;
+        let id = runtime.insert(CopyApp::default(), place, 1.0);
+        let invoke = || nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate);
+        runtime.set_clipboard_limit(10);
+        let generation = runtime.bounded_application_semantics(id).unwrap().0;
+        assert!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .unwrap()
+        );
+        assert_eq!(
+            runtime.take_clipboard_result(),
+            Some(Ok("local copy".into()))
+        );
+        runtime.set_clipboard_limit(1);
+        let generation = runtime.bounded_application_semantics(id).unwrap().0;
+        assert_eq!(
+            runtime
+                .perform_bounded_application_action(id, generation, 0, invoke())
+                .unwrap_err(),
+            "semantic action completed with a local effect failure; do not retry"
+        );
+        assert!(runtime.take_clipboard_result().unwrap().is_err());
+        assert_eq!(runtime.application::<CopyApp>(id).unwrap().copies, 2);
+        assert!(runtime.has_damage());
     }
 
     struct SubmitCounter(usize);
@@ -3058,6 +3433,31 @@ mod tests {
             vec![application]
         );
         assert_eq!(runtime.surface_at((10.0, 10.0), true).unwrap().0, overlay);
+        let trusted = runtime.insert(
+            Label,
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::TrustedControl,
+                geometry: (0, 0, 100, 100),
+                output: Some("nested".into()),
+            },
+            1.0,
+        );
+        assert_eq!(
+            runtime.ordered_ids_for_layer_filtered(
+                "nested",
+                Some(InternalSurfaceLayer::Overlay),
+                Some(false)
+            ),
+            vec![overlay, panel]
+        );
+        assert_eq!(
+            runtime.ordered_ids_for_layer_filtered(
+                "nested",
+                Some(InternalSurfaceLayer::Overlay),
+                Some(true)
+            ),
+            vec![trusted]
+        );
     }
 
     #[test]
@@ -3142,6 +3542,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert_eq!(
+            renderer.diagnostics().fallback_reason,
+            Some(InternalUiFallbackReason::RequestedSoftware)
+        );
         assert!(renderer.primitives.is_empty());
         assert!(renderer.raster.is_some());
         assert!(renderer.software.is_some());
@@ -3178,6 +3582,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
+        assert_eq!(renderer.diagnostics().fallback_reason, None);
+        assert_eq!(
+            renderer.diagnostics().configured_mode,
+            InternalUiRendererMode::Gpu
+        );
         assert!(renderer.software.is_none());
         assert!(renderer.raster.is_none());
         assert_eq!(renderer.diagnostics().software_frame_bytes, 0);
@@ -3242,6 +3651,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert_eq!(
+            renderer.diagnostics().fallback_reason,
+            Some(InternalUiFallbackReason::ElementBudget)
+        );
         assert!(renderer.primitives.is_empty());
         assert!(renderer.raster.is_some());
         assert_eq!(renderer.diagnostics().fallback_frames, 1);
@@ -3554,6 +3967,10 @@ mod tests {
         assert_eq!(renderer.mode(), InternalUiPresentationMode::GpuSolid);
         assert!(renderer.activate_import_fallback());
         assert_eq!(renderer.mode(), InternalUiPresentationMode::RasterFallback);
+        assert_eq!(
+            renderer.diagnostics().fallback_reason,
+            Some(InternalUiFallbackReason::TextureImportFailure)
+        );
         assert!(renderer.raster.is_some());
         assert!(renderer.primitives.is_empty());
         assert_eq!(renderer.diagnostics().fallback_image_count, 1);

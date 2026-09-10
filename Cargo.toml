@@ -5,6 +5,7 @@ members = [
     "crates/nickel-codex-fixture",
     "crates/nickel-codex-ui",
     "crates/nickel-remote-control",
+    "crates/nickel-mcp-client",
     "crates/nickel-input",
     "crates/nickel-ui",
     "crates/nickel-ui-testkit",
@@ -39,6 +40,7 @@ debug = "line-tables-only"
 incremental = false
 
 [patch.crates-io]
+pipewire-native = { path = "vendor/pipewire-native" }
 ui-declarative-macros = { path = "crates/ui-declarative-macros" }
 winit = { path = "vendor/winit" }
 
@@ -103,6 +105,9 @@ qrcode = { version = "0.14.1", default-features = false }
 getrandom = "0.4.3"
 subtle = "2.6.1"
 axum = "0.8.8"
+axum-server = { version = "0.8.0", features = ["tls-rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12"] }
+rustls-pemfile = "2.2"
 http = "1.5.0"
 rmcp = { version = "3.2.0", default-features = false, features = ["macros", "server", "transport-streamable-http-server"] }
 schemars = "1.2.1"

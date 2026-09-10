@@ -27,6 +27,22 @@ use crate::session::{
     window_frame::{self, FramePart},
 };
 
+fn physical_emergency_control(xkb_code: u32, syspath: Option<&std::path::Path>) -> Option<KeyCode> {
+    let path = syspath?;
+    if !path.starts_with("/sys/devices")
+        || path
+            .components()
+            .any(|component| component.as_os_str() == "virtual")
+    {
+        return None;
+    }
+    match xkb_code {
+        37 => Some(KeyCode::ControlLeft),
+        105 => Some(KeyCode::ControlRight),
+        _ => None,
+    }
+}
+
 fn desktop_modifiers(
     modifiers: &smithay::input::keyboard::ModifiersState,
 ) -> nickel_input::ModifierState {
@@ -450,6 +466,21 @@ impl NickelSession {
         output_name: Option<&str>,
     ) -> Option<i32> {
         use smithay::backend::input::{Device, DeviceCapability};
+        if !self.remote_input_dispatching
+            && matches!(
+                &event,
+                InputEvent::Keyboard { .. }
+                    | InputEvent::PointerMotion { .. }
+                    | InputEvent::PointerMotionAbsolute { .. }
+                    | InputEvent::PointerButton { .. }
+                    | InputEvent::PointerAxis { .. }
+                    | InputEvent::TouchDown { .. }
+            )
+        {
+            self.take_over_remote_gtk_menu();
+            self.cancel_remote_pointer();
+            self.cancel_remote_keyboard();
+        }
         match &event {
             InputEvent::DeviceAdded { device }
                 if device.has_capability(DeviceCapability::Touch) && device.syspath().is_some() =>
@@ -564,19 +595,27 @@ impl NickelSession {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = event.time();
                 let state = event.state();
-                // XKB keycodes are evdev codes plus eight, so Escape is keycode nine. Keep this
-                // diagnostic deliberately limited to Escape: logging ordinary keys would expose
-                // typed text, while this provenance is essential for distinguishing a physical
-                // HID report from the compositor's auxiliary and test input paths.
-                if event.key_code().raw() == 9 {
-                    let device = event.device();
-                    tracing::warn!(
-                        device_id = %device.id(),
-                        device_name = %device.name(),
-                        device_path = ?device.syspath(),
-                        ?state,
-                        "diagnostic: received Escape from an input backend"
-                    );
+                // Recognize the two physical positions before XKB layout/remapping or client
+                // dispatch. Synthetic backends and virtual devices cannot participate, including
+                // releases that could otherwise reset the physical recognizer's held state.
+                if let Some(key) = physical_emergency_control(
+                    event.key_code().raw(),
+                    event.device().syspath().as_deref(),
+                ) {
+                    let edge = if state == KeyState::Pressed {
+                        KeyEdge::Pressed
+                    } else {
+                        KeyEdge::Released
+                    };
+                    if self.remote_emergency_chord.handle_physical(
+                        key,
+                        edge,
+                        self.remote_control.status().effective
+                            == nickel_remote_control::EffectiveState::Enabled,
+                    ) {
+                        self.emergency_stop_remote_control();
+                        return None;
+                    }
                 }
                 let keyboard = self.seat.get_keyboard().unwrap();
                 return keyboard
@@ -619,15 +658,6 @@ impl NickelSession {
                             };
                             let outcome = match key_code_from_keysym(sym) {
                                 Some(key) => {
-                                    if session.remote_emergency_chord.handle_physical(
-                                        key,
-                                        edge,
-                                        session.remote_control.status().effective
-                                            == nickel_remote_control::EffectiveState::Enabled,
-                                    ) {
-                                        session.emergency_stop_remote_control();
-                                        return FilterResult::Intercept(None);
-                                    }
                                     session.hotkeys.handle(key, edge)
                                 }
                                 None => session.hotkeys.handle_unmapped(edge),
@@ -1957,6 +1987,44 @@ fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn physical_emergency_positions_exclude_synthetic_and_virtual_devices() {
+        use super::physical_emergency_control;
+        use nickel_core::hotkeys::KeyCode;
+        use std::path::Path;
+        let physical = Some(Path::new(
+            "/sys/devices/pci0000:00/usb1/input/input10/event10",
+        ));
+        assert_eq!(
+            physical_emergency_control(37, physical),
+            Some(KeyCode::ControlLeft)
+        );
+        assert_eq!(
+            physical_emergency_control(105, physical),
+            Some(KeyCode::ControlRight)
+        );
+        assert_eq!(physical_emergency_control(38, physical), None);
+        for path in [
+            None,
+            Some(Path::new("/sys/devices/virtual/input/input20/event20")),
+            Some(Path::new("remote-agent")),
+        ] {
+            assert_eq!(physical_emergency_control(37, path), None);
+            assert_eq!(physical_emergency_control(105, path), None);
+        }
+        let mut chord = nickel_remote_control::EmergencyChord::default();
+        let events = [
+            (37, physical, nickel_core::hotkeys::KeyEdge::Pressed, false),
+            (105, None, nickel_core::hotkeys::KeyEdge::Pressed, false),
+            (37, None, nickel_core::hotkeys::KeyEdge::Released, false),
+            (105, physical, nickel_core::hotkeys::KeyEdge::Pressed, true),
+        ];
+        for (code, path, edge, expected) in events {
+            let stopped = physical_emergency_control(code, path)
+                .is_some_and(|key| chord.handle_physical(key, edge, true));
+            assert_eq!(stopped, expected);
+        }
+    }
     #[test]
     fn desktop_scroll_keeps_fractional_wheel_lines_and_pixel_distances() {
         use super::super::internal_ui::DesktopPointerAction;

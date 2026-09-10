@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 25;
+pub const PROTOCOL_VERSION: u16 = 26;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -127,6 +127,29 @@ pub enum Command {
     },
     RevokeRemoteClient {
         client_id: String,
+    },
+    BlockRemoteClient {
+        client_id: String,
+        blocked: bool,
+    },
+    DecideRemoteLease {
+        pending_generation: u64,
+        client_id: String,
+        #[serde(rename = "lease_request")]
+        request: RemoteLeaseRequest,
+        allow: bool,
+    },
+    ManageRemoteLease {
+        lease_id: u64,
+        action: RemoteLeaseAction,
+    },
+    ApproveRemoteLeaseDuration {
+        pending_generation: u64,
+        client_id: String,
+        #[serde(rename = "lease_request")]
+        request: RemoteLeaseRequest,
+        #[serde(deserialize_with = "Option::deserialize")]
+        duration_seconds: Option<u64>,
     },
     ToggleLauncher,
     SetLauncherVisible {
@@ -863,7 +886,7 @@ pub enum Event {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ShellBehaviorSetting {
     BarDisplayScope,
@@ -871,14 +894,15 @@ pub enum ShellBehaviorSetting {
     DesktopCount,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(untagged)]
 pub enum ShellBehaviorValue {
     Toggle(bool),
     Count(u8),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct ShellBehaviorTransaction {
     pub setting: ShellBehaviorSetting,
     pub prior: ShellBehaviorValue,
@@ -909,9 +933,212 @@ pub struct RemoteControlSnapshot {
     pub generation: u64,
     pub acknowledged_generation: u64,
     pub endpoint: String,
+    #[serde(default)]
+    pub host_fingerprint: Option<String>,
+    #[serde(default)]
+    pub environment_override: bool,
     pub diagnostic: Option<String>,
     pub pending_clients: Vec<RemotePendingClientSnapshot>,
     pub granted_clients: Vec<RemoteGrantedClientSnapshot>,
+    #[serde(default)]
+    pub pending_leases: Vec<RemotePendingLease>,
+    #[serde(default)]
+    pub active_leases: Vec<RemoteActiveLease>,
+    #[serde(default)]
+    pub lease_audit: Vec<RemoteLeaseAuditEvent>,
+    #[serde(default)]
+    pub lease_audit_evicted: u64,
+    #[serde(default)]
+    pub permission_audit: Vec<RemotePermissionAuditEvent>,
+    #[serde(default)]
+    pub permission_audit_evicted: u64,
+    #[serde(default)]
+    pub trace_audit: Vec<RemoteTraceAuditEvent>,
+    #[serde(default)]
+    pub trace_audit_evicted: u64,
+    #[serde(default)]
+    pub connection_audit: Vec<RemoteConnectionAuditEvent>,
+    #[serde(default)]
+    pub connection_audit_evicted: u64,
+}
+
+/// Local control protocol only; excluded from agent discovery and diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteConnectionAuditEvent {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub client_id: String,
+    pub address: std::net::IpAddr,
+    pub tls: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTraceCategory {
+    NestedFrameDispatch,
+    DrmFrameDispatch,
+}
+
+/// Fixed trace lifecycle outcomes for trusted local inspection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteTraceTransition {
+    Started,
+    Stopped,
+    TimedOut,
+    Cancelled,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteTraceAuditEvent {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub client_id: u64,
+    pub lease_id: u64,
+    pub trace_id: u64,
+    pub category: RemoteTraceCategory,
+    pub transition: RemoteTraceTransition,
+    pub duration_limit_seconds: u16,
+    pub elapsed_us: u64,
+}
+
+/// Fixed permission outcomes; no caller-controlled labels or request payloads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(usize)]
+pub enum RemotePermissionOutcome {
+    Submitted,
+    Coalesced,
+    Approved,
+    Denied,
+    Cancelled,
+    Blocked,
+    Invalid,
+    Capacity,
+    Cooldown,
+    BlockedRequest,
+    Unauthorized,
+}
+
+/// Trusted local projection, excluded from remote diagnostic snapshots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemotePermissionAuditEvent {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub client_id: Option<u64>,
+    pub outcome: RemotePermissionOutcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLeaseTransition {
+    Approved,
+    Renewed,
+    Paused,
+    Resumed,
+    Expired,
+    Revoked,
+    Disconnected,
+    Reconnected,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLeaseScopeKind {
+    Surface,
+    Window,
+    Application,
+    Output,
+    FullSession,
+}
+
+/// Trusted local Settings projection, excluded from MCP diagnostic snapshots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteLeaseAuditEvent {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub lease_id: u64,
+    pub transition: RemoteLeaseTransition,
+    pub scope: RemoteLeaseScopeKind,
+    pub lifetime_limit_seconds: Option<u64>,
+    pub full_debug: bool,
+    pub allow_resumption: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteLeaseAction {
+    Pause,
+    Resume,
+    Revoke,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemoteActiveLease {
+    pub lease_id: u64,
+    pub client_label: String,
+    pub scope: RemoteResourceScope,
+    /// Presentation resolved by the local session; never an authorization key.
+    #[serde(default)]
+    pub resource_label: Option<String>,
+    pub remaining_seconds: Option<u64>,
+    pub suspended: bool,
+    pub full_debug: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RemoteResourceId {
+    pub id: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", content = "resource", rename_all = "snake_case")]
+pub enum RemoteResourceScope {
+    Surface(RemoteResourceId),
+    Window(RemoteResourceId),
+    /// Use verified_application from an authorized window or installed-app inventory.
+    /// A display label, self-reported app ID, or WM_CLASS does not establish scope.
+    Application(String),
+    Output(RemoteResourceId),
+    FullSession,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemoteLeaseRequest {
+    #[serde(default)]
+    pub renewal: Option<RemoteLeaseRenewal>,
+    pub scope: RemoteResourceScope,
+    pub duration_seconds: Option<u64>,
+    pub allow_resumption: bool,
+    pub full_debug: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteLeaseRenewal {
+    pub lease_id: u64,
+    pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemoteLeaseRequestChanges {
+    pub access_changed: bool,
+    pub duration_increased: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RemotePendingLease {
+    /// Incarnation of this pending card, preserved only for equivalent coalesced requests.
+    pub pending_generation: u64,
+    pub client_id: String,
+    pub client_label: String,
+    pub request: RemoteLeaseRequest,
+    /// Presentation resolved by the local session; never supplied by the client.
+    #[serde(default)]
+    pub resource_label: Option<String>,
+    /// Local comparison with previous versions of this pending request.
+    #[serde(default)]
+    pub changes: RemoteLeaseRequestChanges,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -944,11 +1171,21 @@ pub struct RemotePendingClientSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteClientOrigin {
+    pub address: String,
+    pub tls: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteGrantedClientSnapshot {
     pub id: String,
     pub label: String,
     pub capabilities: Vec<RemoteCapability>,
     pub remembered: bool,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub origin: Option<RemoteClientOrigin>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1385,6 +1622,103 @@ impl PreviewFrame {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lease_management_uses_the_protocols_snake_case_wire_actions() {
+        use super::*;
+        for (action, name) in [
+            (RemoteLeaseAction::Pause, "pause"),
+            (RemoteLeaseAction::Resume, "resume"),
+            (RemoteLeaseAction::Revoke, "revoke"),
+        ] {
+            let value = serde_json::json!({
+                "token": "test-only", "request_id": 42,
+                "request": {"request": "command", "command": "manage_remote_lease",
+                    "lease_id": 7, "action": name}
+            });
+            let envelope: ClientEnvelope = serde_json::from_value(value).unwrap();
+            assert_eq!(
+                envelope.request,
+                Request::Command(Command::ManageRemoteLease {
+                    lease_id: 7,
+                    action,
+                })
+            );
+            assert_eq!(
+                decode::<ClientEnvelope>(&encode(&envelope).unwrap()).unwrap(),
+                envelope
+            );
+        }
+    }
+
+    #[test]
+    fn pending_lease_change_metadata_defaults_with_explicit_incarnation() {
+        use super::*;
+        let pending: RemotePendingLease = serde_json::from_value(serde_json::json!({
+            "pending_generation": 1, "client_id": "agent", "client_label": "Agent", "resource_label": null,
+            "request": {"scope": {"kind": "full_session"}, "duration_seconds": 30,
+                "allow_resumption": false, "full_debug": false}
+        }))
+        .unwrap();
+        assert_eq!(pending.changes, RemoteLeaseRequestChanges::default());
+    }
+
+    #[test]
+    fn local_duration_approval_requires_an_explicit_choice() {
+        use super::*;
+        for duration_seconds in [Some(1200), Some(7200), Some(420), None] {
+            let command = Command::ApproveRemoteLeaseDuration {
+                pending_generation: 1,
+                client_id: "agent".into(),
+                request: RemoteLeaseRequest {
+                    renewal: None,
+                    scope: RemoteResourceScope::FullSession,
+                    duration_seconds: Some(30),
+                    allow_resumption: false,
+                    full_debug: false,
+                },
+                duration_seconds,
+            };
+            let mut json = serde_json::to_value(&command).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Command>(json.clone()).unwrap(),
+                command
+            );
+            json.as_object_mut().unwrap().remove("duration_seconds");
+            assert!(serde_json::from_value::<Command>(json).is_err());
+        }
+    }
+
+    #[test]
+    fn lease_decision_round_trips_inside_the_authenticated_request_envelope() {
+        use super::*;
+        let envelope = ClientEnvelope {
+            token: "test-only".into(),
+            request_id: 42,
+            request: Request::Command(Command::DecideRemoteLease {
+                pending_generation: 1,
+                client_id: "agent".into(),
+                allow: true,
+                request: RemoteLeaseRequest {
+                    renewal: None,
+                    scope: RemoteResourceScope::FullSession,
+                    duration_seconds: Some(1200),
+                    allow_resumption: false,
+                    full_debug: false,
+                },
+            }),
+        };
+        let encoded = encode(&envelope).unwrap();
+        assert_eq!(decode::<ClientEnvelope>(&encoded).unwrap(), envelope);
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["request"]["request"], "command");
+        assert!(json["request"]["lease_request"].is_object());
+        let mut missing = json;
+        missing["request"]
+            .as_object_mut()
+            .unwrap()
+            .remove("pending_generation");
+        assert!(serde_json::from_value::<ClientEnvelope>(missing).is_err());
+    }
     #[test]
     fn native_preview_work_diagnostics_preserve_old_payload_compatibility() {
         let mut old = serde_json::to_value(super::CacheDiagnostics::default()).unwrap();

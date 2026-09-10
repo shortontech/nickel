@@ -52,6 +52,7 @@ struct Sink {
     exposed: bool,
     driver_id: Option<u32>,
     channel_volumes: Vec<f32>,
+    volume_observed: bool,
     muted: bool,
 }
 
@@ -60,6 +61,26 @@ struct Graph {
     sinks: HashMap<u32, Sink>,
     default_name: Option<String>,
     metadata: Option<Metadata>,
+    metadata_id: Option<u32>,
+    proxy_admissions: usize,
+    invalid_inventory: bool,
+}
+
+// Count lifetime admissions, not current map occupancy: the native Core may
+// retain removed proxies. Never recycle this budget within a guarded connection.
+fn admit_guarded_proxy(graph: &Mutex<Graph>, metadata: bool) -> bool {
+    let Ok(mut graph) = graph.lock() else {
+        return false;
+    };
+    if graph.invalid_inventory
+        || graph.proxy_admissions >= 129
+        || (metadata && graph.metadata_id.is_some())
+    {
+        graph.invalid_inventory = true;
+        return false;
+    }
+    graph.proxy_admissions += 1;
+    true
 }
 
 static BACKEND: OnceLock<AudioBackend> = OnceLock::new();
@@ -185,10 +206,88 @@ fn run_connection(
     commands: &mpsc::Receiver<AudioCommand>,
     pending: &mut Option<AudioCommand>,
 ) -> Result<(), String> {
+    let connection = create_connection(snapshot, subscribers, false)?;
+    let AudioConnection {
+        main_loop,
+        core,
+        completed,
+        graph,
+        ..
+    } = &connection;
+
+    loop {
+        main_loop
+            .iterate(Some(Duration::from_millis(50)))
+            .map_err(|error| error.to_string())?;
+        loop {
+            match pending
+                .take()
+                .map(Ok)
+                .unwrap_or_else(|| commands.try_recv())
+            {
+                Ok(command) => {
+                    if graph.lock().map_or(true, |graph| graph.invalid_inventory) {
+                        return Err("PipeWire inventory is ambiguous or exceeded its bound".into());
+                    }
+                    apply_command(command, graph)?;
+                    audio_roundtrip(core, main_loop, completed)?;
+                    // Relative commands must not all read the pre-burst graph.
+                    // Refresh properties, then process the matching roundtrip
+                    // before deriving the next adjustment. This wait is confined
+                    // to the existing audio worker, never the compositor loop.
+                    let node = {
+                        let current = graph
+                            .lock()
+                            .map_err(|_| "PipeWire graph lock was poisoned")?;
+                        effective_sink(&current)?.node.clone()
+                    };
+                    node.enum_params(0, Some(ParamType::Props), 0, u32::MAX, None)
+                        .map_err(|error| error.to_string())?;
+                    audio_roundtrip(core, main_loop, completed)?;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+            }
+        }
+    }
+}
+
+struct AudioConnection {
+    core: Core,
+    completed: Arc<Mutex<Option<u32>>>,
+    graph: Arc<Mutex<Graph>>,
+    // Context and main loop outlive the Core and its proxies.
+    _context: Context,
+    main_loop: MainLoop,
+}
+
+impl Drop for AudioConnection {
+    fn drop(&mut self) {
+        // Core's destroy listener disconnects the transport, removes its loop
+        // source and discards queued bytes. It does not flush on disconnect.
+        self.core.disconnect();
+    }
+}
+
+fn create_connection(
+    snapshot: &Arc<RwLock<AudioStatus>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
+    bounded: bool,
+) -> Result<AudioConnection, String> {
+    pipewire::init();
     let main_loop = MainLoop::new(&Properties::new())
         .ok_or_else(|| "could not create PipeWire main loop".to_owned())?;
     let context = Context::new(&main_loop, Properties::new()).map_err(|error| error.to_string())?;
-    let core = context.connect(None).map_err(|error| error.to_string())?;
+    let core = if bounded {
+        context.connect_timeout(None, Duration::from_millis(300))
+    } else {
+        context.connect(None)
+    }
+    .map_err(|error| error.to_string())?;
+    if bounded {
+        core.set_dispatch_limits(128, 262_144, 65_536)
+            .map_err(|error| error.to_string())?;
+    }
     let completed = Arc::new(Mutex::new(None));
     let completion = Arc::clone(&completed);
     let mut events = CoreEvents::default();
@@ -209,12 +308,15 @@ fn run_connection(
             if type_ == types::interface::NODE
                 && props.get("media.class").is_some_and(|class| class.starts_with("Audio/Sink"))
             {
+                if bounded && !admit_guarded_proxy(listener_graph, false) { return; }
                 let name = props.get("node.name").unwrap_or("unknown-output").to_owned();
+                if bounded && name.len() > 512 { return; }
                 let description = props
                     .get("node.description")
                     .or_else(|| props.get("node.nick"))
                     .unwrap_or(&name)
                     .to_owned();
+                if bounded && description.len() > 512 { return; }
                 let exposed = props.get("media.class") == Some("Audio/Sink");
                 let driver_id = props.get("node.driver-id").and_then(|value| value.parse().ok());
                 let Ok(object) = registry.bind(id, type_, version.min(3)) else { return; };
@@ -250,6 +352,7 @@ fn run_connection(
                         exposed,
                         driver_id,
                         channel_volumes: vec![0.0],
+                        volume_observed: false,
                         muted: false,
                     });
                     publish(listener_snapshot, listener_subscribers, &graph);
@@ -257,6 +360,7 @@ fn run_connection(
                 let _ = node.subscribe_params(&[ParamType::Props]);
                 let _ = node.enum_params(0, Some(ParamType::Props), 0, u32::MAX, None);
             } else if type_ == types::interface::METADATA && props.get("metadata.name") == Some("default") {
+                if bounded && !admit_guarded_proxy(listener_graph, true) { return; }
                 let Ok(object) = registry.bind(id, type_, version.min(3)) else { return; };
                 let Some(metadata) = object.downcast::<Metadata>() else { return; };
                 let metadata_graph = Arc::clone(listener_graph);
@@ -274,49 +378,162 @@ fn run_connection(
                 });
                 if let Ok(mut graph) = listener_graph.lock() {
                     graph.metadata = Some(metadata);
+                    graph.metadata_id = Some(id);
                 }
             }
         }),
         global_remove: some_closure!([^(graph, snapshot, subscribers)] id, {
             if let Ok(mut graph) = graph.lock() {
                 graph.sinks.remove(&id);
+                if graph.metadata_id == Some(id) {
+                    graph.metadata = None;
+                    graph.metadata_id = None;
+                    if bounded { graph.invalid_inventory = true; }
+                }
                 publish(snapshot, subscribers, &graph);
             }
         }),
     });
     let _ = core.sync();
 
-    loop {
-        main_loop
-            .iterate(Some(Duration::from_millis(50)))
-            .map_err(|error| error.to_string())?;
-        loop {
-            match pending
-                .take()
-                .map(Ok)
-                .unwrap_or_else(|| commands.try_recv())
-            {
-                Ok(command) => {
-                    apply_command(command, &graph)?;
-                    audio_roundtrip(&core, &main_loop, &completed)?;
-                    // Relative commands must not all read the pre-burst graph.
-                    // Refresh properties, then process the matching roundtrip
-                    // before deriving the next adjustment. This wait is confined
-                    // to the existing audio worker, never the compositor loop.
-                    let node = {
-                        let current = graph
-                            .lock()
-                            .map_err(|_| "PipeWire graph lock was poisoned")?;
-                        effective_sink(&current)?.node.clone()
-                    };
-                    node.enum_params(0, Some(ParamType::Props), 0, u32::MAX, None)
-                        .map_err(|error| error.to_string())?;
-                    audio_roundtrip(&core, &main_loop, &completed)?;
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => return Ok(()),
+    Ok(AudioConnection {
+        main_loop,
+        _context: context,
+        core,
+        completed,
+        graph,
+    })
+}
+
+pub(super) fn execute_guarded(
+    action: crate::control_view::ControlAction,
+    permit: nickel_remote_control::DesktopPermit,
+    origin: super::linux_guarded_control::GuardedControlOrigin,
+) -> super::linux_guarded_control::GuardedControlOutcome {
+    use super::linux_guarded_control::GuardedControlOutcome as Outcome;
+    use crate::control_view::ControlAction;
+    let command = match &action {
+        ControlAction::SetAudioVolume(volume) if *volume <= 100 => AudioCommand::SetVolume(*volume),
+        ControlAction::SelectAudioDevice { id } if id.len() <= 512 => {
+            AudioCommand::SelectOutput(id.clone())
+        }
+        _ => return Outcome::Unavailable,
+    };
+    if origin.check().is_err() {
+        return Outcome::Cancelled;
+    }
+    let evidence = nickel_remote_control::leases::ResourceEvidence {
+        surface: None,
+        window: None,
+        verified_application: None,
+        output: None,
+        authorized_surface_ancestors: &[],
+        protected: false,
+    };
+    if permit.with_resource(&evidence, || Ok(())).is_err() {
+        return Outcome::Cancelled;
+    }
+    // This worker exclusively owns a separate connection. Neither the local
+    // audio worker nor another thread can iterate or flush its pending bytes.
+    let snapshot = Arc::new(RwLock::new(AudioStatus::default()));
+    let subscribers = Arc::new(Mutex::new(Vec::new()));
+    let Ok(connection) = create_connection(&snapshot, &subscribers, true) else {
+        return Outcome::Unavailable;
+    };
+    let AudioConnection {
+        core,
+        main_loop,
+        completed,
+        graph,
+        ..
+    } = &connection;
+    // Registry discovery, node bindings and initial properties each need their
+    // own server barrier. These read-only setup phases never hold authority.
+    for _ in 0..3 {
+        if permit.check_live().is_err() || origin.check().is_err() {
+            return Outcome::Cancelled;
+        }
+        if audio_roundtrip(core, main_loop, completed).is_err() {
+            return Outcome::Unavailable;
+        }
+    }
+    // Drain all setup output before queuing a mutation. No main-loop callbacks
+    // execute between the setter and completion of its guarded socket writes.
+    if !matches!(core.try_flush_pending_once(65_536), Ok(0)) {
+        return Outcome::Unavailable;
+    }
+
+    let mut attempted = false;
+    let result = permit.with_input_boundary(&evidence, |boundary| {
+        permit.check_commit_boundary(boundary)?;
+        origin.check()?;
+        if graph.lock().map_or(true, |graph| graph.invalid_inventory) {
+            return Err("PipeWire inventory is ambiguous or exceeded its bound".into());
+        }
+        apply_command(command, graph)?;
+        // Only this bounded message belongs to this connection. Each partial
+        // write is reauthorized, with no event-loop iteration in between.
+        for _ in 0..16 {
+            permit.check_commit_boundary(boundary)?;
+            origin.check()?;
+            attempted = true;
+            match core.try_flush_pending_once(65_536) {
+                Ok(0) => return Ok(()),
+                Ok(_) => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return Err("native audio submission incomplete".into()),
             }
         }
+        Err("native audio submission exceeded step bound".into())
+    });
+    if result.is_err() {
+        return if attempted {
+            Outcome::Uncertain
+        } else if permit.check_live().is_err() || origin.check().is_err() {
+            Outcome::Cancelled
+        } else {
+            Outcome::Unavailable
+        };
+    }
+    // Once the complete native message is accepted it cannot be rolled back.
+    // Cancellation suppresses confirmed success, but cannot unsend that message.
+    if permit.check_live().is_err()
+        || origin.check().is_err()
+        || audio_roundtrip(core, main_loop, completed).is_err()
+    {
+        return Outcome::Uncertain;
+    }
+    if permit.check_live().is_err() || origin.check().is_err() {
+        return Outcome::Uncertain;
+    }
+    let node = graph
+        .lock()
+        .ok()
+        .and_then(|current| effective_sink(&current).ok().map(|sink| sink.node.clone()));
+    if let Some(node) = node
+        && (node
+            .enum_params(0, Some(ParamType::Props), 0, 128, None)
+            .is_err()
+            || audio_roundtrip(core, main_loop, completed).is_err())
+    {
+        return Outcome::Uncertain;
+    }
+    if permit.check_live().is_err() || origin.check().is_err() {
+        return Outcome::Uncertain;
+    }
+    let confirmed = graph.lock().ok().is_some_and(|current| match action {
+        ControlAction::SetAudioVolume(volume) => effective_sink(&current).is_ok_and(|sink| {
+            sink.volume_observed && average_volume(&sink.channel_volumes) == volume
+        }),
+        ControlAction::SelectAudioDevice { id } => {
+            current.default_name.as_deref() == Some(id.as_str())
+        }
+        _ => false,
+    });
+    if confirmed {
+        Outcome::Confirmed
+    } else {
+        Outcome::Requested
     }
 }
 
@@ -413,6 +630,7 @@ fn update_props(
         && let Some(sink) = graph.sinks.get_mut(&id)
     {
         if let Some(volume) = volume {
+            sink.volume_observed = !volume.is_empty();
             sink.channel_volumes = volume;
         }
         if let Some(muted) = muted {
@@ -585,6 +803,143 @@ mod tests {
     };
 
     use super::{average_volume, default_sink_name, set_volume, status};
+
+    #[test]
+    #[ignore = "requires owned private PipeWire daemon and dummy sink"]
+    fn private_pipewire_flush_and_abandonment_use_actual_socket_boundary() {
+        use super::*;
+        assert_eq!(
+            std::env::var("PIPEWIRE_REMOTE").unwrap(),
+            "nickel-guarded-test"
+        );
+        assert_eq!(
+            std::env::var("XDG_RUNTIME_DIR").unwrap(),
+            "/tmp/nickel-guarded-native/runtime"
+        );
+        fn ready() -> AudioConnection {
+            let connection = create_connection(
+                &Arc::new(RwLock::new(AudioStatus::default())),
+                &Arc::new(Mutex::new(Vec::new())),
+                true,
+            )
+            .unwrap();
+            for _ in 0..3 {
+                audio_roundtrip(
+                    &connection.core,
+                    &connection.main_loop,
+                    &connection.completed,
+                )
+                .unwrap();
+            }
+            assert_eq!(connection.core.try_flush_pending_once(65_536).unwrap(), 0);
+            connection
+        }
+        fn volume(connection: &AudioConnection) -> u8 {
+            average_volume(
+                &effective_sink(&connection.graph.lock().unwrap())
+                    .unwrap()
+                    .channel_volumes,
+            )
+        }
+        // Adversarial ready burst: the peer can supply far more responses than
+        // one callback budget. Each native iterate must yield to the outer loop.
+        for (messages, bytes, expected_batch) in [(7, 262_144, 7), (128, 16_384, 1)] {
+            let burst = ready();
+            burst
+                .core
+                .set_dispatch_limits(messages, bytes, 16_384)
+                .unwrap();
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let observed_count = Arc::clone(&count);
+            let mut burst_events = CoreEvents::default();
+            burst_events.done = Some(Box::new(move |id, _| {
+                if id == 0 {
+                    observed_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }));
+            burst.core.add_listener(burst_events);
+            for _ in 0..512 {
+                burst.core.sync().unwrap();
+            }
+            assert_eq!(burst.core.try_flush_pending_once(65_536).unwrap(), 0);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut yielded = false;
+            while count.load(std::sync::atomic::Ordering::Relaxed) < 512 {
+                assert!(
+                    Instant::now() < deadline,
+                    "burst callback prevented outer deadline progress"
+                );
+                let before = count.load(std::sync::atomic::Ordering::Relaxed);
+                burst
+                    .main_loop
+                    .iterate(Some(Duration::from_millis(10)))
+                    .unwrap();
+                let after = count.load(std::sync::atomic::Ordering::Relaxed);
+                assert!(
+                    after - before <= expected_batch,
+                    "one callback exceeded its message budget"
+                );
+                yielded |= after > 0 && after < 512;
+            }
+            assert!(yielded);
+            drop(burst);
+        }
+
+        // A native peer repeatedly publishes and retires duplicate default
+        // metadata. The guarded connection admits no replacement proxies.
+        let churn = ready();
+        let producer = ready();
+        let admitted = churn.graph.lock().unwrap().proxy_admissions;
+        for _ in 0..140 {
+            let mut properties = Properties::new();
+            properties.set("metadata.name", "default".into());
+            let object = producer
+                .core
+                .create_object("metadata", types::interface::METADATA, 3, &properties)
+                .unwrap();
+            audio_roundtrip(&producer.core, &producer.main_loop, &producer.completed).unwrap();
+            audio_roundtrip(&churn.core, &churn.main_loop, &churn.completed).unwrap();
+            producer.core.destroy(object.as_ref()).unwrap();
+            audio_roundtrip(&producer.core, &producer.main_loop, &producer.completed).unwrap();
+            audio_roundtrip(&churn.core, &churn.main_loop, &churn.completed).unwrap();
+        }
+        assert!(churn.graph.lock().unwrap().invalid_inventory);
+        assert_eq!(churn.graph.lock().unwrap().proxy_admissions, admitted);
+        drop(producer);
+        drop(churn);
+
+        let original = ready();
+        let before = volume(&original);
+        drop(original);
+        let abandoned = ready();
+        apply_command(
+            AudioCommand::SetVolume(if before == 13 { 14 } else { 13 }),
+            &abandoned.graph,
+        )
+        .unwrap();
+        // No iterate and no flush after cancellation: dropping the dedicated
+        // connection must not let its buffered setter escape to the dummy sink.
+        drop(abandoned);
+        let confirmed = ready();
+        assert_eq!(volume(&confirmed), before);
+        let requested = if before == 29 { 30 } else { 29 };
+        apply_command(AudioCommand::SetVolume(requested), &confirmed.graph).unwrap();
+        let mut remaining = 1;
+        for _ in 0..16 {
+            remaining = confirmed.core.try_flush_pending_once(65_536).unwrap();
+            if remaining == 0 {
+                break;
+            }
+        }
+        assert_eq!(remaining, 0);
+        audio_roundtrip(&confirmed.core, &confirmed.main_loop, &confirmed.completed).unwrap();
+        drop(confirmed);
+        let observed = ready();
+        assert_eq!(volume(&observed), requested);
+        apply_command(AudioCommand::SetVolume(before), &observed.graph).unwrap();
+        assert_eq!(observed.core.try_flush_pending_once(65_536).unwrap(), 0);
+        audio_roundtrip(&observed.core, &observed.main_loop, &observed.completed).unwrap();
+    }
 
     #[test]
     fn connection_retries_preserve_queued_commands_and_stop_after_disconnect() {

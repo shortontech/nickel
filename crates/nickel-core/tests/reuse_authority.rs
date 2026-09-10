@@ -120,26 +120,30 @@ fn nickel_core_delegates_configuration_storage_mechanics() {
         violations.join("\n")
     );
 
-    for (module, expected_calls) in [
-        ("launcher_preferences.rs", 1),
-        ("wallpaper_settings.rs", 1),
-        ("shell_settings.rs", 1),
-        ("optional_features.rs", 2),
-        ("dpi.rs", 2),
+    for (module, expected_calls, writer) in [
+        ("launcher_preferences.rs", 1, "atomic_write"),
+        ("wallpaper_settings.rs", 1, "atomic_write"),
+        ("shell_settings.rs", 1, "stage_write"),
+        ("optional_features.rs", 2, "atomic_write"),
+        ("dpi.rs", 2, "atomic_write"),
     ] {
         let text = fs::read_to_string(source.join(module)).unwrap();
         let production = text.split("#[cfg(test)]").next().unwrap();
         assert!(
-            production.contains("use nickel_storage::{atomic_write, config_path};"),
+            production
+                .lines()
+                .any(|line| line.starts_with("use nickel_storage::{")
+                    && line.contains(writer)
+                    && line.contains("config_path")),
             "{module} must delegate paths and replacement to nickel-storage"
         );
         assert_eq!(
-            production.matches("atomic_write(").count(),
+            production.matches(&format!("{writer}(")).count(),
             expected_calls,
             "{module} must route each complete settings write through the shared authority"
         );
         assert!(
-            !production.contains("fs::write("),
+            !production.contains("fs::write(") && !production.contains("fs::rename("),
             "{module} restored a non-atomic settings writer"
         );
     }

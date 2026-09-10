@@ -195,7 +195,16 @@ fn consumers_cannot_grow_or_create_display_list_authority() {
         }
         observed.insert(relative.clone());
         match exceptions.get(&relative) {
-            Some(exception) if references == exception.maximum => {}
+            Some(exception) if references == exception.maximum => {
+                if exception.category == "test_only_inspection" {
+                    let production = source.split_once("\n#[cfg(test)]\nmod tests {")
+                        .or_else(|| source.split_once("\n#[cfg(test)]\nmod protocol_tests {"))
+                        .map(|(production, _)| production);
+                    if production.is_none_or(|source| display_list_references(source) != 0) {
+                        violations.push(format!("{relative}: test-only inspection exception cannot admit production display-list authority"));
+                    }
+                }
+            }
             Some(exception) => violations.push(format!(
                 "{relative}: {references} PaintCommand references differ from admitted baseline {} ({}, owner {}, {}; review {})",
                 exception.maximum, exception.category, exception.owner, exception.reason, exception.review

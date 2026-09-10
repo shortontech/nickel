@@ -18,7 +18,11 @@ pub mod text_editor;
 pub mod theme;
 mod ui;
 
-pub use controller::{ControllerAction, ControllerFamily, ControllerFence, ControllerInput};
+#[cfg(target_os = "linux")]
+pub use controller::NativeControllerDevice;
+pub use controller::{
+    ControllerAction, ControllerFamily, ControllerFence, ControllerInput, ControllerObservation,
+};
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,
     TextBoundary,
@@ -47,12 +51,13 @@ pub use primitives::{
     ActionRegion, ArtworkPresentation, ItemPresentation, StatusRegion, SurfaceScaffold, ToolRegion,
 };
 pub use runtime::{
-    AdapterOutcome, Application, Completion, CompletionFailure, CompletionFailureKind,
-    ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragAction, FileDragEvent,
-    FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
-    MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure, Popover, SemanticActionFailure,
-    Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
+    AdapterOutcome, Application, BoundedSemanticActionError, Completion, CompletionFailure,
+    CompletionFailureKind, ControllerPollSchedule, DefaultHostAdapter, EffectEvidence,
+    FileDragAction, FileDragEvent, FrameOverlay, GlobalAction, HostAdapter, HostBatch,
+    HostChangeToken, HostEvent, HostEventOutcome, HostFailure, HostFailureStage, HostInspection,
+    HostServices, HostTelemetry, MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure,
+    Popover, SemanticActionFailure, Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run,
+    run_with_adapter,
 };
 pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
 pub use text_context_menu::{
@@ -71,12 +76,12 @@ pub use theme::{
 pub use ui::{
     ACTION_LEGEND_COMPACT_BREAKPOINT, AccessibilityNode, AccountSummaryRow, ActionKind,
     ActionLegend, ActionLegendActions, ActionLegendDensity, ActionLegendEntry, ActionLegendLabel,
-    AnyView, Background, Border, Button, ButtonLabel, ButtonPresentation, ChoiceCard,
-    ChoiceCardGroup, Collection, CollectionError, CollectionPresentation, CollectionState, Color,
-    ColorSwatch, Column, CompactIconTile, Component, ComponentBuilderExt, Container, ContentPane,
-    ControllerControlPresentation, ControllerGlyphSource, CustomPaint, DiagnosticKind,
-    DiagnosticMode, DragGesture, DragPhase, Dropdown, EffectiveHitRoute, EventOutcome,
-    FallbackAvatar, FieldGroup, FileGrid, FileGridItem, FilePlaneItem, FrameRequest,
+    AnyView, Background, Border, BoundedSemanticError, Button, ButtonLabel, ButtonPresentation,
+    ChoiceCard, ChoiceCardGroup, Collection, CollectionError, CollectionPresentation,
+    CollectionState, Color, ColorSwatch, Column, CompactIconTile, Component, ComponentBuilderExt,
+    Container, ContentPane, ControllerControlPresentation, ControllerGlyphSource, CustomPaint,
+    DiagnosticKind, DiagnosticMode, DragGesture, DragPhase, Dropdown, EffectiveHitRoute,
+    EventOutcome, FallbackAvatar, FieldGroup, FileGrid, FileGridItem, FilePlaneItem, FrameRequest,
     FrameResourceDiagnostics, GradientAxis, Grid, GridColumnSpec, Header, HorizontalRule, Icon,
     Image, ImageAlignment, ImageFit, ImagePresentation, InlineButtonGroup, InputSource,
     InteractionIntent, InteractionState, LauncherSearchField, Layer, LayoutDiagnostic,

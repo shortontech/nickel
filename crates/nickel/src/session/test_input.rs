@@ -1,4 +1,4 @@
-//! Explicitly gated nested-session input source used by live acceptance tests.
+//! Synthetic backend shared by authorized remote input and gated live acceptance tests.
 //!
 //! Events produced here enter `NickelSession::process_input_event`, exactly like
 //! events from winit or libinput. This module must not mutate shell state.
@@ -130,18 +130,18 @@ fn controller_axis_code(axis: TestControllerAxis) -> evdev::AbsoluteAxisCode {
 }
 
 #[derive(Debug)]
-struct TestInputBackend;
+struct SyntheticInputBackend;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct TestInputDevice;
+struct SyntheticInputDevice;
 
-impl Device for TestInputDevice {
+impl Device for SyntheticInputDevice {
     fn id(&self) -> String {
-        "nickel-test-control".into()
+        "nickel-synthetic-input".into()
     }
 
     fn name(&self) -> String {
-        "Nickel nested test control".into()
+        "Nickel synthetic input".into()
     }
 
     fn has_capability(&self, capability: DeviceCapability) -> bool {
@@ -161,23 +161,23 @@ impl Device for TestInputDevice {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TestKeyEvent {
+struct SyntheticKeyEvent {
     time: InputTime,
     key_code: u32,
     state: KeyState,
 }
 
-impl Event<TestInputBackend> for TestKeyEvent {
+impl Event<SyntheticInputBackend> for SyntheticKeyEvent {
     fn time(&self) -> InputTime {
         self.time
     }
 
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
 
-impl KeyboardKeyEvent<TestInputBackend> for TestKeyEvent {
+impl KeyboardKeyEvent<SyntheticInputBackend> for SyntheticKeyEvent {
     fn key_code(&self) -> Keycode {
         (self.key_code + 8).into()
     }
@@ -192,23 +192,23 @@ impl KeyboardKeyEvent<TestInputBackend> for TestKeyEvent {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TestPointerMotionEvent {
+struct SyntheticPointerMotionEvent {
     time: InputTime,
     x: i32,
     y: i32,
 }
 
-impl Event<TestInputBackend> for TestPointerMotionEvent {
+impl Event<SyntheticInputBackend> for SyntheticPointerMotionEvent {
     fn time(&self) -> InputTime {
         self.time
     }
 
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
 
-impl AbsolutePositionEvent<TestInputBackend> for TestPointerMotionEvent {
+impl AbsolutePositionEvent<SyntheticInputBackend> for SyntheticPointerMotionEvent {
     fn x(&self) -> f64 {
         f64::from(self.x)
     }
@@ -226,24 +226,24 @@ impl AbsolutePositionEvent<TestInputBackend> for TestPointerMotionEvent {
     }
 }
 
-impl PointerMotionAbsoluteEvent<TestInputBackend> for TestPointerMotionEvent {}
+impl PointerMotionAbsoluteEvent<SyntheticInputBackend> for SyntheticPointerMotionEvent {}
 
 #[derive(Clone, Copy, Debug)]
-struct TestTouchEvent {
+struct SyntheticTouchEvent {
     time: InputTime,
     slot: u32,
     x: i32,
     y: i32,
 }
-impl Event<TestInputBackend> for TestTouchEvent {
+impl Event<SyntheticInputBackend> for SyntheticTouchEvent {
     fn time(&self) -> InputTime {
         self.time
     }
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
-impl AbsolutePositionEvent<TestInputBackend> for TestTouchEvent {
+impl AbsolutePositionEvent<SyntheticInputBackend> for SyntheticTouchEvent {
     fn x(&self) -> f64 {
         f64::from(self.x)
     }
@@ -257,35 +257,35 @@ impl AbsolutePositionEvent<TestInputBackend> for TestTouchEvent {
         self.y()
     }
 }
-impl smithay::backend::input::TouchEvent<TestInputBackend> for TestTouchEvent {
+impl smithay::backend::input::TouchEvent<SyntheticInputBackend> for SyntheticTouchEvent {
     fn slot(&self) -> smithay::backend::input::TouchSlot {
         Some(self.slot).into()
     }
 }
-impl smithay::backend::input::TouchDownEvent<TestInputBackend> for TestTouchEvent {}
-impl smithay::backend::input::TouchMotionEvent<TestInputBackend> for TestTouchEvent {}
-impl smithay::backend::input::TouchUpEvent<TestInputBackend> for TestTouchEvent {}
-impl smithay::backend::input::TouchCancelEvent<TestInputBackend> for TestTouchEvent {}
-impl smithay::backend::input::TouchFrameEvent<TestInputBackend> for TestTouchEvent {}
+impl smithay::backend::input::TouchDownEvent<SyntheticInputBackend> for SyntheticTouchEvent {}
+impl smithay::backend::input::TouchMotionEvent<SyntheticInputBackend> for SyntheticTouchEvent {}
+impl smithay::backend::input::TouchUpEvent<SyntheticInputBackend> for SyntheticTouchEvent {}
+impl smithay::backend::input::TouchCancelEvent<SyntheticInputBackend> for SyntheticTouchEvent {}
+impl smithay::backend::input::TouchFrameEvent<SyntheticInputBackend> for SyntheticTouchEvent {}
 
 #[derive(Clone, Copy, Debug)]
-struct TestPointerRelativeMotionEvent {
+struct SyntheticPointerRelativeMotionEvent {
     time: InputTime,
     dx: i32,
     dy: i32,
 }
 
-impl Event<TestInputBackend> for TestPointerRelativeMotionEvent {
+impl Event<SyntheticInputBackend> for SyntheticPointerRelativeMotionEvent {
     fn time(&self) -> InputTime {
         self.time
     }
 
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
 
-impl PointerMotionEvent<TestInputBackend> for TestPointerRelativeMotionEvent {
+impl PointerMotionEvent<SyntheticInputBackend> for SyntheticPointerRelativeMotionEvent {
     fn delta_x(&self) -> f64 {
         f64::from(self.dx)
     }
@@ -304,7 +304,7 @@ impl PointerMotionEvent<TestInputBackend> for TestPointerRelativeMotionEvent {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TestPointerButtonEvent {
+struct SyntheticPointerButtonEvent {
     time: InputTime,
     button_code: u32,
     state: ButtonState,
@@ -340,17 +340,17 @@ fn visible_point_in(
     None
 }
 
-impl Event<TestInputBackend> for TestPointerButtonEvent {
+impl Event<SyntheticInputBackend> for SyntheticPointerButtonEvent {
     fn time(&self) -> InputTime {
         self.time
     }
 
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
 
-impl PointerButtonEvent<TestInputBackend> for TestPointerButtonEvent {
+impl PointerButtonEvent<SyntheticInputBackend> for SyntheticPointerButtonEvent {
     fn button_code(&self) -> u32 {
         self.button_code
     }
@@ -361,23 +361,23 @@ impl PointerButtonEvent<TestInputBackend> for TestPointerButtonEvent {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct TestPointerAxisEvent {
+struct SyntheticPointerAxisEvent {
     time: InputTime,
     horizontal_v120: i32,
     vertical_v120: i32,
 }
 
-impl Event<TestInputBackend> for TestPointerAxisEvent {
+impl Event<SyntheticInputBackend> for SyntheticPointerAxisEvent {
     fn time(&self) -> InputTime {
         self.time
     }
 
-    fn device(&self) -> TestInputDevice {
-        TestInputDevice
+    fn device(&self) -> SyntheticInputDevice {
+        SyntheticInputDevice
     }
 }
 
-impl PointerAxisEvent<TestInputBackend> for TestPointerAxisEvent {
+impl PointerAxisEvent<SyntheticInputBackend> for SyntheticPointerAxisEvent {
     fn amount(&self, _axis: Axis) -> Option<f64> {
         None
     }
@@ -398,13 +398,13 @@ impl PointerAxisEvent<TestInputBackend> for TestPointerAxisEvent {
     }
 }
 
-impl InputBackend for TestInputBackend {
-    type Device = TestInputDevice;
-    type KeyboardKeyEvent = TestKeyEvent;
-    type PointerAxisEvent = TestPointerAxisEvent;
-    type PointerButtonEvent = TestPointerButtonEvent;
-    type PointerMotionEvent = TestPointerRelativeMotionEvent;
-    type PointerMotionAbsoluteEvent = TestPointerMotionEvent;
+impl InputBackend for SyntheticInputBackend {
+    type Device = SyntheticInputDevice;
+    type KeyboardKeyEvent = SyntheticKeyEvent;
+    type PointerAxisEvent = SyntheticPointerAxisEvent;
+    type PointerButtonEvent = SyntheticPointerButtonEvent;
+    type PointerMotionEvent = SyntheticPointerRelativeMotionEvent;
+    type PointerMotionAbsoluteEvent = SyntheticPointerMotionEvent;
     type GestureSwipeBeginEvent = UnusedEvent;
     type GestureSwipeUpdateEvent = UnusedEvent;
     type GestureSwipeEndEvent = UnusedEvent;
@@ -413,11 +413,11 @@ impl InputBackend for TestInputBackend {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    type TouchDownEvent = TestTouchEvent;
-    type TouchUpEvent = TestTouchEvent;
-    type TouchMotionEvent = TestTouchEvent;
-    type TouchCancelEvent = TestTouchEvent;
-    type TouchFrameEvent = TestTouchEvent;
+    type TouchDownEvent = SyntheticTouchEvent;
+    type TouchUpEvent = SyntheticTouchEvent;
+    type TouchMotionEvent = SyntheticTouchEvent;
+    type TouchCancelEvent = SyntheticTouchEvent;
+    type TouchFrameEvent = SyntheticTouchEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
@@ -427,6 +427,153 @@ impl InputBackend for TestInputBackend {
 }
 
 impl NickelSession {
+    pub(crate) fn press_controlled_pointer(
+        &mut self,
+        button: nickel_remote_control::pointer::PointerButton,
+    ) -> Result<(), String> {
+        self.controlled_pointer_button(button, ButtonState::Pressed);
+        self.display_handle
+            .flush_clients()
+            .map_err(|_| "could not flush pointer input".into())
+    }
+
+    pub(crate) fn release_controlled_pointer(
+        &mut self,
+        button: nickel_remote_control::pointer::PointerButton,
+    ) {
+        // A client may replace its ordinary click grab with drag-and-drop or a
+        // shell move/resize grab. Cancel that replacement before releasing; a
+        // cancellation must not become a file drop or finish an unauthorized move.
+        if let Some(pointer) = self.seat.get_pointer()
+            && pointer
+                .with_grab(|_, grab| !grab.is::<smithay::input::pointer::ClickGrab<Self>>())
+                .unwrap_or(false)
+        {
+            pointer.unset_grab(
+                self,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                InputTime::now(),
+            );
+        }
+        self.controlled_pointer_button(button, ButtonState::Released);
+        let _ = self.display_handle.flush_clients();
+    }
+
+    fn controlled_pointer_button(
+        &mut self,
+        button: nickel_remote_control::pointer::PointerButton,
+        state: ButtonState,
+    ) {
+        use nickel_remote_control::pointer::PointerButton;
+        let button_code = match button {
+            PointerButton::Left => 0x110,
+            PointerButton::Right => 0x111,
+            PointerButton::Middle => 0x112,
+        };
+        let previous = self.remote_input_dispatching;
+        self.remote_input_dispatching = true;
+        self.process_input_event::<SyntheticInputBackend>(InputEvent::PointerButton {
+            event: SyntheticPointerButtonEvent {
+                time: InputTime::now(),
+                button_code,
+                state,
+            },
+        });
+        self.remote_input_dispatching = previous;
+    }
+
+    /// Caller owns remote authorization and validates the final hit target before each action.
+    pub(crate) fn inject_controlled_pointer(
+        &mut self,
+        target: super::window_registry::WindowId,
+        x: i32,
+        y: i32,
+        action: nickel_remote_control::pointer::PointerAction,
+    ) -> Result<(), String> {
+        use nickel_remote_control::pointer::{PointerAction, PointerButton};
+        action.validate()?;
+        if !self.point_is_on_an_output(x, y) {
+            return Err("pointer target is outside all outputs".into());
+        }
+        let origin = self
+            .space
+            .outputs()
+            .next()
+            .and_then(|output| self.space.output_geometry(output))
+            .ok_or("no output is available")?
+            .loc;
+        let event = SyntheticPointerMotionEvent {
+            time: InputTime::now(),
+            x: x.checked_sub(origin.x)
+                .ok_or("pointer coordinate overflow")?,
+            y: y.checked_sub(origin.y)
+                .ok_or("pointer coordinate overflow")?,
+        };
+        self.process_input_event::<SyntheticInputBackend>(InputEvent::PointerMotionAbsolute {
+            event,
+        });
+        let pointer = self.seat.get_pointer().ok_or("pointer unavailable")?;
+        let location = pointer.current_location();
+        if location.x != f64::from(x) || location.y != f64::from(y) {
+            return Err("pointer constraint prevented the requested position".into());
+        }
+        if !self.remote_pointer_target_matches(target, x, y) {
+            return Err("pointer target changed during motion".into());
+        }
+        match action {
+            PointerAction::DragStart { .. }
+            | PointerAction::DragMove
+            | PointerAction::DragEnd
+            | PointerAction::DragCancel => return Err("drag requires gesture ownership".into()),
+            PointerAction::Move => {}
+            PointerAction::Click { button } | PointerAction::DoubleClick { button } => {
+                let button_code = match button {
+                    PointerButton::Left => 0x110,
+                    PointerButton::Right => 0x111,
+                    PointerButton::Middle => 0x112,
+                };
+                let clicks = if matches!(action, PointerAction::DoubleClick { .. }) {
+                    2
+                } else {
+                    1
+                };
+                // Complete each press/release in the same owner dispatch. No remotely held
+                // button survives either a successful click or a rejected second target.
+                for _ in 0..clicks {
+                    if !self.remote_pointer_target_matches(target, x, y) {
+                        return Err("pointer target changed between clicks".into());
+                    }
+                    for state in [ButtonState::Pressed, ButtonState::Released] {
+                        self.process_input_event::<SyntheticInputBackend>(
+                            InputEvent::PointerButton {
+                                event: SyntheticPointerButtonEvent {
+                                    time: InputTime::now(),
+                                    button_code,
+                                    state,
+                                },
+                            },
+                        );
+                    }
+                }
+            }
+            PointerAction::Scroll {
+                horizontal_v120,
+                vertical_v120,
+            } => {
+                self.process_input_event::<SyntheticInputBackend>(InputEvent::PointerAxis {
+                    event: SyntheticPointerAxisEvent {
+                        time: InputTime::now(),
+                        horizontal_v120,
+                        vertical_v120,
+                    },
+                });
+            }
+        }
+        self.display_handle
+            .flush_clients()
+            .map_err(|error| format!("could not flush pointer input: {error}"))
+    }
+
     pub(crate) fn inject_test_input(&mut self, input: TestInput) -> Result<(), String> {
         #[cfg(target_os = "linux")]
         match &input {
@@ -480,7 +627,7 @@ impl NickelSession {
                 if slot > 31 || !self.point_is_on_an_output(x, y) {
                     return Err("invalid test touch slot or position".into());
                 }
-                let event = TestTouchEvent { time, slot, x, y };
+                let event = SyntheticTouchEvent { time, slot, x, y };
                 if matches!(input, TestInput::TouchDown { .. }) {
                     InputEvent::TouchDown { event }
                 } else {
@@ -491,7 +638,7 @@ impl NickelSession {
                 if slot > 31 {
                     return Err("invalid test touch slot".into());
                 }
-                let event = TestTouchEvent {
+                let event = SyntheticTouchEvent {
                     time,
                     slot,
                     x: 0,
@@ -504,7 +651,7 @@ impl NickelSession {
                 }
             }
             TestInput::TouchFrame => InputEvent::TouchFrame {
-                event: TestTouchEvent {
+                event: SyntheticTouchEvent {
                     time,
                     slot: 0,
                     x: 0,
@@ -512,7 +659,7 @@ impl NickelSession {
                 },
             },
             TestInput::Key { key, state } => InputEvent::Keyboard {
-                event: TestKeyEvent {
+                event: SyntheticKeyEvent {
                     time,
                     key_code: linux_key_code(key),
                     state: key_state(state),
@@ -523,14 +670,14 @@ impl NickelSession {
                     return Err(format!("pointer position {x},{y} is outside every output"));
                 }
                 InputEvent::PointerMotionAbsolute {
-                    event: TestPointerMotionEvent { time, x, y },
+                    event: SyntheticPointerMotionEvent { time, x, y },
                 }
             }
             TestInput::PointerMoveRelative { dx, dy } => InputEvent::PointerMotion {
-                event: TestPointerRelativeMotionEvent { time, dx, dy },
+                event: SyntheticPointerRelativeMotionEvent { time, dx, dy },
             },
             TestInput::PointerButton { button, state } => InputEvent::PointerButton {
-                event: TestPointerButtonEvent {
+                event: SyntheticPointerButtonEvent {
                     time,
                     button_code: pointer_button_code(button),
                     state: button_state(state),
@@ -540,7 +687,7 @@ impl NickelSession {
                 horizontal_v120,
                 vertical_v120,
             } => InputEvent::PointerAxis {
-                event: TestPointerAxisEvent {
+                event: SyntheticPointerAxisEvent {
                     time,
                     horizontal_v120,
                     vertical_v120,
@@ -560,7 +707,7 @@ impl NickelSession {
             | TestInput::ControllerTap { .. }
             | TestInput::ControllerAxis { .. } => unreachable!(),
         };
-        let _ = self.process_input_event::<TestInputBackend>(event);
+        let _ = self.process_input_event::<SyntheticInputBackend>(event);
         self.display_handle
             .flush_clients()
             .map_err(|error| format!("failed to flush injected input: {error}"))?;
@@ -794,7 +941,7 @@ mod tests {
     use smithay::utils::Rectangle;
 
     use super::{
-        TestInputBackend, TestPointerAxisEvent, linux_key_code, pointer_button_code,
+        SyntheticInputBackend, SyntheticPointerAxisEvent, linux_key_code, pointer_button_code,
         visible_point_in,
     };
 
@@ -829,20 +976,20 @@ mod tests {
 
     #[test]
     fn wheel_deltas_map_to_v120_axes_at_the_backend_boundary() {
-        let event = TestPointerAxisEvent {
+        let event = SyntheticPointerAxisEvent {
             time: smithay::backend::input::InputTime::now(),
             horizontal_v120: 120,
             vertical_v120: -240,
         };
         assert_eq!(
-            <TestPointerAxisEvent as PointerAxisEvent<TestInputBackend>>::amount_v120(
+            <SyntheticPointerAxisEvent as PointerAxisEvent<SyntheticInputBackend>>::amount_v120(
                 &event,
                 Axis::Horizontal
             ),
             Some(120.0)
         );
         assert_eq!(
-            <TestPointerAxisEvent as PointerAxisEvent<TestInputBackend>>::amount_v120(
+            <SyntheticPointerAxisEvent as PointerAxisEvent<SyntheticInputBackend>>::amount_v120(
                 &event,
                 Axis::Vertical
             ),

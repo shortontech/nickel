@@ -1,3 +1,5 @@
+mod preference_persistence;
+
 use std::{
     collections::{HashMap, VecDeque},
     sync::Arc,
@@ -200,6 +202,7 @@ const PREVIEW_CACHE_CAPACITY: usize = 32;
 
 #[path = "live_shell/panel.rs"]
 mod panel;
+pub(crate) mod remote_semantics;
 pub use panel::{PanelAction, PanelApplication};
 use panel::{
     PanelHover, normalize_tray_items, panel_clock_text, panel_tray_icons, tint_panel_icon,
@@ -542,6 +545,7 @@ pub struct LiveShell {
     preview_frame: Option<WindowPreviewFrame>,
     window_menu: Option<crate::model::WindowId>,
     window_menu_snapshot: Option<OpenWindow>,
+    window_menu_generation: u64,
     window_menu_anchor_x: Option<i32>,
     window_menu_anchor_y: Option<i32>,
     window_menu_host: Option<nickel_ui::UiHost<WindowMenuApp>>,
@@ -559,6 +563,8 @@ pub struct LiveShell {
     launcher_icons: LauncherIconCache,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
+    launcher_preference_persistence: preference_persistence::PreferencePersistence,
+    launcher_preference_deadline: Option<Instant>,
     shortcut_action_status: Option<String>,
     shortcut_capability_status: Option<String>,
     #[cfg(test)]
@@ -754,6 +760,8 @@ impl LiveShell {
                 LauncherPreferences::default()
             }
         };
+        let launcher_preference_persistence =
+            preference_persistence::PreferencePersistence::new(launcher_preferences.clone());
         launcher.set_preferences(launcher_preferences);
         let _ = launcher.set_dashboard_account(
             std::env::var("USER")
@@ -977,6 +985,7 @@ impl LiveShell {
             preview_frame: None,
             window_menu: None,
             window_menu_snapshot: None,
+            window_menu_generation: 0,
             window_menu_anchor_x: None,
             window_menu_anchor_y: None,
             window_menu_host: None,
@@ -994,6 +1003,8 @@ impl LiveShell {
             launcher_icons,
             launcher_host,
             launcher_status: application_status.map(str::to_owned),
+            launcher_preference_persistence,
+            launcher_preference_deadline: None,
             shortcut_action_status: None,
             shortcut_capability_status: None,
             #[cfg(test)]
@@ -1057,7 +1068,24 @@ impl LiveShell {
     }
 
     pub fn image_cache_diagnostics(&self) -> ShellImageCacheDiagnostics {
+        self.image_cache_diagnostics_for_previews(|_| true)
+    }
+
+    pub(crate) fn image_cache_diagnostics_for_previews(
+        &self,
+        allow_preview: impl Fn(crate::model::WindowId) -> bool,
+    ) -> ShellImageCacheDiagnostics {
         let launcher = self.launcher_icons.diagnostics();
+        let (preview_entries, preview_bytes) = self
+            .preview_images
+            .iter()
+            .filter(|(id, _)| allow_preview(**id))
+            .fold((0usize, 0usize), |(entries, bytes), (_, image)| {
+                (
+                    entries.saturating_add(1),
+                    bytes.saturating_add(image.as_raw().len()),
+                )
+            });
         let wallpaper_bytes = self
             .wallpaper
             .as_ref()
@@ -1074,12 +1102,8 @@ impl LiveShell {
                 .map(|item| item.icon.as_raw().len())
                 .chain(self.tray_icons.iter().map(|image| image.as_raw().len()))
                 .sum(),
-            preview_entries: self.preview_images.len(),
-            preview_bytes: self
-                .preview_images
-                .values()
-                .map(|image| image.as_raw().len())
-                .sum(),
+            preview_entries,
+            preview_bytes,
         }
     }
 
@@ -1335,7 +1359,7 @@ impl LiveShell {
         changed
     }
 
-    fn apply_shell_settings(&mut self, shell_settings: ShellSettings) -> bool {
+    pub(crate) fn apply_shell_settings(&mut self, shell_settings: ShellSettings) -> bool {
         let mut changed = false;
         self.launcher.set_places(crate::places::applications(
             shell_settings.preferred_file_manager.as_deref(),
@@ -1444,6 +1468,31 @@ impl LiveShell {
         semantic_theme_from_palette(self.palette)
     }
 
+    /// Only ordinary shell hosts have production protection evidence for remote capture.
+    pub(crate) fn surface_remote_access_protected(&self, role: SurfaceRole) -> bool {
+        match role {
+            SurfaceRole::Desktop => {
+                self.desktop_host.remote_access_protected()
+                    || self
+                        .desktop_viewports
+                        .values()
+                        .any(|viewport| viewport.host.remote_access_protected())
+            }
+            SurfaceRole::Panel => {
+                self.panel_host.remote_access_protected()
+                    || self
+                        .panel_hosts
+                        .values()
+                        .any(|host| host.remote_access_protected())
+            }
+            SurfaceRole::Launcher if self.run_visible => self.run_host.remote_access_protected(),
+            SurfaceRole::Launcher => self.launcher_host.remote_access_protected(),
+            SurfaceRole::ControlCenter => self.control_host.remote_access_protected(),
+            SurfaceRole::VolumeOsd => self.volume_osd_host.remote_access_protected(),
+            _ => true,
+        }
+    }
+
     pub fn scene(&mut self, role: SurfaceRole, width: u32, height: u32) -> Vec<PaintCommand> {
         match role {
             SurfaceRole::Desktop => self.desktop_scene(width, height),
@@ -1475,6 +1524,8 @@ impl LiveShell {
                 self.keyboard_host.commands().to_vec()
             }
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => Vec::new(),
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => Vec::new(),
         }
     }
 
@@ -1924,6 +1975,8 @@ impl LiveShell {
             SurfaceRole::Screenshot => self.screenshot.visible(),
             SurfaceRole::OnScreenKeyboard => self.keyboard_visible,
             SurfaceRole::CodexChat => true,
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => false,
         }
     }
 
@@ -1955,6 +2008,7 @@ impl LiveShell {
                 .min(),
         );
         push("on-screen-keyboard", Some(self.keyboard_deadline));
+        push("launcher-preferences", self.launcher_preference_deadline);
         push(
             "panel",
             self.panel_hosts
@@ -2011,6 +2065,8 @@ impl LiveShell {
             SurfaceRole::Screenshot => Some(self.screenshot.change_token()),
             SurfaceRole::OnScreenKeyboard => Some(host_token(self.keyboard_host.inspect())),
             SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => None,
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => None,
         }
     }
 
@@ -2133,6 +2189,9 @@ impl LiveShell {
 
     pub fn poll_host_deadlines(&mut self, now: Instant) -> Vec<SurfaceRole> {
         let mut changed = Vec::new();
+        if self.poll_launcher_preferences() {
+            changed.extend([SurfaceRole::Launcher, SurfaceRole::Panel]);
+        }
 
         let mut due_desktop_outputs = self
             .desktop_viewports
@@ -2503,6 +2562,12 @@ impl LiveShell {
                 outcome.changed
             }
             SurfaceRole::WindowContextMenu => {
+                if matches!(
+                    event,
+                    UiEvent::KeyboardNavigateBack | UiEvent::ControllerBack
+                ) {
+                    return self.window_menu_host_key(Some(KeyCode::Escape));
+                }
                 if self.application_menu_target.is_some() {
                     if self.application_menu_host.is_none() {
                         let _ = self.application_menu_scene();
@@ -2576,6 +2641,8 @@ impl LiveShell {
             | SurfaceRole::VolumeOsd
             | SurfaceRole::CodexProjectMenu
             | SurfaceRole::CodexChat => false,
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => false,
         }
     }
 
@@ -2697,6 +2764,7 @@ impl LiveShell {
                     return;
                 }
                 self.close_window_preview();
+                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
                 self.application_menu_target = Some(target);
                 self.application_menu_host = None;
                 let x = self
@@ -3275,6 +3343,7 @@ impl LiveShell {
                     .unwrap_or(self.panel_origin_x);
                 self.application_menu_target = None;
                 self.application_menu_host = None;
+                self.window_menu_generation = self.window_menu_generation.saturating_add(1);
                 self.window_menu = Some(window);
                 self.window_menu_snapshot = self
                     .windows
@@ -3894,6 +3963,9 @@ impl LiveShell {
             platform::GlobalShortcut::CommitSwitch => {
                 self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CommitSwitch)
             }
+            platform::GlobalShortcut::CancelSwitch => {
+                self.apply_task_switch_action(nickel_core::hotkeys::HotkeyAction::CancelSwitch)
+            }
             platform::GlobalShortcut::LockState { locked } => {
                 self.locked = locked;
                 let application = self.lock_host.application_mut();
@@ -4117,6 +4189,39 @@ impl LiveShell {
         self.preview_frame = None;
     }
 
+    /// Pointer ownership retained by any coordinator-owned host or parked viewport.
+    pub(crate) fn pointer_interaction_active(&self) -> bool {
+        self.desktop_host.pointer_interaction_active()
+            || self.desktop_viewports.values().any(|viewport| {
+                viewport.host.pointer_interaction_active()
+                    || viewport.overlay_pointer_capture.is_some()
+            })
+            || self.desktop_overlay_pointer_capture.is_some()
+            || self.volume_osd_host.pointer_interaction_active()
+            || self.run_host.pointer_interaction_active()
+            || self.lock_host.pointer_interaction_active()
+            || self.panel_host.pointer_interaction_active()
+            || self
+                .panel_hosts
+                .values()
+                .any(|host| host.pointer_interaction_active())
+            || self
+                .window_menu_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
+            || self
+                .application_menu_host
+                .as_ref()
+                .is_some_and(|host| host.pointer_interaction_active())
+            || self.notification_host.pointer_interaction_active()
+            || self.control_host.pointer_interaction_active()
+            || self.launcher_host.pointer_interaction_active()
+            || self.keyboard_host.pointer_interaction_active()
+            || self.keyboard_resize.is_some()
+            || !self.keyboard_gesture_leases.is_empty()
+            || self.screenshot.pointer_interaction_active()
+    }
+
     /// Requests a launcher toggle initiated by shell-owned input such as a controller.
     ///
     /// Linux compositor shortcut notifications use [`Self::global_shortcut`] after the
@@ -4254,6 +4359,9 @@ impl LiveShell {
             self.launcher_status = Some("Nickel could not update the launcher.".to_owned());
             return;
         }
+        if self.session_host.stages_effects() {
+            return;
+        }
         self.run_visible = false;
         self.apply_session_launcher_visibility(visible);
         platform::launcher_visibility_applied(visible);
@@ -4294,6 +4402,13 @@ impl LiveShell {
             self.launcher_status = Some("Nickel could not update Quick Settings.".to_owned());
             return;
         }
+        if self.session_host.stages_effects() {
+            return;
+        }
+        self.apply_control_visibility(visible);
+    }
+
+    pub(crate) fn apply_control_visibility(&mut self, visible: bool) {
         self.control_visible = visible;
         if !visible {
             self.control_host.application_mut().show_control_center();
@@ -4307,7 +4422,7 @@ impl LiveShell {
         self.set_launcher_visible(visible);
     }
 
-    fn apply_session_launcher_visibility(&mut self, visible: bool) {
+    pub(crate) fn apply_session_launcher_visibility(&mut self, visible: bool) {
         self.launcher_visible = visible;
         if visible {
             self.control_visible = false;
@@ -4495,19 +4610,65 @@ impl LiveShell {
     }
 
     fn open_active_window_menu(&mut self) -> bool {
-        let Some(snapshot) = self.windows.iter().find(|window| window.active).cloned() else {
+        self.open_active_window_menu_at(self.panel_origin_x, self.panel_origin_y)
+    }
+
+    pub(crate) fn window_menu_generation(&self) -> Option<u64> {
+        (self.window_menu.is_some() && self.window_menu_generation < u64::MAX)
+            .then_some(self.window_menu_generation)
+    }
+
+    pub(crate) fn retire_window_menu(&mut self, generation: u64) -> bool {
+        if self.window_menu_generation() != Some(generation) {
+            return false;
+        }
+        self.close_window_preview();
+        true
+    }
+
+    pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
+        self.window_menu.map(|_| {
+            (
+                self.window_menu_anchor_x.unwrap_or(self.panel_origin_x),
+                self.window_menu_anchor_y.unwrap_or(self.panel_origin_y),
+                MENU_WIDTH.ceil() as u32,
+                self.window_context_menu_height().max(1) as u32,
+            )
+        })
+    }
+
+    pub(crate) fn open_active_window_menu_at(&mut self, x: i32, y: i32) -> bool {
+        let Some(id) = self
+            .windows
+            .iter()
+            .find(|window| window.active)
+            .map(|window| window.id.0)
+        else {
             return false;
         };
+        self.open_window_menu_at(id, x, y)
+    }
+
+    pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
+        let Some(snapshot) = self
+            .windows
+            .iter()
+            .find(|window| window.id.0 == id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.window_menu_generation = self.window_menu_generation.saturating_add(1);
         self.window_menu = Some(snapshot.id);
         self.window_menu_snapshot = Some(snapshot);
         self.window_menu_host = None;
-        self.window_menu_anchor_x = Some(self.panel_origin_x);
-        self.window_menu_anchor_y = Some(self.panel_origin_y);
+        self.window_menu_anchor_x = Some(x);
+        self.window_menu_anchor_y = Some(y);
         let sent = self.send_session_command(
             "show-context-menu",
             ShellCommand::ShowContextMenu {
-                x: self.panel_origin_x,
-                y: self.panel_origin_y,
+                x,
+                y,
                 width: MENU_WIDTH as i32,
                 height: self.window_context_menu_height(),
             },
@@ -4532,7 +4693,9 @@ impl LiveShell {
             match result {
                 Ok(()) => {
                     self.launcher.record_launch(application.id());
-                    self.persist_launcher_preferences();
+                    self.persist_launcher_preferences_with_recent(Some(
+                        application.id().to_owned(),
+                    ));
                     self.set_launcher_visible(false);
                 }
                 Err(error) => {
@@ -4577,7 +4740,7 @@ impl LiveShell {
         match result {
             Ok(_) => {
                 self.launcher.record_launch(application.id());
-                self.persist_launcher_preferences();
+                self.persist_launcher_preferences_with_recent(Some(application.id().to_owned()));
                 self.set_launcher_visible(false);
             }
             Err(error) => {
@@ -5183,12 +5346,12 @@ impl LiveShell {
 }
 
 fn supported_projection_modes(
-    session_host: &dyn SessionHost,
+    _session_host: &dyn SessionHost,
 ) -> Vec<nickel_core::display_projection::ProjectionMode> {
     #[cfg(target_os = "linux")]
     {
         use nickel_core::display_projection::{ProjectionChooser, ProjectionOutput};
-        let Ok(outputs) = session_host.projection_outputs() else {
+        let Ok(outputs) = _session_host.projection_outputs() else {
             return Vec::new();
         };
         let outputs = outputs
@@ -5351,34 +5514,89 @@ impl LiveShell {
     }
 
     fn persist_launcher_preferences(&mut self) {
+        self.persist_launcher_preferences_with_recent(None);
+    }
+
+    fn persist_launcher_preferences_with_recent(&mut self, recent: Option<String>) {
         #[cfg(test)]
         {
             self.launcher_persistence_attempts += 1;
         }
         #[cfg(test)]
-        let result = self.launcher_preferences_path.as_ref().map_or_else(
-            || self.launcher.preferences().save_default(),
-            |path| self.launcher.preferences().save(path),
-        );
+        let path = self
+            .launcher_preferences_path
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(nickel_core::launcher_preferences::preferences_path);
         #[cfg(not(test))]
-        let result = self.launcher.preferences().save_default();
-        match result {
-            Err(error) => {
-                tracing::warn!(%error, "launcher preferences could not be saved");
-                self.launcher_status = Some(format!(
-                    "Launcher preferences could not be saved: {}",
-                    error
-                ));
-            }
-            Ok(())
-                if self.launcher_status.as_deref().is_some_and(|status| {
-                    status.starts_with("Launcher preferences could not be saved:")
-                }) =>
-            {
-                self.launcher_status = None;
-            }
-            Ok(()) => {}
+        let path = nickel_core::launcher_preferences::preferences_path();
+        let result = path
+            .map_err(|_| "preference path unavailable")
+            .and_then(|path| {
+                self.launcher_preference_persistence.enqueue(
+                    path,
+                    self.launcher.preferences().clone(),
+                    recent,
+                )
+            });
+        if let Err(error) = result {
+            self.launcher_status =
+                Some(format!("Launcher preferences could not be saved: {error}"));
         }
+        self.launcher_preference_deadline = self
+            .launcher_preference_persistence
+            .busy()
+            .then(|| Instant::now() + Duration::from_millis(16));
+    }
+
+    fn poll_launcher_preferences(&mut self) -> bool {
+        let result = self.launcher_preference_persistence.poll();
+        self.launcher_preference_deadline = self
+            .launcher_preference_persistence
+            .busy()
+            .then(|| Instant::now() + Duration::from_millis(16));
+        let Some((preferences, failed)) = result else {
+            return false;
+        };
+        if !failed {
+            self.launcher.set_preferences(preferences);
+        }
+        if failed {
+            self.launcher_status = Some("Launcher preferences could not be saved: configuration changed or storage unavailable".into());
+        } else if self
+            .launcher_status
+            .as_deref()
+            .is_some_and(|status| status.starts_with("Launcher preferences could not be saved:"))
+        {
+            self.launcher_status = None;
+        }
+        true
+    }
+
+    pub(crate) fn launcher_favorites_match(&self, preferences: &LauncherPreferences) -> bool {
+        self.launcher.preferences().favorites() == preferences.favorites()
+    }
+
+    pub(crate) fn launcher_preferences_busy(&self) -> bool {
+        self.launcher_preference_persistence.busy()
+    }
+
+    pub(crate) fn apply_committed_launcher_preferences(
+        &mut self,
+        preferences: LauncherPreferences,
+    ) -> Result<(), &'static str> {
+        self.launcher_preference_persistence
+            .replace_committed(preferences.clone())?;
+        self.launcher.set_preferences(preferences);
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, None);
+        self.launcher_host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        let _ = self.refresh_fast_changes();
+        Ok(())
     }
 
     fn apply_control_action(&mut self, action: ControlAction) {

@@ -131,10 +131,6 @@ impl WindowRegistry {
                 .metadata_diagnostics
                 .peak_app_id_bytes
                 .max(self.metadata_diagnostics.app_id_bytes);
-            eprintln!(
-                "nickel: window {} [{}] {}",
-                id.0, window.app_id, window.title
-            );
         }
     }
 

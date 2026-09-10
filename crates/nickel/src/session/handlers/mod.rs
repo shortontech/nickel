@@ -61,6 +61,14 @@ impl SeatHandler for NickelSession {
     type PointerFocus = PointerFocusTarget;
     type TouchFocus = WlSurface;
 
+    fn focus_bound_source_cancelled(
+        &mut self,
+        _seat: &Seat<Self>,
+        source: smithay::input::keyboard::KeyboardSource,
+    ) {
+        self.remote_keyboard_source_focus_cancelled(source);
+    }
+
     fn seat_state(&mut self) -> &mut SeatState<NickelSession> {
         &mut self.seat_state
     }
@@ -85,6 +93,7 @@ impl SeatHandler for NickelSession {
         set_primary_focus(dh, seat, client);
         self.launcher_keyboard_focus_changed(focused_surface.as_deref());
         self.on_screen_keyboard_focus_changed();
+        self.record_remote_focus_event(focused);
     }
 }
 
@@ -181,6 +190,14 @@ impl WaylandDndGrabHandler for NickelSession {
         serial: Serial,
         grab_type: GrabType,
     ) {
+        // A remote pointer gesture permits ordinary in-window interaction, not
+        // selection/file transfer. Refuse before installing a data-device grab
+        // or exposing its offers to a target.
+        if self.remote_held_pointer.is_some() {
+            source.cancel();
+            self.cancel_remote_pointer();
+            return;
+        }
         self.dnd_icon = icon;
         self.request_output_redraw();
         match grab_type {

@@ -13,43 +13,868 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A stalled local subscriber must never block compositor input or revocation.
+/// Existing send-error handling retires subscribers whose bounded queue is full.
+fn notification_socket() -> std::io::Result<UnixDatagram> {
+    let socket = UnixDatagram::unbound()?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
+}
+
 enum RemoteDesktopRequest {
-    List(std::sync::mpsc::SyncSender<Result<Vec<nickel_remote_control::WindowSummary>, String>>),
-    Focus {
+    ApplicationScale {
+        permit: nickel_remote_control::DesktopPermit,
+        request: remote_application_scale::Request,
+    },
+    ClientConnection {
+        permit: nickel_remote_control::ClientConnectionPermit,
+        action: nickel_remote_control::ClientConnectionAction,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    Events {
+        permit: nickel_remote_control::DesktopPermit,
+        after: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::desktop_events::DesktopEventObservation, String>,
+        >,
+    },
+    LaunchApplication {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_launch::PreparedLaunch,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String>,
+        >,
+    },
+    Applications {
+        prepared: remote_launch::PreparedCatalog,
+        permit: nickel_remote_control::DesktopPermit,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::ApplicationInventory, String>,
+        >,
+    },
+    Outputs {
+        permit: nickel_remote_control::DesktopPermit,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::OutputInventory, String>,
+        >,
+    },
+    WorkspaceAction {
+        permit: nickel_remote_control::DesktopPermit,
+        action: nickel_remote_control::diagnostics::WorkspaceAction,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::WorkspaceOutcome, String>,
+        >,
+    },
+    ReadAppearance {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_appearance::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::appearance::Snapshot, String>,
+        >,
+    },
+    AppearanceTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::appearance::Transaction,
+        prepared: remote_appearance::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::appearance::Snapshot, String>,
+        >,
+    },
+    ReadLauncherFavorites {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_launcher_favorites::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::launcher_favorites::Snapshot, String>,
+        >,
+    },
+    LauncherFavoritesTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::launcher_favorites::Transaction,
+        prepared: remote_launcher_favorites::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::launcher_favorites::Snapshot, String>,
+        >,
+    },
+    ShellBehavior {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: ShellBehaviorTransaction,
+        prepared: remote_settings::PreparedShellBehavior,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String>,
+        >,
+    },
+    SemanticAction {
+        permit: nickel_remote_control::DesktopPermit,
+        request: nickel_remote_control::semantics::SemanticActionRequest,
+        reply: std::sync::mpsc::SyncSender<Result<bool, String>>,
+    },
+    SurfaceSemanticAction {
+        permit: nickel_remote_control::DesktopPermit,
+        request: nickel_remote_control::semantics::SurfaceSemanticActionRequest,
+        reply: std::sync::mpsc::SyncSender<Result<remote_shell_actions::ShellActionPlan, String>>,
+    },
+    ShellSemanticStep {
+        permit: nickel_remote_control::DesktopPermit,
+        origin: nickel_remote_control::leases::ResourceId,
+        output: nickel_remote_control::leases::ResourceId,
+        tree_generation: u64,
+        prepared: remote_shell_actions::PreparedShellStep,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::semantics::SurfaceSemanticCompletion, String>,
+        >,
+    },
+    NativeKeyboardState {
+        source: smithay::input::keyboard::KeyboardSource,
+        sequence: u64,
+        result: Result<native_key_worker::NativeKeyObservation, String>,
+    },
+    DiagnosticAction {
+        permit: nickel_remote_control::DesktopPermit,
+        action: nickel_remote_control::diagnostics::DiagnosticAction,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>,
+        >,
+    },
+    ListSurfaces {
+        permit: nickel_remote_control::DesktopPermit,
+        reply: std::sync::mpsc::SyncSender<
+            Result<Vec<nickel_remote_control::diagnostics::ShellSurfaceDiagnostic>, String>,
+        >,
+    },
+    ValidateSurfaceCapture {
+        permit: nickel_remote_control::DesktopPermit,
         id: String,
         generation: u64,
-        reply: std::sync::mpsc::SyncSender<Result<nickel_remote_control::WindowSummary, String>>,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    CaptureSurface {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::capture::CapturedWindow, String>,
+        >,
+    },
+    ValidateCapture {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    Capture {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::capture::CapturedWindow, String>,
+        >,
+    },
+    Keyboard {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        action: nickel_remote_control::keyboard::KeyboardAction,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    Pointer {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        x: i32,
+        y: i32,
+        action: nickel_remote_control::pointer::PointerAction,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    Semantics {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::semantics::SemanticSnapshot, String>,
+        >,
+    },
+    PrepareNativeSemantics {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        application_root: bool,
+        reply: std::sync::mpsc::SyncSender<Result<super::remote_accessibility::Proof, String>>,
+    },
+    ValidateNativeSemantics {
+        permit: nickel_remote_control::DesktopPermit,
+        proof: super::remote_accessibility::Proof,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    FinishNativeSemantics {
+        permit: nickel_remote_control::DesktopPermit,
+        proof: super::remote_accessibility::Proof,
+        result: super::remote_accessibility::Observation,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String>,
+        >,
+    },
+    SurfaceSemantics {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::semantics::SurfaceSemanticSnapshot, String>,
+        >,
+    },
+    Diagnostic {
+        permit: nickel_remote_control::DesktopPermit,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String>,
+        >,
+    },
+    List {
+        permit: nickel_remote_control::DesktopPermit,
+        reply:
+            std::sync::mpsc::SyncSender<Result<Vec<nickel_remote_control::WindowSummary>, String>>,
+    },
+    WindowAction {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        action: nickel_remote_control::window_actions::WindowAction,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::window_actions::WindowOutcome, String>,
+        >,
     },
 }
 
 struct RemoteDesktopBridge {
-    sender: channel::Sender<RemoteDesktopRequest>,
+    cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
+    sender: channel::SyncSender<RemoteDesktopRequest>,
+    settings_staging: Arc<remote_settings::SettingsStaging>,
+}
+
+impl RemoteDesktopBridge {
+    fn inspect_native_accessibility(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+        application_root: bool,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        use super::remote_accessibility::{Admission, observe};
+        let _admission = Admission::acquire()?;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::PrepareNativeSemantics {
+                permit: permit.clone(),
+                id: id.to_owned(),
+                generation,
+                application_root,
+                reply,
+            })
+            .map_err(|_| "native accessibility queue is busy")?;
+        let proof = response
+            .recv_timeout(Duration::from_millis(100))
+            .map_err(|_| "native accessibility owner timed out")??;
+        let validate = || {
+            proof.check_live(&permit)?;
+            if Instant::now() >= deadline {
+                return Err("native accessibility deadline elapsed".into());
+            }
+            let (reply, response) = std::sync::mpsc::sync_channel(1);
+            self.sender
+                .try_send(RemoteDesktopRequest::ValidateNativeSemantics {
+                    permit: permit.clone(),
+                    proof: proof.clone(),
+                    reply,
+                })
+                .map_err(|_| "native accessibility validation queue is busy")?;
+            response
+                .recv_timeout(
+                    Duration::from_millis(100)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                )
+                .map_err(|_| "native accessibility validation timed out")?
+        };
+        let result = observe(&proof, &permit, deadline, validate)?;
+        proof.check_live(&permit)?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::FinishNativeSemantics {
+                permit,
+                proof,
+                result,
+                reply,
+            })
+            .map_err(|_| "native accessibility completion queue is busy")?;
+        response
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "native accessibility completion timed out")?
+    }
 }
 
 impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
-    fn list_windows(&self) -> Result<Vec<nickel_remote_control::WindowSummary>, String> {
+    fn connection_cleanup_wake(&self) -> Option<nickel_remote_control::ConnectionCleanupWake> {
+        Some(self.cleanup_wake.clone())
+    }
+
+    fn client_connection(
+        &self,
+        permit: nickel_remote_control::ClientConnectionPermit,
+        action: nickel_remote_control::ClientConnectionAction,
+    ) -> Result<(), String> {
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender
-            .send(RemoteDesktopRequest::List(reply))
-            .map_err(|_| "desktop authority stopped".to_owned())?;
+            .try_send(RemoteDesktopRequest::ClientConnection {
+                permit,
+                action,
+                reply,
+            })
+            .map_err(|_| "desktop connection queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop connection transition timed out".to_owned())?
+    }
+
+    fn read_desktop_events(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        after: u64,
+    ) -> Result<nickel_remote_control::desktop_events::DesktopEventObservation, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Events {
+                permit,
+                after,
+                reply,
+            })
+            .map_err(|_| "desktop event queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop event observation timed out".to_owned())?
+    }
+
+    fn launch_installed_application(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+        // Called by the bounded blocking desktop adapter, never the owner loop.
+        let prepared = remote_launch::PreparedLaunch::prepare(&permit, &request)?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::LaunchApplication {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "desktop launch queue is busy or stopped".to_owned())?;
+        response.recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "launch result uncertain: desktop authority timed out; inspect windows before retrying".to_owned())?
+    }
+
+    fn list_installed_applications(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::diagnostics::ApplicationInventory, String> {
+        let prepared = remote_launch::PreparedCatalog::prepare(&permit)?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Applications {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "desktop application queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop application observation timed out".to_owned())?
+    }
+
+    fn list_outputs(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::diagnostics::OutputInventory, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Outputs { permit, reply })
+            .map_err(|_| "desktop output queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop output observation timed out".to_owned())?
+    }
+    fn workspace_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        action: nickel_remote_control::diagnostics::WorkspaceAction,
+    ) -> Result<nickel_remote_control::diagnostics::WorkspaceOutcome, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::WorkspaceAction {
+                permit,
+                action,
+                reply,
+            })
+            .map_err(|_| "desktop workspace queue is busy or stopped".to_owned())?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| "workspace result uncertain: desktop authority timed out; inspect state before retrying".to_owned())?
+    }
+    fn read_application_scale(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::application_scale::Snapshot, String> {
+        remote_application_scale::read(self, permit)
+    }
+    fn application_scale_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::application_scale::Transaction,
+    ) -> Result<nickel_remote_control::application_scale::TransactionOutcome, String> {
+        remote_application_scale::transact(self, permit, transaction)
+    }
+    fn read_appearance(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_appearance::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadAppearance {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "appearance queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "appearance observation timed out")?
+    }
+    fn appearance_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::appearance::Transaction,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_appearance::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::AppearanceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "appearance queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "appearance result uncertain; read current appearance before retrying")?
+    }
+    fn read_launcher_favorites(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_launcher_favorites::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadLauncherFavorites {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "launcher_favorites queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "launcher_favorites observation timed out")?
+    }
+    fn launcher_favorites_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::launcher_favorites::Transaction,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_launcher_favorites::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::LauncherFavoritesTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "launcher_favorites queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "launcher_favorites result uncertain; read current launcher_favorites before retrying"
+        })?
+    }
+    fn shell_behavior_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: ShellBehaviorTransaction,
+    ) -> Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String> {
+        // This method runs in desktop_call's blocking worker, never on the
+        // compositor. Hold admission until the worker and reply wait finish,
+        // even if the network caller drops its future during filesystem I/O.
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_settings::PreparedShellBehavior::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ShellBehavior {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "desktop settings queue is busy or stopped".to_owned())?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "settings transaction result uncertain: desktop authority timed out; inspect current state before retrying".to_owned()
+        })?
+    }
+
+    fn semantic_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        request: nickel_remote_control::semantics::SemanticActionRequest,
+    ) -> Result<bool, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::SemanticAction {
+                permit,
+                request,
+                reply,
+            })
+            .map_err(|_| "desktop request queue is unavailable".to_owned())?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "semantic action result uncertain: desktop authority timed out; do not retry".to_owned()
+        })?
+    }
+
+    fn surface_semantic_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        request: nickel_remote_control::semantics::SurfaceSemanticActionRequest,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticActionOutcome, String> {
+        let lease_id = request.lease_id;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::SurfaceSemanticAction {
+                permit: permit.clone(),
+                request,
+                reply,
+            })
+            .map_err(|_| "desktop request queue is unavailable".to_owned())?;
+        let plan = response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| {
+                "semantic action result uncertain: desktop authority timed out; do not retry"
+                    .to_owned()
+            })??;
+        self.finish_shell_action(permit, lease_id, plan)
+    }
+
+    fn diagnostic_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        action: nickel_remote_control::diagnostics::DiagnosticAction,
+    ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::DiagnosticAction {
+                permit,
+                action,
+                reply,
+            })
+            .map_err(|_| "desktop diagnostic queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop authority timed out".to_owned())?
+    }
+    fn list_surfaces(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<Vec<nickel_remote_control::diagnostics::ShellSurfaceDiagnostic>, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ListSurfaces { permit, reply })
+            .map_err(|_| "surface inventory queue is busy")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "surface inventory timed out".to_owned())?
+    }
+
+    fn validate_surface_capture(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ValidateSurfaceCapture {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop capture validation queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "capture validation timed out".to_owned())?
+    }
+
+    fn capture_surface(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::CaptureSurface {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop capture queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop capture timed out".to_owned())?
+    }
+
+    fn validate_window_capture(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ValidateCapture {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop capture validation queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "capture validation timed out".to_owned())?
+    }
+
+    fn capture_window(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Capture {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop capture queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop capture timed out".to_owned())?
+    }
+
+    fn keyboard_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::keyboard::KeyboardAction,
+    ) -> Result<(), String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Keyboard {
+                permit,
+                id: id.to_owned(),
+                generation,
+                action,
+                reply,
+            })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "desktop request queue is busy".to_owned()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "desktop authority stopped".to_owned()
+                }
+            })?;
+        response
+            // Delivery authority expires after two seconds. Allow the owner
+            // thread's bounded cancellation timer to release input and report
+            // partial progress before the HTTP handler gives up waiting. This
+            // grace period does not extend the permit or allow more input.
+            .recv_timeout(Duration::from_millis(2250))
+            .map_err(|_| {
+                "keyboard outcome unavailable; input may have been partially delivered; do not automatically retry"
+                    .to_owned()
+            })?
+    }
+    fn pointer_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+        x: i32,
+        y: i32,
+        action: nickel_remote_control::pointer::PointerAction,
+    ) -> Result<(), String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Pointer {
+                permit,
+                id: id.to_owned(),
+                generation,
+                x,
+                y,
+                action,
+                reply,
+            })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "desktop request queue is busy".to_owned()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "desktop authority stopped".to_owned()
+                }
+            })?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop authority timed out".to_owned())?
+    }
+    fn inspect_window(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::semantics::SemanticSnapshot, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::Semantics {
+                permit,
+                id: id.to_owned(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop request queue is unavailable".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop authority timed out".to_owned())?
+    }
+    fn inspect_native_window(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        self.inspect_native_accessibility(permit, id, generation, false)
+    }
+    fn inspect_native_application(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        self.inspect_native_accessibility(permit, id, generation, true)
+    }
+
+    fn inspect_surface(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticSnapshot, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::SurfaceSemantics {
+                permit,
+                id: id.to_owned(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "desktop request queue is unavailable".to_owned())?;
         response
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "desktop authority timed out".to_owned())?
     }
 
-    fn focus_window(
+    fn diagnostic_snapshot(
         &self,
-        id: &str,
-        generation: u64,
-    ) -> Result<nickel_remote_control::WindowSummary, String> {
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String> {
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender
-            .send(RemoteDesktopRequest::Focus {
+            .try_send(RemoteDesktopRequest::Diagnostic { permit, reply })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "desktop request queue is busy".to_owned()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "desktop authority stopped".to_owned()
+                }
+            })?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop authority timed out".to_owned())?
+    }
+    fn list_windows(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<Vec<nickel_remote_control::WindowSummary>, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::List { permit, reply })
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "desktop request queue is busy".to_owned()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "desktop authority stopped".to_owned()
+                }
+            })?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "desktop authority timed out".to_owned())?
+    }
+
+    fn window_action(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::window_actions::WindowAction,
+    ) -> Result<nickel_remote_control::window_actions::WindowOutcome, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::WindowAction {
+                permit,
                 id: id.to_owned(),
                 generation,
+                action,
                 reply,
             })
-            .map_err(|_| "desktop authority stopped".to_owned())?;
+            .map_err(|error| match error {
+                std::sync::mpsc::TrySendError::Full(_) => {
+                    "desktop request queue is busy".to_owned()
+                }
+                std::sync::mpsc::TrySendError::Disconnected(_) => {
+                    "desktop authority stopped".to_owned()
+                }
+            })?;
         response
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "desktop authority timed out".to_owned())?
@@ -130,8 +955,8 @@ pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
 #[cfg(test)]
 mod internal_shell_placement_tests {
     use super::{
-        internal_codex_chat_placement, internal_codex_project_menu_placement,
-        internal_shell_surface_placement,
+        avoid_trusted_control_collision, internal_codex_chat_placement,
+        internal_codex_project_menu_placement, internal_shell_surface_placement,
     };
     use crate::{internal_shell::InternalOutput, winit_shell::SurfaceRole};
     use nickel_session_protocol::{AnchorSide, Geometry, ShellPopoverAnchor};
@@ -177,6 +1002,26 @@ mod internal_shell_placement_tests {
 
         assert_eq!(placement.output.as_deref(), Some("right"));
         assert_eq!(placement.geometry, (18, 896, 960, 720));
+    }
+
+    #[test]
+    fn context_menu_moves_away_from_trusted_control_without_leaving_output() {
+        assert_eq!(
+            avoid_trusted_control_collision(
+                (760, 113, 220, 282),
+                (0, 0, 1280, 800),
+                &[(788, 12, 480, 210)],
+            ),
+            (560, 113, 220, 282)
+        );
+        assert_eq!(
+            avoid_trusted_control_collision(
+                (10, 10, 300, 250),
+                (0, 0, 640, 480),
+                &[(0, 0, 320, 200)],
+            ),
+            (10, 208, 300, 250)
+        );
     }
 
     #[test]
@@ -836,6 +1681,39 @@ pub struct NickelSession {
     preview_counters: PreviewCacheCounters,
     pub hotkeys: CompositorShortcutAdapter,
     pub(crate) remote_control: nickel_remote_control::RemoteControlRuntime,
+    pub(crate) local_cues: crate::local_cues::LocalCues,
+    remote_controller_observer: nickel_ui::ControllerInput,
+    remote_cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
+    remote_settings_staging: Arc<remote_settings::SettingsStaging>,
+    remote_observation_generation: u64,
+    remote_appearance: remote_appearance::AppearanceState,
+    remote_application_scale: remote_application_scale::ScaleState,
+    remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
+    remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
+    remote_event_windows: HashSet<WindowId>,
+    remote_launched_children: Vec<std::process::Child>,
+    remote_launch_placements: Vec<remote_launch::LaunchPlacement>,
+    remote_launch_maps: HashMap<WindowId, (Instant, remote_launch::DeferredLaunchMap)>,
+    remote_shell_origins: HashMap<u64, remote_shell_actions::PendingDeviceOrigin>,
+    remote_shell_origin_generation: u64,
+    pub(crate) remote_held_keyboard: Option<remote_keyboard::RemoteHeldKeyboard>,
+    remote_keyboard_timer_armed: bool,
+    remote_native_key_worker: Option<native_key_worker::NativeKeyWorker>,
+    pub(crate) remote_held_pointer: Option<remote_pointer::RemoteHeldPointer>,
+    pub(crate) remote_input_dispatching: bool,
+    pub(crate) remote_native_press: Option<(nickel_remote_control::DesktopPermit, WindowId)>,
+    remote_gtk_menu: Option<remote_accessibility::RemoteGtkMenu>,
+    remote_gtk_menu_timer_armed: bool,
+    pub(crate) remote_gtk_epoch: u64,
+    remote_pointer_timer_armed: bool,
+    #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+    remote_capture_work: Option<remote_capture::RemoteCaptureWork>,
+    remote_resource_recheck_pending: bool,
+    remote_output_generations: HashMap<String, (Output, u64)>,
+    remote_next_output_generation: u64,
+    remote_identity_worker: Option<super::remote_identity::IdentityWorker>,
+    remote_window_identities: HashMap<WindowId, super::remote_identity::WindowIdentity>,
     pub(crate) remote_emergency_chord: nickel_remote_control::EmergencyChord,
     pub(crate) remote_desktop_authority: Arc<dyn nickel_remote_control::DesktopAuthority>,
     pub task_switcher: TaskSwitcher<WindowId>,
@@ -861,6 +1739,8 @@ pub struct NickelSession {
     pub buffer_commit_tx: Option<smithay::reexports::calloop::channel::Sender<SurfaceBufferCommit>>,
     pub identify_outputs_until: Option<std::time::Instant>,
     identify_outputs_generation: u64,
+    identify_outputs_timer: Option<smithay::reexports::calloop::RegistrationToken>,
+    remote_output_identification: Option<RemoteOutputIdentification>,
     pub output_capture_path: Option<PathBuf>,
     pub output_capture_name: Option<String>,
     pub output_capture_reply_path: Option<PathBuf>,
@@ -879,7 +1759,22 @@ pub struct NickelSession {
 }
 
 mod control_protocol;
+mod native_key_worker;
 mod preview;
+mod remote_accessibility;
+mod remote_appearance;
+mod remote_application_scale;
+#[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+mod remote_capture;
+mod remote_controller;
+mod remote_diagnostics;
+mod remote_keyboard;
+pub(super) mod remote_launch;
+pub(super) mod remote_launcher_favorites;
+mod remote_pointer;
+mod remote_settings;
+mod remote_shell_actions;
+mod remote_worker;
 
 #[allow(unused_imports)]
 pub use preview::{
@@ -895,35 +1790,1061 @@ use preview::{
     admitted_preview_ids, advance_preview_content_generation, record_preview_capture_attempt,
 };
 impl NickelSession {
-    fn handle_remote_desktop_request(&mut self, request: RemoteDesktopRequest) {
-        let snapshot = |window: nickel_session_protocol::WindowSnapshot| {
-            let (x, y, width, height) = window.geometry.map_or((0, 0, 0, 0), |geometry| {
-                (geometry.x, geometry.y, geometry.width, geometry.height)
-            });
-            nickel_remote_control::WindowSummary {
-                id: window.id.0.to_string(),
-                application_id: window.application_id,
-                title: window.title,
-                active: window.active,
-                minimized: window.minimized,
-                maximized: window.maximized,
-                fullscreen: window.fullscreen,
-                x,
-                y,
-                width: u32::try_from(width).unwrap_or_default(),
-                height: u32::try_from(height).unwrap_or_default(),
-                // Registry IDs are monotonic and never reused during a session.
-                generation: window.id.0,
+    pub(super) fn schedule_remote_window_identity(
+        &mut self,
+        id: WindowId,
+        source: super::remote_identity::IdentitySource,
+    ) {
+        use super::remote_identity::WindowIdentity;
+        let queued = self
+            .remote_identity_worker
+            .as_ref()
+            .is_some_and(|worker| worker.request(id, source));
+        self.remote_window_identities.insert(
+            id,
+            if queued {
+                WindowIdentity::Pending
+            } else {
+                WindowIdentity::Unavailable
+            },
+        );
+    }
+
+    fn refresh_remote_window_identities(&mut self) {
+        use super::remote_identity::{IdentitySource, WindowIdentity};
+        let catalog_generation = crate::platform::run_signature_diagnostics().generation;
+        let stale = self
+            .remote_window_identities
+            .iter()
+            .filter_map(|(id, identity)| match identity {
+                WindowIdentity::Pending => None,
+                WindowIdentity::Unavailable => Some(*id),
+                WindowIdentity::Verified(process) => (!process.is_current()
+                    || process.catalog_generation != catalog_generation)
+                    .then_some(*id),
+            })
+            .collect::<Vec<_>>();
+        for id in stale {
+            let Some(window) = self.registry_native_window(id) else {
+                continue;
+            };
+            let source = if let Some(x11) = window.x11_surface() {
+                Some(IdentitySource::X11Client(Box::new(x11.clone())))
+            } else {
+                window
+                    .wl_surface()
+                    .and_then(|surface| surface.client())
+                    .and_then(|client| client.get_credentials(&self.display_handle).ok())
+                    .and_then(|credentials| u32::try_from(credentials.pid).ok())
+                    .map(IdentitySource::WaylandPeer)
+            };
+            if let Some(source) = source {
+                self.schedule_remote_window_identity(id, source);
             }
+        }
+    }
+
+    fn remote_window_is_protected(&self, id: WindowId) -> bool {
+        self.locked
+            || self.shell_recovery_visible()
+            || self.shell_owned_windows.contains(&id)
+            || self
+                .internal_window_surfaces
+                .get(&id)
+                .is_some_and(|surface| self.internal_ui.remote_access_protected(*surface))
+            || (!self.internal_window_surfaces.contains_key(&id)
+                && self
+                    .remote_window_identities
+                    .get(&id)
+                    .is_none_or(|identity| identity.is_protected()))
+    }
+
+    fn remote_verified_application(&self, id: WindowId) -> Option<String> {
+        if self.remote_window_is_protected(id) {
+            return None;
+        }
+        if let Some(surface) = self.internal_window_surfaces.get(&id).copied() {
+            if self
+                .internal_ui
+                .application::<nickel_file::FileApp>(surface)
+                .is_some()
+            {
+                return Some("nickel-file".into());
+            }
+            if self
+                .internal_ui
+                .application::<nickel_codex_ui::ChatApplication>(surface)
+                .is_some()
+            {
+                return Some("nickel-codex".into());
+            }
+            return None;
+        }
+        self.remote_window_identities
+            .get(&id)?
+            .application()
+            .map(str::to_owned)
+    }
+
+    fn remote_lease_target_live(
+        &self,
+        scope: &nickel_session_protocol::RemoteResourceScope,
+    ) -> bool {
+        use nickel_session_protocol::RemoteResourceScope;
+        if self.locked {
+            return false;
+        }
+        match scope {
+            RemoteResourceScope::Window(resource) => {
+                let id = WindowId(resource.generation);
+                resource.id == resource.generation.to_string()
+                    && self.windows.contains(id)
+                    && !self.remote_window_is_protected(id)
+            }
+            RemoteResourceScope::Surface(resource) => self
+                .internal_ui
+                .resolve_surface_identity(&resource.id, resource.generation)
+                .is_some_and(|id| !self.internal_ui.remote_access_protected(id)),
+            RemoteResourceScope::Output(resource) => self
+                .remote_output_generations
+                .get(&resource.id)
+                .is_some_and(|(output, generation)| {
+                    *generation == resource.generation
+                        && self.space.outputs().any(|live| live == output)
+                }),
+            // Application and session grants may precede a window's creation.
+            RemoteResourceScope::Application(_) | RemoteResourceScope::FullSession => true,
+        }
+    }
+
+    fn remote_resource_label(
+        &self,
+        scope: &nickel_session_protocol::RemoteResourceScope,
+    ) -> Option<String> {
+        use nickel_session_protocol::RemoteResourceScope;
+        match scope {
+            RemoteResourceScope::Application(application) if application == "nickel-file" => {
+                Some("Nickel File windows".into())
+            }
+            RemoteResourceScope::Application(application) if application == "nickel-codex" => {
+                Some("Nickel Codex windows".into())
+            }
+            RemoteResourceScope::Application(application) => self
+                .remote_window_identities
+                .values()
+                .find_map(|identity| match identity {
+                    super::remote_identity::WindowIdentity::Verified(process)
+                        if identity.application() == Some(application.as_str()) =>
+                    {
+                        process
+                            .application_name
+                            .as_ref()
+                            .map(|name| format!("{name} windows"))
+                    }
+                    _ => None,
+                }),
+            RemoteResourceScope::Window(resource) => {
+                let id = resource.id.parse::<u64>().ok()?;
+                if id != resource.generation || self.remote_window_is_protected(WindowId(id)) {
+                    return None;
+                }
+                self.windows.title(WindowId(id)).map(|title| {
+                    let title: String = title
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .take(256)
+                        .collect();
+                    format!("{title} (window {id})")
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn schedule_remote_resource_retirement(&mut self) {
+        if self.remote_resource_recheck_pending {
+            return;
+        }
+        self.remote_resource_recheck_pending = true;
+        // A window may be destroyed from inside an authorized synchronous operation. Defer
+        // mutex acquisition until that owner dispatch ends, coalescing all retired identities.
+        // Queued remote requests independently reject nonexistent targets before any effect.
+        self.event_loop_handle
+            .insert_idle(|data| data.flush_remote_resource_retirement());
+    }
+
+    fn refresh_remote_output_identities(&mut self) {
+        self.invalidate_departed_shell_outputs();
+        let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        let before = self.remote_output_generations.len();
+        self.remote_output_generations
+            .retain(|_, (output, _)| outputs.contains(output));
+        let mut changed = before != self.remote_output_generations.len();
+        for output in outputs {
+            if self
+                .remote_output_generations
+                .get(&output.name())
+                .is_some_and(|(previous, _)| previous == &output)
+            {
+                continue;
+            }
+            let Some(generation) = self.remote_next_output_generation.checked_add(1) else {
+                continue;
+            };
+            self.remote_next_output_generation = generation;
+            self.remote_output_generations
+                .insert(output.name(), (output, generation));
+            changed = true;
+        }
+        if changed {
+            if !self.locked && !self.shell_recovery_visible() {
+                self.remote_desktop_events.record(
+                    nickel_remote_control::desktop_events::DesktopEventKind::OutputMembershipChanged {
+                        latest_output_identity_generation: self.remote_next_output_generation,
+                        outputs: self.remote_output_generations.len(),
+                    },
+                    self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                );
+            }
+            self.schedule_remote_resource_retirement();
+        }
+    }
+
+    fn remote_window_geometry(&self, id: WindowId) -> Option<nickel_session_protocol::Geometry> {
+        // MCP coordinates describe the client area, not the buffer's shadows or
+        // decorations. Use the same geometry as production pointer dispatch.
+        self.window_for_registry_id(id)
+            .and_then(|window| self.space.element_geometry(&window))
+            .map(|bounds| nickel_session_protocol::Geometry {
+                x: bounds.loc.x,
+                y: bounds.loc.y,
+                width: bounds.size.w,
+                height: bounds.size.h,
+            })
+            .or_else(|| self.registry_window_geometry(id))
+    }
+
+    fn remote_window_output(
+        &self,
+        id: WindowId,
+    ) -> Option<nickel_remote_control::leases::ResourceId> {
+        let bounds = self.remote_window_geometry(id)?;
+        let geometry = self.output_geometry_for_bounds(Geometry {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+        })?;
+        let name = self.output_name_matching_geometry(geometry)?;
+        self.remote_output_identity(name)
+    }
+
+    fn remote_output_identity(
+        &self,
+        name: String,
+    ) -> Option<nickel_remote_control::leases::ResourceId> {
+        let (_, generation) = self.remote_output_generations.get(&name)?;
+        Some(nickel_remote_control::leases::ResourceId {
+            id: name,
+            generation: *generation,
+        })
+    }
+
+    fn flush_remote_resource_retirement(&mut self) {
+        if !std::mem::take(&mut self.remote_resource_recheck_pending) {
+            return;
+        }
+        let live = self
+            .windows
+            .snapshot()
+            .into_iter()
+            .map(|window| window.id.0)
+            .collect::<HashSet<_>>();
+        self.remote_window_identities
+            .retain(|id, _| live.contains(&id.0));
+        let control = self.remote_control.control();
+        let mut control = control.lock().unwrap();
+        let retired = control
+            .leases()
+            .iter()
+            .filter_map(|lease| {
+                if let nickel_remote_control::leases::ResourceScope::Window(resource) = &lease.scope
+                {
+                    let valid = resource
+                        .id
+                        .parse::<u64>()
+                        .ok()
+                        .is_some_and(|id| id == resource.generation && live.contains(&id));
+                    (!valid).then_some(lease.id)
+                } else if let nickel_remote_control::leases::ResourceScope::Surface(resource) =
+                    &lease.scope
+                {
+                    (!self
+                        .internal_ui
+                        .has_surface_identity(&resource.id, resource.generation))
+                    .then_some(lease.id)
+                } else if let nickel_remote_control::leases::ResourceScope::Output(resource) =
+                    &lease.scope
+                {
+                    self.remote_output_generations
+                        .get(&resource.id)
+                        .is_none_or(|(_, generation)| *generation != resource.generation)
+                        .then_some(lease.id)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        for lease in &retired {
+            control.leases_mut().revoke(*lease);
+        }
+        drop(control);
+        if !retired.is_empty() {
+            self.sync_remote_control_indicators();
+        }
+    }
+
+    pub(crate) fn remote_keyboard_target_matches(&self, id: WindowId) -> bool {
+        self.seat
+            .get_keyboard()
+            .is_some_and(|keyboard| keyboard.pressed_keys().is_empty())
+            && self.remote_keyboard_focus_matches(id)
+    }
+
+    fn remote_keyboard_focus_matches(&self, id: WindowId) -> bool {
+        use smithay::wayland::seat::WaylandFocus;
+
+        if self.remote_window_is_protected(id) || self.internal_ui.focused().is_some() {
+            return false;
+        }
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return false;
         };
-        match request {
-            RemoteDesktopRequest::List(reply) => {
-                let windows = self.protocol_windows().into_iter().map(snapshot).collect();
-                let _ = reply.send(Ok(windows));
+        if keyboard.is_grabbed() {
+            return false;
+        }
+        let Some(window) = self.window_for_registry_id(id) else {
+            return false;
+        };
+        let Some(focus) = keyboard.current_focus() else {
+            return false;
+        };
+        // Compare native recipients, not the cached active-window flag. A popup
+        // or a compositor-owned surface must not inherit its parent's approval.
+        match focus {
+            super::focus::KeyboardFocusTarget::X11(surface) => {
+                surface.has_observed_keyboard_focus() && window.x11_surface() == Some(&surface)
             }
-            RemoteDesktopRequest::Focus {
+            super::focus::KeyboardFocusTarget::Wayland(surface) => window
+                .wl_surface()
+                .is_some_and(|recipient| *recipient == surface),
+        }
+    }
+
+    pub(crate) fn remote_pointer_target_matches(&self, id: WindowId, x: i32, y: i32) -> bool {
+        let point = (f64::from(x), f64::from(y)).into();
+        if self.remote_window_is_protected(id) {
+            return false;
+        }
+        if self
+            .internal_ui
+            .surface_at(
+                (f64::from(x), f64::from(y)),
+                self.client_scene_under(point) && !self.internal_applications_are_foremost(),
+            )
+            .is_some()
+        {
+            return false;
+        }
+        let Some(window) = self.window_for_registry_id(id) else {
+            return false;
+        };
+        self.space
+            .element_under(point)
+            .is_some_and(|(hit, _)| hit == &window)
+            && self.surface_under(point).is_some()
+    }
+
+    fn remote_window_summary(
+        &self,
+        window: nickel_session_protocol::WindowSnapshot,
+    ) -> nickel_remote_control::WindowSummary {
+        let (x, y, width, height) = window.geometry.map_or((0, 0, 0, 0), |geometry| {
+            (geometry.x, geometry.y, geometry.width, geometry.height)
+        });
+        let verified_application = self.remote_verified_application(WindowId(window.id.0));
+        nickel_remote_control::WindowSummary {
+            id: window.id.0.to_string(),
+            application_id: window.application_id.chars().take(256).collect(),
+            title: window.title.chars().take(512).collect(),
+            active: window.active,
+            minimized: window.minimized,
+            maximized: window.maximized,
+            fullscreen: window.fullscreen,
+            x,
+            y,
+            width: u32::try_from(width).unwrap_or_default(),
+            height: u32::try_from(height).unwrap_or_default(),
+            // Registry IDs are monotonic and never reused during a session.
+            generation: window.id.0,
+            workspace: window.workspace.0,
+            verified_application,
+        }
+    }
+
+    fn register_remote_connection_cleanup_wake(
+        handle: &smithay::reexports::calloop::LoopHandle<'static, Self>,
+        descriptor: std::io::Result<std::os::fd::OwnedFd>,
+    ) -> nickel_remote_control::ConnectionCleanupWake {
+        use smithay::reexports::{
+            calloop::{Interest, Mode, PostAction, generic::Generic},
+            rustix,
+        };
+        let fallback = || {
+            tracing::warn!(
+                "Remote connection cleanup wake unavailable; periodic owner fallback is active"
+            );
+            nickel_remote_control::ConnectionCleanupWake::new(|| false)
+        };
+        let Ok(descriptor) = descriptor else {
+            return fallback();
+        };
+        let cleanup_fd = Arc::new(descriptor);
+        let writer = cleanup_fd.clone();
+        let wake = nickel_remote_control::ConnectionCleanupWake::new(move || {
+            matches!(
+                rustix::io::write(&*writer, &1_u64.to_ne_bytes()),
+                Ok(8) | Err(rustix::io::Errno::AGAIN)
+            )
+        });
+        let source = Generic::new(cleanup_fd, Interest::READ, Mode::Level);
+        if handle.insert_source(source, |_, fd, data| {
+            let mut counter = [0_u8; 8];
+            if let Err(error) = rustix::io::read(&**fd, &mut counter)
+                && error != rustix::io::Errno::AGAIN {
+                tracing::warn!("Remote connection cleanup wake read failed; periodic owner fallback is active");
+                data.service_remote_connection_cleanup();
+                return Ok(PostAction::Remove);
+            }
+            data.service_remote_connection_cleanup();
+            Ok(PostAction::Continue)
+        }).is_err() {
+            return fallback();
+        }
+        wake
+    }
+
+    fn service_remote_connection_cleanup(&mut self) {
+        if self.remote_cleanup_wake.take_wake_failure() {
+            tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
+        }
+        if !self.remote_cleanup_wake.take_pending() {
+            return;
+        }
+        self.remote_control
+            .control()
+            .lock()
+            .unwrap()
+            .reconcile_pending_lease_requests(Instant::now());
+        self.sync_remote_control_indicators();
+    }
+
+    fn handle_remote_desktop_request(&mut self, request: RemoteDesktopRequest) {
+        self.service_remote_connection_cleanup();
+        self.refresh_remote_output_identities();
+        self.revalidate_remote_frame_trace();
+        match request {
+            RemoteDesktopRequest::ClientConnection {
+                permit,
+                action,
+                reply,
+            } => {
+                let result = permit.apply(action, self.locked || self.shell_recovery_visible());
+                self.sync_remote_control_indicators();
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::LaunchApplication {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let _ = reply.send(self.remote_launch_installed_application(&permit, prepared));
+            }
+            RemoteDesktopRequest::Events {
+                permit,
+                after,
+                reply,
+            } => {
+                let result =
+                    permit.with_debug(self.locked || self.shell_recovery_visible(), || {
+                        let history = self.remote_desktop_events.since(after)?;
+                        self.remote_observation_generation =
+                            self.remote_observation_generation.saturating_add(1);
+                        Ok(
+                            nickel_remote_control::desktop_events::DesktopEventObservation {
+                                observation_generation: self.remote_observation_generation,
+                                observed_at_us: self
+                                    .start_time
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u64::MAX as u128)
+                                    as u64,
+                                history,
+                            },
+                        )
+                    });
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::Applications {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_scoped_application_inventory(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::Outputs { permit, reply } => {
+                let result = self.remote_list_outputs(&permit);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::WorkspaceAction {
+                permit,
+                action,
+                reply,
+            } => {
+                let result = self.remote_workspace_action(&permit, action);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ApplicationScale { permit, request } => {
+                self.remote_application_scale(permit, request);
+            }
+            RemoteDesktopRequest::ReadAppearance {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_appearance(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::AppearanceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_appearance(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadLauncherFavorites {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_launcher_favorites(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::LauncherFavoritesTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_launcher_favorites(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ShellBehavior {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_shell_behavior_transaction(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::NativeKeyboardState {
+                source,
+                sequence,
+                result,
+            } => {
+                self.complete_native_keyboard_query(source, sequence, result);
+            }
+
+            RemoteDesktopRequest::DiagnosticAction {
+                permit,
+                action,
+                reply,
+            } => {
+                let result = permit.with_debug(self.locked || self.shell_recovery_visible(), || {
+                    #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                    {
+                        let _ = action;
+                        Err("diagnostic rendering backend is unavailable".into())
+                    }
+                    #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                    {
+                        let mut output_identification = None;
+                        match action.clone() {
+                            nickel_remote_control::diagnostics::DiagnosticAction::IdentifyOutput { output } => {
+                                action.validate()?;
+                                if self.remote_output_identity(output.id.clone()).as_ref() != Some(&output) {
+                                    return Err("output incarnation is unavailable".into());
+                                }
+                                let generation = self.start_output_identification(Some(RemoteOutputIdentification { permit: permit.clone(), output: output.clone() }))?;
+                                output_identification = Some(nickel_remote_control::diagnostics::OutputIdentificationOutcome { output, generation, duration_ms: 3000 });
+                            }
+                            nickel_remote_control::diagnostics::DiagnosticAction::Repaint => {}
+                            nickel_remote_control::diagnostics::DiagnosticAction::StartFrameTrace { duration_seconds } => {
+                                let category = self.remote_frame_trace_category().ok_or("frame trace backend is unavailable")?;
+                                if self.remote_frame_trace.as_ref().is_some_and(|trace| trace.active()) {
+                                    return Err("frame trace capacity reached".into());
+                                }
+                                self.remote_frame_trace = Some(nickel_remote_control::frame_trace::FrameTrace::new_authorized(permit.clone(), duration_seconds, category)?);
+                            }
+                            nickel_remote_control::diagnostics::DiagnosticAction::StopFrameTrace => {
+                                if let Some(trace) = self.remote_frame_trace.as_mut() {
+                                    if !trace.owned_by(&permit) { return Err("frame trace belongs to another lease".into()); }
+                                    trace.stop();
+                                }
+                            }
+
+                            nickel_remote_control::diagnostics::DiagnosticAction::RefreshScene => {
+                                use nickel_remote_control::diagnostics::{
+                                    MAX_DIAGNOSTIC_OUTPUTS, MAX_DIAGNOSTIC_WINDOWS,
+                                };
+                                if self
+                                    .space
+                                    .elements()
+                                    .take(MAX_DIAGNOSTIC_WINDOWS + 1)
+                                    .count()
+                                    > MAX_DIAGNOSTIC_WINDOWS
+                                    || self
+                                        .space
+                                        .outputs()
+                                        .take(MAX_DIAGNOSTIC_OUTPUTS + 1)
+                                        .count()
+                                        > MAX_DIAGNOSTIC_OUTPUTS
+                                {
+                                    return Err("scene exceeds diagnostic refresh budget".into());
+                                }
+                                // The same production housekeeping pass used by
+                                // both rendering backends. No native round trips,
+                                // permission changes, or requested geometry edits.
+                                self.space.refresh();
+                            }
+                        }
+                        #[cfg(feature = "backend-udev")]
+                        self.invalidate_native_outputs();
+                        self.request_output_redraw();
+                        self.remote_observation_generation =
+                            self.remote_observation_generation.saturating_add(1);
+                        Ok(
+                            nickel_remote_control::diagnostics::DiagnosticActionOutcome {
+                                action,
+                                observation_generation: self.remote_observation_generation,
+                                submitted_at_us: self
+                                    .start_time
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                                presentation_confirmed: false,
+                                output_identification,
+                            },
+                        )
+                    }
+                });
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ListSurfaces { permit, reply } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                let result = self.list_remote_surfaces(&permit);
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                let result = {
+                    let _ = permit;
+                    Err("shell surfaces unavailable".into())
+                };
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::ValidateSurfaceCapture {
+                permit,
                 id,
                 generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                let result = self.with_surface_capture_authority(
+                    &nickel_remote_control::leases::ResourceId { id, generation },
+                    &permit,
+                    || Ok(()),
+                );
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                let result = {
+                    let _ = (permit, id, generation);
+                    Err("capture renderer is unavailable".into())
+                };
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::CaptureSurface {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                self.enqueue_remote_capture(
+                    permit,
+                    remote_capture::CaptureTarget::Surface(
+                        nickel_remote_control::leases::ResourceId { id, generation },
+                    ),
+                    reply,
+                );
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                {
+                    let _ = (permit, id, generation);
+                    let _ = reply.try_send(Err("capture renderer is unavailable".into()));
+                }
+            }
+            RemoteDesktopRequest::ValidateCapture {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                let result = id
+                    .parse::<u64>()
+                    .map_err(|_| "invalid window identity".to_owned())
+                    .and_then(|id| {
+                        if id != generation {
+                            return Err("stale window generation".into());
+                        }
+                        self.with_capture_authority(WindowId(id), &permit, || Ok(()))
+                    });
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                let result = {
+                    let _ = (permit, id, generation);
+                    Err("capture renderer is unavailable".into())
+                };
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::Capture {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                match id.parse::<u64>() {
+                    Ok(parsed) if parsed == generation && id == parsed.to_string() => self
+                        .enqueue_remote_capture(
+                            permit,
+                            remote_capture::CaptureTarget::Window(WindowId(parsed)),
+                            reply,
+                        ),
+                    _ => {
+                        let _ = reply.try_send(Err("invalid or stale window identity".into()));
+                    }
+                }
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                {
+                    let _ = (permit, id, generation);
+                    let _ = reply.try_send(Err("capture renderer is unavailable".into()));
+                }
+            }
+            RemoteDesktopRequest::Keyboard {
+                permit,
+                id,
+                generation,
+                action,
+                reply,
+            } => {
+                let result =
+                    self.dispatch_remote_keyboard(permit, id, generation, action, reply.clone());
+                if !matches!(result, Ok(true)) {
+                    let _ = reply.try_send(result.map(|_| ()));
+                }
+            }
+            RemoteDesktopRequest::Pointer {
+                permit,
+                id,
+                generation,
+                x,
+                y,
+                action,
+                reply,
+            } => {
+                let result = self.dispatch_remote_pointer(permit, id, generation, x, y, action);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::SemanticAction {
+                permit,
+                request,
+                reply,
+            } => {
+                let result = self.remote_semantic_action(&permit, request);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ShellSemanticStep {
+                permit,
+                origin,
+                output,
+                tree_generation,
+                prepared,
+                reply,
+            } => {
+                let result = self.commit_shell_semantic_step(
+                    &permit,
+                    &origin,
+                    &output,
+                    tree_generation,
+                    prepared,
+                );
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::SurfaceSemanticAction {
+                permit,
+                request,
+                reply,
+            } => {
+                let result = self.remote_surface_semantic_action(&permit, request);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::Semantics {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                let result = self.remote_window_semantics(&permit, &id, generation);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::PrepareNativeSemantics {
+                permit,
+                id,
+                generation,
+                application_root,
+                reply,
+            } => {
+                let result =
+                    self.native_accessibility_proof(&permit, &id, generation, application_root);
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::ValidateNativeSemantics {
+                permit,
+                proof,
+                reply,
+            } => {
+                let result = self.validate_native_accessibility(&permit, &proof);
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::FinishNativeSemantics {
+                permit,
+                proof,
+                result,
+                reply,
+            } => {
+                let result = self.finish_native_accessibility(&permit, &proof, result);
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::SurfaceSemantics {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                let result = self.remote_surface_semantics(&permit, &id, generation);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::Diagnostic { permit, reply } => {
+                if let Err(error) =
+                    permit.with_debug(self.locked || self.shell_recovery_visible(), || Ok(()))
+                {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                // Match the local Settings query: refresh topology before
+                // publishing a version for compare-and-set transactions. Shell
+                // reconciliation consults control state, so it runs outside the
+                // authority lock; collection below revalidates the permit.
+                self.refresh_output_topology_generation();
+                let lease_metrics = permit.lease_metrics_snapshot(
+                    self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                );
+                let result =
+                    permit.with_debug(self.locked || self.shell_recovery_visible(), || {
+                        use nickel_remote_control::diagnostics::*;
+                        self.remote_observation_generation =
+                            self.remote_observation_generation.saturating_add(1);
+                        let all_windows = self
+                            .remote_protocol_windows()
+                            .into_iter()
+                            .filter(|window| {
+                                !self.shell_owned_windows.contains(&WindowId(window.id.0))
+                            })
+                            .collect::<Vec<_>>();
+                        let all_outputs = self.protocol_outputs();
+                        let (shell_surfaces, shell_surfaces_truncated) =
+                            self.remote_shell_surface_diagnostics();
+                        let truncated = shell_surfaces_truncated
+                            || self.workspaces.ordered().len() > MAX_DIAGNOSTIC_WORKSPACES
+                            || all_windows.len() > MAX_DIAGNOSTIC_WINDOWS
+                            || all_outputs.len() > MAX_DIAGNOSTIC_OUTPUTS;
+                        let windows = all_windows
+                            .into_iter()
+                            .take(MAX_DIAGNOSTIC_WINDOWS)
+                            .map(|window| self.remote_window_summary(window))
+                            .collect::<Vec<_>>();
+                        let geometry = |value: nickel_session_protocol::Geometry| {
+                            [value.x, value.y, value.width, value.height]
+                        };
+                        let observed_at_us =
+                            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                        let internal_applications =
+                            self.remote_internal_application_diagnostics(&windows);
+                        let internal_renderers = self.remote_internal_renderer_diagnostics(
+                            &internal_applications,
+                            observed_at_us,
+                        );
+                        let input = self.remote_input_diagnostic(
+                            &windows,
+                            &internal_applications,
+                            self.remote_observation_generation,
+                            observed_at_us,
+                        );
+                        Ok(DiagnosticSnapshot {
+                            observation_generation: self.remote_observation_generation,
+                            observed_at_us,
+                            workspaces: self.remote_workspace_diagnostics(&windows),
+                            focused_window: input
+                                .keyboard
+                                .as_ref()
+                                .and_then(|device| device.focused_window.clone()),
+                            input,
+                            shortcuts: remote_diagnostics::shortcut_diagnostic(Some(&self.hotkeys), self.remote_observation_generation, observed_at_us),
+                            stacking_front_to_back: windows
+                                .iter()
+                                .map(|window| window.id.clone())
+                                .collect(),
+                            internal_applications,
+                            internal_renderers,
+                            shell_renderers: self.remote_shell_renderer_diagnostics(observed_at_us),
+                            shell_image_cache: self.internal_shell.as_ref().map(|shell| {
+                                let cache = shell.image_cache_diagnostics_for_previews(|id| {
+                                    windows.iter().any(|window| window.generation == id.0)
+                                });
+                                ShellImageCacheDiagnostic {
+                                    observation_generation: self.remote_observation_generation,
+                                    observed_at_us,
+                                    launcher_icon_entries: cache.launcher_icon_entries as u64,
+                                    launcher_icon_bytes: cache.launcher_icon_bytes as u64,
+                                    wallpaper_entries: cache.wallpaper_entries as u64,
+                                    wallpaper_bytes: cache.wallpaper_bytes as u64,
+                                    tray_entries: cache.tray_entries as u64,
+                                    tray_bytes: cache.tray_bytes as u64,
+                                    preview_entries: cache.preview_entries as u64,
+                                    preview_bytes: cache.preview_bytes as u64,
+                                }
+                            }),
+                            shell_surfaces,
+                            windows,
+                            outputs: all_outputs
+                                .into_iter()
+                                .take(MAX_DIAGNOSTIC_OUTPUTS)
+                                .map(|output| OutputDiagnostic {
+                                    generation: self
+                                        .remote_output_generations
+                                        .get(&output.name)
+                                        .map_or(0, |(_, generation)| *generation),
+                                    name: output.name.chars().take(128).collect(),
+                                    geometry: geometry(output.geometry),
+                                    work_area: geometry(output.work_area),
+                                    scale_120: output.scale_120,
+                                    primary: output.primary,
+                                    enabled: output.enabled,
+                                })
+                                .collect(),
+                            preview: PreviewDiagnostic {
+                                presentation_generation: self
+                                    .preview_counters
+                                    .presentation_generation,
+                                readback_bytes: self.preview_counters.readback_bytes,
+                                capture_failures: self.preview_counters.capture_failures,
+                            },
+                            metrics: permit.operation_metrics_snapshot(),
+                            admission: permit.admission_snapshot(),
+                            lease_metrics,
+                            platform: self.remote_platform_diagnostic(
+                                self.remote_observation_generation,
+                                observed_at_us,
+                            ),
+                            shell_behavior: self.remote_shell_behavior_diagnostic(
+                                self.remote_observation_generation,
+                                observed_at_us,
+                            ),
+                            settings_worker: self.remote_settings_staging.snapshot(),
+                            application_launch: self.remote_application_launch_diagnostic(),
+                            recent_events: self.remote_desktop_events.snapshot(),
+                            diagnostic_logs: self.remote_diagnostic_logs(),
+                            frame_trace: self
+                                .remote_frame_trace
+                                .as_ref()
+                                .filter(|trace| trace.owned_by(&permit))
+                                .map(|trace| trace.snapshot()),
+                            truncated,
+                            unavailable_domains: [
+                                "shell_transients_and_content",
+                                "internal_hit_testing",
+                                "external_accessibility_not_embedded_in_snapshot",
+                                "effects",
+                                "native_gpu_renderer_timing",
+                                "shell_gpu_resources_and_external_renderer_resources_and_shared_caches",
+                                "other_compositor_event_categories",
+                                "structured_log_details_and_other_trace_categories",
+                                "platform_queries",
+                            ]
+                            .into_iter()
+                            .map(str::to_owned)
+                            .collect(),
+                        })
+                    });
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::List { permit, reply } => {
+                if let Err(error) = permit.check_live() {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+                let windows = self
+                    .remote_protocol_windows()
+                    .into_iter()
+                    .filter_map(|window| {
+                        let identity = nickel_remote_control::leases::ResourceId {
+                            id: window.id.0.to_string(),
+                            generation: window.id.0,
+                        };
+                        let output = self.remote_window_output(WindowId(identity.generation));
+                        let verified_application =
+                            self.remote_verified_application(WindowId(identity.generation));
+                        let evidence = nickel_remote_control::leases::ResourceEvidence {
+                            window: Some(&identity),
+                            surface: None,
+                            verified_application: verified_application.as_deref(),
+                            output: output.as_ref(),
+                            authorized_surface_ancestors: &[],
+                            protected: self.remote_window_is_protected(WindowId(window.id.0)),
+                        };
+                        permit
+                            .with_resource(&evidence, || Ok(self.remote_window_summary(window)))
+                            .ok()
+                    })
+                    .collect();
+                let _ = reply.send(Ok(windows));
+            }
+            RemoteDesktopRequest::WindowAction {
+                permit,
+                id,
+                generation,
+                action,
                 reply,
             } => {
                 let result = id
@@ -935,18 +2856,169 @@ impl NickelSession {
                         }
                         let id = WindowId(numeric);
                         if !self
-                            .protocol_windows()
+                            .remote_protocol_windows()
                             .iter()
                             .any(|window| window.id.0 == numeric)
                         {
-                            return Err("window is not available for remote focus".into());
+                            return Err("window is not available for remote control".into());
                         }
-                        self.activate_window(id);
-                        self.protocol_windows()
-                            .into_iter()
-                            .find(|window| window.id.0 == numeric && window.active)
-                            .map(snapshot)
-                            .ok_or_else(|| "window did not confirm focus".into())
+                        let identity = nickel_remote_control::leases::ResourceId {
+                            id: numeric.to_string(),
+                            generation,
+                        };
+                        let output = self.remote_window_output(WindowId(identity.generation));
+                        let verified_application =
+                            self.remote_verified_application(WindowId(identity.generation));
+                        let evidence = nickel_remote_control::leases::ResourceEvidence {
+                            window: Some(&identity),
+                            surface: None,
+                            verified_application: verified_application.as_deref(),
+                            output: output.as_ref(),
+                            authorized_surface_ancestors: &[],
+                            protected: self.remote_window_is_protected(id),
+                        };
+                        action.validate()?;
+                        if let nickel_remote_control::window_actions::WindowAction::MoveToWorkspace { workspace } = action {
+                            return self.remote_move_window_to_workspace(&permit, &evidence, id, workspace);
+                        }
+                        if let nickel_remote_control::window_actions::WindowAction::SetBounds {
+                            x,
+                            y,
+                            width,
+                            height,
+                        } = action
+                        {
+                            let destination = self
+                                .output_geometry_for_bounds(Geometry {
+                                    x,
+                                    y,
+                                    width: width as i32,
+                                    height: height as i32,
+                                })
+                                .and_then(|geometry| self.output_name_matching_geometry(geometry))
+                                .and_then(|name| self.remote_output_identity(name))
+                                .ok_or("requested window bounds do not intersect an output")?;
+                            // Source and destination use the same production output-membership
+                            // policy. The owner cannot change the layout between these checks;
+                            // the input reservation below rechecks cancellation and expiry.
+                            permit.with_resource(
+                                &nickel_remote_control::leases::ResourceEvidence {
+                                    output: Some(&destination),
+                                    ..evidence
+                                },
+                                || Ok(()),
+                            )?;
+                        }
+                        permit.with_input(&evidence, || {
+                            use nickel_remote_control::window_actions::{
+                                WindowAction, WindowOutcome,
+                            };
+                            let window = self.registry_native_window(id);
+                            let fullscreen = window
+                                .as_ref()
+                                .is_some_and(|window| self.is_fullscreen_window(window));
+                            let maximized = window
+                                .as_ref()
+                                .is_some_and(|window| self.is_maximized_window(window));
+                            match action {
+                                WindowAction::MoveToWorkspace { .. } => return Err("workspace action was not routed to its owner".into()),
+                                WindowAction::SetBounds {
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                } => {
+                                    if fullscreen || maximized {
+                                        return Err(
+                                            "restore the window before changing its bounds".into(),
+                                        );
+                                    }
+                                    if self
+                                        .seat
+                                        .get_pointer()
+                                        .is_none_or(|pointer| pointer.is_grabbed())
+                                    {
+                                        return Err(
+                                            "pointer is busy with another interaction".into()
+                                        );
+                                    }
+                                    let window = window.ok_or("native window is unavailable")?;
+                                    let geometry = Geometry {
+                                        x,
+                                        y,
+                                        width: width as i32,
+                                        height: height as i32,
+                                    };
+                                    Self::configure_window(&window, geometry);
+                                    if let Some(surface) = window.x11_surface() {
+                                        surface
+                                            .configure(Rectangle::new(
+                                                (x, y).into(),
+                                                (width as i32, height as i32).into(),
+                                            ))
+                                            .map_err(|error| {
+                                                format!("window configuration failed: {error}")
+                                            })?;
+                                    }
+                                    if let Some((_, location)) = self.minimized_windows.get_mut(&id)
+                                    {
+                                        *location = (x, y).into();
+                                    } else if let Some((_, location)) =
+                                        self.workspace_hidden_windows.get_mut(&id)
+                                    {
+                                        *location = (x, y).into();
+                                    } else {
+                                        self.map_compositor_moved_window(
+                                            window,
+                                            (x, y).into(),
+                                            false,
+                                        );
+                                    }
+                                    self.notify_protocol_snapshot();
+                                    self.display_handle.flush_clients().map_err(|error| {
+                                        format!("window configuration flush failed: {error}")
+                                    })?;
+                                }
+                                WindowAction::Activate => self.activate_window(id),
+                                WindowAction::Close => self.close_window(id),
+                                WindowAction::Minimize => self.minimize_window(id),
+                                WindowAction::Maximize => {
+                                    self.activate_window(id);
+                                    if fullscreen {
+                                        self.toggle_fullscreen_window(id);
+                                    }
+                                    if !maximized {
+                                        self.maximize_window(id);
+                                    }
+                                }
+                                WindowAction::Restore => {
+                                    self.activate_window(id);
+                                    if fullscreen {
+                                        self.toggle_fullscreen_window(id);
+                                    }
+                                    if maximized {
+                                        self.maximize_window(id);
+                                    }
+                                }
+                                WindowAction::Fullscreen => {
+                                    self.activate_window(id);
+                                    if !fullscreen {
+                                        self.toggle_fullscreen_window(id);
+                                    }
+                                }
+                                WindowAction::ExitFullscreen => {
+                                    if fullscreen {
+                                        self.toggle_fullscreen_window(id);
+                                    }
+                                }
+                            }
+                            let window = self
+                                .remote_protocol_windows()
+                                .into_iter()
+                                .find(|window| window.id.0 == numeric)
+                                .map(|window| self.remote_window_summary(window));
+                            Ok(WindowOutcome::observed(action, window))
+                        })
                     });
                 let _ = reply.send(result);
             }
@@ -1169,6 +3241,14 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_internal_shell_outputs(&mut self) {
+        self.invalidate_remote_shell_actions();
+        // Runtime slots are replaced below, but a surviving coordinator surface
+        // must retain keyboard ownership across output reconciliation.
+        let focused_owner = self.internal_ui.focused().and_then(|focused| {
+            self.internal_shell_surfaces
+                .iter()
+                .find_map(|(owner, runtime)| (*runtime == focused).then_some(*owner))
+        });
         self.pending_desktop_scenes.clear();
         // Deliver cancellation while old runtime-to-coordinator identities still
         // exist. Tombstones retain ownership of eventual releases after rebuild.
@@ -1215,12 +3295,20 @@ impl NickelSession {
             let runtime_id = self.internal_ui.insert_scene(scene, placement, scale);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
+        if let Some(runtime) =
+            focused_owner.and_then(|owner| self.internal_shell_surfaces.get(&owner).copied())
+        {
+            self.focus_internal_surface(runtime);
+        }
         self.schedule_internal_ui_frame();
         self.wake_internal_shell();
         self.sync_remote_control_indicators();
     }
 
     pub(crate) fn poll_internal_shell(&mut self, now: Instant) {
+        if self.internal_ui.take_surface_retirement() {
+            self.schedule_remote_resource_retirement();
+        }
         // Focus may change without another device event. Consume deferred lifecycle
         // batches here, outside Smithay's focus callback/keyboard lock.
         self.flush_internal_shell_input();
@@ -1451,6 +3539,8 @@ impl NickelSession {
         self.workspaces.remove_window(&id);
         self.remove_window_from_switcher(id);
         self.windows.remove(id);
+        self.remote_window_identities.remove(&id);
+        self.schedule_remote_resource_retirement();
         self.notify_protocol_snapshot();
     }
 
@@ -1634,41 +3724,15 @@ impl NickelSession {
     }
 
     pub(crate) fn toggle_internal_launcher(&mut self) -> bool {
-        let Some(was_visible) = self
+        let Some(visible) = self
             .internal_shell
             .as_ref()
-            .map(crate::internal_shell::InternalShellCoordinator::launcher_visible)
+            .map(|shell| shell.launcher_visible())
         else {
             return false;
         };
-        if !was_visible {
-            self.launcher_output_name = self.resolve_interaction_output(InvocationSource::Keyboard);
-            if self.launcher_restore_window.is_none() {
-                self.launcher_restore_window = self
-                    .windows
-                    .snapshot()
-                    .into_iter()
-                    .find(|window| window.active)
-                    .map(|window| window.id);
-            }
-        }
-        let changed = self.internal_shell.as_mut().unwrap().toggle_launcher();
-        if changed {
-            self.sync_internal_shell();
-            if was_visible {
-                self.restore_launcher_focus();
-            } else if let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
-                shell
-                    .surfaces()
-                    .iter()
-                    .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
-                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
-            }) {
-                self.focus_internal_surface(runtime);
-            }
-            self.wake_internal_shell();
-        }
-        changed
+        self.set_launcher_visible_from(!visible, InvocationSource::Keyboard);
+        true
     }
 
     /// Hide the compositor-hosted launcher because an ordinary client is
@@ -1735,6 +3799,20 @@ impl NickelSession {
     }
 
     pub(crate) fn flush_internal_shell_input(&mut self) {
+        let stop = self
+            .remote_indicator_surfaces
+            .values()
+            .copied()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .any(|id| {
+                self.internal_ui
+                    .application_mut::<super::remote_indicator::RemoteIndicator>(id)
+                    .is_some_and(|app| app.stop_requested)
+            });
+        if stop {
+            self.emergency_stop_remote_control();
+        }
         self.flush_native_clipboard_results();
         let events = self.internal_ui.drain_routed_events();
         if events.is_empty() || self.internal_shell.is_none() {
@@ -1908,6 +3986,7 @@ impl NickelSession {
             // scene over the compositor-owned menu.
             if surface.role == crate::winit_shell::SurfaceRole::CodexProjectMenu {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                    self.invalidate_remote_shell_surface(runtime_id);
                     self.internal_ui.remove(runtime_id);
                 }
                 continue;
@@ -1915,11 +3994,16 @@ impl NickelSession {
             let visible = shell.visible(surface.id);
             if !visible {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                    self.invalidate_remote_shell_surface(runtime_id);
                     self.internal_ui.remove(runtime_id);
                 }
                 continue;
             }
             let interaction_output = match surface.role {
+                crate::winit_shell::SurfaceRole::ControlCenter => shell
+                    .popover_anchor(nickel_session_protocol::AnchorSide::Above)
+                    .filter(|(role, _)| *role == nickel_session_protocol::ShellRole::ControlCenter)
+                    .map(|(_, anchor)| anchor.output),
                 crate::winit_shell::SurfaceRole::VolumeOsd => {
                     self.preferred_interaction_output_name()
                 }
@@ -1936,6 +4020,71 @@ impl NickelSession {
                 self.launcher_output_name.as_deref(),
             );
             let mut resized = false;
+            if matches!(
+                surface.role,
+                crate::winit_shell::SurfaceRole::Launcher
+                    | crate::winit_shell::SurfaceRole::ControlCenter
+            ) {
+                surface.size = (placement.geometry.2, placement.geometry.3);
+                resized = shell.set_surface_size(surface.id, surface.size);
+            }
+            if surface.role == crate::winit_shell::SurfaceRole::WindowContextMenu
+                && let Some((x, y, width, height)) = shell.window_menu_geometry()
+                && let Some((output, origin_x, origin_y)) = outputs
+                    .iter()
+                    .find(|(output, ox, oy)| {
+                        x >= *ox
+                            && y >= *oy
+                            && i64::from(x) < i64::from(*ox) + i64::from(output.width)
+                            && i64::from(y) < i64::from(*oy) + i64::from(output.height)
+                    })
+                    .or_else(|| outputs.first())
+            {
+                let width = width.min(output.width).max(1);
+                let height = height
+                    .min(
+                        output
+                            .height
+                            .saturating_sub(crate::winit_shell::PANEL_HEIGHT),
+                    )
+                    .max(1);
+                placement.output = Some(output.name.clone());
+                placement.geometry = (
+                    x.clamp(
+                        *origin_x,
+                        origin_x.saturating_add(output.width.saturating_sub(width) as i32),
+                    ),
+                    y.clamp(
+                        *origin_y,
+                        origin_y.saturating_add(
+                            output
+                                .height
+                                .saturating_sub(crate::winit_shell::PANEL_HEIGHT)
+                                .saturating_sub(height) as i32,
+                        ),
+                    ),
+                    width,
+                    height,
+                );
+                let trusted_controls = self
+                    .remote_indicator_surfaces
+                    .values()
+                    .filter_map(|id| self.internal_ui.placement(*id))
+                    .filter(|candidate| {
+                        candidate.role == crate::session::InternalSurfaceRole::TrustedControl
+                            && candidate.output.as_deref() == Some(output.name.as_str())
+                    })
+                    .map(|candidate| candidate.geometry)
+                    .collect::<Vec<_>>();
+                placement.geometry = avoid_trusted_control_collision(
+                    placement.geometry,
+                    (*origin_x, *origin_y, output.width, output.height),
+                    &trusted_controls,
+                );
+                surface.size = (width, height);
+
+                resized = shell.set_surface_size(surface.id, surface.size);
+            }
             if surface.role == crate::winit_shell::SurfaceRole::Screenshot
                 && let Some((output, _, _)) = outputs.iter().find(|(output, _, _)| {
                     Some(output.name.as_str()) == placement.output.as_deref()
@@ -1954,6 +4103,7 @@ impl NickelSession {
                     &outputs,
                 ) else {
                     if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
+                        self.invalidate_remote_shell_surface(runtime_id);
                         self.internal_ui.remove(runtime_id);
                     }
                     continue;
@@ -1968,9 +4118,17 @@ impl NickelSession {
                 .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
                 .map_or(1.0, |(output, _, _)| output.scale);
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
+                if shell.remote_access_protected(surface.id)
+                    || self
+                        .internal_ui
+                        .placement(runtime_id)
+                        .is_none_or(|current| current != &placement)
+                {
+                    self.invalidate_remote_shell_surface(runtime_id);
+                }
                 let geometry_changed =
                     self.internal_ui
-                        .configure_scene(runtime_id, placement, output_scale);
+                        .configure_surface(runtime_id, placement, output_scale);
                 if (resized
                     || geometry_changed
                     || (preview_pixels_changed
@@ -2024,6 +4182,7 @@ impl NickelSession {
     }
 
     pub fn remove_internal_surface(&mut self, id: nickel_ui::InternalSurfaceId) -> bool {
+        self.invalidate_remote_shell_surface(id);
         let removed = self.internal_ui.remove(id);
         if removed {
             self.schedule_internal_ui_frame();
@@ -2181,6 +4340,11 @@ fn shell_registration_is_active(
     }
 }
 
+struct RemoteOutputIdentification {
+    permit: nickel_remote_control::DesktopPermit,
+    output: nickel_remote_control::leases::ResourceId,
+}
+
 pub struct SurfaceBufferCommit {
     pub surface: WlSurface,
     pub render_visible: bool,
@@ -2192,7 +4356,11 @@ impl NickelSession {
         {
             return false;
         }
+        if let Some(token) = self.identify_outputs_timer.take() {
+            self.event_loop_handle.remove(token);
+        }
         self.identify_outputs_until = None;
+        self.remote_output_identification = None;
         #[cfg(feature = "backend-udev")]
         if let Some(native) = self.native.as_mut() {
             native.retire_identify_badges();
@@ -2201,35 +4369,126 @@ impl NickelSession {
     }
 
     fn begin_output_identification(&mut self) {
-        const IDENTIFY_DURATION: std::time::Duration = std::time::Duration::from_secs(3);
-        self.identify_outputs_generation = self.identify_outputs_generation.wrapping_add(1);
-        let generation = self.identify_outputs_generation;
-        self.identify_outputs_until = Some(std::time::Instant::now() + IDENTIFY_DURATION);
+        if let Err(error) = self.start_output_identification(None) {
+            tracing::warn!(%error, "output identification unavailable");
+            return;
+        }
         self.request_output_redraw();
         #[cfg(feature = "backend-udev")]
         if self.native.is_some() {
             self.render_all_outputs();
         }
+    }
 
-        let timer = Timer::from_duration(IDENTIFY_DURATION);
-        if let Err(error) = self
+    fn start_output_identification(
+        &mut self,
+        owner: Option<RemoteOutputIdentification>,
+    ) -> Result<u64, String> {
+        const DURATION: Duration = Duration::from_secs(3);
+        let generation = self
+            .identify_outputs_generation
+            .checked_add(1)
+            .ok_or("output identification generation exhausted")?;
+        if let Some(token) = self.identify_outputs_timer.take() {
+            self.event_loop_handle.remove(token);
+        }
+        self.identify_outputs_generation = generation;
+        self.identify_outputs_until = Some(Instant::now() + DURATION);
+        let remote = owner.is_some();
+        self.remote_output_identification = owner;
+        let timer = Timer::from_duration(if remote {
+            Duration::from_millis(100)
+        } else {
+            DURATION
+        });
+        let registration = self
             .event_loop_handle
             .insert_source(timer, move |_, _, data| {
-                if data.expire_output_identification(generation) {
+                if data.identify_outputs_generation != generation {
+                    return TimeoutAction::Drop;
+                }
+                let token = data.identify_outputs_timer.take();
+                data.revalidate_remote_output_identification();
+                if data
+                    .identify_outputs_until
+                    .is_none_or(|until| Instant::now() >= until)
+                {
+                    data.expire_output_identification(generation);
                     data.request_output_redraw();
                     #[cfg(feature = "backend-udev")]
                     if data.native.is_some() {
                         data.render_all_outputs();
                     }
+                    TimeoutAction::Drop
+                } else {
+                    data.identify_outputs_timer = token;
+                    TimeoutAction::ToDuration(Duration::from_millis(100))
                 }
-                TimeoutAction::Drop
-            })
-        {
-            tracing::warn!(
-                ?error,
-                "failed to schedule output-identification retirement"
-            );
+            });
+        match registration {
+            Ok(token) => self.identify_outputs_timer = Some(token),
+            Err(_) => {
+                self.expire_output_identification(generation);
+                return Err("output identification timer is unavailable".into());
+            }
         }
+        Ok(generation)
+    }
+
+    pub(crate) fn revalidate_remote_output_identification(&mut self) {
+        let invalid = self
+            .remote_output_identification
+            .as_ref()
+            .is_some_and(|owner| {
+                self.locked
+                    || self.shell_recovery_visible()
+                    || self
+                        .remote_output_identity(owner.output.id.clone())
+                        .as_ref()
+                        != Some(&owner.output)
+                    || owner
+                        .permit
+                        .continued_observation()
+                        .and_then(|permit| permit.with_debug(false, || Ok(())))
+                        .is_err()
+            });
+        if invalid {
+            self.expire_output_identification(self.identify_outputs_generation);
+            self.request_output_redraw();
+        }
+    }
+
+    #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+    pub(crate) fn output_identification_index(&mut self, output: &Output) -> Option<(u64, usize)> {
+        self.revalidate_remote_output_identification();
+        self.identify_outputs_until
+            .filter(|until| Instant::now() < *until)?;
+        if self.locked || self.shell_recovery_visible() {
+            return None;
+        }
+        if self
+            .remote_output_identification
+            .as_ref()
+            .is_some_and(|owner| owner.output.id != output.name())
+        {
+            return None;
+        }
+        let mut outputs = self
+            .space
+            .outputs()
+            .take(nickel_remote_control::diagnostics::MAX_DIAGNOSTIC_OUTPUTS)
+            .cloned()
+            .collect::<Vec<_>>();
+        outputs.sort_by_key(|output| {
+            self.space
+                .output_geometry(output)
+                .map(|geometry| (geometry.loc.x, geometry.loc.y))
+                .unwrap_or_default()
+        });
+        outputs
+            .iter()
+            .position(|candidate| candidate == output)
+            .map(|index| (self.identify_outputs_generation, index))
     }
 
     pub(crate) fn note_input_activity(&mut self) {
@@ -2396,6 +4655,7 @@ impl NickelSession {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
+        super::remote_accessibility::install(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
         let xdg_shell_state = XdgShellState::new::<Self>(&dh);
@@ -2499,7 +4759,46 @@ impl NickelSession {
                 }
             })
             .expect("failed to register deferred focus restoration");
-        let (remote_desktop_tx, remote_desktop_rx) = channel::channel();
+        let remote_cleanup_wake = Self::register_remote_connection_cleanup_wake(
+            &event_loop.handle(),
+            smithay::reexports::rustix::event::eventfd(
+                0,
+                smithay::reexports::rustix::event::EventfdFlags::NONBLOCK
+                    | smithay::reexports::rustix::event::EventfdFlags::CLOEXEC,
+            )
+            .map_err(Into::into),
+        );
+        let (remote_desktop_tx, remote_desktop_rx) = channel::sync_channel(32);
+        let remote_native_key_worker =
+            native_key_worker::NativeKeyWorker::start(remote_desktop_tx.clone()).ok();
+        let (identity_tx, identity_rx) = channel::sync_channel(32);
+        let remote_identity_worker =
+            super::remote_identity::IdentityWorker::start(identity_tx).ok();
+        event_loop
+            .handle()
+            .insert_source(identity_rx, |event, _, data| {
+                if let channel::Event::Msg(super::remote_identity::IdentityResult {
+                    window,
+                    identity,
+                }) = event
+                    && data.windows.title(window).is_some()
+                {
+                    data.remote_window_identities.insert(window, identity);
+                    data.resume_remote_launch_maps();
+                    data.observe_pending_launch_window(window);
+                    if !data.remote_window_is_protected(window) {
+                        if data.remote_event_windows.insert(window) {
+                            data.remote_desktop_events.record(
+                                nickel_remote_control::desktop_events::DesktopEventKind::WindowIdentityVerified { window_id: window.0 },
+                                data.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                            );
+                        }
+                    } else {
+                        data.remote_event_windows.remove(&window);
+                    }
+                }
+            })
+            .expect("failed to register resource identity worker");
         event_loop
             .handle()
             .insert_source(remote_desktop_rx, |event, _, data| {
@@ -2508,9 +4807,42 @@ impl NickelSession {
                 }
             })
             .expect("failed to register remote desktop authority");
+        event_loop
+            .handle()
+            .insert_source(
+                smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_secs(1)),
+                |_, _, data| {
+                    data.service_remote_connection_cleanup();
+                    data.expire_remote_shell_origins();
+                    data.reap_remote_launched_children();
+                    data.resume_remote_launch_maps();
+                    data.refresh_remote_output_identities();
+                    data.refresh_remote_window_identities();
+                    let control = data.remote_control.control();
+                    let mut control = control.lock().unwrap();
+                    let had_leases = control.leases().iter().next().is_some();
+                    control.leases_mut().expire(Instant::now());
+                    control.reconcile_pending_lease_requests(Instant::now());
+                    // Native held input is revalidated below after releasing the authority lock.
+                    control.leases_mut().take_cancellations();
+                    drop(control);
+                    data.revalidate_remote_pointer();
+                    data.revalidate_remote_keyboard();
+                    if had_leases {
+                        data.sync_remote_control_indicators();
+                    }
+                    smithay::reexports::calloop::timer::TimeoutAction::ToDuration(
+                        Duration::from_secs(1),
+                    )
+                },
+            )
+            .expect("failed to register remote lease expiration");
+        let remote_settings_staging = Arc::new(remote_settings::SettingsStaging::default());
         let remote_desktop_authority: Arc<dyn nickel_remote_control::DesktopAuthority> =
             Arc::new(RemoteDesktopBridge {
+                cleanup_wake: remote_cleanup_wake.clone(),
                 sender: remote_desktop_tx,
+                settings_staging: remote_settings_staging.clone(),
             });
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
@@ -2643,6 +4975,39 @@ impl NickelSession {
             preview_counters: PreviewCacheCounters::default(),
             hotkeys: CompositorShortcutAdapter::default(),
             remote_control: Default::default(),
+            local_cues: Default::default(),
+            remote_controller_observer: nickel_ui::ControllerInput::new(),
+            remote_cleanup_wake,
+            remote_settings_staging,
+            remote_observation_generation: 0,
+            remote_appearance: Default::default(),
+            remote_application_scale: Default::default(),
+            remote_launcher_favorites: Default::default(),
+            remote_desktop_events: Default::default(),
+            remote_frame_trace: None,
+            remote_event_windows: HashSet::new(),
+            remote_launched_children: Vec::new(),
+            remote_launch_placements: Vec::new(),
+            remote_launch_maps: HashMap::new(),
+            remote_shell_origins: HashMap::new(),
+            remote_shell_origin_generation: 0,
+            remote_held_keyboard: None,
+            remote_keyboard_timer_armed: false,
+            remote_native_key_worker,
+            remote_held_pointer: None,
+            remote_input_dispatching: false,
+            remote_native_press: None,
+            remote_gtk_menu: None,
+            remote_gtk_menu_timer_armed: false,
+            remote_gtk_epoch: 0,
+            remote_pointer_timer_armed: false,
+            #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+            remote_capture_work: None,
+            remote_resource_recheck_pending: false,
+            remote_output_generations: HashMap::new(),
+            remote_next_output_generation: 0,
+            remote_identity_worker,
+            remote_window_identities: HashMap::new(),
             remote_emergency_chord: Default::default(),
             remote_desktop_authority,
             task_switcher: TaskSwitcher::default(),
@@ -2668,6 +5033,8 @@ impl NickelSession {
             buffer_commit_tx: None,
             identify_outputs_until: None,
             identify_outputs_generation: 0,
+            identify_outputs_timer: None,
+            remote_output_identification: None,
             output_capture_path: None,
             output_capture_name: None,
             output_capture_reply_path: None,
@@ -2756,16 +5123,11 @@ impl NickelSession {
     }
 
     fn toggle_launcher_from(&mut self, source: InvocationSource) {
-        let visible = self.launcher_visibility.toggle();
-        if visible {
-            self.launcher_output_name = self.resolve_interaction_output(source);
-        }
-        self.hotkeys.launcher_visibility_applied(visible);
-        self.apply_launcher_visibility(visible);
-        if !visible {
-            self.restore_launcher_focus();
-        }
-        self.notify_launcher_visibility(visible);
+        let visible = self.internal_shell.as_ref().map_or_else(
+            || self.launcher_visibility.is_visible(),
+            |shell| shell.launcher_visible(),
+        );
+        self.set_launcher_visible_from(!visible, source);
     }
 
     fn apply_output_layout(
@@ -3144,8 +5506,13 @@ impl NickelSession {
     }
 
     fn apply_workspace_transition(&mut self, transition: WorkspaceTransition<WindowId>) {
+        self.cancel_remote_keyboard();
         self.hide_overlays();
         for id in transition.hide {
+            if let Some(surface) = self.internal_surface_for_window(id) {
+                self.internal_ui.set_visible(surface, false);
+                continue;
+            }
             if self.minimized_windows.contains_key(&id)
                 || self.workspace_hidden_windows.contains_key(&id)
             {
@@ -3166,6 +5533,12 @@ impl NickelSession {
             }
         }
         for id in transition.show {
+            if let Some(surface) = self.internal_surface_for_window(id) {
+                if !self.internal_minimized_windows.contains(&id) {
+                    self.internal_ui.set_visible(surface, true);
+                }
+                continue;
+            }
             if self.minimized_windows.contains_key(&id) {
                 continue;
             }
@@ -3182,6 +5555,8 @@ impl NickelSession {
                 .unwrap()
                 .set_focus(self, None, SERIAL_COUNTER.next_serial());
         }
+        self.sync_internal_window_decorations();
+        self.schedule_internal_ui_frame();
         self.raise_panels();
         self.request_output_redraw();
         self.notify_workspace_state();
@@ -3504,14 +5879,53 @@ impl NickelSession {
     }
 
     fn set_launcher_visible_from(&mut self, visible: bool, source: InvocationSource) {
-        let changed = self.launcher_visibility.is_visible() != visible;
+        self.set_launcher_visible_on_output(visible, self.resolve_interaction_output(source));
+    }
+
+    pub(super) fn set_launcher_visible_on_output(&mut self, visible: bool, output: Option<String>) {
+        let was_visible = self.internal_shell.as_ref().map_or_else(
+            || self.launcher_visibility.is_visible(),
+            |shell| shell.launcher_visible(),
+        );
+        let changed = was_visible != visible;
         if changed && visible {
             self.launcher_show_requested_at = Some(std::time::Instant::now());
-            self.launcher_output_name = self.resolve_interaction_output(source);
+            self.launcher_output_name = output;
+            if self.internal_shell.is_some() && self.launcher_restore_window.is_none() {
+                self.launcher_restore_window = self
+                    .windows
+                    .snapshot()
+                    .into_iter()
+                    .find(|window| window.active)
+                    .map(|window| window.id);
+            }
         }
         self.launcher_visibility.set(visible);
         self.hotkeys.launcher_visibility_applied(visible);
-        self.apply_launcher_visibility(visible);
+        if let Some(shell) = self.internal_shell.as_mut() {
+            shell.apply_launcher_visibility(visible);
+            if changed {
+                self.sync_internal_shell();
+                if visible
+                    && let Some(runtime) = self.internal_shell.as_ref().and_then(|shell| {
+                        shell
+                            .surfaces()
+                            .iter()
+                            .find(|surface| {
+                                surface.role == crate::winit_shell::SurfaceRole::Launcher
+                            })
+                            .and_then(|surface| {
+                                self.internal_shell_surfaces.get(&surface.id).copied()
+                            })
+                    })
+                {
+                    self.focus_internal_surface(runtime);
+                }
+                self.wake_internal_shell();
+            }
+        } else {
+            self.apply_launcher_visibility(visible);
+        }
         if changed {
             if !visible {
                 self.restore_launcher_focus();
@@ -3580,7 +5994,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3588,7 +6002,19 @@ impl NickelSession {
         self.notify_protocol_snapshot();
     }
 
-    pub(crate) fn observe_pending_launch_window(&mut self, client_pid: u32) {
+    pub(crate) fn observe_pending_launch_window(&mut self, window: WindowId) {
+        // Identity may complete before the first Wayland buffer is mapped.
+        // Acknowledgement requires both verified ownership and a mapped window.
+        if self.window_for_registry_id(window).is_none() {
+            return;
+        }
+        let Some(client_pid) = self
+            .remote_window_identities
+            .get(&window)
+            .and_then(super::remote_identity::WindowIdentity::current_process_id)
+        else {
+            return;
+        };
         let now = Instant::now();
         let mut observations = Vec::new();
         self.pending_launch_observations
@@ -3610,7 +6036,7 @@ impl NickelSession {
         if observations.is_empty() {
             return;
         }
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         for (generation, observed_after_ms, descendant) in observations {
@@ -3636,7 +6062,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3650,7 +6076,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3664,7 +6090,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3702,7 +6128,7 @@ impl NickelSession {
             message: ServerMessage::Event(SessionEvent::ShellBehaviorChanged(snapshot)),
         });
         if let Ok(event) = event
-            && let Ok(socket) = UnixDatagram::unbound()
+            && let Ok(socket) = notification_socket()
         {
             self.launcher_subscribers
                 .retain(|path| socket.send_to(&event, path).is_ok());
@@ -3714,36 +6140,73 @@ impl NickelSession {
         transaction: ShellBehaviorTransaction,
     ) -> ServerMessage {
         let _ = self.refresh_output_topology_generation();
+        match self.commit_shell_behavior_transaction(transaction, None) {
+            Ok((effective, transitions)) => {
+                self.reconcile_shell_behavior_commit(&effective, transitions);
+                ServerMessage::ShellBehavior(effective)
+            }
+            Err(error) => *error,
+        }
+    }
+
+    /// Commit configuration and workspace policy together. No shell polling or
+    /// control-authority callbacks occur here; callers reconcile the committed
+    /// state synchronously on this same owner before processing another request.
+    fn commit_shell_behavior_transaction(
+        &mut self,
+        transaction: ShellBehaviorTransaction,
+        commit_deadline: Option<Instant>,
+    ) -> Result<(ShellBehaviorSnapshot, Vec<WorkspaceTransition<WindowId>>), Box<ServerMessage>>
+    {
         if transaction.topology_generation != self.output_topology_generation {
-            return protocol_error(
+            return Err(Box::new(protocol_error(
                 ErrorCode::InvalidRequest,
                 format!(
                     "stale output topology generation {}; current generation is {}",
                     transaction.topology_generation, self.output_topology_generation
                 ),
-            );
+            )));
         }
-        let previous = ShellSettings::load_default();
+        let previous = nickel_core::shell_settings::settings_path()
+            .and_then(ShellSettings::load_for_update)
+            .map_err(|error| {
+                Box::new(protocol_error(
+                    ErrorCode::Internal,
+                    format!("could not read shell settings for transaction: {error}"),
+                ))
+            })?;
         let requested = match prepare_shell_behavior_update(
             &previous,
             self.output_topology_generation,
             &transaction,
         ) {
             Ok(requested) => requested,
-            Err(error) => return protocol_error(ErrorCode::InvalidRequest, error),
+            Err(error) => return Err(Box::new(protocol_error(ErrorCode::InvalidRequest, error))),
         };
-        if let Err(error) = requested.save_default() {
-            return protocol_error(
+        let persistence = nickel_core::shell_settings::settings_path().and_then(|path| {
+            requested.save_checked(path, || {
+                if commit_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "settings commit expired",
+                    ))
+                } else {
+                    Ok(())
+                }
+            })
+        });
+        if let Err(error) = persistence {
+            return Err(Box::new(protocol_error(
                 ErrorCode::Internal,
                 format!("could not persist shell setting: {error}"),
-            );
+            )));
         }
         let requested_count = usize::from(requested.desktop_count);
         let transitions = match self.workspaces.set_count(requested_count) {
             Ok(transitions) => transitions,
             Err(error) => {
                 let rollback = previous.save_default();
-                return protocol_error(
+                return Err(Box::new(protocol_error(
                     ErrorCode::Internal,
                     format!(
                         "could not apply shell setting: {error:?}; persistence rollback: {}",
@@ -3753,20 +6216,26 @@ impl NickelSession {
                             "failed"
                         }
                     ),
-                );
+                )));
             }
         };
+        Ok((self.protocol_shell_behavior(), transitions))
+    }
+
+    fn reconcile_shell_behavior_commit(
+        &mut self,
+        effective: &ShellBehaviorSnapshot,
+        transitions: Vec<WorkspaceTransition<WindowId>>,
+    ) {
         for transition in transitions {
             self.apply_workspace_transition(transition);
         }
-        let effective = self.protocol_shell_behavior();
         if let Some(shell) = self.internal_shell.as_mut()
             && shell.set_bar_on_all_displays(effective.bar_on_all_displays)
         {
             self.reconcile_internal_shell_outputs();
         }
         self.notify_shell_behavior_snapshot(effective.clone());
-        ServerMessage::ShellBehavior(effective)
     }
 
     pub(crate) fn notify_global_shortcut(
@@ -3795,7 +6264,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3830,7 +6299,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3854,7 +6323,7 @@ impl NickelSession {
         let Ok(event) = event else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -3914,6 +6383,26 @@ impl NickelSession {
         }
         if role == ShellRole::Screenshot {
             self.screenshot_output_name = self.preferred_interaction_output_name();
+        }
+        let internal_role = match role {
+            ShellRole::ControlCenter => Some(crate::winit_shell::SurfaceRole::ControlCenter),
+            ShellRole::ProjectMenu => Some(crate::winit_shell::SurfaceRole::CodexProjectMenu),
+            ShellRole::Preview => Some(crate::winit_shell::SurfaceRole::WindowPreview),
+            ShellRole::ContextMenu => Some(crate::winit_shell::SurfaceRole::WindowContextMenu),
+            ShellRole::Screenshot => Some(crate::winit_shell::SurfaceRole::Screenshot),
+            _ => None,
+        };
+        if let Some(runtime) = internal_role.and_then(|role| {
+            self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surfaces()
+                    .iter()
+                    .find(|surface| surface.role == role && shell.visible(surface.id))
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            })
+        }) {
+            self.pending_shell_focus_role = None;
+            return self.focus_internal_surface(runtime);
         }
         self.pending_shell_focus_role = Some(role);
         let registry = self.windows.snapshot();
@@ -4058,6 +6547,27 @@ impl NickelSession {
         surface_id: Option<&ObjectId>,
         window_id: Option<WindowId>,
     ) {
+        if let Some(id) = window_id {
+            self.remote_launch_maps.remove(&id);
+        }
+        if let Some(window) = window_id {
+            // Native process liveness may already be gone at destruction.
+            // Remember only previously accepted ordinary observation, and drop
+            // it on retirement regardless of whether history can be recorded.
+            if self.remote_event_windows.remove(&window)
+                && self.windows.contains(window)
+                && !self.locked
+                && !self.shell_recovery_visible()
+                && !self.shell_owned_windows.contains(&window)
+            {
+                self.remote_desktop_events.record(
+                    nickel_remote_control::desktop_events::DesktopEventKind::WindowRetired {
+                        window_id: window.0,
+                    },
+                    self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                );
+            }
+        }
         if let Some(surface_id) = surface_id {
             let _ = retire_pointer_surface(
                 &mut self.pointer_lock_hints,
@@ -4120,6 +6630,8 @@ impl NickelSession {
             self.workspaces.remove_window(&window_id);
             self.remove_window_from_switcher(window_id);
             self.windows.remove(window_id);
+            self.remote_window_identities.remove(&window_id);
+            self.schedule_remote_resource_retirement();
             self.preview_highlight = self
                 .preview_highlight
                 .filter(|candidate| *candidate != window_id);
@@ -4147,7 +6659,11 @@ impl NickelSession {
             shell_roles = counts.shell_roles,
             "retired session identity references"
         );
-        debug_assert!(self.lifecycle_references_are_live());
+        // Wayland invalidates all objects of a disconnected client before
+        // invoking each destruction callback. Other identities can therefore
+        // be dead but still awaiting their own retirement here. Assert the
+        // postcondition of this retirement, not global liveness mid-batch.
+        debug_assert!(self.retired_identity_has_no_references(surface_id, window_id));
     }
 
     pub(crate) fn retire_pointer_constraint_references(
@@ -4215,28 +6731,33 @@ impl NickelSession {
         }
     }
 
-    fn lifecycle_references_are_live(&self) -> bool {
-        let backend = self.display_handle.backend_handle();
-        let live_surface = |surface: &ObjectId| backend.object_info(surface.clone()).is_ok();
-        self.pointer_lock_hints.keys().all(live_surface)
-            && self.active_pointer_locks.iter().all(live_surface)
-            && self
-                .active_pointer_constraint_origins
-                .keys()
-                .all(live_surface)
-            && self
-                .registered_shell_role_slots
-                .iter()
-                .all(|registration| live_surface(&registration.surface))
-            && self
-                .surface_windows
-                .iter()
-                .all(|(surface, window)| live_surface(surface) && self.windows.contains(*window))
-            && self
-                .displaced_output_windows
-                .values()
-                .flatten()
-                .all(|displaced| self.windows.contains(displaced.id))
+    fn retired_identity_has_no_references(
+        &self,
+        surface_id: Option<&ObjectId>,
+        window_id: Option<WindowId>,
+    ) -> bool {
+        surface_id.is_none_or(|surface| {
+            !self.pointer_lock_hints.contains_key(surface)
+                && !self.active_pointer_locks.contains(surface)
+                && !self.active_pointer_constraint_origins.contains_key(surface)
+                && !self
+                    .registered_shell_role_slots
+                    .iter()
+                    .any(|registration| &registration.surface == surface)
+                && !self.surface_windows.contains_key(surface)
+        }) && window_id.is_none_or(|window| {
+            !self.windows.contains(window)
+                && !self.remote_event_windows.contains(&window)
+                && !self
+                    .surface_windows
+                    .values()
+                    .any(|retained| *retained == window)
+                && !self
+                    .displaced_output_windows
+                    .values()
+                    .flatten()
+                    .any(|displaced| displaced.id == window)
+        })
     }
 
     pub(crate) fn record_shell_role_registration(
@@ -4596,9 +7117,12 @@ impl NickelSession {
     }
 
     pub(crate) fn lock_session(&mut self) {
+        self.invalidate_remote_shell_actions();
         if self.locked {
             return;
         }
+        self.cancel_remote_pointer();
+        self.cancel_remote_keyboard();
         self.locked = true;
         self.remote_control.lock();
         self.sync_remote_control_indicators();
@@ -4736,7 +7260,7 @@ impl NickelSession {
         }) else {
             return;
         };
-        let Ok(socket) = UnixDatagram::unbound() else {
+        let Ok(socket) = notification_socket() else {
             return;
         };
         self.launcher_subscribers
@@ -5133,7 +7657,16 @@ impl NickelSession {
     }
 
     pub fn activate_window(&mut self, id: WindowId) {
+        self.cancel_remote_keyboard_before_focus(id);
         if let Some(surface) = self.internal_surface_for_window(id) {
+            if let Some(workspace) = self.workspaces.workspace_for(&id)
+                && workspace != self.workspaces.active()
+                && let Ok(mut transition) = self.workspaces.switch_to(workspace, None)
+            {
+                transition.focus = Some(id);
+                self.apply_workspace_transition(transition);
+                return;
+            }
             self.internal_minimized_windows.remove(&id);
             self.internal_ui.set_visible(surface, true);
             self.internal_ui.raise(surface);
@@ -5208,6 +7741,7 @@ impl NickelSession {
         if !self.internal_ui.is_visible(surface) {
             return false;
         }
+        self.cancel_remote_keyboard();
         self.seat.get_keyboard().unwrap().set_focus(
             self,
             Option::<crate::session::focus::KeyboardFocusTarget>::None,
@@ -6121,6 +8655,15 @@ impl NickelSession {
             .cloned()
     }
 
+    fn registry_native_window(&self, id: WindowId) -> Option<Window> {
+        self.window_for_registry_id(id).or_else(|| {
+            self.minimized_windows
+                .get(&id)
+                .or_else(|| self.workspace_hidden_windows.get(&id))
+                .map(|(window, _)| window.clone())
+        })
+    }
+
     pub(crate) fn raise_panels(&mut self) {
         for panel in self.panel_windows.clone() {
             self.space.raise_element(&panel, false);
@@ -6308,6 +8851,10 @@ impl NickelSession {
 
     pub(crate) fn output_name_for_window(&self, window: &Window) -> Option<String> {
         let geometry = self.output_geometry_for_window(window)?;
+        self.output_name_matching_geometry(geometry)
+    }
+
+    fn output_name_matching_geometry(&self, geometry: Geometry) -> Option<String> {
         self.space.outputs().find_map(|output| {
             let candidate = self.space.output_geometry(output)?;
             (candidate.loc.x == geometry.x
@@ -6398,6 +8945,10 @@ impl NickelSession {
             width: bounds.size.w,
             height: bounds.size.h,
         };
+        self.output_geometry_for_bounds(window_geometry)
+    }
+
+    fn output_geometry_for_bounds(&self, window_geometry: Geometry) -> Option<Geometry> {
         let outputs: Vec<_> = self
             .space
             .outputs()
@@ -6624,6 +9175,8 @@ impl NickelSession {
                     if let Err(error) = display.dispatch_clients(state) {
                         tracing::warn!(%error, "Wayland client dispatch failed");
                     }
+                    state.revalidate_remote_pointer();
+                    state.revalidate_remote_keyboard();
                     if let Err(error) = display.flush_clients() {
                         tracing::debug!(%error, "Wayland client flush deferred");
                     }
@@ -6770,6 +9323,13 @@ fn internal_shell_surface_placement(
         })
         .unwrap_or((None, 0, 0, surface_size.0, surface_size.1));
 
+    let surface_size = match surface_role {
+        SurfaceRole::Launcher => crate::internal_shell::launcher_size(output_width, output_height),
+        SurfaceRole::ControlCenter => {
+            crate::internal_shell::control_center_size(output_width, output_height)
+        }
+        _ => surface_size,
+    };
     let (x, y) = match surface_role {
         SurfaceRole::Panel => (
             origin_x,
@@ -6797,6 +9357,45 @@ fn internal_shell_surface_placement(
         geometry: (x, y, surface_size.0, surface_size.1),
         output: output_name,
     }
+}
+
+fn avoid_trusted_control_collision(
+    mut menu: (i32, i32, u32, u32),
+    output: (i32, i32, u32, u32),
+    trusted_controls: &[(i32, i32, u32, u32)],
+) -> (i32, i32, u32, u32) {
+    const GAP: i32 = 8;
+    let (output_x, output_y, output_width, output_height) = output;
+    let output_right = i64::from(output_x) + i64::from(output_width);
+    let output_bottom = i64::from(output_y) + i64::from(output_height);
+    for &(x, y, width, height) in trusted_controls {
+        let overlaps = i64::from(menu.0) < i64::from(x) + i64::from(width)
+            && i64::from(x) < i64::from(menu.0) + i64::from(menu.2)
+            && i64::from(menu.1) < i64::from(y) + i64::from(height)
+            && i64::from(y) < i64::from(menu.1) + i64::from(menu.3);
+        if !overlaps {
+            continue;
+        }
+        let menu_width = i32::try_from(menu.2).unwrap_or(i32::MAX);
+        let menu_height = i32::try_from(menu.3).unwrap_or(i32::MAX);
+        let trusted_width = i32::try_from(width).unwrap_or(i32::MAX);
+        let trusted_height = i32::try_from(height).unwrap_or(i32::MAX);
+        let left = x.saturating_sub(GAP).saturating_sub(menu_width);
+        if left >= output_x {
+            menu.0 = left;
+            continue;
+        }
+        let below = y.saturating_add(trusted_height).saturating_add(GAP);
+        if i64::from(below) + i64::from(menu_height) <= output_bottom {
+            menu.1 = below;
+            continue;
+        }
+        let right = x.saturating_add(trusted_width).saturating_add(GAP);
+        if i64::from(right) + i64::from(menu.2) <= output_right {
+            menu.0 = right;
+        }
+    }
+    menu
 }
 
 fn internal_codex_project_menu_placement(
@@ -7087,6 +9686,75 @@ mod protocol_tests {
     }
 
     #[test]
+    #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+    fn shell_capture_evidence_excludes_hidden_retired_and_trusted_surfaces() {
+        use nickel_remote_control::leases::ResourceId;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.refresh_remote_output_identities();
+        let desktop = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|entry| entry.role == crate::winit_shell::SurfaceRole::Desktop)
+            .unwrap()
+            .id;
+        let runtime = session.internal_shell_surfaces[&desktop];
+        let identity = ResourceId {
+            id: format!("internal:{}", runtime.snapshot_token()),
+            generation: runtime.snapshot_token(),
+        };
+        let (_, output) = session.surface_capture_evidence(&identity).unwrap();
+        assert_eq!(output.unwrap().id, "file-test");
+        session.internal_ui.set_visible(runtime, false);
+        assert!(session.surface_capture_evidence(&identity).is_err());
+        session.internal_ui.set_visible(runtime, true);
+        session.locked = true;
+        assert!(session.surface_capture_evidence(&identity).is_err());
+        session.locked = false;
+        let mut placement = session.internal_ui.placement(runtime).unwrap().clone();
+        placement.geometry.0 -= 1;
+        session.internal_ui.relocate(runtime, placement);
+        assert!(
+            session
+                .surface_capture_evidence(&identity)
+                .unwrap()
+                .1
+                .is_none(),
+            "straddling content cannot claim output membership"
+        );
+        // Same label with a new native output object cannot reuse old output evidence
+        // even before the identity refresh handles topology retirement.
+        let native = session.space.outputs().next().unwrap().clone();
+        session.space.unmap_output(&native);
+        assert!(
+            session
+                .surface_capture_evidence(&identity)
+                .unwrap()
+                .1
+                .is_none()
+        );
+        let trusted = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::TrustedControl,
+                geometry: (0, 0, 20, 20),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let trusted_identity = ResourceId {
+            id: format!("internal:{}", trusted.snapshot_token()),
+            generation: trusted.snapshot_token(),
+        };
+        assert!(session.surface_capture_evidence(&trusted_identity).is_err());
+        assert!(session.internal_ui.remove(runtime));
+        assert!(session.surface_capture_evidence(&identity).is_err());
+    }
+
+    #[test]
     fn desktop_motion_burst_rebuilds_once_at_frame_boundary_and_focus_cancels_immediately() {
         use crate::session::internal_ui::DesktopPointerAction;
         use nickel_input::{InputEvent, KeyEdge, PointerButton};
@@ -7181,7 +9849,682 @@ mod protocol_tests {
     }
 
     #[test]
-    fn active_remote_grant_owns_one_overlay_per_output_and_revoke_removes_it() {
+    fn surface_lease_retires_with_runtime_slot_and_cannot_follow_reopened_launcher() {
+        use nickel_remote_control::leases::{ResourceId, ResourceScope};
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.set_launcher_visible(true);
+        let record = session
+            .remote_shell_surface_diagnostics()
+            .0
+            .into_iter()
+            .find(|record| {
+                matches!(
+                    record.role,
+                    nickel_remote_control::diagnostics::ShellDiagnosticRole::Launcher
+                )
+            })
+            .unwrap();
+        let resource = ResourceId {
+            id: record.id,
+            generation: record.generation,
+        };
+        assert!(
+            session
+                .internal_ui
+                .has_surface_identity(&resource.id, resource.generation)
+        );
+        assert!(!session.internal_ui.has_surface_identity(
+            &format!("internal:0{}", resource.generation),
+            resource.generation
+        ));
+        assert!(
+            !session
+                .internal_ui
+                .has_surface_identity(&resource.id, resource.generation + 1)
+        );
+        let control = session.remote_control.control();
+        let lease = control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                "test-agent".into(),
+                ResourceScope::Surface(resource.clone()),
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        session.schedule_remote_resource_retirement();
+        session.flush_remote_resource_retirement();
+        assert!(
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .any(|candidate| candidate.id == lease)
+        );
+        session.set_launcher_visible(false);
+        assert!(
+            !session
+                .internal_ui
+                .has_surface_identity(&resource.id, resource.generation)
+        );
+        session.poll_internal_shell(Instant::now());
+        session.flush_remote_resource_retirement();
+        assert!(
+            !control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .any(|candidate| candidate.id == lease)
+        );
+        session.set_launcher_visible(true);
+        assert!(
+            !session
+                .internal_ui
+                .has_surface_identity(&resource.id, resource.generation)
+        );
+        assert!(
+            !control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .any(|candidate| candidate.id == lease)
+        );
+    }
+
+    #[test]
+    fn repeated_native_identity_verification_does_not_duplicate_observation_events() {
+        use crate::session::{remote_identity::IdentitySource, window_registry::WindowAdmission};
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        let window = session.windows.insert(WindowAdmission::Ordinary).unwrap();
+        for _ in 0..2 {
+            session.schedule_remote_window_identity(
+                window,
+                IdentitySource::WaylandPeer(std::process::id()),
+            );
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while session.remote_window_is_protected(window) && Instant::now() < deadline {
+                event_loop
+                    .dispatch(Duration::from_millis(10), &mut session)
+                    .unwrap();
+            }
+            assert!(!session.remote_window_is_protected(window));
+        }
+        let verified = session
+            .remote_desktop_events
+            .snapshot()
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.event
+                    == DesktopEventKind::WindowIdentityVerified {
+                        window_id: window.0,
+                    }
+            })
+            .count();
+        assert_eq!(verified, 1);
+        session.retire_surface_window_references(None, Some(window));
+        session.retire_surface_window_references(None, Some(window));
+        let retired = session
+            .remote_desktop_events
+            .snapshot()
+            .events
+            .into_iter()
+            .filter(|event| {
+                event.event
+                    == DesktopEventKind::WindowRetired {
+                        window_id: window.0,
+                    }
+            })
+            .count();
+        assert_eq!(retired, 1);
+        assert!(!session.remote_event_windows.contains(&window));
+    }
+
+    #[test]
+    fn launch_output_rejects_replaced_native_output_before_inventory_refresh() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.refresh_remote_output_identities();
+        let identity = session.remote_output_identity("file-test".into()).unwrap();
+        let (original, _) = session.remote_output_generations["file-test"].clone();
+        assert!(session.validate_launch_output(Some(&identity)).is_ok());
+        session.space.map_output(&original, (-1280, 0));
+        assert!(session.validate_launch_output(Some(&identity)).is_ok());
+        session.space.unmap_output(&original);
+        let replacement = Output::new(
+            "file-test".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Replacement".into(),
+                serial_number: "replacement".into(),
+            },
+        );
+        session.space.map_output(&replacement, (0, 0));
+        // The published generation has not caught up yet. Comparing the name
+        // alone would incorrectly authorize this replacement native object.
+        assert_eq!(
+            session.remote_output_identity("file-test".into()),
+            Some(identity.clone())
+        );
+        assert!(session.validate_launch_output(Some(&identity)).is_err());
+    }
+
+    #[test]
+    fn output_lease_generation_survives_repositioning_but_not_output_retirement() {
+        use nickel_remote_control::leases::{ResourceId, ResourceScope};
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.refresh_remote_output_identities();
+        let (output, generation) = session.remote_output_generations["file-test"].clone();
+        let initial_history = session.remote_desktop_events.snapshot();
+        let control = session.remote_control.control();
+        let lease = control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                "test-agent".into(),
+                ResourceScope::Output(ResourceId {
+                    id: "file-test".into(),
+                    generation,
+                }),
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        session.space.map_output(&output, (-1280, 0));
+        session.refresh_remote_output_identities();
+        session.flush_remote_resource_retirement();
+        assert_eq!(session.remote_output_generations["file-test"].1, generation);
+        assert_eq!(
+            session.remote_desktop_events.snapshot().generation,
+            initial_history.generation,
+            "repositioning must not invent an output membership transition"
+        );
+        assert!(
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .any(|candidate| candidate.id == lease)
+        );
+        session.space.unmap_output(&output);
+        session.refresh_remote_output_identities();
+        session.flush_remote_resource_retirement();
+        assert!(control.lock().unwrap().leases().iter().next().is_none());
+        let removed_history = session
+            .remote_desktop_events
+            .since(initial_history.generation)
+            .unwrap();
+        assert_eq!(removed_history.events.len(), 1);
+        assert_eq!(
+            removed_history.events[0].event,
+            nickel_remote_control::desktop_events::DesktopEventKind::OutputMembershipChanged {
+                latest_output_identity_generation: generation,
+                outputs: 0,
+            }
+        );
+        session.refresh_remote_output_identities();
+        assert_eq!(
+            session.remote_desktop_events.snapshot().generation,
+            removed_history.generation,
+            "rechecking unchanged membership must not duplicate events"
+        );
+        session.space.map_output(&output, (0, 0));
+        session.refresh_remote_output_identities();
+        let replacement_generation = session.remote_output_generations["file-test"].1;
+        assert_ne!(replacement_generation, generation);
+        let restored_history = session
+            .remote_desktop_events
+            .since(removed_history.generation)
+            .unwrap();
+        assert_eq!(restored_history.events.len(), 1);
+        assert_eq!(
+            restored_history.events[0].event,
+            nickel_remote_control::desktop_events::DesktopEventKind::OutputMembershipChanged {
+                latest_output_identity_generation: replacement_generation,
+                outputs: 1,
+            }
+        );
+        assert!(
+            restored_history.events[0].observed_at_us >= removed_history.events[0].observed_at_us
+        );
+    }
+
+    #[test]
+    fn window_retirement_revokes_its_lease_after_the_current_authorized_dispatch() {
+        use crate::session::window_registry::{WindowAdmission, WindowId};
+        use nickel_remote_control::leases::{ResourceId, ResourceScope};
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let removed = session.windows.insert(WindowAdmission::Ordinary).unwrap();
+        let retained = session.windows.insert(WindowAdmission::Ordinary).unwrap();
+        let control = session.remote_control.control();
+        let mut authority = control.lock().unwrap();
+        authority.set_enabled(true);
+        let identity = authority.connect_identity("Retirement test").unwrap();
+        let scope = |id: WindowId| {
+            ResourceScope::Window(ResourceId {
+                id: id.0.to_string(),
+                generation: id.0,
+            })
+        };
+        let retired_lease = authority
+            .leases_mut()
+            .approve_local(
+                identity.client_id.clone(),
+                scope(removed),
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        let retained_lease = authority
+            .leases_mut()
+            .approve_local(
+                identity.client_id,
+                scope(retained),
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        // Production lifecycle runs while the outer operation still holds authorization.
+        session.remote_window_identities.insert(
+            removed,
+            crate::session::remote_identity::WindowIdentity::Pending,
+        );
+        session.retire_surface_window_references(None, Some(removed));
+        assert!(
+            !session.remote_window_identities.contains_key(&removed),
+            "retirement must bound identity storage before deferred lease cleanup"
+        );
+        assert!(session.remote_resource_recheck_pending);
+        drop(authority);
+        session.flush_remote_resource_retirement();
+        let mut authority = control.lock().unwrap();
+        assert_eq!(
+            authority
+                .leases()
+                .iter()
+                .map(|lease| lease.id)
+                .collect::<Vec<_>>(),
+            vec![retained_lease]
+        );
+        assert!(
+            authority
+                .leases_mut()
+                .take_cancellations()
+                .contains(&retired_lease)
+        );
+    }
+
+    #[test]
+    fn remote_lease_approval_rejects_retired_and_nonexistent_generation_targets() {
+        use nickel_session_protocol::{
+            Command, RemoteLeaseRequest, RemoteResourceId, RemoteResourceScope, ServerMessage,
+        };
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let control = session.remote_control.control();
+        control.lock().unwrap().set_enabled(true);
+        let surface = session.internal_ui.insert_scene(
+            Vec::new(),
+            super::super::internal_ui::InternalSurfacePlacement {
+                role: super::super::internal_ui::InternalSurfaceRole::Panel,
+                geometry: (0, 0, 100, 40),
+                output: None,
+            },
+            1.0,
+        );
+        let identity = control
+            .lock()
+            .unwrap()
+            .connect_identity("Pending retirement")
+            .unwrap();
+        let request = RemoteLeaseRequest {
+            renewal: None,
+            scope: RemoteResourceScope::Surface(RemoteResourceId {
+                id: format!("internal:{}", surface.snapshot_token()),
+                generation: surface.snapshot_token(),
+            }),
+            duration_seconds: Some(1200),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        assert!(session.remote_lease_target_live(&request.scope));
+        {
+            let mut owner = control.lock().unwrap();
+            let now = Instant::now();
+            let watch = owner
+                .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                .unwrap();
+            owner
+                .activate_connection_watch(&identity.client_id, &identity.token, watch, false, now)
+                .unwrap();
+        }
+        control
+            .lock()
+            .unwrap()
+            .request_lease(
+                &identity.client_id,
+                &identity.token,
+                request.clone().into(),
+                Instant::now(),
+            )
+            .unwrap();
+        session.internal_ui.remove(surface);
+        let pending_generation = control
+            .lock()
+            .unwrap()
+            .lease_requests()
+            .pending_generation(&identity.client_id)
+            .unwrap();
+        let result = session.handle_protocol_command(
+            Command::DecideRemoteLease {
+                pending_generation,
+                client_id: identity.client_id,
+                request,
+                allow: true,
+            },
+            None,
+            0,
+        );
+        assert!(matches!(result, ServerMessage::Error { .. }));
+        assert_eq!(control.lock().unwrap().leases().iter().count(), 0);
+        for scope in [
+            RemoteResourceScope::Window(RemoteResourceId {
+                id: u64::MAX.to_string(),
+                generation: u64::MAX,
+            }),
+            RemoteResourceScope::Output(RemoteResourceId {
+                id: "missing-output".into(),
+                generation: u64::MAX,
+            }),
+        ] {
+            let identity = control
+                .lock()
+                .unwrap()
+                .connect_identity("Missing resource")
+                .unwrap();
+            let request = RemoteLeaseRequest {
+                renewal: None,
+                scope,
+                duration_seconds: Some(1200),
+                allow_resumption: false,
+                full_debug: false,
+            };
+            {
+                let mut owner = control.lock().unwrap();
+                let now = Instant::now();
+                let watch = owner
+                    .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                    .unwrap();
+                owner
+                    .activate_connection_watch(
+                        &identity.client_id,
+                        &identity.token,
+                        watch,
+                        false,
+                        now,
+                    )
+                    .unwrap();
+            }
+            control
+                .lock()
+                .unwrap()
+                .request_lease(
+                    &identity.client_id,
+                    &identity.token,
+                    request.clone().into(),
+                    Instant::now(),
+                )
+                .unwrap();
+            let pending_generation = control
+                .lock()
+                .unwrap()
+                .lease_requests()
+                .pending_generation(&identity.client_id)
+                .unwrap();
+            let result = session.handle_protocol_command(
+                Command::DecideRemoteLease {
+                    pending_generation,
+                    client_id: identity.client_id,
+                    request,
+                    allow: true,
+                },
+                None,
+                0,
+            );
+            assert!(matches!(result, ServerMessage::Error { .. }));
+        }
+        assert_eq!(control.lock().unwrap().leases().iter().count(), 0);
+    }
+
+    #[test]
+    fn remote_lease_resume_checks_live_protection_and_pending_retirement() {
+        use crate::session::internal_ui::{InternalSurfacePlacement, InternalSurfaceRole};
+        use nickel_session_protocol::{
+            Command, RemoteLeaseAction, RemoteResourceId, RemoteResourceScope, ServerMessage,
+        };
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let placement = |role| InternalSurfacePlacement {
+            role,
+            geometry: (0, 0, 100, 40),
+            output: None,
+        };
+        let surface = session.internal_ui.insert_scene(
+            Vec::new(),
+            placement(InternalSurfaceRole::Panel),
+            1.0,
+        );
+        let control = session.remote_control.control();
+        let mut authority = control.lock().unwrap();
+        authority.set_enabled(true);
+        let identity = authority.connect_identity("Resume lifecycle").unwrap();
+        let lease = authority
+            .leases_mut()
+            .approve_local(
+                identity.client_id,
+                RemoteResourceScope::Surface(RemoteResourceId {
+                    id: format!("internal:{}", surface.snapshot_token()),
+                    generation: surface.snapshot_token(),
+                }),
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        drop(authority);
+        let manage = |session: &mut super::NickelSession, action| {
+            session.handle_protocol_command(
+                Command::ManageRemoteLease {
+                    lease_id: lease,
+                    action,
+                },
+                None,
+                0,
+            )
+        };
+        assert!(matches!(
+            manage(&mut session, RemoteLeaseAction::Pause),
+            ServerMessage::RemoteControl(_)
+        ));
+        session
+            .internal_ui
+            .relocate(surface, placement(InternalSurfaceRole::TrustedControl));
+        assert!(matches!(
+            manage(&mut session, RemoteLeaseAction::Resume),
+            ServerMessage::Error { .. }
+        ));
+        assert!(
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .find(|item| item.id == lease)
+                .unwrap()
+                .suspended
+        );
+        session
+            .internal_ui
+            .relocate(surface, placement(InternalSurfaceRole::Panel));
+        assert!(matches!(
+            manage(&mut session, RemoteLeaseAction::Resume),
+            ServerMessage::RemoteControl(_)
+        ));
+        assert!(
+            !control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .find(|item| item.id == lease)
+                .unwrap()
+                .suspended
+        );
+        manage(&mut session, RemoteLeaseAction::Pause);
+        session.internal_ui.remove(surface);
+        // Retirement is deferred; resume must check the owner before that queue runs.
+        assert!(matches!(
+            manage(&mut session, RemoteLeaseAction::Resume),
+            ServerMessage::Error { .. }
+        ));
+        assert!(
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .find(|item| item.id == lease)
+                .unwrap()
+                .suspended
+        );
+    }
+
+    #[test]
+    fn remote_lease_local_commands_approve_pause_resume_and_revoke() {
+        use nickel_session_protocol::{
+            Command, RemoteLeaseAction, RemoteLeaseRequest, RemoteResourceScope, ServerMessage,
+        };
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let control = session.remote_control.control();
+        control.lock().unwrap().set_enabled(true);
+        let identity = control
+            .lock()
+            .unwrap()
+            .connect_identity("Lease test")
+            .unwrap();
+        let request = RemoteLeaseRequest {
+            renewal: None,
+            scope: RemoteResourceScope::FullSession,
+            duration_seconds: Some(1200),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        {
+            let mut owner = control.lock().unwrap();
+            let now = Instant::now();
+            let watch = owner
+                .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                .unwrap();
+            owner
+                .activate_connection_watch(&identity.client_id, &identity.token, watch, false, now)
+                .unwrap();
+        }
+        control
+            .lock()
+            .unwrap()
+            .request_lease(
+                &identity.client_id,
+                &identity.token,
+                request.clone().into(),
+                Instant::now(),
+            )
+            .unwrap();
+        let pending_generation = control
+            .lock()
+            .unwrap()
+            .lease_requests()
+            .pending_generation(&identity.client_id)
+            .unwrap();
+        let result = session.handle_protocol_command(
+            Command::DecideRemoteLease {
+                pending_generation,
+                client_id: identity.client_id,
+                request,
+                allow: true,
+            },
+            None,
+            0,
+        );
+        let ServerMessage::RemoteControl(snapshot) = result else {
+            panic!("approval failed");
+        };
+        assert!(snapshot.pending_leases.is_empty());
+        assert_eq!(snapshot.active_leases.len(), 1);
+        let lease_id = snapshot.active_leases[0].lease_id;
+        for (action, suspended) in [
+            (RemoteLeaseAction::Pause, true),
+            (RemoteLeaseAction::Resume, false),
+        ] {
+            let result = session.handle_protocol_command(
+                Command::ManageRemoteLease { lease_id, action },
+                None,
+                0,
+            );
+            let ServerMessage::RemoteControl(snapshot) = result else {
+                panic!("management failed");
+            };
+            assert_eq!(snapshot.active_leases[0].suspended, suspended);
+            assert_eq!(session.remote_indicator_surfaces.len(), 1);
+            let indicator = *session.remote_indicator_surfaces.values().next().unwrap();
+            let app = session
+                .internal_ui
+                .application_mut::<crate::session::remote_indicator::RemoteIndicator>(indicator)
+                .unwrap();
+            assert_eq!(app.grants.len(), 1);
+            assert_eq!(app.grants[0].suspended, suspended);
+            assert!(app.grants[0].connected);
+        }
+        let result = session.handle_protocol_command(
+            Command::ManageRemoteLease {
+                lease_id,
+                action: RemoteLeaseAction::Revoke,
+            },
+            None,
+            0,
+        );
+        let ServerMessage::RemoteControl(snapshot) = result else {
+            panic!("revoke failed");
+        };
+        assert!(snapshot.active_leases.is_empty());
+        assert!(session.remote_indicator_surfaces.is_empty());
+    }
+
+    #[test]
+    fn active_remote_lease_owns_one_overlay_per_output_and_revoke_removes_it() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         let control = session.remote_control.control();
@@ -7207,21 +10550,60 @@ mod protocol_tests {
         drop(control_guard);
 
         session.sync_remote_control_indicators();
+        assert!(session.remote_indicator_surfaces.is_empty());
+        control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                pending.id.clone(),
+                nickel_remote_control::leases::ResourceScope::FullSession,
+                Instant::now(),
+                None,
+                false,
+                false,
+            )
+            .unwrap();
+        session.sync_remote_control_indicators();
         assert_eq!(session.remote_indicator_surfaces.len(), 1);
         let indicator = session.remote_indicator_surfaces["file-test"];
         let placement = session.internal_ui.placement(indicator).unwrap();
         assert_eq!(
             placement.role,
-            crate::session::InternalSurfaceRole::PassiveOverlay
+            crate::session::InternalSurfaceRole::TrustedControl
         );
         assert_eq!(placement.output.as_deref(), Some("file-test"));
         assert!(
             session
                 .internal_ui
                 .surface_at((900.0, 30.0), true)
-                .is_none()
+                .is_some()
         );
 
+        let stop = session
+            .internal_ui
+            .semantic_nodes(indicator)
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("Stop"))
+            .expect("trusted indicator exposes an accessible Stop button");
+        assert!(stop.actions.contains(&nickel_ui::ActionKind::Activate));
+        session.internal_ui.step(
+            indicator,
+            nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Accessibility {
+                    target: stop.id,
+                    action: nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                }],
+                ..Default::default()
+            },
+        );
+        assert!(
+            session
+                .internal_ui
+                .application_mut::<super::super::remote_indicator::RemoteIndicator>(indicator)
+                .unwrap()
+                .stop_requested
+        );
         assert!(control.lock().unwrap().revoke(&pending.id));
         session.sync_remote_control_indicators();
         assert!(session.remote_indicator_surfaces.is_empty());
@@ -7246,6 +10628,19 @@ mod protocol_tests {
                 &pending.id,
                 nickel_remote_control::Approval::AllowOnce,
                 vec![nickel_remote_control::Capability::Observe],
+            )
+            .unwrap();
+        control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .approve_local(
+                pending.id.clone(),
+                nickel_remote_control::leases::ResourceScope::FullSession,
+                Instant::now(),
+                None,
+                false,
+                false,
             )
             .unwrap();
         session.sync_remote_control_indicators();
@@ -7704,6 +11099,261 @@ mod protocol_tests {
     }
 
     #[test]
+    fn internal_protection_hides_remote_inventory_without_hiding_local_window() {
+        struct ProtectedApp(bool);
+        impl nickel_ui::Application for ProtectedApp {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn remote_access_protected(&self) -> bool {
+                self.0
+            }
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("fixture")
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.internal_ui.insert(
+            ProtectedApp(false),
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let window = session.register_internal_application(surface).unwrap();
+        // The registration fallback is presentation metadata, not a verified app identity.
+        assert_eq!(session.windows.app_id(window), Some("nickel-codex"));
+        assert!(session.remote_verified_application(window).is_none());
+        assert!(
+            session
+                .remote_protocol_windows()
+                .iter()
+                .any(|entry| entry.id.0 == window.0)
+        );
+        let observed_windows = session
+            .protocol_windows()
+            .into_iter()
+            .map(|window| session.remote_window_summary(window))
+            .collect::<Vec<_>>();
+        let observed_apps = session.remote_internal_application_diagnostics(&observed_windows);
+        session
+            .inject_test_input(nickel_session_protocol::TestInput::PointerMove { x: 100, y: 120 })
+            .unwrap();
+        let input = session.remote_input_diagnostic(&observed_windows, &observed_apps, 1, 1);
+        assert_eq!(
+            input.keyboard.unwrap().focused_window,
+            Some(window.0.to_string())
+        );
+        assert_eq!(
+            input.pointer_hit_test.unwrap().window,
+            Some(window.0.to_string())
+        );
+        assert!(
+            session
+                .remote_workspace_diagnostics(&observed_windows)
+                .iter()
+                .any(|workspace| workspace.windows.contains(&window.0.to_string()))
+        );
+        assert_eq!(
+            session
+                .remote_internal_renderer_diagnostics(&observed_apps, 1)
+                .len(),
+            1
+        );
+        session
+            .internal_ui
+            .application_mut::<ProtectedApp>(surface)
+            .unwrap()
+            .0 = true;
+        assert!(session.remote_window_is_protected(window));
+        // Previously projected identities cannot outlive a live protection change,
+        // including before the next hosted frame reconciles presentation state.
+        let input = session.remote_input_diagnostic(&observed_windows, &observed_apps, 2, 2);
+        assert!(input.keyboard.is_none());
+        assert!(input.pointer_hit_test.is_none());
+        assert!(
+            session
+                .remote_workspace_diagnostics(&observed_windows)
+                .iter()
+                .all(
+                    |workspace| !workspace.windows.contains(&window.0.to_string())
+                        && workspace.last_focused_window.as_deref()
+                            != Some(window.0.to_string().as_str())
+                )
+        );
+        assert!(
+            session
+                .remote_internal_renderer_diagnostics(&observed_apps, 2)
+                .is_empty()
+        );
+        // Even a caller retaining the local inventory cannot project a protected host.
+        let local_windows = session
+            .protocol_windows()
+            .into_iter()
+            .map(|window| session.remote_window_summary(window))
+            .collect::<Vec<_>>();
+        assert!(
+            session
+                .remote_internal_application_diagnostics(&local_windows)
+                .is_empty()
+        );
+
+        assert!(session.internal_ui.step(
+            surface,
+            nickel_ui::HostBatch {
+                application_changed: true,
+                ..nickel_ui::HostBatch::default()
+            },
+        ));
+        assert!(
+            !session
+                .remote_protocol_windows()
+                .iter()
+                .any(|entry| entry.id.0 == window.0)
+        );
+        assert!(
+            session
+                .protocol_windows()
+                .iter()
+                .any(|entry| entry.id.0 == window.0)
+        );
+        session
+            .internal_ui
+            .application_mut::<ProtectedApp>(surface)
+            .unwrap()
+            .0 = false;
+        assert!(session.remote_window_is_protected(window));
+        let pending = session.remote_input_diagnostic(&observed_windows, &observed_apps, 3, 3);
+        assert!(pending.keyboard.is_none());
+        assert!(pending.pointer_hit_test.is_none());
+        assert!(session.internal_ui.step(
+            surface,
+            nickel_ui::HostBatch {
+                application_changed: true,
+                ..nickel_ui::HostBatch::default()
+            },
+        ));
+        assert!(!session.remote_window_is_protected(window));
+        let restored = session.remote_input_diagnostic(&observed_windows, &observed_apps, 4, 4);
+        assert_eq!(
+            restored.keyboard.unwrap().focused_window,
+            Some(window.0.to_string())
+        );
+        assert_eq!(
+            restored.pointer_hit_test.unwrap().window,
+            Some(window.0.to_string())
+        );
+        assert!(
+            session
+                .remote_protocol_windows()
+                .iter()
+                .any(|entry| entry.id.0 == window.0)
+        );
+    }
+
+    #[test]
+    fn internal_diagnostics_follow_production_visibility_and_frame_lifecycle() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (-80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.25,
+        );
+        let window = session.register_internal_application(surface).unwrap();
+        let windows = session
+            .remote_protocol_windows()
+            .into_iter()
+            .map(|window| session.remote_window_summary(window))
+            .collect::<Vec<_>>();
+        let records = session.remote_internal_application_diagnostics(&windows);
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.id, format!("internal:{}", surface.snapshot_token()));
+        assert_eq!(record.generation, surface.snapshot_token());
+        assert_eq!(record.window, window.0.to_string());
+        assert_eq!(record.geometry, [-80, 90, 640, 480]);
+        assert_eq!(record.output.as_deref(), Some("file-test"));
+        assert_eq!(record.scale_factor, 1.25);
+        assert!(record.keyboard_focused);
+        session
+            .inject_test_input(nickel_session_protocol::TestInput::PointerMove { x: 100, y: 120 })
+            .unwrap();
+        let input = session.remote_input_diagnostic(&windows, &records, 7, 11);
+        assert_eq!(
+            input.pointer_hit_test.as_ref().unwrap().window.as_deref(),
+            Some(record.window.as_str())
+        );
+        assert!(
+            session
+                .remote_input_diagnostic(&windows, &[], 8, 12)
+                .pointer_hit_test
+                .is_none(),
+            "unprojected internal applications must remain unavailable"
+        );
+        assert_eq!(input.observation_generation, 7);
+        assert_eq!(input.observed_at_us, 11);
+        assert_eq!(
+            input.keyboard.unwrap().focused_window.as_deref(),
+            Some(record.window.as_str())
+        );
+        assert!(
+            session
+                .remote_input_diagnostic(&windows, &[], 8, 12)
+                .keyboard
+                .is_none()
+        );
+
+        assert!(record.redraw_pending);
+        assert!(
+            session
+                .remote_internal_application_diagnostics(&[])
+                .is_empty()
+        );
+        session.internal_ui.step(
+            surface,
+            nickel_ui::HostBatch {
+                application_changed: true,
+                ..nickel_ui::HostBatch::default()
+            },
+        );
+        let next = session.remote_internal_application_diagnostics(&windows);
+        assert!(next[0].resolved_frame_generation > record.resolved_frame_generation);
+        assert_eq!(next[0].generation, record.generation);
+        session.internal_ui.set_visible(surface, false);
+        // Hidden ordinary applications remain inspectable under the same lease;
+        // visibility and renderer suspension are part of the diagnostic state.
+        let hidden = session.remote_internal_application_diagnostics(&windows);
+        assert_eq!(hidden.len(), 1);
+        assert_eq!(hidden[0].id, record.id);
+        assert_eq!(hidden[0].generation, record.generation);
+        assert!(!hidden[0].visible);
+        assert!(!hidden[0].keyboard_focused);
+        let hidden_renderers = session.remote_internal_renderer_diagnostics(&hidden, 13);
+        assert_eq!(hidden_renderers.len(), 1);
+        assert_eq!(hidden_renderers[0].mode, "suspended");
+        session.internal_ui.set_visible(surface, true);
+        assert_eq!(
+            session
+                .remote_internal_application_diagnostics(&windows)
+                .len(),
+            1
+        );
+        session.internal_ui.remove(surface);
+        assert!(
+            session
+                .remote_internal_application_diagnostics(&windows)
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn internal_application_has_canonical_window_lifecycle() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
@@ -7756,6 +11406,342 @@ mod protocol_tests {
         session.close_window(window);
         assert!(!session.windows.contains(window));
         assert!(session.internal_ui.placement(surface).is_none());
+    }
+
+    #[test]
+    #[ignore = "native XWayland acceptance: requires Xwayland and a writable XDG_RUNTIME_DIR; run alone"]
+    fn native_x11_launch_acknowledgement_rejects_forged_pid() {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::xproto::{AtomEnum, ConnectionExt, CreateWindowAux, PropMode, WindowClass},
+            wrapper::ConnectionExt as _,
+        };
+        struct FixtureEnvironment(Option<std::ffi::OsString>);
+        impl Drop for FixtureEnvironment {
+            fn drop(&mut self) {
+                // SAFETY: this opt-in native test runs alone, like XWayland startup.
+                unsafe {
+                    match self.0.take() {
+                        Some(display) => std::env::set_var("DISPLAY", display),
+                        None => std::env::remove_var("DISPLAY"),
+                    }
+                }
+            }
+        }
+        struct OwnedProcess(std::process::Child);
+        impl Drop for OwnedProcess {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let _environment = FixtureEnvironment(std::env::var_os("DISPLAY"));
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        session.start_xwayland();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while session.xwm.is_none() {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < deadline, "owned XWayland did not start");
+        }
+        let child = OwnedProcess(
+            std::process::Command::new("/usr/bin/sleep")
+                .arg("30")
+                .spawn()
+                .unwrap(),
+        );
+        let forged_pid = child.0.id();
+        session
+            .pending_launch_observations
+            .push(PendingLaunchObservation {
+                generation: 93,
+                root_pid: forged_pid,
+                root_start_time: super::linux_process_start_time(forged_pid).unwrap(),
+                registered_at: Instant::now(),
+                deadline: Duration::from_secs(15),
+            });
+        let display = format!(":{}", session.xwayland_display.unwrap());
+        let (stop, stopped) = std::sync::mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let (connection, screen) = smithay::reexports::x11rb::connect(Some(&display)).unwrap();
+            let root = &connection.setup().roots[screen];
+            let window = connection.generate_id().unwrap();
+            connection
+                .create_window(
+                    0,
+                    window,
+                    root.root,
+                    20,
+                    20,
+                    200,
+                    100,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new().background_pixel(root.white_pixel),
+                )
+                .unwrap();
+            let pid_atom = connection
+                .intern_atom(false, b"_NET_WM_PID")
+                .unwrap()
+                .reply()
+                .unwrap()
+                .atom;
+            connection
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    pid_atom,
+                    AtomEnum::CARDINAL,
+                    &[forged_pid],
+                )
+                .unwrap();
+            connection
+                .change_property8(
+                    PropMode::REPLACE,
+                    window,
+                    AtomEnum::WM_NAME,
+                    AtomEnum::STRING,
+                    b"Forged launch acknowledgement fixture",
+                )
+                .unwrap();
+            connection.map_window(window).unwrap();
+            connection.flush().unwrap();
+            let _ = stopped.recv_timeout(Duration::from_secs(20));
+        });
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let id = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            if let Some(id) = session.x11_windows.values().copied().find(|id| {
+                session
+                    .remote_window_identities
+                    .get(id)
+                    .and_then(|identity| identity.current_process_id())
+                    == Some(std::process::id())
+                    && session.window_for_registry_id(*id).is_some()
+            }) {
+                break id;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "mapped X11 owner was not verified through XRes"
+            );
+        };
+        let window = session.window_for_registry_id(id).unwrap();
+        assert_eq!(window.x11_surface().unwrap().pid(), Some(forged_pid));
+        assert_eq!(
+            session.pending_launch_observations.len(),
+            1,
+            "forged PID must not acknowledge the unrelated child"
+        );
+        // The same production observation accepts the actual connection owner.
+        session.pending_launch_observations[0].root_pid = std::process::id();
+        session.pending_launch_observations[0].root_start_time =
+            super::linux_process_start_time(std::process::id()).unwrap();
+        session.observe_pending_launch_window(id);
+        assert!(session.pending_launch_observations.is_empty());
+        let _ = stop.send(());
+        client.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "native Wayland acceptance: requires /usr/bin/zenity and a writable XDG_RUNTIME_DIR"]
+    fn native_launch_acknowledgement_waits_for_mapped_verified_window() {
+        use crate::session::remote_identity::{ProcessIdentity, WindowIdentity};
+        use crate::session::window_registry::WindowId;
+        struct OwnedDialog(std::process::Child);
+        impl Drop for OwnedDialog {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        // Deliver the identity result explicitly to exercise both orderings.
+        session.remote_identity_worker = None;
+        let config = tempfile::tempdir().unwrap();
+        let child = OwnedDialog(
+            std::process::Command::new("/usr/bin/zenity")
+                .args([
+                    "--info",
+                    "--title=Launch acknowledgement native fixture",
+                    "--text=Native launch fixture",
+                ])
+                .env("WAYLAND_DISPLAY", &session.socket_name)
+                .env("GDK_BACKEND", "wayland")
+                .env("GSK_RENDERER", "cairo")
+                .env("XDG_CONFIG_HOME", config.path())
+                .env_remove("DISPLAY")
+                .env_remove("NICKEL_SESSION_TOKEN")
+                .env_remove("NICKEL_SESSION_CONTROL")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let id = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            if let Some(id) = session
+                .protocol_windows()
+                .iter()
+                .find(|window| window.title == "Launch acknowledgement native fixture")
+                .map(|window| WindowId(window.id.0))
+                .filter(|id| session.window_for_registry_id(*id).is_some())
+            {
+                break id;
+            }
+            assert!(Instant::now() < deadline, "native dialog did not map");
+        };
+        session
+            .pending_launch_observations
+            .push(PendingLaunchObservation {
+                generation: 91,
+                root_pid: child.0.id(),
+                root_start_time: super::linux_process_start_time(child.0.id()).unwrap(),
+                registered_at: Instant::now(),
+                deadline: Duration::from_secs(2),
+            });
+        let subscriber_path = config.path().join("launch-subscriber.sock");
+        let subscriber = std::os::unix::net::UnixDatagram::bind(&subscriber_path).unwrap();
+        subscriber.set_nonblocking(true).unwrap();
+        session.launcher_subscribers.push(subscriber_path);
+        let no_acknowledgement = || {
+            let mut bytes = [0; 2048];
+            assert_eq!(
+                subscriber.recv(&mut bytes).unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock,
+                "ineligible or duplicate observation must not emit launch feedback"
+            );
+        };
+        session.observe_pending_launch_window(id);
+        no_acknowledgement();
+        assert_eq!(
+            session.pending_launch_observations.len(),
+            1,
+            "mapped window without verified identity must wait"
+        );
+        let window = session.window_for_registry_id(id).unwrap();
+        let location = session.space.element_location(&window).unwrap();
+        session.space.unmap_elem(&window);
+        session.remote_window_identities.insert(
+            id,
+            WindowIdentity::Verified(ProcessIdentity::inspect(child.0.id()).unwrap()),
+        );
+        session.observe_pending_launch_window(id);
+        assert_eq!(
+            session.pending_launch_observations.len(),
+            1,
+            "verified but unmapped window must wait"
+        );
+        no_acknowledgement();
+        session.space.map_element(window, location, false);
+        session.remote_window_identities.insert(
+            id,
+            WindowIdentity::Verified(ProcessIdentity::inspect(std::process::id()).unwrap()),
+        );
+        session.observe_pending_launch_window(id);
+        assert_eq!(
+            session.pending_launch_observations.len(),
+            1,
+            "an unrelated verified owner cannot satisfy the launched child's lineage"
+        );
+        no_acknowledgement();
+        session.remote_window_identities.insert(
+            id,
+            WindowIdentity::Verified(ProcessIdentity::inspect(child.0.id()).unwrap()),
+        );
+        session.observe_pending_launch_window(id);
+        assert!(
+            session.pending_launch_observations.is_empty(),
+            "mapped verified process should acknowledge once"
+        );
+        let mut bytes = [0; 2048];
+        let size = subscriber.recv(&mut bytes).unwrap();
+        let response = nickel_session_protocol::decode::<nickel_session_protocol::ServerEnvelope>(
+            &bytes[..size],
+        )
+        .unwrap();
+        assert_eq!(response.request_id, 0);
+        assert!(matches!(
+            response.message,
+            nickel_session_protocol::ServerMessage::Event(
+                nickel_session_protocol::Event::PendingLaunchWindow {
+                    generation: 91,
+                    descendant: false,
+                    observed_after_ms: 0..=2000,
+                }
+            )
+        ));
+        session.observe_pending_launch_window(id);
+        assert!(session.pending_launch_observations.is_empty());
+        no_acknowledgement();
+
+        let slow_path = config.path().join("stalled-launch-subscriber.sock");
+        let slow = std::os::unix::net::UnixDatagram::bind(&slow_path).unwrap();
+        slow.set_nonblocking(true).unwrap();
+        let mut fillers = vec![super::notification_socket().unwrap()];
+        let mut filled = false;
+        for _ in 0..10_000 {
+            match fillers.last().unwrap().send_to(b"occupied", &slow_path) {
+                Ok(_) => (),
+                Err(error) => {
+                    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                    let fresh = super::notification_socket().unwrap();
+                    match fresh.send_to(b"occupied", &slow_path) {
+                        Ok(_) => fillers.push(fresh),
+                        Err(error) => {
+                            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                            filled = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(filled, "fixture must actually saturate the receiver queue");
+        session.launcher_subscribers.insert(0, slow_path.clone());
+        // Bound failure time if blocking sends regress: release queue capacity
+        // after one second, then fail the latency assertion rather than hanging.
+        let recovery = slow.try_clone().unwrap();
+        let (cancel, wait) = std::sync::mpsc::channel();
+        let recovery_thread = std::thread::spawn(move || {
+            if wait.recv_timeout(Duration::from_secs(1)).is_err() {
+                let mut bytes = [0; 2048];
+                while recovery.recv(&mut bytes).is_ok() {}
+            }
+        });
+        let started = Instant::now();
+        session.notify_pending_launch_expired(92);
+        let elapsed = started.elapsed();
+        let _ = cancel.send(());
+        recovery_thread.join().unwrap();
+        assert!(
+            elapsed < Duration::from_millis(750),
+            "stalled subscriber delayed owner by {elapsed:?}"
+        );
+        assert!(!session.launcher_subscribers.contains(&slow_path));
+        let size = subscriber.recv(&mut bytes).unwrap();
+        let delivered = nickel_session_protocol::decode::<nickel_session_protocol::ServerEnvelope>(
+            &bytes[..size],
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                delivered.message,
+                nickel_session_protocol::ServerMessage::Event(
+                    nickel_session_protocol::Event::PendingLaunchExpired { generation: 92 }
+                )
+            ),
+            "healthy subscriber must still receive the event"
+        );
     }
 
     #[test]
@@ -8144,10 +12130,134 @@ mod protocol_tests {
     }
 
     #[test]
+    fn output_identification_local_replacement_survives_stale_expiry_and_exhaustion() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let first = session.start_output_identification(None).unwrap();
+        let first_timer = session.identify_outputs_timer.unwrap();
+        session.begin_output_identification();
+        assert_ne!(session.identify_outputs_timer, Some(first_timer));
+        let replacement = session.identify_outputs_generation;
+        assert!(replacement > first);
+        assert!(!session.expire_output_identification(first));
+        assert!(session.identify_outputs_until.is_some());
+        #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+        {
+            let output = session.space.outputs().next().unwrap().clone();
+            assert_eq!(
+                session.output_identification_index(&output),
+                Some((replacement, 0))
+            );
+            session.locked = true;
+            assert_eq!(session.output_identification_index(&output), None);
+            session.locked = false;
+        }
+        session.identify_outputs_generation = u64::MAX;
+        let until = session.identify_outputs_until;
+        let timer = session.identify_outputs_timer;
+        assert!(session.start_output_identification(None).is_err());
+        assert_eq!(session.identify_outputs_timer, timer);
+        assert_eq!(session.identify_outputs_generation, u64::MAX);
+        assert_eq!(session.identify_outputs_until, until);
+        assert!(session.expire_output_identification(u64::MAX));
+        assert!(session.identify_outputs_until.is_none());
+        assert!(session.identify_outputs_timer.is_none());
+    }
+
+    #[test]
     fn only_the_latest_output_identification_generation_may_expire() {
         assert!(identification_expiry_is_current(7, 7));
         assert!(!identification_expiry_is_current(8, 7));
         assert!(!identification_expiry_is_current(7, 8));
+    }
+
+    #[test]
+    fn connection_cleanup_precedes_first_request_from_full_ordinary_queue() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let wake = session.remote_cleanup_wake.clone();
+        let control = session.remote_control.control();
+        let lease = {
+            let mut authority = control.lock().unwrap();
+            authority.set_enabled(true);
+            let client = authority.connect_identity("Cleanup priority test").unwrap();
+            let then = Instant::now() - Duration::from_secs(61);
+            let watch = authority
+                .reserve_connection_watch(&client.client_id, &client.token, then)
+                .unwrap();
+            authority
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, then)
+                .unwrap();
+            authority
+                .leases_mut()
+                .approve_local(
+                    client.client_id.clone(),
+                    nickel_remote_control::leases::ResourceScope::FullSession,
+                    then,
+                    None,
+                    false,
+                    false,
+                )
+                .unwrap()
+        };
+        let (sender, receiver) = smithay::reexports::calloop::channel::sync_channel(32);
+        for sequence in 0..32 {
+            assert!(
+                sender
+                    .try_send(super::RemoteDesktopRequest::NativeKeyboardState {
+                        source: smithay::input::keyboard::KeyboardSource::new_focus_bound_auxiliary(
+                        ),
+                        sequence,
+                        result: Err("stale native query".into()),
+                    })
+                    .is_ok()
+            );
+        }
+        wake.notify();
+        // Same production handler used by the registered ordinary channel. Do
+        // not dispatch the separate wake source: priority must also hold here.
+        session.handle_remote_desktop_request(receiver.try_recv().unwrap());
+        assert!(!wake.take_pending());
+        assert!(
+            control
+                .lock()
+                .unwrap()
+                .leases()
+                .iter()
+                .all(|entry| entry.id != lease)
+        );
+    }
+
+    #[test]
+    fn connection_cleanup_setup_failure_preserves_owner_fallback() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (event_loop, mut session) = internal_shell_test_session();
+        let wake = super::NickelSession::register_remote_connection_cleanup_wake(
+            &event_loop.handle(),
+            Err(std::io::Error::other("descriptor unavailable")),
+        );
+        session.remote_cleanup_wake = wake.clone();
+        wake.notify();
+        assert!(wake.take_wake_failure());
+        // Exercise the same owner drain used by the retained periodic timer.
+        session.service_remote_connection_cleanup();
+        assert!(!wake.take_pending());
+        wake.notify();
+        assert!(wake.take_wake_failure());
+        session.service_remote_connection_cleanup();
+        assert!(!wake.take_pending());
+    }
+
+    #[test]
+    fn connection_cleanup_eventfd_wakes_idle_production_owner() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        let wake = session.remote_cleanup_wake.clone();
+        wake.notify();
+        event_loop
+            .dispatch(Duration::from_millis(50), &mut session)
+            .unwrap();
+        assert!(!wake.take_pending());
     }
 
     static PREVIEW_SESSION_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -8467,6 +12577,270 @@ mod protocol_tests {
         assert_eq!(session.seat.get_keyboard().unwrap().current_focus(), None);
 
         assert!(session.toggle_internal_launcher());
+        assert_eq!(session.internal_ui.focused(), Some(application));
+    }
+
+    #[test]
+    fn shell_diagnostics_follow_owner_scene_visibility_and_exclude_lock() {
+        use nickel_remote_control::diagnostics::ShellDiagnosticRole;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let (records, truncated) = session.remote_shell_surface_diagnostics();
+        assert!(!truncated);
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.role, ShellDiagnosticRole::Desktop))
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| matches!(record.role, ShellDiagnosticRole::Panel))
+        );
+        assert!(
+            !records
+                .iter()
+                .any(|record| matches!(record.role, ShellDiagnosticRole::Launcher))
+        );
+        session.set_launcher_visible(true);
+        let (shown, _) = session.remote_shell_surface_diagnostics();
+        let launcher = shown
+            .iter()
+            .find(|record| matches!(record.role, ShellDiagnosticRole::Launcher))
+            .unwrap();
+        let shell = session.internal_shell.as_ref().unwrap();
+        let owner = shell
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+            .unwrap();
+        let owner_id = owner.id;
+        let (tree_generation, semantics) = shell.bounded_shell_semantics(owner_id).unwrap();
+        assert!(tree_generation > 0);
+        assert!(semantics.iter().any(|node| node.focused));
+        assert!(
+            semantics
+                .iter()
+                .any(|node| node.name.as_deref() == Some("Home"))
+        );
+        assert_eq!(
+            shell.bounded_shell_semantics(owner_id).unwrap().0,
+            tree_generation,
+            "observation must not rebuild or focus another viewport"
+        );
+        let runtime = session.internal_shell_surfaces[&owner.id];
+        let placement = session.internal_ui.placement(runtime).unwrap();
+        assert_eq!(launcher.generation, runtime.snapshot_token());
+        assert_eq!(launcher.scene_generation, owner.scene_generation);
+        assert_eq!(
+            launcher.geometry,
+            [
+                i64::from(placement.geometry.0),
+                i64::from(placement.geometry.1),
+                i64::from(placement.geometry.2),
+                i64::from(placement.geometry.3)
+            ]
+        );
+        assert!(launcher.keyboard_focused);
+        let input = session.remote_input_diagnostic(&[], &[], 41, 42);
+        let recipient = input.keyboard.unwrap();
+        assert!(recipient.focused_window.is_none());
+        let focused_surface = recipient.focused_surface.unwrap();
+        assert_eq!(focused_surface.id, launcher.id);
+        assert_eq!(focused_surface.generation, launcher.generation);
+        let placement = placement.clone();
+        session
+            .internal_ui
+            .configure_surface(runtime, placement, 1.5);
+        let (scaled, _) = session.remote_shell_surface_diagnostics();
+        let scaled = scaled
+            .iter()
+            .find(|record| record.id == launcher.id)
+            .unwrap();
+        assert_eq!(scaled.scale_factor, 1.5);
+        assert!(scaled.redraw_pending);
+        assert_eq!(scaled.generation, launcher.generation);
+        let renderer = session
+            .remote_shell_renderer_diagnostics(42)
+            .into_iter()
+            .find(|record| record.surface == launcher.id)
+            .unwrap();
+        let actual = session.internal_ui.renderer_diagnostics(runtime).unwrap();
+        assert_eq!(renderer.surface_generation, launcher.generation);
+        assert_eq!(renderer.observed_at_us, 42);
+        assert_eq!(renderer.gpu_frames, actual.gpu_frames);
+        assert_eq!(renderer.fallback_frames, actual.fallback_frames);
+        assert_eq!(
+            renderer.software_frame_bytes,
+            actual.software_frame_bytes as u64
+        );
+        session.set_launcher_visible(false);
+        assert!(
+            session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .bounded_shell_semantics(owner_id)
+                .is_err()
+        );
+        assert!(
+            session
+                .remote_shell_renderer_diagnostics(43)
+                .iter()
+                .all(|record| record.surface != launcher.id)
+        );
+        assert!(
+            !session
+                .remote_shell_surface_diagnostics()
+                .0
+                .iter()
+                .any(|record| matches!(record.role, ShellDiagnosticRole::Launcher))
+        );
+        session.locked = true;
+        assert!(session.remote_shell_surface_diagnostics().0.is_empty());
+        assert!(session.remote_shell_renderer_diagnostics(44).is_empty());
+        let input = session.remote_input_diagnostic(&[], &[], 45, 46);
+        assert!(input.keyboard.is_none());
+        assert!(input.pointer.is_none());
+        assert!(input.pointer_hit_test.is_none());
+    }
+
+    #[test]
+    fn remote_panel_effect_is_staged_without_changing_local_host_dispatch() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let shell = session.internal_shell.as_mut().unwrap();
+        assert!(!shell.launcher_visible());
+        let commands = shell
+            .shell_mut()
+            .stage_remote_shell_effect(
+                crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                    crate::live_shell::PanelAction::Launcher,
+                    Some("file-test".into()),
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            commands.as_slice(),
+            [crate::platform::ShellCommand::Show]
+        ));
+        assert!(
+            !shell.launcher_visible(),
+            "staging must not apply visibility or defer unguarded work"
+        );
+        session.set_launcher_visible(true);
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+    }
+
+    #[test]
+    fn ordinary_shell_semantic_mutation_updates_real_launcher_and_rejects_stale_tree() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.set_launcher_visible(true);
+        let shell = session.internal_shell.as_mut().unwrap();
+        let id = shell
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+            .unwrap()
+            .id;
+        let (generation, nodes) = shell.bounded_shell_semantics(id).unwrap();
+        let ordinal = nodes
+            .iter()
+            .position(|node| node.role == Some(nickel_ui::SemanticRole::TextField))
+            .unwrap();
+        let action = |text: &str| {
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(text.into()))
+        };
+        let outcome = shell
+            .perform_bounded_shell_action(
+                id,
+                generation,
+                ordinal,
+                action("semantic launcher query"),
+                2048,
+            )
+            .unwrap();
+        assert!(outcome.effects.is_empty());
+        assert!(outcome.host.semantic_failures.is_empty());
+        let (next, nodes) = shell.bounded_shell_semantics(id).unwrap();
+        assert_ne!(next, generation);
+        assert!(nodes.iter().any(|node| matches!(&node.value, Some(nickel_ui::SemanticValueSnapshot::Text(text)) if text == "semantic launcher query")));
+        assert!(
+            shell
+                .perform_bounded_shell_action(id, generation, ordinal, action("stale query"), 2048)
+                .is_err()
+        );
+        session.set_launcher_visible(false);
+        assert!(
+            session
+                .internal_shell
+                .as_mut()
+                .unwrap()
+                .perform_bounded_shell_action(id, next, ordinal, action("hidden query"), 2048)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn launcher_protocol_visibility_updates_hosted_scene_and_restores_focus() {
+        use nickel_session_protocol::Command;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let application = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(application).unwrap();
+        for command in [
+            Command::SetLauncherVisible { visible: true },
+            Command::SetLauncherVisible { visible: true },
+        ] {
+            assert!(matches!(
+                session.handle_protocol_command(command, None, 0),
+                ServerMessage::Ack
+            ));
+            assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+            assert!(session.launcher_visibility.is_visible());
+            assert!(
+                session
+                    .protocol_shell_surfaces()
+                    .iter()
+                    .any(
+                        |surface| surface.role == ShellRole::Launcher && surface.geometry.is_some()
+                    )
+            );
+            assert_ne!(session.internal_ui.focused(), Some(application));
+        }
+        for command in [
+            Command::SetLauncherVisible { visible: false },
+            Command::SetLauncherVisible { visible: false },
+        ] {
+            assert!(matches!(
+                session.handle_protocol_command(command, None, 0),
+                ServerMessage::Ack
+            ));
+            assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
+            assert!(!session.launcher_visibility.is_visible());
+            assert_eq!(session.internal_ui.focused(), Some(application));
+            assert!(
+                session
+                    .protocol_shell_surfaces()
+                    .iter()
+                    .any(
+                        |surface| surface.role == ShellRole::Launcher && surface.geometry.is_none()
+                    )
+            );
+        }
+        session.handle_protocol_command(Command::ToggleLauncher, None, 0);
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+        session.handle_protocol_command(Command::ToggleLauncher, None, 0);
+        assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
         assert_eq!(session.internal_ui.focused(), Some(application));
     }
 

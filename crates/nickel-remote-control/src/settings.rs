@@ -1,4 +1,8 @@
-use std::{fs, io::ErrorKind, path::Path};
+use std::{
+    fs,
+    io::{ErrorKind, Read},
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,14 +13,21 @@ const SETTINGS_VERSION: u16 = 1;
 pub struct RemoteAiControlSettings {
     version: u16,
     pub requested_enabled: bool,
+    #[serde(default = "audible_default")]
+    pub audible_indications: bool,
     pub generation: u64,
+}
+
+fn audible_default() -> bool {
+    true
 }
 
 impl Default for RemoteAiControlSettings {
     fn default() -> Self {
         Self {
             version: SETTINGS_VERSION,
-            requested_enabled: false,
+            requested_enabled: true,
+            audible_indications: true,
             generation: 0,
         }
     }
@@ -43,14 +54,37 @@ impl RemoteAiControlSettings {
         Self::load(Self::default_path()?)
     }
 
-    /// Missing and malformed state fail closed. The error remains available to Settings while the
-    /// caller can safely use `Default` as its effective preference.
+    /// A missing preference starts the capability-free listener. Malformed state is reported;
+    /// no saved client authority is loaded by either this preference or its default.
     pub fn load(path: impl AsRef<Path>) -> Result<Self, SettingsError> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        // Do not wait for a FIFO writer or follow a replaced preference symlink.
+        // Inspect the opened handle, closing the metadata/open race for devices.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW);
+        }
+        let file = match options.open(path) {
+            Ok(file) => file,
             Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Self::default()),
             Err(error) => return Err(SettingsError::Unavailable(error)),
         };
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(SettingsError::Invalid(
+                "settings must be a regular file".into(),
+            ));
+        }
+        if metadata.len() > 64 * 1024 {
+            return Err(SettingsError::Invalid("settings exceed size limit".into()));
+        }
+        let mut text = String::new();
+        file.take(64 * 1024 + 1).read_to_string(&mut text)?;
+        if text.len() > 64 * 1024 {
+            return Err(SettingsError::Invalid("settings exceed size limit".into()));
+        }
         let settings: Self = toml::from_str(&text)?;
         settings.validate()?;
         Ok(settings)
@@ -87,8 +121,51 @@ impl RemoteAiControlSettings {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
-    fn missing_defaults_disabled_and_corruption_never_enables() {
+    fn preference_special_files_are_rejected_without_waiting_for_a_writer() {
+        use std::{
+            ffi::CString,
+            os::unix::{ffi::OsStrExt, fs::symlink},
+            time::{Duration, Instant},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let fifo = directory.path().join("fifo");
+        let name = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: name is a valid NUL-terminated path in this owned temp directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let link = directory.path().join("link");
+        symlink(&fifo, &link).unwrap();
+        let before = Instant::now();
+        for path in [
+            fifo.as_path(),
+            link.as_path(),
+            Path::new("/dev/zero"),
+            directory.path(),
+        ] {
+            assert!(RemoteAiControlSettings::load(path).is_err());
+        }
+        assert!(before.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn audible_preference_is_backward_compatible_and_round_trips() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("remote.toml");
+        fs::write(
+            &path,
+            "version = 1\nrequested_enabled = true\ngeneration = 9\n",
+        )
+        .unwrap();
+        let mut settings = RemoteAiControlSettings::load(&path).unwrap();
+        assert!(settings.audible_indications);
+        settings.audible_indications = false;
+        settings.save(&path).unwrap();
+        assert_eq!(RemoteAiControlSettings::load(&path).unwrap(), settings);
+        assert_eq!(settings.generation, 9);
+    }
+    #[test]
+    fn missing_defaults_to_capability_free_listener_and_corruption_is_reported() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("remote.toml");
         assert_eq!(
@@ -97,7 +174,7 @@ mod tests {
         );
         fs::write(&path, "requested_enabled = true\nnot valid").unwrap();
         assert!(RemoteAiControlSettings::load(&path).is_err());
-        assert!(!RemoteAiControlSettings::default().requested_enabled);
+        assert!(RemoteAiControlSettings::default().requested_enabled);
     }
 
     #[test]
@@ -105,8 +182,8 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("remote.toml");
         let mut settings = RemoteAiControlSettings::default();
-        assert!(settings.set_requested(true));
-        assert!(!settings.set_requested(true));
+        assert!(settings.set_requested(false));
+        assert!(!settings.set_requested(false));
         settings.save(&path).unwrap();
         assert_eq!(RemoteAiControlSettings::load(&path).unwrap(), settings);
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 1);

@@ -43,6 +43,10 @@ struct ConsumedTextTransaction {
 }
 
 impl FocusedInputDispatcher {
+    pub(crate) fn touch_active(&self) -> bool {
+        self.active_touch.is_some()
+    }
+
     pub fn dispatch(&mut self, event: &InputEvent) -> Vec<InputCommand> {
         self.dispatch_with_context(event, InputContext::default())
     }
@@ -196,10 +200,13 @@ impl FocusedInputDispatcher {
                 vec![InputCommand::Ui(UiEvent::FocusGained)]
             }
             InputEvent::FocusLost { .. } => {
+                self.active_touch = None;
                 self.consumed_text.clear();
                 vec![InputCommand::Ui(UiEvent::FocusLost)]
             }
             InputEvent::DeviceRemoved { device, .. } => {
+                // UiEvent::DeviceRemoved cancels this viewport's interactions.
+                self.active_touch = None;
                 self.consumed_text
                     .retain(|transaction| transaction.device != *device);
                 vec![InputCommand::Ui(UiEvent::DeviceRemoved)]
@@ -752,6 +759,7 @@ mod tests {
     #[test]
     fn one_touch_contact_uses_the_canonical_pointer_transition_and_cancel_path() {
         let mut dispatch = FocusedInputDispatcher::default();
+        assert!(!dispatch.touch_active());
         let started = InputEvent::Touch(TouchEvent::Started {
             device: DeviceId(7),
             order: EventOrder(1),
@@ -765,6 +773,7 @@ mod tests {
                 InputCommand::Ui(UiEvent::PointerPressed(Point { x: 12.0, y: 18.0 })),
             ]
         );
+        assert!(dispatch.touch_active());
         let cancelled = InputEvent::Touch(TouchEvent::Cancelled {
             device: DeviceId(7),
             order: EventOrder(2),
@@ -774,6 +783,22 @@ mod tests {
             dispatch.dispatch(&cancelled),
             [InputCommand::Ui(UiEvent::PointerCancelled)]
         );
+        assert!(!dispatch.touch_active());
+        for event in [
+            InputEvent::FocusLost {
+                order: EventOrder(3),
+            },
+            InputEvent::DeviceRemoved {
+                device: DeviceId(7),
+                order: EventOrder(4),
+            },
+        ] {
+            dispatch.dispatch(&started);
+            assert!(dispatch.touch_active());
+            dispatch.dispatch(&event);
+            assert!(!dispatch.touch_active());
+            assert!(dispatch.dispatch(&cancelled).is_empty());
+        }
     }
 
     #[test]

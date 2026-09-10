@@ -213,6 +213,7 @@ mod tests {
     #[test]
     fn desktop_keyboard_repeat_state_retires_on_focus_loss() {
         let mut runtime = InternalUiRuntime::default();
+        assert!(!runtime.desktop_keyboard_interaction_active());
         let id = desktop(&mut runtime);
         runtime.focus_surface(id);
         runtime.drain_routed_events();
@@ -247,14 +248,14 @@ mod tests {
         assert!(
             matches!(&events[2].1.events[..], [HostEvent::Normalized { input: InputEvent::Key(key), .. }] if key.edge == KeyEdge::Released)
         );
-        assert!(!runtime.desktop_input.pressed_keys.is_empty());
+        assert!(runtime.desktop_keyboard_interaction_active());
         runtime.clear_focus();
         assert!(
             !runtime.desktop_keyboard_input("keyboard", 116, true, |_, _, _| panic!(
                 "unfocused desktop must not normalize keys"
             ))
         );
-        assert!(runtime.desktop_input.pressed_keys.is_empty());
+        assert!(!runtime.desktop_keyboard_interaction_active());
     }
 
     #[test]
@@ -559,6 +560,7 @@ mod tests {
         runtime.drain_routed_events();
         runtime.remove_desktop_pointer_device("other");
         assert!(runtime.desktop_input.capture.is_some());
+        assert!(runtime.pointer_interaction_active());
         assert!(runtime.drain_routed_events().is_empty());
         runtime.desktop_pointer_input(
             "owner",
@@ -568,6 +570,7 @@ mod tests {
             true,
         );
         assert!(runtime.desktop_input.capture.is_none());
+        assert!(!runtime.pointer_interaction_active());
     }
 
     #[test]
@@ -614,6 +617,21 @@ pub(super) struct DesktopInputState {
 }
 
 impl InternalUiRuntime {
+    pub(crate) fn desktop_keyboard_interaction_active(&self) -> bool {
+        !self.desktop_input.pressed_keys.is_empty()
+    }
+
+    pub(crate) fn pointer_interaction_active(&self) -> bool {
+        self.desktop_input.capture.is_some()
+            || !self.desktop_input.touches.is_empty()
+            || !self.touches.is_empty()
+            || self.surfaces.ids().any(|id| {
+                self.surfaces
+                    .get(id)
+                    .is_some_and(|host| host.pointer_interaction_active())
+            })
+    }
+
     /// Route both key edges only to the focused desktop. The closure performs
     /// backend conversion after device identity/order and repeat are established.
     pub(crate) fn desktop_keyboard_input(

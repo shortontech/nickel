@@ -17,13 +17,13 @@ use nickel_session_protocol::ConsumerControl;
 
 const NETWORK_MANAGER: &str = "org.freedesktop.NetworkManager";
 const NETWORK_MANAGER_PATH: &str = "/org/freedesktop/NetworkManager";
-const BLUEZ: &str = "org.bluez";
+pub(super) const BLUEZ: &str = "org.bluez";
 
 type Properties = HashMap<String, OwnedValue>;
 type Interfaces = HashMap<String, Properties>;
 type ManagedObjects = HashMap<OwnedObjectPath, Interfaces>;
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Command {
     SetWifiEnabled(bool),
     ActivateWifi(String),
@@ -573,7 +573,7 @@ fn read_bluetooth_status(connection: &Connection) -> zbus::Result<BluetoothStatu
     })
 }
 
-fn managed_bluez_objects(connection: &Connection) -> zbus::Result<ManagedObjects> {
+pub(super) fn managed_bluez_objects(connection: &Connection) -> zbus::Result<ManagedObjects> {
     Proxy::new(connection, BLUEZ, "/", "org.freedesktop.DBus.ObjectManager")?
         .call("GetManagedObjects", &())
 }
@@ -589,43 +589,242 @@ where
         .and_then(|value| T::try_from(value).ok())
 }
 
-fn apply_command(connection: &Connection, command: Command) -> Result<(), String> {
-    match command {
-        Command::SetWifiEnabled(enabled) => {
-            let proxy = Proxy::new(
+enum PreparedControl {
+    Property {
+        destination: &'static str,
+        path: String,
+        interface: &'static str,
+        name: &'static str,
+        value: bool,
+    },
+    Method {
+        destination: &'static str,
+        path: String,
+        interface: &'static str,
+        method: &'static str,
+    },
+    Activate {
+        connection: OwnedObjectPath,
+        device: OwnedObjectPath,
+        access_point: OwnedObjectPath,
+    },
+}
+
+impl PreparedControl {
+    fn execute(&self, connection: &Connection) -> Result<(), String> {
+        match self {
+            Self::Property {
+                destination,
+                path,
+                interface,
+                name,
+                value,
+            } => Proxy::new(connection, *destination, path.as_str(), *interface)
+                .and_then(|proxy| Ok(proxy.set_property(name, *value)?))
+                .map_err(|error| error.to_string()),
+            Self::Method {
+                destination,
+                path,
+                interface,
+                method,
+            } => Proxy::new(connection, *destination, path.as_str(), *interface)
+                .and_then(|proxy| proxy.call_method(*method, &()))
+                .map(|_| ())
+                .map_err(|error| error.to_string()),
+            Self::Activate {
+                connection: profile,
+                device,
+                access_point,
+            } => Proxy::new(
                 connection,
                 NETWORK_MANAGER,
                 NETWORK_MANAGER_PATH,
                 NETWORK_MANAGER,
             )
+            .and_then(|proxy| {
+                proxy.call_method("ActivateConnection", &(profile, device, access_point))
+            })
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+        }
+    }
+
+    fn confirmed(&self, connection: &Connection, service_owner: &str) -> bool {
+        match self {
+            Self::Property {
+                destination: _,
+                path,
+                interface,
+                name,
+                value,
+            } => {
+                observed_property::<bool>(connection, service_owner, path, interface, name)
+                    == Some(*value)
+            }
+            Self::Method {
+                destination: _,
+                path,
+                interface,
+                method,
+            } => {
+                let (name, desired) = match *method {
+                    "StartDiscovery" => ("Discovering", true),
+                    "StopDiscovery" => ("Discovering", false),
+                    "Connect" => ("Connected", true),
+                    "Disconnect" => ("Connected", false),
+                    _ => return false,
+                };
+                observed_property::<bool>(connection, service_owner, path, interface, name)
+                    == Some(desired)
+            }
+            Self::Activate {
+                device,
+                access_point,
+                ..
+            } => {
+                observed_property::<OwnedObjectPath>(
+                    connection,
+                    service_owner,
+                    device.as_str(),
+                    "org.freedesktop.NetworkManager.Device.Wireless",
+                    "ActiveAccessPoint",
+                )
+                .as_ref()
+                    == Some(access_point)
+            }
+        }
+    }
+
+    fn message(&self, service_owner: &str) -> zbus::Result<zbus::Message> {
+        use zbus::message::Flags;
+        match self {
+            Self::Property {
+                destination: _,
+                path,
+                interface,
+                name,
+                value,
+            } => zbus::Message::method_call(path.as_str(), "Set")?
+                .destination(service_owner)?
+                .interface("org.freedesktop.DBus.Properties")?
+                .with_flags(Flags::NoReplyExpected)?
+                .build(&(*interface, *name, zbus::zvariant::Value::new(*value))),
+            Self::Method {
+                destination: _,
+                path,
+                interface,
+                method,
+            } => zbus::Message::method_call(path.as_str(), *method)?
+                .destination(service_owner)?
+                .interface(*interface)?
+                .with_flags(Flags::NoReplyExpected)?
+                .build(&()),
+            Self::Activate {
+                connection,
+                device,
+                access_point,
+            } => zbus::Message::method_call(NETWORK_MANAGER_PATH, "ActivateConnection")?
+                .destination(service_owner)?
+                .interface(NETWORK_MANAGER)?
+                .with_flags(Flags::NoReplyExpected)?
+                .build(&(connection, device, access_point)),
+        }
+    }
+}
+
+// Explicit Properties.Get bypasses proxy caches. Confirmation represents a fresh
+// service observation, not a cached value left over from an earlier command.
+fn observed_property<T: TryFrom<OwnedValue>>(
+    connection: &Connection,
+    destination: &str,
+    path: &str,
+    interface: &str,
+    name: &str,
+) -> Option<T> {
+    Proxy::new(
+        connection,
+        destination,
+        path,
+        "org.freedesktop.DBus.Properties",
+    )
+    .ok()?
+    .call::<_, _, OwnedValue>("Get", &(interface, name))
+    .ok()
+    .and_then(|value| T::try_from(value).ok())
+}
+
+fn apply_command(connection: &Connection, command: Command) -> Result<(), String> {
+    prepare_command(connection, command)?.execute(connection)
+}
+
+fn prepare_command(connection: &Connection, command: Command) -> Result<PreparedControl, String> {
+    prepare_command_with_guard(connection, command, None)
+}
+
+fn prepare_command_with_guard(
+    connection: &Connection,
+    command: Command,
+    permit: Option<&nickel_remote_control::DesktopPermit>,
+) -> Result<PreparedControl, String> {
+    Ok(match command {
+        Command::SetWifiEnabled(value) => PreparedControl::Property {
+            destination: NETWORK_MANAGER,
+            path: NETWORK_MANAGER_PATH.into(),
+            interface: NETWORK_MANAGER,
+            name: "WirelessEnabled",
+            value,
+        },
+        Command::ActivateWifi(id) => {
+            let (device_path, access_point_path) = id
+                .split_once('\t')
+                .ok_or("invalid Wi-Fi network identity")?;
+            let access_point = Proxy::new(
+                connection,
+                NETWORK_MANAGER,
+                access_point_path,
+                "org.freedesktop.NetworkManager.AccessPoint",
+            )
             .map_err(|error| error.to_string())?;
-            proxy
-                .set_property("WirelessEnabled", enabled)
-                .map_err(|error| error.to_string())
-        }
-        Command::ActivateWifi(id) => activate_wifi(connection, &id),
-        Command::SetBluetoothPowered(powered) => {
-            let path = bluetooth_adapter_path(connection)?;
-            let proxy = Proxy::new(connection, BLUEZ, path.as_str(), "org.bluez.Adapter1")
+            let ssid = access_point
+                .get_property::<Vec<u8>>("Ssid")
                 .map_err(|error| error.to_string())?;
-            proxy
-                .set_property("Powered", powered)
-                .map_err(|error| error.to_string())
+            let saved = if let Some(permit) = permit {
+                nickel_platform::network_manager_saved_wifi_connections_bounded(
+                    connection,
+                    64,
+                    || permit.check_live().is_ok(),
+                )
+            } else {
+                nickel_platform::network_manager_saved_wifi_connections(connection)
+            };
+            let profile = saved
+                .get(&ssid)
+                .ok_or("network has no saved connection profile")?;
+            PreparedControl::Activate {
+                connection: profile.clone(),
+                device: OwnedObjectPath::try_from(device_path)
+                    .map_err(|error| error.to_string())?,
+                access_point: OwnedObjectPath::try_from(access_point_path)
+                    .map_err(|error| error.to_string())?,
+            }
         }
-        Command::SetBluetoothDiscovery(discovering) => {
-            let path = bluetooth_adapter_path(connection)?;
-            let proxy = Proxy::new(connection, BLUEZ, path.as_str(), "org.bluez.Adapter1")
-                .map_err(|error| error.to_string())?;
-            let method = if discovering {
+        Command::SetBluetoothPowered(value) => PreparedControl::Property {
+            destination: BLUEZ,
+            path: bluetooth_adapter_path(connection)?.to_string(),
+            interface: "org.bluez.Adapter1",
+            name: "Powered",
+            value,
+        },
+        Command::SetBluetoothDiscovery(discovering) => PreparedControl::Method {
+            destination: BLUEZ,
+            path: bluetooth_adapter_path(connection)?.to_string(),
+            interface: "org.bluez.Adapter1",
+            method: if discovering {
                 "StartDiscovery"
             } else {
                 "StopDiscovery"
-            };
-            proxy
-                .call_method(method, &())
-                .map(|_| ())
-                .map_err(|error| error.to_string())
-        }
+            },
+        },
         Command::ToggleBluetoothDevice(path) => {
             let objects = managed_bluez_objects(connection).map_err(|error| error.to_string())?;
             let connected = objects
@@ -634,48 +833,183 @@ fn apply_command(connection: &Connection, command: Command) -> Result<(), String
                 .and_then(|(_, interfaces)| interfaces.get("org.bluez.Device1"))
                 .and_then(|properties| property::<bool>(properties, "Connected"))
                 .unwrap_or(false);
-            let proxy = Proxy::new(connection, BLUEZ, path, "org.bluez.Device1")
-                .map_err(|error| error.to_string())?;
-            proxy
-                .call_method(if connected { "Disconnect" } else { "Connect" }, &())
-                .map(|_| ())
-                .map_err(|error| error.to_string())
+            PreparedControl::Method {
+                destination: BLUEZ,
+                path,
+                interface: "org.bluez.Device1",
+                method: if connected { "Disconnect" } else { "Connect" },
+            }
         }
-    }
+    })
 }
 
-fn activate_wifi(connection: &Connection, id: &str) -> Result<(), String> {
-    let (device_path, access_point_path) = id
-        .split_once('\t')
-        .ok_or_else(|| "invalid Wi-Fi network identity".to_owned())?;
-    let access_point = Proxy::new(
+pub(super) fn service_owner(connection: &Connection, name: &str) -> Option<String> {
+    Proxy::new(
         connection,
-        NETWORK_MANAGER,
-        access_point_path,
-        "org.freedesktop.NetworkManager.AccessPoint",
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
     )
-    .map_err(|error| error.to_string())?;
-    let ssid = access_point
-        .get_property::<Vec<u8>>("Ssid")
-        .map_err(|error| error.to_string())?;
-    let saved = nickel_platform::network_manager_saved_wifi_connections(connection);
-    let connection_path = saved
-        .get(&ssid)
-        .ok_or_else(|| "network has no saved connection profile".to_owned())?;
-    let manager = Proxy::new(
+    .ok()?
+    .call("GetNameOwner", &(name,))
+    .ok()
+}
+
+fn guarded_wifi_target_present(connection: &Connection, id: &str) -> bool {
+    let Some((device, access_point)) = id.split_once('\t') else {
+        return false;
+    };
+    let Ok(manager) = Proxy::new(
         connection,
         NETWORK_MANAGER,
         NETWORK_MANAGER_PATH,
         NETWORK_MANAGER,
-    )
-    .map_err(|error| error.to_string())?;
-    let specific =
-        OwnedObjectPath::try_from(access_point_path).map_err(|error| error.to_string())?;
-    let device = OwnedObjectPath::try_from(device_path).map_err(|error| error.to_string())?;
-    manager
-        .call_method("ActivateConnection", &(connection_path, device, specific))
-        .map(|_| ())
-        .map_err(|error| error.to_string())
+    ) else {
+        return false;
+    };
+    let Ok(devices) = manager.call::<_, _, Vec<OwnedObjectPath>>("GetDevices", &()) else {
+        return false;
+    };
+    if devices.len() > 64 || !devices.iter().any(|path| path.as_str() == device) {
+        return false;
+    }
+    let Ok(wireless) = Proxy::new(
+        connection,
+        NETWORK_MANAGER,
+        device,
+        "org.freedesktop.NetworkManager.Device.Wireless",
+    ) else {
+        return false;
+    };
+    wireless
+        .get_property::<Vec<OwnedObjectPath>>("AccessPoints")
+        .is_ok_and(|points| {
+            points.len() <= 256 && points.iter().any(|path| path.as_str() == access_point)
+        })
+}
+
+pub(super) fn execute_guarded(
+    action: crate::control_view::ControlAction,
+    permit: nickel_remote_control::DesktopPermit,
+    origin: super::linux_guarded_control::GuardedControlOrigin,
+) -> super::linux_guarded_control::GuardedControlOutcome {
+    use super::linux_guarded_control::GuardedControlOutcome as Outcome;
+    use crate::control_view::ControlAction;
+    if let ControlAction::SetBluetoothDiscovery(start) = action {
+        return super::linux_discovery::execute(start, permit, origin);
+    }
+    if origin.check().is_err() {
+        return Outcome::Cancelled;
+    }
+    let evidence = nickel_remote_control::leases::ResourceEvidence {
+        surface: None,
+        window: None,
+        verified_application: None,
+        output: None,
+        authorized_surface_ancestors: &[],
+        protected: false,
+    };
+    if permit.with_resource(&evidence, || Ok(())).is_err() {
+        return Outcome::Cancelled;
+    }
+    let Ok(address) = zbus::Address::system() else {
+        return Outcome::Unavailable;
+    };
+    let Ok((connection, sender)) = nickel_platform::bounded_dbus::connect_guarded_blocking(
+        address,
+        nickel_platform::bounded_dbus::Limits::ACCESSIBILITY,
+        Duration::from_millis(300),
+    ) else {
+        return Outcome::Unavailable;
+    };
+    let service = match &action {
+        ControlAction::SetWifiEnabled(_) | ControlAction::ActivateWifi { .. } => NETWORK_MANAGER,
+        _ => BLUEZ,
+    };
+    let Some(owner) = service_owner(&connection, service) else {
+        return Outcome::Unavailable;
+    };
+    // Resolve caller-visible identities through the same production inventory.
+    // A path supplied by an MCP caller is never treated as a general DBus proxy.
+    let command = match action {
+        ControlAction::SetWifiEnabled(value) => Command::SetWifiEnabled(value),
+        ControlAction::ActivateWifi { id } => {
+            if !guarded_wifi_target_present(&connection, &id) {
+                return Outcome::Unavailable;
+            }
+            Command::ActivateWifi(id)
+        }
+        ControlAction::SetBluetoothPowered(value) => Command::SetBluetoothPowered(value),
+        ControlAction::SetBluetoothDiscovery(value) => Command::SetBluetoothDiscovery(value),
+        ControlAction::ToggleBluetoothDevice { id } => {
+            if !managed_bluez_objects(&connection).is_ok_and(|objects| {
+                objects.len() <= 128
+                    && objects.iter().any(|(path, interfaces)| {
+                        path.as_str() == id && interfaces.contains_key("org.bluez.Device1")
+                    })
+            }) {
+                return Outcome::Unavailable;
+            }
+            Command::ToggleBluetoothDevice(id)
+        }
+        _ => return Outcome::Unavailable,
+    };
+    let Ok(prepared) = prepare_command_with_guard(&connection, command.clone(), Some(&permit))
+    else {
+        return Outcome::Unavailable;
+    };
+    if service_owner(&connection, service).as_deref() != Some(owner.as_str()) {
+        return Outcome::Unavailable;
+    }
+    let Ok(message) = prepared.message(&owner) else {
+        return Outcome::Unavailable;
+    };
+    if message.data().len() > 8192 {
+        return Outcome::Unavailable;
+    }
+
+    // The dedicated connection has no exported objects and no other writer.
+    // Recheck authority at every native write. Incomplete messages retire the
+    // dedicated socket, so no later task can send the abandoned remainder.
+    let mut attempted = false;
+    let mut not_accepted = false;
+    let result = permit.with_input_boundary(&evidence, |boundary| {
+        permit.check_commit_boundary(boundary)?;
+        origin.check()?;
+        attempted = true;
+        sender
+            .send_guarded(&message, || {
+                permit.check_commit_boundary(boundary)?;
+                origin.check()
+            })
+            .map_err(|error| {
+                not_accepted =
+                    error == nickel_platform::bounded_dbus::GuardedSendError::NotAccepted;
+                error.to_string()
+            })
+    });
+    if result.is_err() {
+        return if not_accepted {
+            Outcome::Unavailable
+        } else if attempted {
+            Outcome::Uncertain
+        } else {
+            Outcome::Cancelled
+        };
+    }
+    // NoReplyExpected avoids holding authority over a service reply. Confirm
+    // the exact prepared object/property; failed queries never count as false.
+    if permit.check_live().is_err() || origin.check().is_err() {
+        return Outcome::Uncertain;
+    }
+    let confirmed = prepared.confirmed(&connection, &owner);
+    if permit.check_live().is_err() || origin.check().is_err() {
+        Outcome::Uncertain
+    } else if confirmed {
+        Outcome::Confirmed
+    } else {
+        Outcome::Requested
+    }
 }
 
 fn bluetooth_adapter_path(connection: &Connection) -> Result<OwnedObjectPath, String> {
@@ -691,6 +1025,74 @@ fn bluetooth_adapter_path(connection: &Connection) -> Result<OwnedObjectPath, St
 mod tests {
     use super::{MPRIS_PLAYER_CAPACITY, MprisPlayer, MprisTracker};
     use nickel_session_protocol::ConsumerControl;
+
+    #[derive(Default)]
+    struct PrivateWifi {
+        enabled: bool,
+    }
+    #[zbus::interface(name = "org.freedesktop.NetworkManager")]
+    impl PrivateWifi {
+        #[zbus(property)]
+        fn wireless_enabled(&self) -> bool {
+            self.enabled
+        }
+        #[zbus(property)]
+        fn set_wireless_enabled(&mut self, value: bool) {
+            self.enabled = value;
+        }
+    }
+
+    #[test]
+    #[ignore = "requires explicitly owned private DBus daemon"]
+    fn private_dbus_guarded_message_flush_updates_only_owned_service() {
+        use super::*;
+        let address = std::env::var("NICKEL_TEST_GUARDED_DBUS_ADDRESS")
+            .expect("private bus address required");
+        assert!(address.starts_with("unix:path=/tmp/nickel-guarded-"));
+        let _service = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name(NETWORK_MANAGER)
+            .unwrap()
+            .serve_at(NETWORK_MANAGER_PATH, PrivateWifi::default())
+            .unwrap()
+            .build()
+            .unwrap();
+        let (connection, sender) = nickel_platform::bounded_dbus::connect_guarded_blocking(
+            address.parse().unwrap(),
+            nickel_platform::bounded_dbus::Limits::ACCESSIBILITY,
+            Duration::from_millis(300),
+        )
+        .unwrap();
+        let prepared = prepare_command(&connection, Command::SetWifiEnabled(true)).unwrap();
+        let owner = service_owner(&connection, NETWORK_MANAGER).unwrap();
+        assert!(owner.starts_with(':'));
+        let message = prepared.message(&owner).unwrap();
+        assert!(message.data().len() < 8192);
+        sender.send_guarded(&message, || Ok(())).unwrap();
+        assert!(prepared.confirmed(&connection, &owner));
+        let proxy = Proxy::new(
+            &connection,
+            NETWORK_MANAGER,
+            NETWORK_MANAGER_PATH,
+            NETWORK_MANAGER,
+        )
+        .unwrap();
+        assert!(proxy.get_property::<bool>("WirelessEnabled").unwrap());
+        prepare_command(&connection, Command::SetWifiEnabled(false))
+            .unwrap()
+            .execute(&connection)
+            .unwrap();
+        assert_eq!(
+            observed_property::<bool>(
+                &connection,
+                NETWORK_MANAGER,
+                NETWORK_MANAGER_PATH,
+                NETWORK_MANAGER,
+                "WirelessEnabled"
+            ),
+            Some(false)
+        );
+    }
 
     fn player(name: &str, owner: &str, status: &str) -> MprisPlayer {
         MprisPlayer {

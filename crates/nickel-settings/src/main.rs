@@ -582,8 +582,7 @@ enum SettingsMessage {
     ApplyCodexExecutable,
     RetryCodexProbe,
     SetRemoteControlEnabled(bool),
-    ConfirmEnableRemoteControl,
-    CancelEnableRemoteControl,
+    SetRemoteAudibleIndications(bool),
     StartRemotePairing,
     CancelRemotePairing,
     StopRemoteControlNow,
@@ -592,6 +591,27 @@ enum SettingsMessage {
         decision: nickel_session_protocol::RemoteClientDecision,
     },
     RevokeRemoteClient(String),
+    BlockRemoteClient {
+        client_id: String,
+        blocked: bool,
+    },
+    ManageRemoteLease {
+        lease_id: u64,
+        action: nickel_session_protocol::RemoteLeaseAction,
+    },
+    DecideRemoteLease {
+        pending_generation: u64,
+        client_id: String,
+        request: nickel_session_protocol::RemoteLeaseRequest,
+        allow: bool,
+    },
+    RemoteLeaseCustomMinutesChanged(String),
+    ApproveRemoteLeaseDuration {
+        pending_generation: u64,
+        client_id: String,
+        request: nickel_session_protocol::RemoteLeaseRequest,
+        duration_seconds: Option<u64>,
+    },
     AppearanceLight,
     AppearanceDark,
     AppearanceSystem,
@@ -1030,86 +1050,56 @@ impl SettingsApp {
     }
 
     fn apply_application_scale_policy(&mut self) {
-        let mut settings =
-            nickel_core::dpi::ApplicationScaleSettings::load_default().unwrap_or_default();
+        #[cfg(target_os = "linux")]
+        let Ok(mut journal) = nickel_core::dpi::ApplicationScaleJournal::open_default() else {
+            self.toolkit_scale_status =
+                "Application scaling is busy or its ownership journal is unavailable.".into();
+            return;
+        };
+        #[cfg(target_os = "linux")]
+        let loaded = journal.load();
+        #[cfg(not(target_os = "linux"))]
+        let loaded = nickel_core::dpi::ApplicationScaleSettings::load_default();
+        let Ok(mut settings) = loaded else {
+            self.toolkit_scale_status =
+                "Could not read application scale ownership; no settings changed.".into();
+            return;
+        };
         #[cfg(target_os = "linux")]
         {
             let backend = nickel_platform::LinuxToolkitScaleBackend::detect();
-            let report = if self.application_scale_policy == ApplicationScalePolicy::FollowNickel {
-                let mut owned = Vec::new();
-                if let (Some(previous), Some(applied)) = (
-                    settings.owned_gtk_previous.clone(),
-                    settings.owned_gtk_applied.clone(),
-                ) {
-                    owned.push(nickel_platform::ToolkitWrite {
-                        family: nickel_platform::ToolkitFamily::Gtk,
-                        previous,
-                        applied,
-                        restart_required: true,
+            self.toolkit_scale_status = match nickel_platform::transact_application_scale(
+                &backend,
+                &mut settings,
+                self.application_scale_policy,
+                |settings| {
+                    journal
+                        .persist(settings)
+                        .map_err(|_| "could not persist application scale ownership".to_owned())
+                },
+                || Ok(()),
+            ) {
+                Ok(report) => {
+                    let partial = report.outcomes.iter().any(|outcome| {
+                        matches!(
+                            outcome.kind,
+                            nickel_platform::ToolkitOutcomeKind::Failed
+                                | nickel_platform::ToolkitOutcomeKind::Uncertain
+                                | nickel_platform::ToolkitOutcomeKind::ExternalConflict
+                        )
                     });
-                }
-                if let (Some(previous), Some(applied)) = (
-                    settings.owned_qt_previous.clone(),
-                    settings.owned_qt_applied.clone(),
-                ) {
-                    owned.push(nickel_platform::ToolkitWrite {
-                        family: nickel_platform::ToolkitFamily::Qt,
-                        previous,
-                        applied,
-                        restart_required: true,
-                    });
-                }
-                let report = nickel_platform::reset_owned_toolkit_scale(&backend, &owned);
-                for write in &report.writes {
-                    match write.family {
-                        nickel_platform::ToolkitFamily::Gtk => {
-                            settings.owned_gtk_previous = None;
-                            settings.owned_gtk_applied = None;
-                        }
-                        nickel_platform::ToolkitFamily::Qt => {
-                            settings.owned_qt_previous = None;
-                            settings.owned_qt_applied = None;
-                        }
+                    if partial {
+                        "Application scale partially applied; an external change or unresolved toolkit write needs a fresh observation.".into()
+                    } else if report.outcomes.iter().any(|outcome| {
+                        outcome.kind == nickel_platform::ToolkitOutcomeKind::Confirmed
+                            && outcome.restart_required
+                    }) {
+                        "Application scale updated. Already-running applications may need a restart.".into()
+                    } else {
+                        "Application scale policy saved; unavailable toolkits use launch-time compatibility.".into()
                     }
                 }
-                report
-            } else {
-                let report =
-                    nickel_platform::apply_toolkit_scale(&backend, self.application_scale_policy);
-                for write in &report.writes {
-                    match write.family {
-                        nickel_platform::ToolkitFamily::Gtk => {
-                            settings.owned_gtk_previous = Some(write.previous.clone());
-                            settings.owned_gtk_applied = Some(write.applied.clone());
-                        }
-                        nickel_platform::ToolkitFamily::Qt => {
-                            settings.owned_qt_previous = Some(write.previous.clone());
-                            settings.owned_qt_applied = Some(write.applied.clone());
-                        }
-                    }
-                }
-                report
-            };
-            let restart = report.writes.iter().any(|write| write.restart_required);
-            self.toolkit_scale_status = if report.failures.is_empty() {
-                if report.writes.is_empty() {
-                    "No toolkit values needed changing; launch-time compatibility will be used where necessary.".into()
-                } else if restart {
-                    "Application scale updated. Already-running applications may need a restart."
-                        .into()
-                } else {
-                    "Application scale updated.".into()
-                }
-            } else {
-                format!(
-                    "Application scale was only partially applied: {}",
-                    report
-                        .failures
-                        .iter()
-                        .map(|(family, error)| format!("{family:?}: {error}"))
-                        .collect::<Vec<_>>()
-                        .join("; ")
-                )
+                Err(_) => "Application scale result is uncertain; refresh before retrying.".into(),
             };
         }
         #[cfg(not(target_os = "linux"))]
@@ -1117,12 +1107,12 @@ impl SettingsApp {
             self.toolkit_scale_status =
                 "Native per-monitor DPI is managed by the operating system.".into();
         }
-        settings.policy = self.application_scale_policy;
-        if let Err(error) = settings.save_default() {
-            self.toolkit_scale_status = format!(
-                "{} Could not persist the compatibility choice: {error}",
-                self.toolkit_scale_status
-            );
+        #[cfg(not(target_os = "linux"))]
+        {
+            settings.policy = self.application_scale_policy;
+            if settings.save_default().is_err() {
+                self.toolkit_scale_status = "Could not persist the compatibility choice.".into();
+            }
         }
     }
 
@@ -1442,13 +1432,27 @@ impl SettingsApp {
             }
             SettingsMessage::RetryCodexProbe => self.start_codex_probe(),
             SettingsMessage::SetRemoteControlEnabled(enabled) => {
-                self.request_remote_control_enabled(enabled, false);
+                self.request_remote_control_enabled(enabled);
             }
-            SettingsMessage::ConfirmEnableRemoteControl => {
-                self.request_remote_control_enabled(true, true);
-            }
-            SettingsMessage::CancelEnableRemoteControl => {
-                self.remote_control_enable_confirmation = false;
+            SettingsMessage::SetRemoteAudibleIndications(enabled) => {
+                if !self.persistence_enabled {
+                    self.remote_control_settings.audible_indications = enabled;
+                } else {
+                    let result = nickel_remote_control::RemoteAiControlSettings::load_default()
+                        .and_then(|mut settings| {
+                            settings.audible_indications = enabled;
+                            settings.save(
+                                nickel_remote_control::RemoteAiControlSettings::default_path()?,
+                            )?;
+                            Ok(settings)
+                        });
+                    match result {
+                        Ok(settings) => self.remote_control_settings = settings,
+                        Err(error) => {
+                            self.remote_control_runtime.diagnostic = Some(error.to_string())
+                        }
+                    }
+                }
             }
             SettingsMessage::StartRemotePairing => {
                 let now = std::time::SystemTime::now()
@@ -1517,6 +1521,97 @@ impl SettingsApp {
                         capabilities,
                     },
                 )) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected remote-control response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::DecideRemoteLease {
+                pending_generation,
+                client_id,
+                request,
+                allow,
+            } => {
+                match session_request(SessionRequest::Command(SessionCommand::DecideRemoteLease {
+                    pending_generation,
+                    client_id,
+                    request,
+                    allow,
+                })) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected lease response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::RemoteLeaseCustomMinutesChanged(value) => {
+                self.remote_lease_custom_minutes = value.chars().take(10).collect();
+            }
+            SettingsMessage::ApproveRemoteLeaseDuration {
+                pending_generation,
+                client_id,
+                request,
+                duration_seconds,
+            } => {
+                match session_request(SessionRequest::Command(
+                    SessionCommand::ApproveRemoteLeaseDuration {
+                        pending_generation,
+                        client_id,
+                        request,
+                        duration_seconds,
+                    },
+                )) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected lease response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::ManageRemoteLease { lease_id, action } => {
+                match session_request(SessionRequest::Command(SessionCommand::ManageRemoteLease {
+                    lease_id,
+                    action,
+                })) {
+                    Ok(ServerMessage::RemoteControl(runtime)) => {
+                        self.remote_control_runtime = runtime
+                    }
+                    Ok(ServerMessage::Error { message, .. }) => {
+                        self.remote_control_runtime.diagnostic = Some(message)
+                    }
+                    Ok(_) => {
+                        self.remote_control_runtime.diagnostic =
+                            Some("Unexpected lease response".into())
+                    }
+                    Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
+                }
+            }
+            SettingsMessage::BlockRemoteClient { client_id, blocked } => {
+                match session_request(SessionRequest::Command(SessionCommand::BlockRemoteClient {
+                    client_id,
+                    blocked,
+                })) {
                     Ok(ServerMessage::RemoteControl(runtime)) => {
                         self.remote_control_runtime = runtime
                     }
@@ -1805,17 +1900,7 @@ impl SettingsApp {
             }
             SettingsMessage::ApplicationScaleUnchanged => {
                 self.application_scale_policy = ApplicationScalePolicy::Unchanged;
-                self.toolkit_scale_status =
-                    "Application toolkit settings are left unchanged.".into();
-                let mut settings =
-                    nickel_core::dpi::ApplicationScaleSettings::load_default().unwrap_or_default();
-                settings.policy = self.application_scale_policy;
-                if let Err(error) = settings.save_default() {
-                    self.toolkit_scale_status = format!(
-                        "{} Could not persist the choice: {error}",
-                        self.toolkit_scale_status
-                    );
-                }
+                self.apply_application_scale_policy();
             }
             SettingsMessage::SetApplicationScale(step) => {
                 self.application_scale_policy = ApplicationScalePolicy::Custom(
@@ -2061,6 +2146,35 @@ impl SettingsApp {
         }
     }
 
+    fn apply_remote_control_observation(&mut self, result: std::io::Result<ServerMessage>) {
+        let reason = match result {
+            Ok(ServerMessage::RemoteControl(snapshot)) => {
+                self.remote_control_runtime = snapshot;
+                return;
+            }
+            Ok(ServerMessage::Error { message, .. }) => message,
+            Ok(_) => "Unexpected remote-control response".into(),
+            Err(error) => error.to_string(),
+        };
+        let runtime = &mut self.remote_control_runtime;
+        runtime.effective = nickel_session_protocol::RemoteControlEffectiveState::Rejected;
+        runtime.acknowledged_generation = 0;
+        runtime.diagnostic = Some(
+            format!("Current remote control status is unavailable: {reason}")
+                .chars()
+                .take(256)
+                .collect(),
+        );
+        // These are actionable live projections, not a durable grant cache.
+        // Keep historical audits, but don't offer stale approvals or lease controls.
+        runtime.pending_clients.clear();
+        runtime.pending_leases.clear();
+        runtime.active_leases.clear();
+        runtime.granted_clients.clear();
+        self.remote_pairing = None;
+        self.remote_pairing_qr = None;
+    }
+
     fn refresh_optional_feature_state(&mut self) {
         if self.persistence_enabled {
             self.keyboard_runtime =
@@ -2075,19 +2189,9 @@ impl SettingsApp {
                     self.remote_control_runtime.diagnostic = Some(error.to_string());
                 }
             }
-            match session_request(SessionRequest::Query(SessionQuery::RemoteControl)) {
-                Ok(ServerMessage::RemoteControl(snapshot)) => {
-                    self.remote_control_runtime = snapshot;
-                }
-                Ok(ServerMessage::Error { message, .. }) => {
-                    self.remote_control_runtime.diagnostic = Some(message);
-                }
-                Ok(_) => {
-                    self.remote_control_runtime.diagnostic =
-                        Some("Unexpected remote-control response".into());
-                }
-                Err(error) => self.remote_control_runtime.diagnostic = Some(error.to_string()),
-            }
+            self.apply_remote_control_observation(session_request(SessionRequest::Query(
+                SessionQuery::RemoteControl,
+            )));
             let now_unix_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -2178,17 +2282,12 @@ impl SettingsApp {
         }
     }
 
-    fn request_remote_control_enabled(&mut self, enabled: bool, confirmed: bool) {
+    fn request_remote_control_enabled(&mut self, enabled: bool) {
         if self.remote_control_settings.requested_enabled == enabled
             && self.remote_control_runtime.requested_enabled == enabled
         {
             return;
         }
-        if enabled && !confirmed {
-            self.remote_control_enable_confirmation = true;
-            return;
-        }
-        self.remote_control_enable_confirmation = false;
         let mut requested = self.remote_control_settings.clone();
         requested.set_requested(enabled);
         if !self.persistence_enabled {
@@ -5238,20 +5337,18 @@ mod tests {
     }
 
     #[test]
-    fn remote_control_enable_requires_explicit_confirmation() {
+    fn listener_switch_enables_connections_without_approving_any_resource() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.persistence_enabled = false;
         app.remote_control_settings = Default::default();
+        app.remote_control_settings.set_requested(false);
         app.remote_control_runtime.requested_enabled = false;
         app.remote_control_runtime.effective =
             nickel_session_protocol::RemoteControlEffectiveState::Disabled;
 
         app.handle_settings_message(SettingsMessage::SetRemoteControlEnabled(true));
-        assert!(app.remote_control_enable_confirmation);
-        assert!(!app.remote_control_settings.requested_enabled);
-
-        app.handle_settings_message(SettingsMessage::ConfirmEnableRemoteControl);
-        assert!(!app.remote_control_enable_confirmation);
+        assert!(app.remote_control_runtime.active_leases.is_empty());
+        assert!(app.remote_control_runtime.pending_leases.is_empty());
         assert!(app.remote_control_settings.requested_enabled);
         assert_eq!(
             app.remote_control_runtime.effective,
@@ -5284,6 +5381,248 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn audible_preference_changes_locally_without_changing_listener_authority() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.persistence_enabled = false;
+        app.remote_control_settings.audible_indications = true;
+        let generation = app.remote_control_settings.generation;
+        let enabled = app.remote_control_settings.requested_enabled;
+        let frame = app.build_ui(1100.0, 720.0);
+        assert_eq!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::SetRemoteAudibleIndications(false))
+                .len(),
+            1
+        );
+        app.handle_settings_message(SettingsMessage::SetRemoteAudibleIndications(false));
+        assert!(!app.remote_control_settings.audible_indications);
+        assert_eq!(app.remote_control_settings.generation, generation);
+        assert_eq!(app.remote_control_settings.requested_enabled, enabled);
+    }
+
+    #[test]
+    fn remote_status_failure_removes_stale_approval_until_a_fresh_snapshot_arrives() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        let request = nickel_session_protocol::RemoteLeaseRequest {
+            renewal: None,
+            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+            duration_seconds: Some(1200),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        let mut live = app.remote_control_runtime.clone();
+        live.effective = nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        live.acknowledged_generation = 7;
+        live.diagnostic = None;
+        live.pending_leases = vec![nickel_session_protocol::RemotePendingLease {
+            pending_generation: 1,
+            client_id: "agent".into(),
+            client_label: "Agent".into(),
+            resource_label: None,
+            changes: Default::default(),
+            request: request.clone(),
+        }];
+        let approve = SettingsMessage::ApproveRemoteLeaseDuration {
+            pending_generation: 1,
+            client_id: "agent".into(),
+            request,
+            duration_seconds: Some(1200),
+        };
+        app.apply_remote_control_observation(Ok(
+            nickel_session_protocol::ServerMessage::RemoteControl(live.clone()),
+        ));
+        assert!(
+            !app.build_ui(1100.0, 1200.0)
+                .semantic_targets_for_message(&approve)
+                .is_empty()
+        );
+        app.apply_remote_control_observation(Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "fixture timeout",
+        )));
+        assert_eq!(
+            app.remote_control_runtime.effective,
+            nickel_session_protocol::RemoteControlEffectiveState::Rejected
+        );
+        assert_eq!(app.remote_control_runtime.acknowledged_generation, 0);
+        assert!(
+            app.remote_control_runtime
+                .diagnostic
+                .as_ref()
+                .unwrap()
+                .contains("unavailable")
+        );
+        assert!(
+            app.build_ui(1100.0, 1200.0)
+                .semantic_targets_for_message(&approve)
+                .is_empty()
+        );
+        app.apply_remote_control_observation(Ok(
+            nickel_session_protocol::ServerMessage::RemoteControl(live),
+        ));
+        assert_eq!(app.remote_control_runtime.acknowledged_generation, 7);
+        assert!(
+            !app.build_ui(1100.0, 1200.0)
+                .semantic_targets_for_message(&approve)
+                .is_empty()
+        );
+        // The payload may be identical after disconnect/reconnect. Its old
+        // semantic action must not identify the replacement approval card.
+        let mut replacement = app.remote_control_runtime.clone();
+        replacement.pending_leases[0].pending_generation = 2;
+        app.apply_remote_control_observation(Ok(
+            nickel_session_protocol::ServerMessage::RemoteControl(replacement),
+        ));
+        let ui = app.build_ui(1100.0, 1200.0);
+        assert!(ui.semantic_targets_for_message(&approve).is_empty());
+        let mut fresh_approve = approve;
+        if let SettingsMessage::ApproveRemoteLeaseDuration {
+            pending_generation, ..
+        } = &mut fresh_approve
+        {
+            *pending_generation = 2;
+        }
+        assert!(!ui.semantic_targets_for_message(&fresh_approve).is_empty());
+    }
+
+    #[test]
+    fn full_debug_approval_offers_the_thirty_minute_preset() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_lease_custom_minutes = "7".into();
+        let request = nickel_session_protocol::RemoteLeaseRequest {
+            renewal: None,
+            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+            duration_seconds: Some(30),
+            allow_resumption: false,
+            full_debug: true,
+        };
+        app.remote_control_runtime.pending_leases =
+            vec![nickel_session_protocol::RemotePendingLease {
+                pending_generation: 1,
+                client_id: "agent".into(),
+                client_label: "Development agent".into(),
+                resource_label: None,
+                changes: Default::default(),
+                request: request.clone(),
+            }];
+        let frame = app.build_ui(1100.0, 1200.0);
+        for (duration_seconds, expected) in
+            [(Some(1800), 1), (Some(1200), 0), (Some(7200), 1), (None, 1)]
+        {
+            assert_eq!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
+                        pending_generation: 1,
+                        client_id: "agent".into(),
+                        request: request.clone(),
+                        duration_seconds,
+                    })
+                    .len(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn lease_approval_card_preserves_the_exact_resource_and_duration() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_lease_custom_minutes = "7".into();
+        let request = nickel_session_protocol::RemoteLeaseRequest {
+            renewal: None,
+            scope: nickel_session_protocol::RemoteResourceScope::Application("Anki".into()),
+            duration_seconds: Some(7200),
+            allow_resumption: true,
+            full_debug: false,
+        };
+        app.remote_control_runtime.pending_leases =
+            vec![nickel_session_protocol::RemotePendingLease {
+                pending_generation: 1,
+                client_id: "agent".into(),
+                client_label: "Development agent".into(),
+                resource_label: Some("Verified application windows".into()),
+                changes: Default::default(),
+                request: request.clone(),
+            }];
+        let frame = app.build_ui(1100.0, 1200.0);
+        for duration_seconds in [Some(1200), Some(7200), Some(420), None] {
+            assert_eq!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
+                        pending_generation: 1,
+                        client_id: "agent".into(),
+                        request: request.clone(),
+                        duration_seconds,
+                    })
+                    .len(),
+                1
+            );
+        }
+        for allow in [false, true] {
+            assert_eq!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
+                        pending_generation: 1,
+                        client_id: "agent".into(),
+                        request: request.clone(),
+                        allow,
+                    })
+                    .len(),
+                1
+            );
+        }
+        let broader = nickel_session_protocol::RemoteLeaseRequest {
+            renewal: None,
+            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+            ..request
+        };
+        assert!(
+            frame
+                .semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
+                    pending_generation: 1,
+                    client_id: "agent".into(),
+                    request: broader,
+                    allow: true,
+                })
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn connected_client_block_control_tracks_acknowledged_local_policy() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        for blocked in [false, true] {
+            app.remote_control_runtime.granted_clients =
+                vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
+                    id: "block-fixture".into(),
+                    origin: None,
+                    label: "Fixture".into(),
+                    capabilities: vec![],
+                    remembered: false,
+                    blocked,
+                }];
+            let frame = app.build_ui(1100.0, 1200.0);
+            assert_eq!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::BlockRemoteClient {
+                        client_id: "block-fixture".into(),
+                        blocked: !blocked,
+                    })
+                    .len(),
+                1
+            );
+            assert!(
+                frame
+                    .semantic_targets_for_message(&SettingsMessage::BlockRemoteClient {
+                        client_id: "block-fixture".into(),
+                        blocked,
+                    })
+                    .is_empty()
+            );
+            assert!(app.remote_control_runtime.active_leases.is_empty());
+        }
     }
 
     #[test]

@@ -348,6 +348,12 @@ pub struct ScreenshotTool {
     pointer_deadline: Option<Instant>,
 }
 
+impl ScreenshotTool {
+    pub(crate) fn pointer_interaction_active(&self) -> bool {
+        self.host.pointer_interaction_active() || self.host.application().drag_start.is_some()
+    }
+}
+
 impl Default for ScreenshotTool {
     fn default() -> Self {
         Self {
@@ -1030,9 +1036,12 @@ mod tests {
         );
         let end = (preview.origin.x + 18.0, preview.origin.y + 16.0);
 
+        assert!(!tool.pointer_interaction_active());
         assert!(tool.pointer_pressed(start.0, start.1, 1280, 720));
+        assert!(tool.pointer_interaction_active());
         tool.queue_pointer_moved(end.0, end.1, 1280, 720);
         assert!(tool.pointer_released());
+        assert!(!tool.pointer_interaction_active());
 
         let selection = tool
             .host

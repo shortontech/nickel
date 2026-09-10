@@ -1,0 +1,588 @@
+//! Bounded diagnostic projections, without input payloads or raw process logs.
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum DiagnosticAction {
+    Repaint,
+    /// Reconcile native scene/output membership using production housekeeping.
+    RefreshScene,
+    StartFrameTrace {
+        duration_seconds: u16,
+    },
+    StopFrameTrace,
+    /// Existing compositor-owned output number, on one exact live output only.
+    IdentifyOutput {
+        output: crate::leases::ResourceId,
+    },
+}
+
+impl DiagnosticAction {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Self::IdentifyOutput { output } = self
+            && !crate::leases::valid_resource_scope(&crate::leases::ResourceScope::Output(
+                output.clone(),
+            ))
+        {
+            return Err("invalid output identity".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DiagnosticActionOutcome {
+    pub action: DiagnosticAction,
+    pub observation_generation: u64,
+    pub submitted_at_us: u64,
+    /// Queuing damage does not prove a frame was presented.
+    pub presentation_confirmed: bool,
+    /// Present only for an accepted output identification; never a presentation claim.
+    pub output_identification: Option<OutputIdentificationOutcome>,
+}
+
+pub const MAX_DIAGNOSTIC_WINDOWS: usize = 512;
+pub const MAX_DIAGNOSTIC_OUTPUTS: usize = 32;
+pub const MAX_DIAGNOSTIC_SHELL_SURFACES: usize = 128;
+pub const MAX_DIAGNOSTIC_WORKSPACES: usize = 32;
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct OutputInventory {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Exact output identities, filtered by the supplied lease.
+    pub outputs: Vec<OutputDiagnostic>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAction {
+    List,
+    Create,
+    Switch { workspace: u64 },
+    Remove { workspace: u64 },
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct WorkspaceOutcome {
+    pub requested: WorkspaceAction,
+    pub created_workspace: Option<u64>,
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Committed production membership and selection, not presentation confirmation.
+    pub workspaces: Vec<WorkspaceDiagnostic>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct WorkspaceDiagnostic {
+    /// Session-owned identity; never a caller-provided workspace label.
+    pub id: u64,
+    pub active: bool,
+    /// Only windows present in this same bounded, protected-filtered snapshot.
+    pub windows: Vec<String>,
+    /// Remembered focus for this workspace, not necessarily current seat focus.
+    pub last_focused_window: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct OutputDiagnostic {
+    pub name: String,
+    pub generation: u64,
+    pub geometry: [i32; 4],
+    pub work_area: [i32; 4],
+    pub scale_120: u32,
+    pub primary: bool,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct PreviewDiagnostic {
+    pub presentation_generation: u64,
+    pub readback_bytes: u64,
+    pub capture_failures: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct InputDeviceDiagnostic {
+    /// Compositor seat or hosted-application top-level window recipient, drawn
+    /// only from diagnostic window IDs. Shell recipients use focused_surface.
+    /// Protected/unprojected recipients make the whole device record unavailable.
+    /// X11 client-side focus changes require a separate platform query.
+    pub focused_window: Option<String>,
+    /// Current ordinary shell recipient, with its live surface incarnation.
+    pub focused_surface: Option<crate::leases::ResourceId>,
+    /// Compositor grab state; does not claim to observe X11 client-side grabs.
+    pub compositor_grabbed: bool,
+    pub remote_hold_active: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct InputDiagnostic {
+    /// Same owner-thread observation point as the containing snapshot.
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// None means unavailable, including protected or unprojected recipients.
+    pub keyboard: Option<InputDeviceDiagnostic>,
+    pub pointer: Option<InputDeviceDiagnostic>,
+    /// Current native or projected hosted-application hit, independent of the
+    /// grab recipient. None means absent device or protected/unprojected target.
+    pub pointer_hit_test: Option<PointerHitTestDiagnostic>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct PointerHitTestDiagnostic {
+    /// An ordinary window in this snapshot; None means no native input surface
+    /// at the pointer (for example a server decoration or shell surface).
+    /// Ordinary shell hits use surface. No raw coordinates are exposed.
+    pub window: Option<String>,
+    /// Current ordinary shell hit; this is not a captured-pointer recipient.
+    pub surface: Option<crate::leases::ResourceId>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DurationBucket {
+    pub upper_bound_seconds: f64,
+    pub cumulative_count: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct MethodMetrics {
+    /// One of the fixed, server-owned MCP method names; never a caller label.
+    pub method: String,
+    pub success: u64,
+    pub error: u64,
+    pub cancelled: u64,
+    pub in_flight: u64,
+    pub duration_seconds_sum: f64,
+    /// Finite cumulative bounds; success + error + cancelled is the +Inf bucket.
+    pub duration_buckets: Vec<DurationBucket>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct OperationMetricsSnapshot {
+    /// Collector generation, incremented on each method start and completion.
+    pub generation: u64,
+    /// Monotonic microseconds since this collector was created, not session time.
+    pub collector_uptime_us: u64,
+    /// Sampled together under the collector lock at the owner observation point.
+    /// Covers typed MCP futures, not application processing or response delivery.
+    pub methods: Vec<MethodMetrics>,
+    /// Bounded method completions, oldest first, sampled under the same collector lock.
+    /// Contains no individual input events, caller identities, arguments or error text.
+    pub recent_completions: Vec<OperationCompletion>,
+    /// Completions evicted since this collector started; history is never persisted.
+    pub evicted_completions: u64,
+}
+
+pub const MAX_RECENT_OPERATION_COMPLETIONS: usize = 128;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationOutcome {
+    Success,
+    Error,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct OperationCompletion {
+    /// Collector generation at completion; unrelated to scene or presentation generation.
+    pub generation: u64,
+    pub collector_uptime_us: u64,
+    /// Fixed server-owned method name, never supplied by a caller.
+    pub method: String,
+    pub outcome: OperationOutcome,
+    /// Method future duration, excluding response delivery; cancellation is not rollback.
+    pub duration_us: u64,
+    /// First successful resource authorization in this method, not proof that
+    /// a native effect completed. Absent for pre-authorization rejection.
+    pub authorization: Option<OperationAuthorization>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct OperationAuthorization {
+    /// Session-local numeric audit identity, never a caller label or credential.
+    pub client_id: Option<u64>,
+    pub lease_id: u64,
+    pub operation_id: u64,
+    pub lease_operation_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompositorBackend {
+    Winit,
+    Udev,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct PlatformDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Runtime backend owner, not compiled-in feature availability. None during setup.
+    pub backend: Option<CompositorBackend>,
+    /// Logical compositor seat capabilities, not counts of physical devices.
+    pub keyboard_present: bool,
+    pub pointer_present: bool,
+    pub touch_present: bool,
+    pub xwayland_connected: bool,
+    pub xwayland_restart_pending: bool,
+    /// Successful private-device allocation at the current XWM's startup.
+    /// Does not imply an independently queried device is still live.
+    pub isolated_x11_keyboard_initialized: bool,
+    /// Worker creation succeeded; no blocking health probe is performed here.
+    pub native_keyboard_worker_initialized: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellDiagnosticRole {
+    Desktop,
+    Panel,
+    Launcher,
+    ControlCenter,
+    VolumeOsd,
+}
+
+/// Geometry/scene metadata only; never includes shell text, pixels or semantic values.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ShellSurfaceDiagnostic {
+    pub id: String,
+    pub generation: u64,
+    pub role: ShellDiagnosticRole,
+    pub geometry: [i64; 4],
+    pub output: Option<String>,
+    /// Generation of the coordinator's production paint scene, not presented pixels.
+    pub scene_generation: u64,
+    /// Current compositor presenter scale, sampled with the placement.
+    pub scale_factor: f32,
+    /// Production presenter has changes pending; false does not prove presentation.
+    pub redraw_pending: bool,
+    pub keyboard_focused: bool,
+}
+
+/// One compositor-hosted application surface at the snapshot observation point.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct InternalApplicationDiagnostic {
+    /// Diagnostic identity only; this record does not grant surface authority.
+    pub id: String,
+    pub generation: u64,
+    /// Refers to a window in this same bounded snapshot.
+    pub window: String,
+    pub geometry: [i64; 4],
+    pub output: Option<String>,
+    pub scale_factor: f32,
+    pub visible: bool,
+    /// Resolved UI tree generation, not the generation of presented pixels.
+    pub resolved_frame_generation: u64,
+    /// Production presenter has changes pending; false does not confirm presentation.
+    pub redraw_pending: bool,
+    pub keyboard_focused: bool,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererPolicy {
+    Gpu,
+    Software,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RendererFallbackReason {
+    RequestedSoftware,
+    UnsupportedCommands,
+    ElementBudget,
+    TextureImportFailure,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct InternalRendererDiagnostic {
+    pub surface: String,
+    pub surface_generation: u64,
+    pub observed_at_us: u64,
+    /// Current production path, or suspended while hidden; not GPU presentation confirmation.
+    pub mode: String,
+    pub configured_mode: RendererPolicy,
+    pub fallback_reason: Option<RendererFallbackReason>,
+    pub gpu_frames: u64,
+    pub fallback_frames: u64,
+    pub software_frame_bytes: u64,
+    pub fallback_raster_bytes: u64,
+    pub fallback_buffer_creations: u64,
+    pub fallback_buffer_reuses: u64,
+    pub fallback_upload_damage_bytes: u64,
+    pub fallback_full_repaints: u64,
+    pub fallback_partial_repaints: u64,
+    pub texture_import_failures: u64,
+    pub fallback_import_failures: u64,
+}
+
+/// The existing shell-behavior transaction domain, excluding security settings.
+/// Values use the same production read/default policy as local Settings.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ShellBehaviorDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Output-topology version used by local compare-and-set transactions.
+    pub topology_generation: u64,
+    pub bar_on_all_displays: bool,
+    pub all_windows_on_every_bar: bool,
+    /// Configured value; loading defaults does not prove a persisted file exists.
+    pub configured_desktop_count: u8,
+    /// Actual workspace owner state, which can differ before reconciliation.
+    pub runtime_desktop_count: usize,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct BackgroundWorkerDiagnostic {
+    /// Changes on admission and release, independently of MCP future completion.
+    pub generation: u64,
+    pub collector_uptime_us: u64,
+    pub last_changed_uptime_us: u64,
+    /// Includes blocking preparation and its owner reply wait. A timed-out
+    /// network request can leave this true until its worker finishes cleanup.
+    pub busy: bool,
+}
+
+pub type SettingsWorkerDiagnostic = BackgroundWorkerDiagnostic;
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ApplicationLaunchDiagnostic {
+    /// Shared bounded preparation for launch and application-scoped enumeration.
+    pub preparation: Option<BackgroundWorkerDiagnostic>,
+    /// Child handles awaiting nonblocking exit collection, including running apps.
+    pub tracked_children: usize,
+    pub child_capacity: usize,
+}
+
+/// Warning/error source metadata only; no formatted messages, fields, or span values.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DiagnosticLogRecord {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub level: String,
+    pub target: String,
+    pub source_file: Option<String>,
+    pub source_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DiagnosticLogSnapshot {
+    pub collecting: bool,
+    pub generation: u64,
+    /// Monotonic microseconds since logging collector initialization.
+    pub observed_at_us: u64,
+    pub evicted: u64,
+    pub contention_drops: u64,
+    /// At most 256 warning/error locations, ordered by generation.
+    pub records: Vec<DiagnosticLogRecord>,
+}
+
+/// Aggregate production HTTP admission state. No client table or identifiers.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct AdmissionDiagnostic {
+    pub generation: u64,
+    /// Timestamp relative to this listener's admission collector, not session start.
+    pub collector_uptime_us: u64,
+    pub requests_admitted: u64,
+    /// Combined global and authenticated-client admission rejections.
+    pub admission_rejections: u64,
+    pub active_requests: u64,
+    pub active_authenticated_requests: u64,
+}
+
+/// Fixed-cardinality lease counts shared with public operational metrics.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct LeaseMetricsDiagnostic {
+    /// Monotonic microseconds since compositor start, supplied at collection.
+    pub observed_at_us: u64,
+    /// Scope order is surface, window, application, output, full_session.
+    pub active_by_scope: [u64; 5],
+    pub active_total: u64,
+    pub pending_requests: u64,
+}
+
+/// Owned CPU image caches only. Byte totals are retained pixel storage, not RSS
+/// or GPU allocation. Preview totals include only windows in this snapshot.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ShellImageCacheDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    pub launcher_icon_entries: u64,
+    pub launcher_icon_bytes: u64,
+    pub wallpaper_entries: u64,
+    pub wallpaper_bytes: u64,
+    pub tray_entries: u64,
+    pub tray_bytes: u64,
+    pub preview_entries: u64,
+    pub preview_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct DiagnosticSnapshot {
+    pub observation_generation: u64,
+    /// Monotonic microseconds since the current compositor session started.
+    pub observed_at_us: u64,
+    pub windows: Vec<crate::WindowSummary>,
+    pub outputs: Vec<OutputDiagnostic>,
+    pub workspaces: Vec<WorkspaceDiagnostic>,
+    /// Unprotected hosted applications whose windows are in this snapshot.
+    pub internal_applications: Vec<InternalApplicationDiagnostic>,
+    /// Cumulative production renderer work for the allowed applications above.
+    /// Shared caches, text payloads and presentation completion are not projected.
+    pub internal_renderers: Vec<InternalRendererDiagnostic>,
+    /// Per-surface renderer work for the visible, unprotected shell surfaces below.
+    /// Excludes shared caches and does not confirm GPU presentation.
+    pub shell_renderers: Vec<InternalRendererDiagnostic>,
+    /// None means the in-process shell is unavailable.
+    pub shell_image_cache: Option<ShellImageCacheDiagnostic>,
+    pub shell_surfaces: Vec<ShellSurfaceDiagnostic>,
+    pub focused_window: Option<String>,
+    pub input: InputDiagnostic,
+    pub shortcuts: ShortcutDiagnostic,
+    pub stacking_front_to_back: Vec<String>,
+    pub preview: PreviewDiagnostic,
+    /// None explicitly means the bounded operational collector is unavailable.
+    pub metrics: Option<OperationMetricsSnapshot>,
+    /// None means the listener collector is absent or busy; collection never waits.
+    pub admission: Option<AdmissionDiagnostic>,
+    /// None means the control collector was busy at its independent observation.
+    pub lease_metrics: Option<LeaseMetricsDiagnostic>,
+    pub platform: PlatformDiagnostic,
+    pub shell_behavior: ShellBehaviorDiagnostic,
+    /// None means the worker-state collector is unavailable.
+    pub settings_worker: Option<SettingsWorkerDiagnostic>,
+    pub application_launch: ApplicationLaunchDiagnostic,
+    /// Currently ordinary native-window identity, retirement, focus assignments and output membership only.
+    pub recent_events: crate::desktop_events::DesktopEventSnapshot,
+    /// None means the collector is unavailable or busy; never reads log files.
+    pub diagnostic_logs: Option<DiagnosticLogSnapshot>,
+    pub frame_trace: Option<crate::frame_trace::FrameTraceSnapshot>,
+    pub truncated: bool,
+    /// Explicitly identifies domains not supplied by this projection.
+    pub unavailable_domains: Vec<String>,
+}
+
+/// Installed launch targets from the production catalog, never executable arguments.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct InstalledApplication {
+    pub id: String,
+    pub name: String,
+    /// Executable identity observed during catalog preparation, usable in an
+    /// application lease request before any window exists. Launch and window
+    /// ownership are independently revalidated; this is not a standing grant.
+    /// None includes scripts, shared runtimes and unverifiable launch targets.
+    #[serde(default)]
+    pub verified_application: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct ApplicationInventory {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Executable inspection may precede the final owner observation.
+    pub catalog_observed_at_us: u64,
+    pub catalog_generation: u64,
+    pub available: bool,
+    pub applications: Vec<InstalledApplication>,
+    pub truncated: bool,
+}
+
+pub const MAX_INSTALLED_APPLICATIONS: usize = 512;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LaunchApplicationRequest {
+    pub lease_id: u64,
+    pub catalog_generation: u64,
+    pub application_id: String,
+}
+
+/// Spawn acknowledgement, not proof of a mapped window or a new control grant.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+pub struct LaunchApplicationOutcome {
+    pub catalog_generation: u64,
+    pub application_id: String,
+    pub process_id: u32,
+}
+
+/// Static registration metadata only. No key events, held state or emergency controls.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ShortcutDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// None when the backend is unavailable or the revision counter exhausted.
+    pub registration_revision: Option<u64>,
+    pub capability: ShortcutDiagnosticCapability,
+    pub registrations: Vec<ShortcutRegistrationDiagnostic>,
+    /// String-bearing logical/native bindings among the bounded inspected prefix.
+    /// Their text is never projected; truncation also bounds inspection work.
+    pub unprojected_bindings: u64,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutDiagnosticCapability {
+    Available,
+    BackendUnavailable,
+    RevisionExhausted,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct ShortcutRegistrationDiagnostic {
+    pub registration_id: u64,
+    /// Fixed physical key enum name, never a logical character or native string.
+    pub physical_key: String,
+    /// Fixed product action enum name (workspace actions may include an index).
+    pub action: String,
+    pub modifiers: Vec<String>,
+    pub trigger: String,
+}
+
+pub const MAX_DIAGNOSTIC_SHORTCUTS: usize = 128;
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct OutputIdentificationOutcome {
+    pub output: crate::leases::ResourceId,
+    pub generation: u64,
+    pub duration_ms: u32,
+}
+
+#[cfg(test)]
+mod output_identification_tests {
+    use super::*;
+
+    #[test]
+    fn output_identification_requires_a_bounded_exact_identity_and_no_custom_label() {
+        let action: DiagnosticAction = serde_json::from_value(serde_json::json!({
+            "identify_output": {"output": {"id": "DP-2", "generation": 7}}
+        }))
+        .unwrap();
+        assert!(action.validate().is_ok());
+        for (id, generation) in [
+            (String::new(), 7),
+            ("DP-2".into(), 0),
+            ("x".repeat(1024), 7),
+        ] {
+            assert!(
+                DiagnosticAction::IdentifyOutput {
+                    output: crate::leases::ResourceId { id, generation }
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::from_value::<DiagnosticAction>(serde_json::json!({
+                "identify_output": {"output": {"id": "DP-2", "generation": 7}, "label": "trusted"}
+            }))
+            .is_err()
+        );
+    }
+}

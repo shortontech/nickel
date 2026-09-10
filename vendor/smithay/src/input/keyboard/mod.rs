@@ -211,6 +211,9 @@ pub enum KeyboardSource {
     /// An auxiliary input source (e.g. a `zwp_virtual_keyboard_v1` instance or a libei
     /// connection), distinguished by a compositor-assigned opaque id.
     Auxiliary(u64),
+    /// Auxiliary input whose held keys must be released before focus changes.
+    /// Suitable for resource-scoped remote input; never inherited by a new target.
+    FocusBoundAuxiliary(u64),
 }
 
 impl KeyboardSource {
@@ -219,8 +222,23 @@ impl KeyboardSource {
 
     /// Mint a fresh, process-unique auxiliary source.
     pub fn new_auxiliary() -> Self {
+        KeyboardSource::Auxiliary(Self::next_auxiliary_id())
+    }
+
+    /// Mint an auxiliary source that cannot carry held keys into another focus.
+    pub fn new_focus_bound_auxiliary() -> Self {
+        KeyboardSource::FocusBoundAuxiliary(Self::next_auxiliary_id())
+    }
+
+    fn next_auxiliary_id() -> u64 {
         static NEXT_AUX_SOURCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        KeyboardSource::Auxiliary(NEXT_AUX_SOURCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+        NEXT_AUX_SOURCE
+            .fetch_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |id| id.checked_add(1),
+            )
+            .expect("keyboard source identity exhausted")
     }
 }
 
@@ -229,6 +247,7 @@ pub(crate) struct KbdInternal<D: SeatHandler> {
     pending_focus: Option<<D as SeatHandler>::KeyboardFocus>,
     pub(crate) pressed_keys: HashSet<Keycode>,
     pub(crate) key_sources: HashMap<Keycode, HashSet<KeyboardSource>>,
+    external_focus_bound_sources: HashSet<KeyboardSource>,
     pub(crate) forwarded_pressed_keys: HashSet<Keycode>,
     pub(crate) mods_state: ModifiersState,
     xkb: Arc<Mutex<Xkb>>,
@@ -282,6 +301,7 @@ impl<D: SeatHandler + 'static> KbdInternal<D> {
             pending_focus: None,
             pressed_keys: HashSet::new(),
             key_sources: HashMap::new(),
+            external_focus_bound_sources: HashSet::new(),
             forwarded_pressed_keys: HashSet::new(),
             mods_state: ModifiersState::default(),
             xkb: Arc::new(Mutex::new(Xkb {
@@ -1053,8 +1073,6 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     where
         F: FnOnce(&mut D, &ModifiersState, KeysymHandle<'_>) -> FilterResult<T>,
     {
-        trace!("Handling keystroke");
-
         let mut guard = self.arc.internal.lock().unwrap();
         let (mods_changed, leds_changed, is_transition) = guard.key_input(source, keycode, state);
         let led_state = guard.led_state;
@@ -1074,9 +1092,7 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         }
 
         let key_handle = KeysymHandle { xkb: &xkb, keycode };
-        trace!(mods_state = ?mods_state, sym = xkb::keysym_get_name(key_handle.modified_sym()), "Calling input filter");
         if let FilterResult::Intercept(val) = filter(data, &mods_state, key_handle) {
-            trace!("Input was intercepted by filter");
             return Some(val);
         }
 
@@ -1090,6 +1106,20 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     /// This is a teardown-only path: the releases are forwarded directly and do not run
     /// the compositor's input filter, so a departing source can't trigger a key binding
     pub fn release_source(&self, data: &mut D, source: KeyboardSource) {
+        if matches!(source, KeyboardSource::FocusBoundAuxiliary(_)) {
+            let seat = self.get_seat(data);
+            let mut guard = self.arc.internal.lock().unwrap();
+            guard.external_focus_bound_sources.remove(&source);
+            let released = guard.release_source_keys(source);
+            let mut handle = KeyboardInnerHandle { inner: &mut guard, seat: &seat };
+            for code in released {
+                if handle.inner.forwarded_pressed_keys.remove(&code) {
+                    handle.input(data, code, KeyState::Released, Some(handle.inner.mods_state),
+                        SERIAL_COUNTER.next_serial(), InputTime::now());
+                }
+            }
+            return;
+        }
         let (transitioned, mods) = {
             let mut guard = self.arc.internal.lock().unwrap();
             let transitioned = guard.release_source_keys(source);
@@ -1122,8 +1152,6 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     where
         F: FnOnce(&mut D, &ModifiersState, KeysymHandle<'_>) -> T,
     {
-        trace!("Handling keystroke");
-
         let mut guard = self.arc.internal.lock().unwrap();
         let (mods_changed, leds_changed, _is_transition) =
             guard.key_input(KeyboardSource::MAIN, keycode, state);
@@ -1134,7 +1162,6 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
 
         let key_handle = KeysymHandle { xkb: &xkb, keycode };
 
-        trace!(mods_state = ?mods_state, sym = xkb::keysym_get_name(key_handle.modified_sym()), "Calling input filter");
         let filter_result = filter(data, &mods_state, key_handle);
 
         if leds_changed {
@@ -1177,11 +1204,6 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         guard.with_grab(data, &seat, |data, handle, grab| {
             grab.input(data, handle, keycode, state, modifiers, serial, time);
         });
-        if guard.focus.is_some() {
-            trace!("Input forwarded to client");
-        } else {
-            trace!("No client currently focused");
-        }
     }
 
     /// Set the current focus of this keyboard
@@ -1204,6 +1226,25 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
     pub fn pressed_keys(&self) -> HashSet<Keycode> {
         let guard = self.arc.internal.lock().unwrap();
         guard.pressed_keys.clone()
+    }
+
+    /// Whether this source still holds input. Focus-bound operation owners can
+    /// detect cancellation even if focus subsequently returns to the old target.
+    pub fn source_has_input(&self, source: KeyboardSource) -> bool {
+        let guard = self.arc.internal.lock().unwrap();
+        guard.external_focus_bound_sources.contains(&source)
+            || guard.key_sources.values().any(|sources| sources.contains(&source))
+    }
+
+    /// Bind externally delivered native input to this focus without modifying
+    /// the seat's XKB state. Cancellation is reported through SeatHandler before
+    /// another recipient is entered. Registration alone emits no key events.
+    pub fn register_external_focus_bound_source(&self, source: KeyboardSource) -> bool {
+        let mut guard = self.arc.internal.lock().unwrap();
+        matches!(source, KeyboardSource::FocusBoundAuxiliary(_))
+            && guard.focus.is_some()
+            && guard.external_focus_bound_sources.len() < 128
+            && guard.external_focus_bound_sources.insert(source)
     }
 
     /// Iterate over the keysyms of the currently pressed keys.
@@ -1614,6 +1655,32 @@ impl<D: SeatHandler + 'static> KeyboardInnerHandle<'_, D> {
         focus: Option<<D as SeatHandler>::KeyboardFocus>,
         serial: Serial,
     ) {
+        if self.inner.focus.as_ref().map(|(target, _)| target) != focus.as_ref() {
+            let mut sources: HashSet<_> = self
+                .inner
+                .key_sources
+                .values()
+                .flat_map(|sources| sources.iter().copied())
+                .filter(|source| matches!(source, KeyboardSource::FocusBoundAuxiliary(_)))
+                .collect();
+            sources.extend(self.inner.external_focus_bound_sources.drain());
+            for source in sources {
+                let released = self.inner.release_source_keys(source);
+                for code in released {
+                    if self.inner.forwarded_pressed_keys.remove(&code) {
+                        self.input(
+                            data,
+                            code,
+                            KeyState::Released,
+                            Some(self.inner.mods_state),
+                            serial,
+                            InputTime::now(),
+                        );
+                    }
+                }
+                data.focus_bound_source_cancelled(self.seat, source);
+            }
+        }
         if let Some(focus) = focus {
             let old_focus = self.inner.focus.replace((focus.clone(), serial));
             match (focus, old_focus) {

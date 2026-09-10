@@ -52,6 +52,7 @@ pub enum HotkeyAction {
 pub struct CompositorShortcutAdapter {
     engine: ShortcutEngine<RegistrationId>,
     next_order: u64,
+    registration_revision: Option<u64>,
     registrations: RegistrationTable<HotkeyAction>,
     actions: BTreeMap<HotkeyAction, RegistrationId>,
     bindings: BTreeMap<RegistrationId, Binding<RegistrationId>>,
@@ -67,6 +68,7 @@ impl Default for CompositorShortcutAdapter {
         let mut adapter = Self {
             engine: ShortcutEngine::default(),
             next_order: 0,
+            registration_revision: Some(0),
             registrations: RegistrationTable::default(),
             actions: BTreeMap::new(),
             bindings: BTreeMap::new(),
@@ -88,6 +90,18 @@ impl Default for CompositorShortcutAdapter {
 }
 
 impl CompositorShortcutAdapter {
+    /// None permanently marks revision exhaustion; never implies unchanged bindings.
+    pub fn registration_revision(&self) -> Option<u64> {
+        self.registration_revision
+    }
+
+    /// Production registrations, with no pressed keys or delivery history.
+    pub fn registrations(
+        &self,
+    ) -> impl Iterator<Item = (RegistrationId, &Registration<HotkeyAction>)> {
+        self.registrations.registrations()
+    }
+
     pub fn handle(&mut self, key: KeyCode, edge: KeyEdge) -> HotkeyOutcome {
         if edge == KeyEdge::Released && self.consumed_super_releases.remove(&key) {
             self.owned_keys.remove(&key);
@@ -330,6 +344,9 @@ impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
             ShortcutTrigger::ModifierReleased(_) | ShortcutTrigger::ModifierReleasedAfterChord(_)
         );
         let id = self.registrations.register(registration)?;
+        self.registration_revision = self
+            .registration_revision
+            .and_then(|value| value.checked_add(1));
         let binding = Binding {
             suppress,
             shortcut,
@@ -344,7 +361,13 @@ impl GlobalShortcutAdapter<HotkeyAction> for CompositorShortcutAdapter {
         self.actions.retain(|_, registered| *registered != id);
         self.bindings.remove(&id);
         self.engine.set_bindings(self.bindings.values().cloned());
-        self.registrations.unregister(id)
+        let removed = self.registrations.unregister(id);
+        if removed {
+            self.registration_revision = self
+                .registration_revision
+                .and_then(|value| value.checked_add(1));
+        }
+        removed
     }
 
     fn reset(&mut self) {
@@ -685,6 +708,32 @@ mod tests {
         CompositorShortcutAdapter, HotkeyAction, HotkeyOutcome, compositor_registrations,
         default_bindings,
     };
+
+    #[test]
+    fn registration_revision_tracks_mutations_not_input_or_failed_changes() {
+        let mut adapter = CompositorShortcutAdapter::default();
+        let (id, registration) = adapter
+            .registrations()
+            .next()
+            .map(|(id, registration)| (id, registration.clone()))
+            .unwrap();
+        let revision = adapter.registration_revision();
+        assert!(adapter.register(registration.clone()).is_err());
+        adapter.handle(KeyCode::KeyA, KeyEdge::Pressed);
+        adapter.reset();
+        assert_eq!(adapter.registration_revision(), revision);
+        assert!(adapter.unregister(id));
+        assert_eq!(adapter.registration_revision(), revision.map(|v| v + 1));
+        assert!(!adapter.unregister(id));
+        adapter.register(registration.clone()).unwrap();
+        assert_eq!(adapter.registration_revision(), revision.map(|v| v + 2));
+        adapter.registration_revision = Some(u64::MAX);
+        let id = adapter.registrations().next().unwrap().0;
+        assert!(adapter.unregister(id));
+        assert_eq!(adapter.registration_revision(), None);
+        adapter.reset();
+        assert_eq!(adapter.registration_revision(), None);
+    }
 
     #[test]
     fn conventional_desktop_defaults_are_registered_once() {

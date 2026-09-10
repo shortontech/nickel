@@ -453,6 +453,13 @@ pub trait Application: Sized {
 
     fn update(&mut self, message: Self::Message);
 
+    /// Whether current application state contains an authentication or other
+    /// protected surface. Compositor adapters must reject remote observation
+    /// and control of such a surface, regardless of an agent's lease scope.
+    fn remote_access_protected(&self) -> bool {
+        false
+    }
+
     /// Application input policy shared by native and compositor-owned hosts.
     /// Runs before ordinary hit testing, once per normalized event; it must not
     /// recursively dispatch input. Native adapters own only window services.
@@ -580,6 +587,7 @@ pub struct UiHost<A: Application> {
     application: A,
     state: UiStateStore,
     tree: UiFrame<A::Message>,
+    tree_remote_access_protected: bool,
     bounds: Rect,
     scale_factor: f32,
     input_dispatcher: FocusedInputDispatcher,
@@ -599,6 +607,7 @@ pub struct UiHost<A: Application> {
 pub struct UiHostViewport<Message> {
     state: UiStateStore,
     tree: UiFrame<Message>,
+    tree_remote_access_protected: bool,
     bounds: Rect,
     scale_factor: f32,
     input_dispatcher: FocusedInputDispatcher,
@@ -607,6 +616,42 @@ pub struct UiHostViewport<Message> {
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
+}
+
+impl<Message> UiHostViewport<Message> {
+    /// Observe a retained viewport without activating it or changing focus.
+    /// The application owner must also validate current application protection.
+    pub fn bounded_semantics(
+        &self,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> Result<(u64, Vec<SemanticNodeSnapshot>), crate::BoundedSemanticError>
+    where
+        Message: Clone,
+    {
+        if self.remote_access_protected() {
+            return Err(crate::BoundedSemanticError::ProtectedSurface);
+        }
+        Ok((
+            self.frame_generation,
+            self.tree.bounded_semantic_nodes(max_nodes, max_bytes)?,
+        ))
+    }
+
+    /// Retired viewport trees retain their protection until the owner rebuilds them.
+    pub fn remote_access_protected(&self) -> bool
+    where
+        Message: Clone,
+    {
+        self.tree_remote_access_protected || self.tree.has_protected_text()
+    }
+
+    pub fn pointer_interaction_active(&self) -> bool {
+        self.state.pressed().is_some()
+            || self.state.captured().is_some()
+            || self.input_dispatcher.touch_active()
+            || self.pending_long_press.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1112,6 +1157,15 @@ impl HostEventOutcome {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedSemanticActionError {
+    InputBusy,
+    Snapshot(crate::BoundedSemanticError),
+    StaleGeneration,
+    MissingTarget,
+    ActionUnavailable,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SemanticActionFailure {
     pub target: UiId,
@@ -1135,6 +1189,7 @@ impl<A: Application> UiHost<A> {
             self.application.frame_overlays(context),
         );
         UiHostViewport {
+            tree_remote_access_protected: self.application.remote_access_protected(),
             state,
             tree,
             bounds,
@@ -1159,6 +1214,10 @@ impl<A: Application> UiHost<A> {
         UiHostViewport {
             state: std::mem::replace(&mut self.state, viewport.state),
             tree: std::mem::replace(&mut self.tree, viewport.tree),
+            tree_remote_access_protected: std::mem::replace(
+                &mut self.tree_remote_access_protected,
+                viewport.tree_remote_access_protected,
+            ),
             bounds: std::mem::replace(&mut self.bounds, viewport.bounds),
             scale_factor: std::mem::replace(&mut self.scale_factor, viewport.scale_factor),
             input_dispatcher: std::mem::replace(
@@ -1225,6 +1284,7 @@ impl<A: Application> UiHost<A> {
             apply_frame_overlays(&mut tree, &mut state, application.frame_overlays(context));
         let next_application_deadline = application.poll_interval().map(|interval| now + interval);
         Self {
+            tree_remote_access_protected: application.remote_access_protected(),
             application,
             state,
             tree,
@@ -1299,8 +1359,34 @@ impl<A: Application> UiHost<A> {
         self.tree.selected_text(&self.state)
     }
 
+    /// Generation of the currently resolved tree, not a presentation acknowledgement.
+    pub fn resolved_frame_generation(&self) -> u64 {
+        self.frame_generation
+    }
+
+    /// Bounded, protected-value-free projection. Adapters still own authorization.
+    pub fn bounded_semantic_nodes(
+        &self,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<SemanticNodeSnapshot>, crate::BoundedSemanticError> {
+        if self.application().remote_access_protected() || self.tree_remote_access_protected {
+            return Err(crate::BoundedSemanticError::ProtectedSurface);
+        }
+        self.tree.bounded_semantic_nodes(max_nodes, max_bytes)
+    }
+
     pub fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         self.tree.semantic_nodes()
+    }
+
+    /// Protection is queried from live application state as well as the tree,
+    /// so an authentication transition is protected before its next paint.
+    /// A previously protected tree remains protected until it is rebuilt.
+    pub fn remote_access_protected(&self) -> bool {
+        self.application().remote_access_protected()
+            || self.tree_remote_access_protected
+            || self.tree.has_protected_text()
     }
 
     pub fn query(&self, selector: &SemanticSelector) -> Vec<SemanticNodeSnapshot> {
@@ -1422,6 +1508,77 @@ impl<A: Application> UiHost<A> {
         action: ActionKind,
     ) -> Result<EffectiveHitRoute, SemanticActionError> {
         self.tree.resolve_effective_target(target, action)
+    }
+
+    /// True while this viewport owns a pointer press/capture or touch contact.
+    /// This does not describe native seat keyboard or other surface ownership.
+    pub fn pointer_interaction_active(&self) -> bool {
+        self.state.pressed().is_some()
+            || self.state.captured().is_some()
+            || self.input_dispatcher.touch_active()
+            || self.pending_long_press.is_some()
+    }
+
+    /// Resolve an ordinal from the same bounded projection used for observation,
+    /// then dispatch through production semantics. Adapters must validate surface
+    /// identity and acquire their input reservation before calling this method.
+    /// The returned host outcome is for local effect handling, never a remote payload.
+    /// An explicit clipboard limit replaces the previous adapter limit; otherwise
+    /// the current limit is retained.
+    pub fn perform_bounded_semantic_action(
+        &mut self,
+        expected_generation: u64,
+        ordinal: usize,
+        action: SemanticAction,
+        max_nodes: usize,
+        max_bytes: usize,
+        clipboard_text_limit: Option<usize>,
+    ) -> Result<HostEventOutcome, BoundedSemanticActionError> {
+        if self.frame_generation != expected_generation {
+            return Err(BoundedSemanticActionError::StaleGeneration);
+        }
+        if self.pointer_interaction_active() {
+            return Err(BoundedSemanticActionError::InputBusy);
+        }
+        match &action {
+            SemanticAction::SetValue(crate::SemanticValueInput::Text(text))
+                if text.len() > max_bytes =>
+            {
+                return Err(BoundedSemanticActionError::Snapshot(
+                    crate::BoundedSemanticError::BudgetExceeded,
+                ));
+            }
+            SemanticAction::SetValue(crate::SemanticValueInput::Number(value))
+                if !value.is_finite() =>
+            {
+                return Err(BoundedSemanticActionError::ActionUnavailable);
+            }
+            _ => {}
+        }
+        let nodes = self
+            .bounded_semantic_nodes(max_nodes, max_bytes)
+            .map_err(BoundedSemanticActionError::Snapshot)?;
+        let target = nodes
+            .into_iter()
+            .nth(ordinal)
+            .ok_or(BoundedSemanticActionError::MissingTarget)?;
+        let required = match &action {
+            SemanticAction::Invoke(kind) => *kind,
+            SemanticAction::SetValue(_) => ActionKind::SetValue,
+        };
+        if !target.actions.contains(&required) {
+            return Err(BoundedSemanticActionError::ActionUnavailable);
+        }
+        // This entry point runs outside the adapter's ordinary batch builder.
+        // Preserve its clipboard policy when entering the production reducer.
+        Ok(self.step(HostBatch {
+            events: vec![HostEvent::Semantic {
+                target: target.id,
+                action,
+            }],
+            clipboard_text_limit: clipboard_text_limit.or(self.state.clipboard_text_limit),
+            ..HostBatch::default()
+        }))
     }
 
     pub fn perform_semantic_action(
@@ -2014,6 +2171,7 @@ impl<A: Application> UiHost<A> {
         let paint_list_us = elapsed_us(paint_started);
         let layout_started = Instant::now();
         self.tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut self.state));
+        self.tree_remote_access_protected = self.application.remote_access_protected();
         // Base resolution cannot retain transient descendants because their
         // topology is declared next. Restore interaction ownership before
         // overlay emission so paint and semantics observe the same state.
@@ -3723,6 +3881,42 @@ mod tests {
                 .changed
         );
         assert_eq!(host.application_mut().text, "pasted");
+    }
+
+    #[test]
+    fn bounded_semantic_dispatch_preserves_adapter_clipboard_limit() {
+        let mut host = UiHost::new(InputApplication::default(), 320, 48);
+        host.handle_input(&focus_event(), None);
+        host.handle_event(UiEvent::PointerCancelled);
+        host.step(HostBatch {
+            clipboard_text_limit: Some(4),
+            ..Default::default()
+        });
+        let outcome = host
+            .perform_bounded_semantic_action(
+                host.resolved_frame_generation(),
+                0,
+                crate::SemanticAction::SetValue(crate::SemanticValueInput::Text(
+                    "preserve me".into(),
+                )),
+                64,
+                4096,
+                None,
+            )
+            .unwrap();
+        assert!(outcome.semantic_failures.is_empty());
+        host.dispatch_ui_event(UiEvent::TextSelectAll);
+        let denied = host.dispatch_ui_event(UiEvent::TextCut);
+        assert_eq!(host.application().text, "preserve me");
+        assert!(denied.clipboard_text.is_none());
+        assert!(host.state.clipboard_rejected);
+        host.step(HostBatch {
+            clipboard_text_limit: Some(11),
+            ..Default::default()
+        });
+        let allowed = host.dispatch_ui_event(UiEvent::TextCut);
+        assert_eq!(allowed.clipboard_text.as_deref(), Some("preserve me"));
+        assert!(host.application().text.is_empty());
     }
 
     #[test]

@@ -511,7 +511,27 @@ pub(super) fn session_event_receiver()
     Some(receiver)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+pub(super) fn session_request(request: SessionRequest) -> std::io::Result<ServerMessage> {
+    let frame = nickel_session_protocol::encode(&nickel_session_protocol::ClientEnvelope {
+        token: String::new(),
+        request_id: 1,
+        request,
+    })
+    .map_err(std::io::Error::other)?;
+    let response = nickel_platform::local_control::request(&frame)?;
+    let envelope: nickel_session_protocol::ServerEnvelope =
+        nickel_session_protocol::decode(&response).map_err(std::io::Error::other)?;
+    if envelope.request_id != 1 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "unexpected local response identifier",
+        ));
+    }
+    Ok(envelope.message)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(super) fn session_request(_request: SessionRequest) -> std::io::Result<ServerMessage> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,

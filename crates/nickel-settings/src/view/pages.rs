@@ -784,23 +784,6 @@ impl SettingsApp {
             nickel_session_protocol::RemoteControlEffectiveState::Disabled
             | nickel_session_protocol::RemoteControlEffectiveState::Rejected => SwitchState::Mixed,
         };
-        let remote_confirmation = if self.remote_control_enable_confirmation {
-            AnyView::new(
-                SettingsRow::new(
-                    theme,
-                    "Allow remote AI control?",
-                    "Approved clients may observe windows and request input, focus, launch, capture, or safe setting capabilities. Press both physical Control keys to stop everything.",
-                )
-                .trailing(ui! { <Row width={190.0} gap={8.0}>
-                    {Button::semantic(theme, SettingsMessage::ConfirmEnableRemoteControl,
-                        "Enable", ButtonPresentation::Primary).width(88.0)}
-                    {Button::semantic(theme, SettingsMessage::CancelEnableRemoteControl,
-                        "Cancel", ButtonPresentation::Quiet).width(78.0)}
-                </Row> }),
-            )
-        } else {
-            AnyView::new(ui! { <Column /> })
-        };
         let pairing = if let Some(pairing) = &self.remote_pairing {
             let qr = self.remote_pairing_qr.as_ref().map_or_else(
                 || AnyView::new(ui! { <Column /> }),
@@ -818,7 +801,7 @@ impl SettingsApp {
                 SettingsCard::titled(
                     theme,
                     "Pair a phone",
-                    "Scanning or entering this single-use code creates a pending client. You must still approve its capabilities locally.",
+                    "Scanning or entering this single-use code identifies a client. Control requires a separate local resource lease.",
                 )
                 .child(qr)
                 .child(SettingsRow::new(theme, "Short code", pairing.short_code.clone()))
@@ -882,6 +865,109 @@ impl SettingsApp {
                 )
             },
         );
+        let pending_leases = self.remote_control_runtime.pending_leases.iter().fold(
+            Column::new().fill_width().gap(12.0),
+            |column, pending| {
+                use nickel_session_protocol::RemoteResourceScope;
+                let scope = match &pending.request.scope {
+                    RemoteResourceScope::Surface(id) => format!("Nickel surface {}", id.id),
+                    RemoteResourceScope::Window(id) => format!("Window {}", id.id),
+                    RemoteResourceScope::Application(id) => format!("{id} windows"),
+                    RemoteResourceScope::Output(id) => format!("Display {}", id.id),
+                    RemoteResourceScope::FullSession if pending.request.full_debug => "Full Control & Debug Nickel".into(),
+                    RemoteResourceScope::FullSession => "Full desktop".into(),
+                };
+                let scope = pending.resource_label.clone().unwrap_or(scope);
+                let duration = pending.request.duration_seconds.map_or_else(
+                    || "Until logout".to_owned(),
+                    |seconds| if seconds % 3600 == 0 { format!("{} hours", seconds / 3600) }
+                        else if seconds % 60 == 0 { format!("{} minutes", seconds / 60) }
+                        else { format!("{seconds} seconds") },
+                );
+                let custom_seconds = self.remote_lease_custom_minutes.parse::<u64>().ok()
+                    .filter(|minutes| *minutes > 0)
+                    .and_then(|minutes| minutes.checked_mul(60));
+                let duration_button = |label: String, duration_seconds| Button::semantic(theme,
+                    SettingsMessage::ApproveRemoteLeaseDuration {
+                        pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), duration_seconds,
+                    }, label, ButtonPresentation::Secondary).width(150.0);
+                let mut changes = Column::new().fill_width().gap(4.0);
+                if pending.changes.access_changed {
+                    changes = changes.child(SettingsStatus::new(theme, SettingsStatusKind::Validation,
+                        "Access changed while this request was pending. Review scope, debug access, and reconnect policy."));
+                }
+                if pending.changes.duration_increased {
+                    changes = changes.child(SettingsStatus::new(theme, SettingsStatusKind::Validation,
+                        "A longer duration was requested while this approval was pending."));
+                }
+                column.child(SettingsCard::titled(theme,
+                    format!("{} requests {}", pending.client_label,
+                        if pending.request.renewal.is_some() { "lease renewal" } else { "control" }), scope)
+                    .child(SettingsRow::new(theme, "Requested duration", duration))
+                    .child(changes)
+                    .child(SettingsRow::new(theme, "Reconnect", if pending.request.allow_resumption {
+                        "May resume until this lease expires"
+                    } else { "Approval ends on disconnect" }))
+                    .child(ui! { <Row gap={8.0}>
+                        {if pending.request.full_debug {
+                            duration_button("Allow 30 minutes".into(), Some(1800))
+                        } else {
+                            duration_button("Allow 20 minutes".into(), Some(1200))
+                        }}
+                        {duration_button("Allow 2 hours".into(), Some(7200))}
+                        {duration_button("Allow until logout".into(), None)}
+                    </Row> })
+                    .child(Text::new("Custom approval duration (minutes)").color(theme.text.secondary))
+                    .child(ui! { <Row gap={8.0}>
+                        {TextField::on_change_with_placeholder(&self.remote_lease_custom_minutes, "Minutes",
+                            SettingsMessage::RemoteLeaseCustomMinutesChanged)
+                            .id(format!("remote-lease-minutes-{}", pending.client_id))
+                            .accessibility_label("Custom approval duration in minutes")
+                            .color(theme.text.primary).width(150.0).height(40.0)}
+                        {duration_button("Allow custom duration".into(), custom_seconds)
+                            .enabled(custom_seconds.is_some()).width(190.0)}
+                    </Row> })
+                    .child(ui! { <Row gap={8.0}>
+                        {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
+                            pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), allow: false,
+                        }, "Deny", ButtonPresentation::Destructive).width(88.0)}
+                        {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
+                            pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), allow: true,
+                        }, "Allow control", ButtonPresentation::Primary).width(150.0)}
+                        {Button::semantic(theme, SettingsMessage::BlockRemoteClient {
+                            client_id: pending.client_id.clone(), blocked: true,
+                        }, "Block client", ButtonPresentation::Destructive).width(130.0)}
+                    </Row> }))
+            },
+        );
+        let active_leases = self.remote_control_runtime.active_leases.iter().fold(
+            Column::new().fill_width().gap(12.0),
+            |column, lease| {
+                use nickel_session_protocol::{RemoteLeaseAction, RemoteResourceScope};
+                let scope = match &lease.scope {
+                    RemoteResourceScope::Surface(id) => format!("Nickel surface {}", id.id),
+                    RemoteResourceScope::Window(id) => format!("Window {}", id.id),
+                    RemoteResourceScope::Application(id) => format!("{id} windows"),
+                    RemoteResourceScope::Output(id) => format!("Display {}", id.id),
+                    RemoteResourceScope::FullSession if lease.full_debug => "Full Control & Debug Nickel".into(),
+                    RemoteResourceScope::FullSession => "Full desktop".into(),
+                };
+                let scope = lease.resource_label.clone().unwrap_or(scope);
+                let remaining = lease.remaining_seconds.map_or_else(|| "Until logout".to_owned(),
+                    |seconds| format!("{}m {}s remaining", seconds / 60, seconds % 60));
+                column.child(SettingsCard::titled(theme, lease.client_label.clone(), scope)
+                    .child(SettingsRow::new(theme, if lease.suspended { "Paused" } else { "Active" }, remaining))
+                    .child(ui! { <Row gap={8.0}>
+                        {Button::semantic(theme, SettingsMessage::ManageRemoteLease {
+                            lease_id: lease.lease_id,
+                            action: if lease.suspended { RemoteLeaseAction::Resume } else { RemoteLeaseAction::Pause },
+                        }, if lease.suspended { "Resume" } else { "Pause" }, ButtonPresentation::Secondary).width(100.0)}
+                        {Button::semantic(theme, SettingsMessage::ManageRemoteLease {
+                            lease_id: lease.lease_id, action: RemoteLeaseAction::Revoke,
+                        }, "Revoke", ButtonPresentation::Destructive).width(100.0)}
+                    </Row> }))
+            },
+        );
         let granted_clients = self.remote_control_runtime.granted_clients.iter().fold(
             Column::new().fill_width().gap(12.0),
             |column, client| {
@@ -895,13 +981,49 @@ impl SettingsApp {
                     SettingsCard::titled(
                         theme,
                         client.label.clone(),
-                        if client.remembered {
+                        if client.blocked {
+                            "Blocked: new permission requests are disabled"
+                        } else if client.remembered {
                             "Remembered client"
                         } else {
-                            "Allow-once client"
+                            "Connected client"
                         },
                     )
                     .child(SettingsRow::new(theme, "Granted", granted))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Last authenticated peer",
+                        client.origin.as_ref().map_or_else(
+                            || "Unavailable".to_owned(),
+                            |origin| {
+                                format!(
+                                    "{} · {}",
+                                    origin.address,
+                                    if origin.tls {
+                                        "TLS protected"
+                                    } else {
+                                        "Local HTTP"
+                                    }
+                                )
+                            },
+                        ),
+                    ))
+                    .child(
+                        Button::semantic(
+                            theme,
+                            SettingsMessage::BlockRemoteClient {
+                                client_id: client.id.clone(),
+                                blocked: !client.blocked,
+                            },
+                            if client.blocked {
+                                "Unblock client"
+                            } else {
+                                "Block client"
+                            },
+                            ButtonPresentation::Destructive,
+                        )
+                        .width(140.0),
+                    )
                     .child(
                         Button::semantic(
                             theme,
@@ -922,15 +1044,13 @@ impl SettingsApp {
         .child(
             SettingsRow::new(
                 theme,
-                "Enable remote control",
+                "Allow remote connections",
                 match remote_effective {
                     nickel_session_protocol::RemoteControlEffectiveState::Disabled => "Disabled",
                     nickel_session_protocol::RemoteControlEffectiveState::Enabled => {
-                        "Listening on loopback"
+                        "Listening. Connections do not grant control."
                     }
-                    nickel_session_protocol::RemoteControlEffectiveState::Rejected => {
-                        "Change rejected"
-                    }
+                    nickel_session_protocol::RemoteControlEffectiveState::Rejected => "Unavailable",
                 },
             )
             .trailing(
@@ -943,10 +1063,16 @@ impl SettingsApp {
                     theme,
                 )
                 .id("optional-feature-remote-control")
-                .accessibility_label("Enable Remote AI Control"),
+                .accessibility_label("Allow Remote AI Control connections"),
             ),
         )
-        .child(remote_confirmation)
+        .child(
+            SettingsRow::new(theme, "Audible control status", "Play local cues for control changes and expiration. Uses current output volume and mute.")
+                .trailing(Switch::with_state_action(
+                    if self.remote_control_settings.audible_indications { SwitchState::On } else { SwitchState::Off },
+                    Some(SettingsMessage::SetRemoteAudibleIndications(!self.remote_control_settings.audible_indications)), theme,
+                ).id("remote-control-audible-indications").accessibility_label("Audible Remote AI Control status")),
+        )
         .child(SettingsRow::new(
             theme,
             "MCP endpoint",
@@ -954,11 +1080,28 @@ impl SettingsApp {
         ))
         .child(SettingsRow::new(
             theme,
-            "Authorized clients",
+            "Connected client identities",
             self.remote_control_runtime
                 .granted_clients
                 .len()
                 .to_string(),
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Listener configuration",
+            if self.remote_control_runtime.environment_override {
+                "Process environment override"
+            } else {
+                "Default loopback address"
+            },
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Host certificate SHA-256",
+            self.remote_control_runtime
+                .host_fingerprint
+                .clone()
+                .unwrap_or_else(|| "Local HTTP listener".into()),
         ))
         .child(SettingsRow::new(
             theme,
@@ -998,6 +1141,107 @@ impl SettingsApp {
                 remote_effective == nickel_session_protocol::RemoteControlEffectiveState::Enabled,
             ),
         );
+        let audit = &self.remote_control_runtime.lease_audit;
+        let shown = audit.len().min(16);
+        let audit_summary = if audit.is_empty() {
+            "No lease activity in this session.".to_owned()
+        } else {
+            format!(
+                "Showing the latest {shown} of {} retained events. {} older events discarded.",
+                audit.len(),
+                self.remote_control_runtime.lease_audit_evicted,
+            )
+        };
+        let audit_card = audit.iter().rev().take(16).fold(
+            SettingsCard::titled(theme, "Recent control activity", audit_summary),
+            |card, event| {
+                use nickel_session_protocol::{
+                    RemoteLeaseScopeKind as Scope, RemoteLeaseTransition as Transition,
+                };
+                let transition = match event.transition {
+                    Transition::Approved => "Approved",
+                    Transition::Renewed => "Renewed",
+                    Transition::Paused => "Paused",
+                    Transition::Resumed => "Resumed",
+                    Transition::Expired => "Expired",
+                    Transition::Revoked => "Revoked",
+                    Transition::Disconnected => "Disconnected",
+                    Transition::Reconnected => "Reconnected",
+                };
+                let scope = match event.scope {
+                    Scope::Surface => "Nickel surface",
+                    Scope::Window => "Window",
+                    Scope::Application => "Application windows",
+                    Scope::Output => "Display",
+                    Scope::FullSession if event.full_debug => "Full Control & Debug Nickel",
+                    Scope::FullSession => "Full desktop",
+                };
+                let lifetime = event.lifetime_limit_seconds.map_or_else(
+                    || "until logout".to_owned(),
+                    |seconds| format!("{seconds}s approved lifetime"),
+                );
+                card.child(SettingsRow::new(
+                    theme,
+                    format!("Lease {} · {transition}", event.lease_id),
+                    format!(
+                        "{scope} · {lifetime} · {}s after session start",
+                        event.observed_at_us / 1_000_000
+                    ),
+                ))
+            },
+        );
+        let origins = &self.remote_control_runtime.connection_audit;
+        let connection_card = origins.iter().rev().take(16).fold(
+            SettingsCard::titled(theme, "Recent connection origins", format!(
+                "Latest {} of {} retained peer changes. {} older events discarded. Repeated requests from the same peer are combined.",
+                origins.len().min(16), origins.len(), self.remote_control_runtime.connection_audit_evicted,
+            )),
+            |card, event| card.child(SettingsRow::new(
+                theme,
+                format!("{} · {}", event.address, if event.tls { "TLS protected" } else { "Local HTTP" }),
+                format!("Client {} · {}s after session start", event.client_id, event.observed_at_us / 1_000_000),
+            )),
+        );
+        let trace_audit = &self.remote_control_runtime.trace_audit;
+        let trace_summary = if trace_audit.is_empty() {
+            "No diagnostic traces in this session.".to_owned()
+        } else {
+            format!(
+                "Showing the latest {} of {} retained events. {} older events discarded.",
+                trace_audit.len().min(16),
+                trace_audit.len(),
+                self.remote_control_runtime.trace_audit_evicted
+            )
+        };
+        let trace_card = trace_audit.iter().rev().take(16).fold(
+            SettingsCard::titled(theme, "Recent diagnostic traces", trace_summary),
+            |card, event| {
+                use nickel_session_protocol::{
+                    RemoteTraceCategory as Category, RemoteTraceTransition as Transition,
+                };
+                let transition = match event.transition {
+                    Transition::Started => "Started",
+                    Transition::Stopped => "Stopped",
+                    Transition::TimedOut => "Time limit reached",
+                    Transition::Cancelled => "Cancelled",
+                };
+                let category = match event.category {
+                    Category::NestedFrameDispatch => "Nested frame timing",
+                    Category::DrmFrameDispatch => "Display frame timing",
+                };
+                card.child(SettingsRow::new(
+                    theme,
+                    format!("Trace {} · {transition}", event.trace_id),
+                    format!(
+                        "{category} · Client {} · Lease {} · {}s limit · {:.2}s elapsed",
+                        event.client_id,
+                        event.lease_id,
+                        event.duration_limit_seconds,
+                        event.elapsed_us as f64 / 1_000_000.0
+                    ),
+                ))
+            },
+        );
         Column::new()
             .fill_width()
             .grow(1.0)
@@ -1008,7 +1252,12 @@ impl SettingsApp {
             .child(remote.shrink(0.0))
             .child(pairing)
             .child(pending_clients)
+            .child(pending_leases)
+            .child(active_leases)
             .child(granted_clients)
+            .child(audit_card.shrink(0.0))
+            .child(connection_card.shrink(0.0))
+            .child(trace_card.shrink(0.0))
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

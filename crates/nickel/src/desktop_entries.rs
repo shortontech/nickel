@@ -33,7 +33,7 @@ pub struct RunSignatureDiagnostics {
 
 #[derive(Clone, Debug, Default)]
 struct RunSignatureIndex {
-    applications: Vec<Application>,
+    applications: Arc<[Application]>,
     diagnostics: RunSignatureDiagnostics,
 }
 
@@ -68,7 +68,7 @@ impl RunSignatureIndex {
                 retained_bytes,
                 skipped,
             },
-            applications: indexed,
+            applications: indexed.into(),
         }
     }
 
@@ -109,6 +109,18 @@ pub fn run_signature_diagnostics() -> RunSignatureDiagnostics {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .diagnostics
+}
+
+/// Share the bounded production catalog with process-identity verification.
+pub(crate) fn installed_application_signatures() -> (u64, Arc<[Application]>, bool) {
+    let authority = run_signature_authority()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (
+        authority.diagnostics.generation,
+        authority.applications.clone(),
+        authority.diagnostics.skipped != 0,
+    )
 }
 
 pub fn load_applications() -> ApplicationDiscovery {

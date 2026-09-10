@@ -1,0 +1,75 @@
+# MCP verification gates: 0230 and 0231
+
+This is an open acceptance checklist, not a completion certificate. Every numbered
+verification item in both active specifications is represented below. None is
+currently proven across its full required platform and behavior scope. The source
+and evidence pointers identify where further work must be verified; a historical
+passing test does not prove a later integrated build or a broader native claim.
+
+Evidence logs referenced here live in `target/mcp-native-2026-09-10/` unless an
+absolute path is given. `mcp-implementation-status.md` records individual results.
+The specifications' non-numbered requirements and Completion sections also remain
+binding; this checklist does not replace them.
+
+## Spec 0230
+
+| Gate | Current evidence or implementation | Remaining proof or implementation |
+| --- | --- | --- |
+| 1 Default listener, zero authority | `settings.rs`, `listener.rs`, server admission; mandatory-watch native fixture rejects requests without ready presence. | Current native default-start and every preapproval observation/action denial on Windows as well as Linux. |
+| 2 Scope, clock, renewal, resumption, generation, outcomes | Shared `leases.rs`, `connection_watch.rs`, `lease_requests.rs`; pending-generation and watch-gap regressions; Windows owner projections compile and pass portable policy tests. | Native Windows lifecycle and requested/confirmed outcomes, including HWND reuse and secure-desktop transitions. |
+| 3 Sustained actions in each scope | Linux owner adapters implement window/application/output/full-session operations. | Complete live multi-action matrix for every scope on both platforms. |
+| 4 No scope widening | Generation-bearing owner checks, continuous input permits, bounded launch placement and capture workers. | Full transforms/transients/grabs/delayed-effect matrix; ambiguous and broker identities; Windows owners. |
+| 5 Native application identity | Linux Wayland process and XRes evidence; Windows retained process/image evidence, catalog receipts, package and executable membership policy. | Flatpak/shared-runtime and verified parent relationships; native Windows packaged and unpackaged execution. |
+| 6 Production-owner lifecycle scenarios | Linux owner tests and separate native fixtures cover individual operations/lifecycle transitions; typed shell semantic mutations, guarded device controls and bounded external AT-SPI observation are integrated. GTK delayed-authority revocation, replacement-menu Escape and physical action dispatch pass natively. | Full operation-by-transition matrix and native Windows owners. |
+| 7 Physical emergency during every operation | Shared atomic stop latch, Linux dispatch, Windows atomic chord recognizer tests. | Actual two physical Control keys during every held/pending operation, both platforms; no late effects. |
+| 8 Trusted local indication, remote exclusion | Linux final composition/protected filtering; shared indicator UiHost semantic Stop tests. | Audit every observation path; native assistive workflow; Windows native UIA, persistent host validation and capture exclusion. |
+| 9 Request UX and rate behavior | Coalescing/generation, cooldown/blocking/renewal policy and bounded admission tests. | Realistic concurrent native request load with measured interaction responsiveness and full local UX traversal. |
+| 10 Native scopes and assistive workflow | Isolated nested Linux fixtures provide partial evidence. | Each scope with actual local assistive input on Linux and Windows; physical backend acceptance. |
+| 11 Movement and launch inheritance | Linux output-placement native tests; window/workspace owner paths. | Complete movement matrix and different-app denial with already-applicable lease success; Windows native equivalent. |
+| 12 Overlapping input owners | Production arbitration and disconnect cleanup tests; watch native fixture releases held input. | Native overlapping clients across all key/drag/focus/cancel combinations and preservation of physical local input on both platforms. |
+
+## Spec 0231
+
+| Gate | Current evidence or implementation | Remaining proof or implementation |
+| --- | --- | --- |
+| 1 Exact environment address and Settings | Shared listener parser and transport state; Linux native listener tests. | Full current Windows startup/bind failure/no-fallback/environment-ownership UI matrix. |
+| 2 Protected transport and zero authority | TLS listener, explicit-cert/hostname client tests and native TLS fixture. | Real non-loopback two-machine transport and preapproval matrix, with confirmed host identity. |
+| 3 Linux–Windows debugging both directions | Rust stdio adapter maintains authenticated watch; Windows control owner incomplete. | Native cross-machine approval, reproduction, correlated diagnosis and verified result in both supported directions. |
+| 4 All diagnostic domains/live failures | Bounded snapshots/logs/events/traces, typed shell behavior, appearance, application scale, launcher favorites, guarded devices and external accessibility; snapshot explicitly lists unavailable domains. | Implement and exercise every remaining unavailable domain/action/settings domain against live failures. |
+| 5 Protected and secret denial | Production protected filtering and bounded payload-free collectors. | Review every new domain/operation plus external sensitive surfaces; native Windows boundary proof. |
+| 6 Prometheus under churn/load | Fixed operation labels and bounded counters in `operation_metrics.rs`; historical native metrics fixtures. | Complete current churn/denial/expiry/input/capture/diagnostic matrix and new method-label coverage. |
+| 7 Bounds and responsiveness | Bounded queues/workers; adapter saturation tests prove EOF and cancellation bypass saturation. | Sustained integrated load and latency/memory measurements; remaining blocking filesystem/platform boundaries. |
+| 8 Physical stop across work types | Atomic authority invalidation and cancellation checks; logical trace/stream cleanup tests. | Physical chord during held input, trace, stream, capture and diagnostic action on Linux and Windows. |
+| 9 Indication everywhere, remote nowhere | Linux trusted composition; shared semantic host tests; hidden Windows HWND groundwork. | Full remote-path exclusion audit and native local accessibility/persistence on every output, both platforms. |
+| 10 Native lifecycle/mixed DPI | `shell-renderer-native-results.txt` proves simultaneous nested 1.0/1.5 presenter scales and retirement. | Full lifecycle across physical multi-output Linux and Windows, including lock/restart/renewal/reconnection. |
+| 11 Delayed subsystem snapshots | Renderer/worker snapshots expose own observations; unavailable domains remain explicit. | Controlled delayed GPU/platform work proving timestamp/staleness semantics and unaffected input/presentation. |
+| 12 Public metrics and input privacy | `trace-input-privacy-results.txt` shows real Gtk canary input absent from retained Linux trace logs; metrics admission tests. | All collection paths, credential entry and temporary trace categories, including Windows; current prelease metrics/diagnostic denial. |
+
+## Feature requirements outside the numbered gates
+
+The following implementation gaps also prevent completion, even if a narrow test
+for one numbered item passes:
+
+- Windows native control, secure-desktop authority, stable application identity,
+  trusted local UIA and persistent per-output indication remain incomplete.
+- Ordinary shell surface capture, semantic observation and typed semantic
+  mutations are integrated, with owned nested Linux tests recorded in the
+  implementation log. Bounded external AT-SPI observation is integrated;
+  GTK-shell delayed gesture authority, replacement-menu local input and
+  collision with trusted indication pass owned native acceptance.
+- Snapshot `unavailable_domains` currently includes shell transients/content,
+  complete internal hit testing, on-demand external accessibility,
+  effects, native GPU timing, GPU/shared cache resources, additional event/trace
+  categories and platform queries. Explicit unavailability is truthful reporting,
+  not completion of the requested diagnostic authority.
+- Typed settings now cover shell behavior, appearance, application scale,
+  launcher favorites and guarded device controls; combined checks and owned
+  native transactions are recorded in the implementation log.
+  Remaining nonprotected settings and safe production diagnostic actions require
+  an explicit inventory and implementation, preserving protected domains.
+- Audible lifecycle cues are integrated and native dummy-sink playback was tested.
+  This does not establish actual physical volume/mute or Windows audio acceptance.
+- Verified application selection before broad approval, broker/daemon launch
+  association and remaining blocking commit boundaries require further work.
+
+Neither specification may be archived on this evidence.

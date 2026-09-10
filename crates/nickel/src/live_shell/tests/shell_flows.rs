@@ -66,6 +66,21 @@
     use nickel_core::launcher_preferences::LauncherPreferences;
     use nickel_core::theme::{Appearance, ThemeMode, ThemePalette};
 
+    fn preferences_fixture(shell: &mut LiveShell, path: std::path::PathBuf) {
+        let preferences = LauncherPreferences::load(&path).unwrap_or_default();
+        shell.launcher_preference_persistence = super::preference_persistence::PreferencePersistence::new(preferences);
+        shell.launcher_preferences_path = Some(path);
+    }
+
+    fn finish_preference_write(shell: &mut LiveShell) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while shell.launcher_preferences_busy() {
+            shell.poll_launcher_preferences();
+            assert!(std::time::Instant::now() < deadline, "local preference worker did not finish");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
     #[test]
     fn launcher_open_focuses_search_and_sequential_input_survives_mode_change() {
         let mut shell = LiveShell::new().unwrap();
@@ -269,11 +284,12 @@
             None,
             None,
         )]);
-        shell.launcher_preferences_path = Some(preferences_path.clone());
+        preferences_fixture(&mut shell, preferences_path.clone());
 
         shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 1);
         assert!(shell.launcher.is_pinned(&application_id));
         let persisted = LauncherPreferences::load(&preferences_path).expect("persisted favorite");
@@ -290,10 +306,11 @@
             "Unpin from Nickel Bar",
         ));
 
-        shell.launcher_preferences_path = Some(directory.path().to_path_buf());
+        preferences_fixture(&mut shell, directory.path().to_path_buf());
         shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 2);
         assert!(!shell.launcher.is_pinned(&application_id));
         assert!(
@@ -308,10 +325,11 @@
             "Pin to Nickel Bar",
         ));
 
-        shell.launcher_preferences_path = Some(preferences_path.clone());
+        preferences_fixture(&mut shell, preferences_path.clone());
         shell.apply_launcher_action(crate::launcher_view::LauncherAction::TogglePin(
             application_id.clone(),
         ));
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 3);
         assert!(shell.launcher.is_pinned(&application_id));
         assert!(shell.launcher_status.is_none());
@@ -357,7 +375,7 @@
         let preferences_path = directory.path().join("launcher-preferences");
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
-        shell.launcher_preferences_path = Some(preferences_path.clone());
+        preferences_fixture(&mut shell, preferences_path.clone());
         let application_id = "firefox";
 
         let mut pin = launcher_scenario(&shell.launcher, shell.palette, None);
@@ -387,6 +405,7 @@
         for effect in effects {
             shell.apply_launcher_action(effect);
         }
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 1);
         assert!(shell.launcher.is_pinned(application_id));
         assert_eq!(
@@ -412,6 +431,7 @@
         for effect in effects {
             shell.apply_launcher_action(effect);
         }
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 2);
         assert!(!shell.launcher.is_pinned(application_id));
         assert!(
@@ -450,9 +470,10 @@
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::default();
         let application_id = "firefox";
-        shell.launcher_preferences_path = Some(directory.path().to_path_buf());
+        preferences_fixture(&mut shell, directory.path().to_path_buf());
 
         shell.apply_launcher_action(LauncherAction::TogglePin(application_id.into()));
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 1);
         assert!(shell.launcher.is_pinned(application_id));
         let failure = shell
@@ -460,7 +481,7 @@
             .clone()
             .expect("truthful save failure");
 
-        shell.launcher_preferences_path = Some(valid_path.clone());
+        preferences_fixture(&mut shell, valid_path.clone());
         let mut retry = launcher_scenario(&shell.launcher, shell.palette, Some(failure));
         let origin = application_context_target(&retry, application_id);
         let origin_id = match &origin {
@@ -487,6 +508,7 @@
         for effect in effects {
             shell.apply_launcher_action(effect);
         }
+        finish_preference_write(&mut shell);
         assert_eq!(shell.launcher_persistence_attempts, 2);
         assert!(shell.launcher.is_pinned(application_id));
         assert!(shell.launcher_status.is_none());

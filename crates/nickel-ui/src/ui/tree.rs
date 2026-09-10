@@ -238,6 +238,12 @@ pub struct SemanticNodeSnapshot {
     pub value: Option<SemanticValueSnapshot>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoundedSemanticError {
+    BudgetExceeded,
+    ProtectedSurface,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SemanticActionError {
     MissingTarget,
@@ -1540,6 +1546,90 @@ impl<Message: Clone> UiFrame<Message> {
                 value: node.semantic_value.clone(),
             })
             .collect()
+    }
+
+    /// Export complete semantics only when the resolved-tree scan and retained
+    /// snapshot allocation fit the supplied budgets. Limits are checked before
+    /// cloning any semantic payload. Protected fields deny the entire projection.
+    /// `max_nodes` bounds all resolved nodes, including nonsemantic layout nodes.
+    /// `max_bytes` bounds retained snapshot structs, strings and action arrays;
+    /// transport serialization requires its own response-size budget.
+    pub fn bounded_semantic_nodes(
+        &self,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<SemanticNodeSnapshot>, BoundedSemanticError> {
+        if self.resolved.nodes.len() > max_nodes {
+            return Err(BoundedSemanticError::BudgetExceeded);
+        }
+        if self.has_protected_text() {
+            return Err(BoundedSemanticError::ProtectedSurface);
+        }
+        let included = |index: usize| {
+            let node = &self.resolved.nodes[index];
+            (node.semantic_role.is_some() || !node.semantic_actions.is_empty())
+                && self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
+                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
+                })
+        };
+        let mut remaining = max_bytes;
+        let mut count = 0;
+        for (index, node) in self.resolved.nodes.iter().enumerate() {
+            if !included(index) {
+                continue;
+            }
+            let parent_bytes = self
+                .semantic_parents
+                .get(index)
+                .copied()
+                .flatten()
+                .map_or(0, |parent| self.resolved.nodes[parent].id.as_str().len());
+            let value_bytes = match &node.semantic_value {
+                Some(SemanticValueSnapshot::Text(text)) => text.len(),
+                _ => 0,
+            };
+            let action_bytes = node
+                .semantic_actions
+                .len()
+                .checked_mul(std::mem::size_of::<ActionKind>())
+                .ok_or(BoundedSemanticError::BudgetExceeded)?;
+            for bytes in [
+                std::mem::size_of::<SemanticNodeSnapshot>(),
+                node.id.as_str().len(),
+                parent_bytes,
+                node.accessibility_label.as_ref().map_or(0, String::len),
+                node.accessibility_description
+                    .as_ref()
+                    .map_or(0, String::len),
+                node.accessibility_controls
+                    .as_ref()
+                    .map_or(0, |id| id.as_str().len()),
+                value_bytes,
+                action_bytes,
+            ] {
+                remaining = remaining
+                    .checked_sub(bytes)
+                    .ok_or(BoundedSemanticError::BudgetExceeded)?;
+            }
+            count += 1;
+        }
+        let mut result = Vec::with_capacity(count);
+        for index in 0..self.resolved.nodes.len() {
+            if included(index) {
+                result.push(self.semantic_snapshot(index));
+            }
+        }
+        Ok(result)
+    }
+
+    /// Inspect only the value category; never clone protected contents or counts.
+    pub fn has_protected_text(&self) -> bool {
+        self.resolved.nodes.iter().any(|node| {
+            matches!(
+                node.semantic_value,
+                Some(SemanticValueSnapshot::ProtectedText { .. })
+            )
+        })
     }
 
     fn semantic_snapshot(&self, index: usize) -> SemanticNodeSnapshot {

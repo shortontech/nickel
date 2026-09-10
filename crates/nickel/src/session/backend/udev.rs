@@ -1,3 +1,4 @@
+use crate::session::output_identification::identify_badge;
 use std::{
     collections::{HashMap, HashSet},
     hash::Hash,
@@ -32,7 +33,6 @@ use smithay::{
                 memory::{MemoryRenderBuffer, MemoryRenderBufferRenderElement},
                 solid::{SolidColorBuffer, SolidColorRenderElement},
                 surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
-                utils::{ConstrainAlign, ConstrainScaleBehavior, constrain_render_elements},
             },
             gles::{GlesRenderer, GlesTexture},
             multigpu::{GpuManager, gbm::GbmGlesBackend},
@@ -2282,7 +2282,23 @@ impl NickelSession {
         }
     }
 
-    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, _wave: u64) {
+    fn render_output(&mut self, node: DrmNode, crtc: crtc::Handle, wave: u64) {
+        let output = self
+            .native
+            .as_ref()
+            .and_then(|native| native.devices.get(&node))
+            .and_then(|device| device.surfaces.get(&crtc))
+            .map(|surface| surface.output.name());
+        let started = std::time::Instant::now();
+        self.render_output_inner(node, crtc, wave);
+        // Measure all returns, including inactive outputs and retry paths.
+        // This does not assert that a frame was queued or presented.
+        if let Some(output) = output {
+            self.record_remote_frame_dispatch(&output, started.elapsed());
+        }
+    }
+
+    fn render_output_inner(&mut self, node: DrmNode, crtc: crtc::Handle, _wave: u64) {
         self.flush_desktop_scenes_for_frame();
         let shell_bootstrapping = self.launcher_window.is_none();
         let mut identified_outputs = self.space.outputs().cloned().collect::<Vec<_>>();
@@ -2293,25 +2309,26 @@ impl NickelSession {
                 .unwrap_or_default()
         });
         let identify_output_count = identified_outputs.len();
-        let identify_index = self
-            .identify_outputs_until
-            .filter(|deadline| *deadline > std::time::Instant::now())
-            .and_then(|_| {
-                let outputs = &identified_outputs;
-                outputs.iter().position(|output| {
-                    self.native
-                        .as_ref()
-                        .and_then(|native| native.devices.get(&node))
-                        .and_then(|device| device.surfaces.get(&crtc))
-                        .is_some_and(|surface| surface.output == *output)
-                })
-            });
+        let identify_output = self
+            .native
+            .as_ref()
+            .and_then(|native| native.devices.get(&node))
+            .and_then(|device| device.surfaces.get(&crtc))
+            .map(|surface| surface.output.clone());
+        let identify_index = identify_output
+            .as_ref()
+            .and_then(|output| self.output_identification_index(output))
+            .map(|(_, index)| index);
         let Some(mut native) = self.native.take() else {
             return;
         };
         let rendered = (|| {
             native.reconcile_identify_badges(identify_output_count);
-            if identify_index.is_none() && !native.identify_badges.entries.is_empty() {
+            if self
+                .identify_outputs_until
+                .is_none_or(|until| Instant::now() >= until)
+                && !native.identify_badges.entries.is_empty()
+            {
                 native.retire_identify_badges();
                 tracing::trace!(
                     diagnostics = ?native.identify_badges.diagnostics(),
@@ -2680,7 +2697,7 @@ impl NickelSession {
                 elements.extend(background_elements);
                 let mut overlay_elements = self
                     .internal_ui
-                    .render_elements_for_layer(
+                    .render_elements_without_trusted(
                         &mut renderer,
                         &output.name(),
                         output_geometry.loc,
@@ -2834,6 +2851,14 @@ impl NickelSession {
                     Ok(element) => elements.insert(0, NativeCustomElement::from(element).into()),
                     Err(error) => tracing::warn!(?error, "failed to upload identify badge"),
                 }
+            }
+            if let Some(geometry) = self.space.output_geometry(&output) {
+                let trusted = self
+                    .internal_ui
+                    .render_trusted_controls(&mut renderer, &output.name(), geometry.loc)
+                    .into_iter()
+                    .map(|element| NativeElement::from(NativeCustomElement::from(element)));
+                elements.splice(0..0, trusted);
             }
             if !self.locked
                 && let Some(icon) = self.dnd_icon.as_ref()
@@ -3337,54 +3362,6 @@ fn fallback_arrow_cursor() -> CursorBuffer {
     }
 }
 
-fn identify_badge(number: usize) -> MemoryRenderBuffer {
-    const SIZE: usize = 180;
-    const THICKNESS: usize = 18;
-    let mut rgba = vec![0_u8; SIZE * SIZE * 4];
-    for pixel in rgba.chunks_exact_mut(4) {
-        pixel.copy_from_slice(&[38, 45, 59, 238]);
-    }
-    let segments = match number {
-        1 => [false, true, true, false, false, false, false],
-        2 => [true, true, false, true, true, false, true],
-        3 => [true, true, true, true, false, false, true],
-        4 => [false, true, true, false, false, true, true],
-        5 => [true, false, true, true, false, true, true],
-        6 => [true, false, true, true, true, true, true],
-        7 => [true, true, true, false, false, false, false],
-        8 => [true; 7],
-        _ => [true, true, true, true, false, true, true],
-    };
-    let rectangles = [
-        (55, 25, 70, THICKNESS),
-        (120, 35, THICKNESS, 55),
-        (120, 90, THICKNESS, 55),
-        (55, 137, 70, THICKNESS),
-        (42, 90, THICKNESS, 55),
-        (42, 35, THICKNESS, 55),
-        (55, 81, 70, THICKNESS),
-    ];
-    for ((x, y, width, height), enabled) in rectangles.into_iter().zip(segments) {
-        if !enabled {
-            continue;
-        }
-        for row in y..y + height {
-            for column in x..x + width {
-                let index = (row * SIZE + column) * 4;
-                rgba[index..index + 4].copy_from_slice(&[245, 247, 252, 255]);
-            }
-        }
-    }
-    MemoryRenderBuffer::from_slice(
-        &rgba,
-        Fourcc::Abgr8888,
-        (SIZE as i32, SIZE as i32),
-        1,
-        Transform::Normal,
-        None,
-    )
-}
-
 const IDENTIFY_BADGE_BYTES: usize = 180 * 180 * 4;
 
 fn switcher_visible_range(count: usize, selected: usize) -> std::ops::Range<usize> {
@@ -3543,96 +3520,6 @@ where
             image.put_pixel(column, row, color);
         }
     }
-}
-
-fn submit_preview(
-    renderer: &mut GlesRenderer,
-    window: &smithay::desktop::Window,
-) -> Option<preview::SubmittedPreview> {
-    (|| {
-        // Do not knowingly enter the renderer's synchronous no-fence fallback.
-        // Fencing also guards shared-context texture import/draw paths that can
-        // otherwise call glFinish before the preview's completion fence exists.
-        // The patched try_finish path rejects runtime fence-export failure
-        // without falling back to a synchronous completion wait.
-        if !renderer
-            .capabilities()
-            .contains(&smithay::backend::renderer::gles::Capability::ExportFence)
-            || !renderer
-                .capabilities()
-                .contains(&smithay::backend::renderer::gles::Capability::Fencing)
-        {
-            return None;
-        }
-        let geometry = window.geometry();
-        let dimensions =
-            crate::session::state::preview_capture_dimensions(geometry.size.w, geometry.size.h)?;
-        let width = i32::from(dimensions.0);
-        let height = i32::from(dimensions.1);
-        let mut texture = <GlesRenderer as Offscreen<GlesTexture>>::create_buffer(
-            renderer,
-            Fourcc::Abgr8888,
-            (width, height).into(),
-        )
-        .ok()?;
-        let mut framebuffer = renderer.bind(&mut texture).ok()?;
-        let elements = window.render_elements::<WaylandSurfaceRenderElement<GlesRenderer>>(
-            renderer,
-            (-geometry.loc.x, -geometry.loc.y).into(),
-            Scale::from(1.0),
-            1.0,
-        );
-        let damage = Rectangle::from_size((width, height).into());
-        let reference = Rectangle::from_size(geometry.size.to_physical(1));
-        let elements = constrain_render_elements(
-            elements,
-            (0, 0),
-            damage,
-            reference,
-            ConstrainScaleBehavior::Fit,
-            ConstrainAlign::TOP
-                | ConstrainAlign::BOTTOM
-                | ConstrainAlign::LEFT
-                | ConstrainAlign::RIGHT,
-            1.0,
-        )
-        .collect::<Vec<_>>();
-        let frame = renderer
-            .render(&mut framebuffer, (width, height).into(), Transform::Normal)
-            .ok()?;
-        let _submitted = crate::session::preview_submission::finish_preview_submission(
-            frame,
-            |frame| {
-                frame.clear(Color32F::new(0.03, 0.04, 0.06, 1.0), &[damage])?;
-                draw_render_elements(frame, 1.0, &elements, &[damage]).map(|_| ())
-            },
-            smithay::backend::renderer::gles::GlesFrame::try_finish,
-        )
-        .ok()?;
-        let region = Rectangle::<i32, Buffer>::from_size((width, height).into());
-        let mapping = renderer
-            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
-            .ok()?;
-        drop(framebuffer);
-        // The fence must follow ReadPixels, not merely the thumbnail draw. Map
-        // is deferred until this fence signals in a later event-loop turn.
-        let display = renderer.egl_context().display().clone();
-        let fence = renderer
-            .with_context(|gl| {
-                let fence = smithay::backend::egl::fence::EGLFence::create(&display).ok()?;
-                // SAFETY: with_context made this renderer's GL context current;
-                // Flush submits work without waiting or changing GL binding state.
-                unsafe { gl.Flush() };
-                Some(smithay::backend::renderer::sync::SyncPoint::from(fence))
-            })
-            .ok()??;
-        Some(preview::SubmittedPreview {
-            texture,
-            mapping,
-            fence,
-            dimensions,
-        })
-    })()
 }
 
 fn save_mapped_capture(

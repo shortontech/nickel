@@ -4,30 +4,30 @@ use crate::{
         renderer::utils::RendererSurfaceStateUserData,
     },
     input::{
-        Seat, SeatHandler,
         keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
         pointer::{
             AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent,
             GesturePinchEndEvent, GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent,
             GestureSwipeUpdateEvent, MotionEvent, PointerTarget, RelativeMotionEvent,
         },
-        tablet::{TabletSeatHandler, tool::TabletToolTarget},
+        tablet::{tool::TabletToolTarget, TabletSeatHandler},
         touch::{FrameMarker, TouchTarget},
+        Seat, SeatHandler,
     },
     utils::{
-        Client, FrameExtents, HookId, IsAlive, Logical, Physical, Rectangle, Serial, Size,
-        user_data::UserDataMap,
+        user_data::UserDataMap, Client, FrameExtents, HookId, IsAlive, Logical, Physical, Rectangle, Serial,
+        Size,
     },
     wayland::{
         compositor::{self, CompositorHandler, RectangleKind, RegionAttributes, SurfaceAttributes},
         pointer_constraints::PointerConstraintsHandler,
-        seat::{WaylandFocus, keyboard::enter_internal},
+        seat::{keyboard::enter_internal, WaylandFocus},
     },
     xwayland::xwm::MwmHints,
 };
 #[cfg(feature = "desktop")]
 use crate::{
-    desktop::{WindowSurfaceType, utils::under_from_surface_tree},
+    desktop::{utils::under_from_surface_tree, WindowSurfaceType},
     utils::Point,
 };
 
@@ -37,8 +37,8 @@ use std::{
     borrow::Cow,
     collections::HashSet,
     sync::{
-        Arc, Mutex, MutexGuard, Weak,
         atomic::{AtomicBool, Ordering},
+        Arc, Mutex, MutexGuard, Weak,
     },
     time::Duration,
 };
@@ -51,7 +51,7 @@ use x11rb::{
     errors::{ReplyError, ReplyOrIdError},
     properties::{WmClass, WmHints, WmSizeHints},
     protocol::{
-        res::{ClientIdSpec, query_client_ids},
+        res::{query_client_ids, ClientIdSpec},
         sync::{Alarm, ConnectionExt as _, Counter, CreateAlarmAux, Int64, TESTTYPE, VALUETYPE},
         xproto::{
             Atom, AtomEnum, ClientMessageEvent, ConfigureWindowAux, ConnectionExt as _, EventMask,
@@ -63,11 +63,12 @@ use x11rb::{
     x11_utils::X11Error,
 };
 
-use super::{X11Wm, XwmId, send_configure_notify};
+use super::{send_configure_notify, X11Wm, XwmId};
 
 /// X11 window managed by an [`X11Wm`](super::X11Wm)
 #[derive(Debug, Clone)]
 pub struct X11Surface {
+    isolated_keyboard: Option<super::isolated_keyboard::IsolatedKeyboard>,
     xwm: Option<XwmId>,
     client_scale: Option<Arc<AtomicF64>>,
     window: X11Window,
@@ -177,6 +178,7 @@ pub(crate) struct SharedSurfaceState {
         Serial,
     )>,
     pub(super) pending_ping_timestamp: Option<u32>,
+    pub(super) observed_keyboard_focus: bool,
 }
 
 pub(super) type Protocols = Vec<WMProtocol>;
@@ -311,7 +313,290 @@ pub enum WmInputModel {
     GloballyActive,
 }
 
+/// Modifier state retained only for one isolated text transaction.
+#[derive(Clone, Copy)]
+pub struct X11IsolatedModifiers {
+    /// Locked real modifier bits.
+    pub locked: u8,
+    /// Latched real modifier bits.
+    pub latched: u8,
+    /// Locked layout group.
+    pub group: u8,
+    /// Latched layout group.
+    pub latched_group: i16,
+}
+
+impl std::fmt::Debug for X11IsolatedModifiers {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("X11IsolatedModifiers(<redacted>)")
+    }
+}
+
+/// A bounded snapshot of the native core keyboard map for private-device setup.
+/// Read on a worker, then apply on the owner thread after revalidating authority.
+pub struct X11IsolatedKeymap(x11rb::protocol::xkb::GetMapReply);
+
+impl std::fmt::Debug for X11IsolatedKeymap {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("X11IsolatedKeymap(<redacted>)")
+    }
+}
+
 impl X11Surface {
+    /// Snapshot the core map off the compositor thread. This does not modify a device.
+    pub fn isolated_keymap(&self) -> Result<X11IsolatedKeymap, ReplyError> {
+        use x11rb::protocol::xkb::{ConnectionExt as _, MapPart};
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        let parts = MapPart::KEY_TYPES
+            | MapPart::KEY_SYMS
+            | MapPart::MODIFIER_MAP
+            | MapPart::EXPLICIT_COMPONENTS
+            | MapPart::KEY_ACTIONS
+            | MapPart::KEY_BEHAVIORS
+            | MapPart::VIRTUAL_MODS
+            | MapPart::VIRTUAL_MOD_MAP;
+        conn.xkb_get_map(
+            device.core_master,
+            parts,
+            0u16.into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0u16.into(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        )?
+        .reply()
+        .map(X11IsolatedKeymap)
+    }
+
+    /// Queue the core map on the isolated master and its XTEST slave only.
+    /// The caller must own the isolated device and revalidate before sending input.
+    pub fn set_isolated_keymap(&self, keymap: X11IsolatedKeymap) -> Result<(), ConnectionError> {
+        use x11rb::protocol::xkb::{
+            ConnectionExt as _, KTSetMapEntry, SetKeyType, SetMapAux, SetMapAuxKeyActions, SetMapFlags,
+        };
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        let map = keymap.0;
+        let values = SetMapAux {
+            types: map.map.types_rtrn.map(|types| {
+                types
+                    .into_iter()
+                    .map(|ty| SetKeyType {
+                        mask: ty.mods_mask,
+                        real_mods: ty.mods_mods,
+                        virtual_mods: ty.mods_vmods,
+                        num_levels: ty.num_levels,
+                        preserve: ty.has_preserve,
+                        entries: ty
+                            .map
+                            .into_iter()
+                            .map(|entry| KTSetMapEntry {
+                                level: entry.level,
+                                real_mods: entry.mods_mods,
+                                virtual_mods: entry.mods_vmods,
+                            })
+                            .collect(),
+                        preserve_entries: ty
+                            .preserve
+                            .into_iter()
+                            .map(|entry| KTSetMapEntry {
+                                // SetMap's preserve record has the same wire shape as a
+                                // type entry; its first byte is unused (GetMap's mask).
+                                level: 0,
+                                real_mods: entry.real_mods,
+                                virtual_mods: entry.vmods,
+                            })
+                            .collect(),
+                    })
+                    .collect()
+            }),
+            syms: map.map.syms_rtrn,
+            key_actions: map.map.key_actions.map(|actions| SetMapAuxKeyActions {
+                actions_count: actions.acts_rtrn_count,
+                actions: actions.acts_rtrn_acts,
+            }),
+            behaviors: map.map.behaviors_rtrn,
+            vmods: map
+                .map
+                .vmods_rtrn
+                .map(|mods| mods.into_iter().map(|mask| u16::from(mask) as u8).collect()),
+            explicit: map.map.explicit_rtrn,
+            modmap: map.map.modmap_rtrn,
+            vmodmap: map.map.vmodmap_rtrn,
+        };
+        for target in [device.master, u16::from(device.slave)] {
+            conn.xkb_set_map(
+                target,
+                SetMapFlags::RESIZE_TYPES,
+                map.min_key_code,
+                map.max_key_code,
+                map.first_type,
+                map.n_types,
+                map.first_key_sym,
+                map.n_key_syms,
+                map.total_syms,
+                map.first_key_action,
+                map.n_key_actions,
+                map.total_actions,
+                map.first_key_behavior,
+                map.n_key_behaviors,
+                map.total_key_behaviors,
+                map.first_key_explicit,
+                map.n_key_explicit,
+                map.total_key_explicit,
+                map.first_mod_map_key,
+                map.n_mod_map_keys,
+                map.total_mod_map_keys,
+                map.first_v_mod_map_key,
+                map.n_v_mod_map_keys,
+                map.total_v_mod_map_keys,
+                map.virtual_mods,
+                &values,
+            )?;
+        }
+        conn.flush()
+    }
+
+    /// Read isolated state off the compositor thread before temporary text changes.
+    pub fn isolated_modifiers(&self) -> Result<X11IsolatedModifiers, ReplyError> {
+        use x11rb::protocol::xkb::ConnectionExt as _;
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        let state = conn.xkb_get_state(device.master)?.reply()?;
+        if u16::from(state.base_mods) != 0 || state.base_group != 0 {
+            return Err(ConnectionError::UnknownError.into());
+        }
+        Ok(X11IsolatedModifiers {
+            locked: u16::from(state.locked_mods) as u8,
+            latched: u16::from(state.latched_mods) as u8,
+            group: state.locked_group.into(),
+            latched_group: state.latched_group,
+        })
+    }
+
+    /// Set only the isolated keyboard's locks/latches; never changes core state.
+    pub fn set_isolated_modifiers(&self, state: X11IsolatedModifiers) -> Result<(), ConnectionError> {
+        use std::io::IoSlice;
+        use x11rb::connection::RequestConnection as _;
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        // XKB extension metadata is warmed during isolated-device startup.
+        let extension = conn
+            .extension_information(x11rb::protocol::xkb::X11_EXTENSION_NAME)?
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        // x11rb 0.13's generated request omits modLatches. Encode the fixed
+        // 16-byte XKB LatchLockState request so existing latches can be restored.
+        let mut bytes = [0u8; 16];
+        bytes[0] = extension.major_opcode;
+        bytes[1] = x11rb::protocol::xkb::LATCH_LOCK_STATE_REQUEST;
+        bytes[2..4].copy_from_slice(&4u16.to_ne_bytes());
+        bytes[4..6].copy_from_slice(&device.master.to_ne_bytes());
+        bytes[6] = 255;
+        bytes[7] = state.locked;
+        bytes[8] = 1;
+        bytes[9] = state.group;
+        bytes[10] = 255;
+        bytes[11] = state.latched;
+        bytes[13] = 1;
+        bytes[14..16].copy_from_slice(&state.latched_group.to_ne_bytes());
+        conn.send_request_without_reply(&[IoSlice::new(&bytes)], vec![])?;
+        conn.flush()
+    }
+
+    /// Last XWM focus-event observation, not a synchronous server query.
+    pub fn has_observed_keyboard_focus(&self) -> bool {
+        self.state.lock().unwrap().observed_keyboard_focus
+    }
+
+    /// Read one requested key's native state. This waits for an X11 reply and
+    /// must run off the compositor thread. Do not retain or log the keymap reply.
+    pub fn isolated_key_is_pressed(&self, code: u8) -> Result<bool, ReplyError> {
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        use x11rb::protocol::xinput::{ConnectionExt as _, InputStateData};
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        let state = conn.xinput_query_device_state(device.slave)?.reply()?;
+        let keys = state
+            .classes
+            .iter()
+            .find_map(|state| match &state.data {
+                InputStateData::Key(key) => Some(&key.keys),
+                _ => None,
+            })
+            .ok_or(ConnectionError::UnknownError)?;
+        Ok(keys[usize::from(code / 8)] & (1 << (code % 8)) != 0)
+    }
+    /// Bind the synthetic keyboard to this recipient without changing core focus.
+    pub fn focus_isolated_keyboard(&self) -> Result<(), ConnectionError> {
+        use x11rb::protocol::xinput::ConnectionExt as _;
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        conn.xinput_xi_set_focus(self.window, x11rb::CURRENT_TIME, device.master)?;
+        conn.flush()
+    }
+
+    /// Queue synthetic keyboard input on the same ordered connection used for
+    /// X11 focus changes. The compositor must authorize the current recipient.
+    /// This does not replace physical-input attribution or convey authority.
+    pub fn send_isolated_key_inputs(&self, codes: &[u8], state: KeyState) -> Result<(), ConnectionError> {
+        self.send_isolated_key_inputs_inner(codes, state, true)
+    }
+
+    /// Release one character while retaining the private focus for a continuing
+    /// authorized text operation. The caller must clear that focus with
+    /// [`Self::send_isolated_key_inputs`] on completion or cancellation.
+    pub fn release_isolated_text_key(&self, code: u8) -> Result<(), ConnectionError> {
+        self.send_isolated_key_inputs_inner(&[code], KeyState::Released, false)
+    }
+
+    fn send_isolated_key_inputs_inner(
+        &self,
+        codes: &[u8],
+        state: KeyState,
+        clear_focus: bool,
+    ) -> Result<(), ConnectionError> {
+        use x11rb::protocol::xtest::ConnectionExt as _;
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        let device = self
+            .isolated_keyboard
+            .ok_or(ConnectionError::UnsupportedExtension)?;
+        let event = device.event_base
+            + match state {
+                KeyState::Pressed => x11rb::protocol::xinput::DEVICE_KEY_PRESS_EVENT,
+                KeyState::Released => x11rb::protocol::xinput::DEVICE_KEY_RELEASE_EVENT,
+            };
+        for code in codes {
+            conn.xtest_fake_input(event, *code, x11rb::CURRENT_TIME, x11rb::NONE, 0, 0, device.slave)?;
+        }
+        if state == KeyState::Released && clear_focus {
+            use x11rb::protocol::xinput::ConnectionExt as _;
+            conn.xinput_xi_set_focus(x11rb::NONE, x11rb::CURRENT_TIME, device.master)?;
+        }
+        conn.flush()
+    }
     /// Create a new [`X11Surface`] usually handled by an [`X11Wm`](super::X11Wm)
     ///
     /// ## Arguments
@@ -334,6 +619,7 @@ impl X11Surface {
         xdnd_active: Arc<AtomicBool>,
     ) -> X11Surface {
         X11Surface {
+            isolated_keyboard: xwm.and_then(|wm| wm.isolated_keyboard),
             xwm: xwm.map(|wm| wm.id),
             client_scale: xwm.map(|wm| wm.client_scale.clone()),
             window,
@@ -377,6 +663,7 @@ impl X11Surface {
                 frame_extents: Default::default(),
                 pending_enter: None,
                 pending_ping_timestamp: None,
+                observed_keyboard_focus: false,
             })),
             xdnd_active,
             focus_release: xwm.map(|wm| wm.focus_release.clone()),

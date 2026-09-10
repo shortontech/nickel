@@ -1,5 +1,6 @@
+#[cfg(target_os = "linux")]
+use std::ffi::OsString;
 use std::{
-    ffi::OsString,
     io,
     path::{Path, PathBuf},
     process::{Child, Command},
@@ -326,7 +327,29 @@ impl Application {
         self.session_process()?.spawn()
     }
 
-    fn process(&self) -> io::Result<Command> {
+    pub(crate) fn process(&self) -> io::Result<Command> {
+        let command = self.process_without_scale()?;
+        #[cfg(target_os = "linux")]
+        let mut command = command;
+        #[cfg(target_os = "linux")]
+        apply_application_scale(
+            &mut command,
+            &nickel_core::dpi::ApplicationScaleSettings::load_default().unwrap_or_default(),
+        );
+        Ok(command)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn process_with_scale_settings(
+        &self,
+        settings: &nickel_core::dpi::ApplicationScaleSettings,
+    ) -> io::Result<Command> {
+        let mut command = self.process_without_scale()?;
+        apply_application_scale(&mut command, settings);
+        Ok(command)
+    }
+
+    fn process_without_scale(&self) -> io::Result<Command> {
         let mut command = self.process_with_capabilities()?;
         // These capabilities authenticate trusted Nickel session clients.
         // They must never cross into an ordinary application.
@@ -334,17 +357,6 @@ impl Application {
             .env_remove("NICKEL_SESSION_CONTROL")
             .env_remove("NICKEL_SESSION_TOKEN")
             .env_remove("NICKEL_SHELL_TEST_CONTROL");
-        #[cfg(target_os = "linux")]
-        for (name, value) in nickel_core::dpi::ApplicationScaleSettings::load_default()
-            .unwrap_or_default()
-            .launch_environment(true)
-        {
-            if value.is_empty() {
-                command.env_remove(name);
-            } else {
-                command.env(name, value);
-            }
-        }
         Ok(command)
     }
 
@@ -385,6 +397,20 @@ impl Application {
             .env_remove("NICKEL_SHELL_TEST_CONTROL");
         authorize_trusted_session_client(&mut command);
         Ok(command)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn apply_application_scale(
+    command: &mut Command,
+    settings: &nickel_core::dpi::ApplicationScaleSettings,
+) {
+    for (name, value) in settings.launch_environment(true) {
+        if value.is_empty() {
+            command.env_remove(name);
+        } else {
+            command.env(name, value);
+        }
     }
 }
 
@@ -505,6 +531,46 @@ mod tests {
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_CONTROL")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SESSION_TOKEN")));
         assert!(removals.contains(&std::ffi::OsStr::new("NICKEL_SHELL_TEST_CONTROL")));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn supplied_scale_snapshot_preserves_launch_arguments_and_strips_capabilities() {
+        use nickel_core::dpi::{ApplicationScalePolicy, ApplicationScaleSettings, Scale120};
+        let application = Application::new(
+            "fixture".into(),
+            "Fixture".into(),
+            None,
+            None,
+            Some(vec![
+                "fixture-program".into(),
+                "argument with spaces".into(),
+            ]),
+        );
+        let settings = ApplicationScaleSettings {
+            policy: ApplicationScalePolicy::Custom(Scale120::new(180).unwrap()),
+            ..Default::default()
+        };
+        let command = application.process_with_scale_settings(&settings).unwrap();
+        assert_eq!(command.get_program(), "fixture-program");
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            ["argument with spaces"]
+        );
+        let environment = command
+            .get_envs()
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            environment[std::ffi::OsStr::new("QT_SCALE_FACTOR")],
+            Some(std::ffi::OsStr::new("1.500000"))
+        );
+        for key in [
+            "NICKEL_SESSION_CONTROL",
+            "NICKEL_SESSION_TOKEN",
+            "NICKEL_SHELL_TEST_CONTROL",
+        ] {
+            assert_eq!(environment[std::ffi::OsStr::new(key)], None);
+        }
     }
 
     #[test]

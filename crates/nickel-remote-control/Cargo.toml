@@ -7,10 +7,18 @@ rust-version.workspace = true
 description = "Permission and pairing authority for Nickel remote desktop control"
 
 [dependencies]
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+base64.workspace = true
+image.workspace = true
 getrandom.workspace = true
 axum.workspace = true
+axum-server.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 http.workspace = true
 nickel-input = { path = "../nickel-input" }
+nickel-session-protocol = { path = "../nickel-session-protocol" }
 nickel-storage = { path = "../nickel-storage" }
 rmcp.workspace = true
 schemars.workspace = true
@@ -22,6 +30,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 toml.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

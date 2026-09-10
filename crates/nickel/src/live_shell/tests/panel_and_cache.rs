@@ -722,6 +722,13 @@
         assert_eq!(diagnostics.tray_bytes, 18 * 18 * 4 * 2);
         assert_eq!(diagnostics.preview_entries, 1);
         assert_eq!(diagnostics.preview_bytes, 240 * 135 * 4);
+        shell.preview_images.insert(WindowId(2), Arc::new(RgbaImage::new(320, 200)));
+        let restricted = shell.image_cache_diagnostics_for_previews(|id| id == WindowId(1));
+        assert_eq!(restricted, diagnostics, "unprojected preview pixels must not contribute even to byte counts");
+        let empty = shell.image_cache_diagnostics_for_previews(|_| false);
+        assert_eq!(empty.preview_entries, 0);
+        assert_eq!(empty.preview_bytes, 0);
+        assert_eq!(empty.wallpaper_bytes, diagnostics.wallpaper_bytes);
     }
 
     #[test]

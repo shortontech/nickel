@@ -194,6 +194,7 @@ mod mwm;
 pub use self::mwm::*;
 pub mod settings;
 use settings::{NameError, Value, XSettings};
+mod isolated_keyboard;
 mod selection;
 mod surface;
 use self::dnd::XWmDnd;
@@ -357,6 +358,10 @@ impl StackingDirection {
 
 /// Handler trait for X11Wm interactions
 pub trait XwmHandler {
+    /// Native focus left a top-level or was intercepted by an X11 grab.
+    /// Focus movement to an inferior within the same top-level is excluded.
+    fn keyboard_focus_lost(&mut self, _xwm: XwmId, _window: X11Surface) {}
+
     /// [`X11Wm`] getter for a given ID.
     fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm;
 
@@ -618,6 +623,7 @@ pub struct X11Wm {
     is_showing_desktop: bool,
 
     pub(super) focus_release: FocusReleaseHandle,
+    isolated_keyboard: Option<isolated_keyboard::IsolatedKeyboard>,
 
     span: tracing::Span,
 }
@@ -625,6 +631,9 @@ pub struct X11Wm {
 impl Drop for X11Wm {
     fn drop(&mut self) {
         xwm_id::remove(self.id.0);
+        if let Some(keyboard) = self.isolated_keyboard {
+            keyboard.remove(&self.conn);
+        }
 
         // Break reference cycle caused by deferred_sync hook
         for window in std::mem::take(&mut self.windows) {
@@ -666,7 +675,9 @@ impl FocusReleaseHandle {
         if !self.pending.swap(false, Ordering::AcqRel) {
             return;
         }
-        let Some(conn) = self.conn.upgrade() else { return };
+        let Some(conn) = self.conn.upgrade() else {
+            return;
+        };
         if let Err(err) = conn.set_input_focus(InputFocus::NONE, x11rb::NONE, x11rb::CURRENT_TIME) {
             warn!("Unable to release X11 keyboard focus: {}", err);
         }
@@ -794,6 +805,12 @@ impl Drop for OwnedX11Window {
 }
 
 impl X11Wm {
+    /// Whether private XInput keyboard allocation succeeded at XWM startup.
+    /// This cached fact is not a synchronous device-liveness probe.
+    pub fn isolated_keyboard_initialized(&self) -> bool {
+        self.isolated_keyboard.is_some()
+    }
+
     /// Start a new window manager for a given Xwayland connection
     ///
     /// ## Arguments
@@ -824,6 +841,15 @@ impl X11Wm {
         let screen = 0;
         let stream = DefaultStream::from_unix_stream(connection)?.0;
         let conn = RustConnection::connect_to_stream(stream, screen)?;
+        // Resolve the extension during existing WM initialization, so later
+        // input dispatch never performs a lazy extension-query round trip.
+        let xtest = x11rb::connection::RequestConnection::extension_information(
+            &conn,
+            x11rb::protocol::xtest::X11_EXTENSION_NAME,
+        )?;
+        if xtest.is_some() {
+            let _ = x11rb::protocol::xtest::get_version(&conn, 2, 2)?.reply();
+        }
         let atoms = Atoms::new(&conn)?.reply()?;
         let screen = conn.setup().roots[0].clone();
         let randr_primary = conn.randr_get_output_primary(screen.root)?.reply()?.output;
@@ -1022,8 +1048,10 @@ impl X11Wm {
             handle.insert_source(focus_release_source, move |_, _, _| release.dispatch())?;
         }
 
+        let isolated_keyboard = isolated_keyboard::IsolatedKeyboard::create(&conn, win).ok();
         drop(_guard);
         let wm = Self {
+            isolated_keyboard,
             id,
             conn,
             client_scale,
@@ -1255,12 +1283,8 @@ impl X11Wm {
             return Err(ReplyOrIdError::ConnectionError(ConnectionError::UnknownError));
             // TODO proper error type
         };
-        let picture = PictureWrapper::create_picture(
-            &*self.conn,
-            pixmap.pixmap(),
-            render_format,
-            &CreatePictureAux::new(),
-        )?;
+        let picture =
+            PictureWrapper::create_picture(&*self.conn, pixmap.pixmap(), render_format, &CreatePictureAux::new())?;
         {
             let gc = GcontextWrapper::create_gc(&*self.conn, pixmap.pixmap(), &CreateGCAux::new())?;
             self.conn.put_image(
@@ -1361,18 +1385,16 @@ impl X11Wm {
         )?;
         self.conn.flush()?;
 
-        selection.pending_transfers.lock().unwrap().insert(
-            incoming_window,
-            (OwnedX11Window::new(incoming_window, &self.conn), fd),
-        );
+        selection
+            .pending_transfers
+            .lock()
+            .unwrap()
+            .insert(incoming_window, (OwnedX11Window::new(incoming_window, &self.conn), fd));
         Ok(())
     }
 
     /// Updates XSETTINGS with the newly provided name/value-pairs.
-    pub fn set_xsettings(
-        &mut self,
-        settings: impl Iterator<Item = (String, Value)>,
-    ) -> Result<(), SettingsError> {
+    pub fn set_xsettings(&mut self, settings: impl Iterator<Item = (String, Value)>) -> Result<(), SettingsError> {
         for (name, value) in settings {
             self.xsettings
                 .set(name.clone(), value)
@@ -1576,6 +1598,9 @@ where
                 return Ok(());
             }
 
+            if let Some(keyboard) = xwm.isolated_keyboard {
+                keyboard.observe_focus(&conn, n.window)?;
+            }
             xwm.conn.change_window_attributes(
                 n.window,
                 &ChangeWindowAttributesAux::new()
@@ -1960,14 +1985,7 @@ where
             match n.target {
                 x if x == xwm.atoms.TARGETS => {
                     if let Some(prop) = conn
-                        .get_property(
-                            true,
-                            *selection.window,
-                            xwm.atoms._WL_SELECTION,
-                            AtomEnum::ANY,
-                            0,
-                            4096,
-                        )?
+                        .get_property(true, *selection.window, xwm.atoms._WL_SELECTION, AtomEnum::ANY, 0, 4096)?
                         .reply_unchecked()?
                     {
                         if prop.type_ == AtomEnum::ATOM.into() {
@@ -2013,38 +2031,35 @@ where
                         let incoming_window = *window;
                         let atom = n.selection;
                         let token = loop_handle
-                            .insert_source(
-                                Generic::new(fd, Interest::WRITE, Mode::Level),
-                                move |_, fd, data| {
-                                    let xwm = data.xwm_state(xwm_id);
-                                    let conn = &xwm.conn;
-                                    let atoms = &xwm.atoms;
-                                    let selection = match atom {
-                                        x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
-                                        x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
-                                        x if x == xwm.atoms.XdndSelection => &mut xwm.dnd.selection,
-                                        _ => unreachable!(),
+                            .insert_source(Generic::new(fd, Interest::WRITE, Mode::Level), move |_, fd, data| {
+                                let xwm = data.xwm_state(xwm_id);
+                                let conn = &xwm.conn;
+                                let atoms = &xwm.atoms;
+                                let selection = match atom {
+                                    x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
+                                    x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
+                                    x if x == xwm.atoms.XdndSelection => &mut xwm.dnd.selection,
+                                    _ => unreachable!(),
+                                };
+                                if let Some(transfer) = selection.incoming.get_mut(&incoming_window) {
+                                    match write_selection_callback(fd.as_fd(), conn, atoms, transfer) {
+                                        Ok(IncomingAction::WaitForWritable) => {
+                                            return Ok(PostAction::Continue);
+                                        }
+                                        Ok(IncomingAction::WaitForProperty) if !transfer.incr_done => {
+                                            return Ok(PostAction::Disable);
+                                        }
+                                        Ok(_) | Err(_) => {
+                                            selection
+                                                .incoming
+                                                .remove(&incoming_window)
+                                                .unwrap()
+                                                .destroy(&loop_handle_clone);
+                                        }
                                     };
-                                    if let Some(transfer) = selection.incoming.get_mut(&incoming_window) {
-                                        match write_selection_callback(fd.as_fd(), conn, atoms, transfer) {
-                                            Ok(IncomingAction::WaitForWritable) => {
-                                                return Ok(PostAction::Continue);
-                                            }
-                                            Ok(IncomingAction::WaitForProperty) if !transfer.incr_done => {
-                                                return Ok(PostAction::Disable);
-                                            }
-                                            Ok(_) | Err(_) => {
-                                                selection
-                                                    .incoming
-                                                    .remove(&incoming_window)
-                                                    .unwrap()
-                                                    .destroy(&loop_handle_clone);
-                                            }
-                                        };
-                                    }
-                                    Ok(PostAction::Remove)
-                                },
-                            )
+                                }
+                                Ok(PostAction::Remove)
+                            })
                             .map_err(|err| err.error)?;
                         loop_handle.disable(&token)?;
 
@@ -2153,13 +2168,7 @@ where
                             )
                             .collect::<Vec<u32>>();
                         trace!(requstor = n.requestor, ?targets, "Sending TARGETS");
-                        conn.change_property32(
-                            PropMode::REPLACE,
-                            n.requestor,
-                            n.property,
-                            AtomEnum::ATOM,
-                            &targets,
-                        )?;
+                        conn.change_property32(PropMode::REPLACE, n.requestor, n.property, AtomEnum::ATOM, &targets)?;
                         send_selection_notify_resp(&conn, &n, true)?;
                     }
                     x if x == xwm.atoms.TIMESTAMP => {
@@ -2400,8 +2409,55 @@ where
                 }
             }
         }
-        Event::FocusIn(n) => {
-            if xwm.windows.iter().any(|x| x.window_id() == n.event) {
+        Event::XinputFocusIn(n) => {
+            if xwm
+                .isolated_keyboard
+                .is_some_and(|keyboard| keyboard.core_master == n.deviceid)
+            {
+                if let Some(surface) = xwm.windows.iter().find(|window| window.window_id() == n.event) {
+                    surface.state.lock().unwrap().observed_keyboard_focus = n.mode
+                        == x11rb::protocol::xinput::NotifyMode::NORMAL
+                        || n.mode == x11rb::protocol::xinput::NotifyMode::UNGRAB;
+                    conn.change_property32(
+                        PropMode::REPLACE,
+                        xwm.screen.root,
+                        xwm.atoms._NET_ACTIVE_WINDOW,
+                        AtomEnum::WINDOW,
+                        &[n.event],
+                    )?;
+                }
+            }
+        }
+        Event::XinputFocusOut(n) => {
+            if xwm
+                .isolated_keyboard
+                .is_some_and(|keyboard| keyboard.core_master == n.deviceid)
+                && (n.detail != x11rb::protocol::xinput::NotifyDetail::INFERIOR
+                    || n.mode != x11rb::protocol::xinput::NotifyMode::NORMAL)
+            {
+                if let Some(surface) = xwm.windows.iter().find(|window| window.window_id() == n.event).cloned() {
+                    surface.state.lock().unwrap().observed_keyboard_focus = false;
+                    if n.detail == x11rb::protocol::xinput::NotifyDetail::NONE {
+                        conn.change_property32(
+                            PropMode::REPLACE,
+                            xwm.screen.root,
+                            xwm.atoms._NET_ACTIVE_WINDOW,
+                            AtomEnum::WINDOW,
+                            &[x11rb::NONE],
+                        )?;
+                    }
+                    drop(_guard);
+                    state.keyboard_focus_lost(xwm_id, surface);
+                }
+            }
+        }
+        Event::FocusIn(n) if xwm.isolated_keyboard.is_none() => {
+            if let Some(surface) = xwm.windows.iter().find(|x| x.window_id() == n.event) {
+                if xwm.isolated_keyboard.is_none() {
+                    surface.state.lock().unwrap().observed_keyboard_focus = n.mode
+                        == x11rb::protocol::xproto::NotifyMode::NORMAL
+                        || n.mode == x11rb::protocol::xproto::NotifyMode::UNGRAB;
+                }
                 conn.change_property32(
                     PropMode::REPLACE,
                     xwm.screen.root,
@@ -2411,15 +2467,24 @@ where
                 )?;
             }
         }
-        Event::FocusOut(n) if n.detail == NotifyDetail::NONE => {
-            if xwm.windows.iter().any(|x| x.window_id() == n.event) {
-                conn.change_property32(
-                    PropMode::REPLACE,
-                    xwm.screen.root,
-                    xwm.atoms._NET_ACTIVE_WINDOW,
-                    AtomEnum::WINDOW,
-                    &[x11rb::NONE],
-                )?;
+        Event::FocusOut(n) if xwm.isolated_keyboard.is_none() => {
+            if let Some(surface) = xwm.windows.iter().find(|x| x.window_id() == n.event).cloned() {
+                if n.detail == NotifyDetail::NONE {
+                    conn.change_property32(
+                        PropMode::REPLACE,
+                        xwm.screen.root,
+                        xwm.atoms._NET_ACTIVE_WINDOW,
+                        AtomEnum::WINDOW,
+                        &[x11rb::NONE],
+                    )?;
+                }
+                if xwm.isolated_keyboard.is_none()
+                    && (n.detail != NotifyDetail::INFERIOR || n.mode != x11rb::protocol::xproto::NotifyMode::NORMAL)
+                {
+                    surface.state.lock().unwrap().observed_keyboard_focus = false;
+                    drop(_guard);
+                    state.keyboard_focus_lost(xwm_id, surface);
+                }
             }
         }
         Event::ClientMessage(msg) => {
@@ -2557,20 +2622,18 @@ where
                                     _ => {}
                                 }
                             }
-                            actions if actions.contains(&xwm.atoms._NET_WM_STATE_FULLSCREEN) => {
-                                match data[0] {
-                                    0 => state.unfullscreen_request(xwm_id, surface),
-                                    1 => state.fullscreen_request(xwm_id, surface),
-                                    2 => {
-                                        if surface.is_fullscreen() {
-                                            state.unfullscreen_request(xwm_id, surface)
-                                        } else {
-                                            state.fullscreen_request(xwm_id, surface)
-                                        }
+                            actions if actions.contains(&xwm.atoms._NET_WM_STATE_FULLSCREEN) => match data[0] {
+                                0 => state.unfullscreen_request(xwm_id, surface),
+                                1 => state.fullscreen_request(xwm_id, surface),
+                                2 => {
+                                    if surface.is_fullscreen() {
+                                        state.unfullscreen_request(xwm_id, surface)
+                                    } else {
+                                        state.fullscreen_request(xwm_id, surface)
                                     }
-                                    _ => {}
                                 }
-                            }
+                                _ => {}
+                            },
                             actions if actions.contains(&xwm.atoms._NET_WM_STATE_MODAL) => match data[0] {
                                 0 => state.unmodal_request(xwm_id, surface),
                                 1 => state.modal_request(xwm_id, surface),
@@ -2631,20 +2694,18 @@ where
                                 }
                                 _ => {}
                             },
-                            actions if actions.contains(&xwm.atoms._NET_WM_STATE_DEMANDS_ATTENTION) => {
-                                match data[0] {
-                                    0 => state.undemands_attention_request(xwm_id, surface),
-                                    1 => state.demands_attention_request(xwm_id, surface),
-                                    2 => {
-                                        if surface.demands_attention() {
-                                            state.undemands_attention_request(xwm_id, surface)
-                                        } else {
-                                            state.demands_attention_request(xwm_id, surface)
-                                        }
+                            actions if actions.contains(&xwm.atoms._NET_WM_STATE_DEMANDS_ATTENTION) => match data[0] {
+                                0 => state.undemands_attention_request(xwm_id, surface),
+                                1 => state.demands_attention_request(xwm_id, surface),
+                                2 => {
+                                    if surface.demands_attention() {
+                                        state.undemands_attention_request(xwm_id, surface)
+                                    } else {
+                                        state.demands_attention_request(xwm_id, surface)
                                     }
-                                    _ => {}
                                 }
-                            }
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
@@ -2700,9 +2761,9 @@ where
                                     surface.state.lock().unwrap().pending_ping_timestamp == Some(timestamp)
                                 })
                                 .or_else(|| {
-                                    xwm.windows.iter().find(|x| {
-                                        x.state.lock().unwrap().pending_ping_timestamp == Some(timestamp)
-                                    })
+                                    xwm.windows
+                                        .iter()
+                                        .find(|x| x.state.lock().unwrap().pending_ping_timestamp == Some(timestamp))
                                 })
                                 .cloned();
 
@@ -2852,11 +2913,7 @@ fn send_configure_notify(
     Ok(())
 }
 
-fn mime_from_atom(
-    atom: u32,
-    conn: &impl ConnectionExt,
-    atoms: &Atoms,
-) -> Result<Option<String>, ConnectionError> {
+fn mime_from_atom(atom: u32, conn: &impl ConnectionExt, atoms: &Atoms) -> Result<Option<String>, ConnectionError> {
     Ok(match atom {
         x if x == atoms.TEXT => Some("text/plain".to_string()),
         x if x == atoms.UTF8_STRING => Some("text/plain;charset=utf-8".to_string()),

@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
-Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-08.
-Scope: all 265 checked-in Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
+Scope: all 332 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,7 +62,7 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 265-source inventory is current,
+translations rather than competing product authorities. The exact 332-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
@@ -95,13 +95,151 @@ refresh does not represent a new clone-scan measurement or complete live accepta
 
 ## Authority exception baselines
 
-- Consumer display-list authority: one reviewed file,
-  `nickel-ui-workbench/src/fixture_inventory.rs`, bounded to two `PaintCommand` references for the
-  custom-paint contract fixture. The executable audit requires the exact reviewed count, rejecting
-  increases, silent decreases, unlisted consumers, duplicate rows, and stale exceptions.
+- Display-list exceptions: the compositor renderer adapter has 78 reviewed references,
+  the terminal viewport has six, and the custom-paint contract fixture has two. Native shell
+  and compositor regression tests have test-only inspection bounds of four and three.
+  The executable audit requires each exact reviewed count, rejecting increases, silent
+  decreases, unlisted consumers, duplicate rows, and stale exceptions. Test-only exceptions
+  cannot admit production display-list authority.
 - Parallel consumer hit authority: zero files and zero references. The executable audit rejects the
   first unlisted authority and stale exceptions.
 - The UI authority audit recursively scans every crate rather than a hand-maintained consumer list;
   it excludes `nickel-ui` itself because that crate is the intended display-list and hit-test owner.
 
 The 2026-09-05 refresh did not increase either exception baseline.
+
+## 2026-09-10 MCP authority inventory refresh
+
+The source inventory now includes the 19-source `nickel-remote-control` crate,
+12 additional Nickel sources, and the logging diagnostic collector. This refresh
+records the new owners introduced for Specs 0230/0231; their specifications remain
+active and native/platform acceptance is incomplete.
+
+- `nickel-remote-control` owns lease policy, bounded request/admission state,
+  typed wire contracts, transport, operational metrics, and payload-free event,
+  trace, and audit retention. TLS/HTTP/MCP transport uses rustls, axum, and rmcp;
+  capture encoding uses the shared image dependency. Native window policy and
+  effects remain at the compositor boundary rather than inside HTTP handlers.
+- `session/remote_identity.rs` supplies native process/resource evidence while
+  reusing the production desktop-entry index. `remote_indicator.rs` owns trusted
+  presentation. Neither establishes a second window registry or lease authority.
+- The session `remote_*` modules translate approved typed requests into the
+  existing production keyboard, pointer, controller, renderer, launch, settings,
+  and diagnostic owners. `native_key_worker.rs` isolates bounded native query
+  work. `remote_worker.rs` shares preparation admission and worker-state reporting
+  across launch/catalog and settings paths.
+- `session/window_capture.rs` shares bounded renderer submission/readback
+  mechanics. Capture policy, resource evidence, and final authorization remain
+  with the compositor request owner.
+- `nickel-logging/diagnostics.rs` collects warning/error source metadata without
+  visiting event or span fields. It does not parse or duplicate the file log.
+- Shell settings now delegates preparation and replacement to
+  `nickel_storage::stage_write` and `StagedWrite::commit`. The domain crate owns
+  serialization; the storage crate still owns temporary files and replacement.
+  The executable architecture check recognizes this shared staged-write entry
+  point and rejects direct writes or renames in the settings modules.
+
+The display-list inventory also records two bounded test-only inspection
+exceptions: four variant references in `internal_shell.rs` and three in
+`session/state.rs`. All seven are inside the final `cfg(test)` module; production
+has zero variant references in those files. They inspect emitted text/image
+output and resolve a visible sidebar label for native pointer dispatch. The
+executable audit rejects production references under these test-only exceptions.
+The existing compositor renderer's reviewed count is 78 (46 production adapter
+references and 32 rendering-test references), correcting its stale count of 74.
+No new production painting or hit-test owner was added. The hit-test exception
+baseline remains empty. Source counts do not constitute a new clone-scan or proof
+of completed native acceptance.
+
+The subsequent Windows identity foundation adds one `nickel-platform` source.
+`process_identity.rs` owns the limited-rights process handle, OS creation-time
+query, package-family query, and nonblocking liveness check. It does not create a
+window registry, lease policy, or permission path. The source inventory records
+ten platform sources; native Windows execution and desktop-owner wiring remain
+pending.
+
+Session identity and fresh process-protection queries extend this same process
+evidence owner. They introduce no window or authorization registry; unavailable
+protection evidence fails the eligibility check instead of granting access.
+
+Token integrity evidence stays in that module too: one temporary query-only
+owned token handle, fixed bounded storage, and checked mandatory-SID decoding.
+It adds no token serialization, logging, impersonation, or application-level
+permission policy. The Windows owner still needs to consume this evidence.
+
+
+## MCP connection and Windows transport additions
+
+`nickel-remote-control::{connection_watch,emergency}` own shared logical presence
+and atomic authority invalidation. Desktop owners consume those authorities rather
+than copying lease policy. `nickel-platform::local_control` owns Windows named-pipe
+peer verification and framing; `nickel::windows_remote_control` owns Windows runtime
+commands and projections. Those OS-specific transport mechanics stay separate from
+Linux Unix-datagram I/O while both consume the shared session protocol.
+
+`nickel-mcp-client` is a separate executable transport adapter: bounded stdio/HTTP
+forwarding, TLS configuration and watch maintenance belong on the client, while
+approval, lease expiry and resource decisions remain on Nickel's server. Its SSE
+framing translates wire data and does not introduce a desktop authority. Client
+saturation/cancellation coverage is integrated; Windows native acceptance remains pending;
+this source-inventory update records module ownership, not spec completion.
+
+The Windows physical chord recognizer now lives in
+`nickel::windows_emergency_chord`: a small atomic adapter consuming normalized
+Windows keyboard facts, compiled on Windows and for executable Linux tests. It
+owns native-key recognition only; shared lease cancellation remains in
+`nickel-remote-control::emergency`. No parallel permission policy is introduced.
+
+
+## Shared trusted indication and local audio
+
+`nickel::remote_indicator` now owns the existing indicator Application for both
+platform hosts; the Linux session re-exports it instead of duplicating its UI.
+`nickel-remote-control::local_cues` consumes production lease audit transitions
+and deadlines. `nickel::local_cues` owns bounded local playback and consumes that
+selector, with no remote payloads or new lease policy. Windows trusted-window
+plumbing uses retained winit window identity and the existing platform adapter;
+it remains inactive pending the rest of the trusted host and native acceptance.
+The two audio sources and subsequent shell semantic adapter bring the inventory to 309.
+
+The trusted Windows accessibility adapter adds one source, bringing the inventory
+to 310. It projects the production indicator UiHost into AccessKit and forwards
+only the existing local Stop action through a bounded owner mailbox; it introduces
+no parallel product semantics or remote authorization route.
+
+`live_shell::remote_semantics` selects existing production UiHost or retained viewport semantics for the authorized shell output without changing focus or creating another UI tree.
+
+`nickel-remote-control::appearance` owns typed wire values; `session::state::remote_appearance` stages and reconciles through the existing ShellSettings writer and LiveShell apply path. The shared commit boundary only rechecks atomic cancellation/deadline while authority is already held.
+
+The retained Windows executable-evidence adapter adds one platform source (311 total). It shares the existing kernel mapped-file verification with local transport, retains file pins independently of process lifetime, and does not promote executable equality into application membership.
+
+The shared bounded D-Bus transport adds one platform source (312 total). It validates frame lengths before delegating parsing to zbus and centralizes authentication, byte, frame and descriptor limits for typed platform consumers.
+
+The guarded shell launch continuation adds one Nickel source (313 total), reusing installed application preparation and native owner replay. Destination placement retains the invoking output.
+
+The Windows application registry adds two Nickel sources (315 total), reusing installed shortcut discovery and retained process/image evidence. Registry policy and native probing remain separate; native Windows acceptance is outstanding.
+
+The shared output-identification raster adds one Nickel source (316 total). Winit and DRM consume the existing badge; remote ownership reuses the production identification lifetime and exact output identities.
+
+Application scaling adds two platform sources, one remote-control source and one Nickel owner source (320 total). Local Settings and MCP share the typed transaction engine, durable intent and fixed GTK/Qt setters.
+
+Launcher favorites use `nickel-core::launcher_preferences::PreparedLauncherPreferences`
+for local favorites, local recent-app recording, and typed remote transactions.
+The shared storage revision validates descriptor identity without consuming content
+at commit; the same stable sibling lock covers all preference writers. Local
+staging and persistence run on one bounded worker with a lifetime and epoch check.
+Remote preparation uses the existing bounded settings worker and commits under the
+original desktop permit before reconciling the accepted launcher and panel model.
+The wire DTOs exclude history and unavailable stored IDs; these adapters do not
+duplicate preference serialization or authority.
+
+Windows resource observation adds two Nickel owner modules (327 total). The
+platform adapter performs bounded native enumeration and identity revalidation;
+the remote owner retains generation, scope, and protected-resource policy.
+Native Windows acceptance and UI Automation inspection remain open gates.
+
+Native accessibility adds one bounded remote-control schema source and four
+Nickel owner/adapter sources (332 total). GTK-shell association and AT-SPI
+observation stay separate: the compositor owns surface identity and delayed
+input provenance, while the bounded observer exposes only admitted metadata.
+GTK menu dispatch acceptance remains an open gate.

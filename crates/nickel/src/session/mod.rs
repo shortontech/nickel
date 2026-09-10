@@ -12,10 +12,15 @@ mod internal_ui;
 pub(crate) mod login_services;
 mod native_clipboard;
 mod on_screen_keyboard;
+#[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+mod output_identification;
 mod output_retirement;
 #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
 mod preview_submission;
 mod recovery_ui;
+mod remote_accessibility;
+mod remote_identity;
+pub(crate) use crate::remote_indicator;
 mod session_services;
 mod shell_layout;
 mod state;
@@ -424,3 +429,6 @@ mod tests {
         assert!(test_control_allowed(false, true, None));
     }
 }
+
+#[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+mod window_capture;

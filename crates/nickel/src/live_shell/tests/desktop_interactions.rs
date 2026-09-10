@@ -1379,6 +1379,7 @@
         );
     }
     #[test]
+    #[cfg(target_os = "linux")]
     fn native_desktop_initial_scene_and_hotplug_use_output_topology() {
         use crate::internal_shell::{InternalOutput, InternalShellCoordinator};
         use crate::winit_shell::{PanelEdge, PANEL_HEIGHT};

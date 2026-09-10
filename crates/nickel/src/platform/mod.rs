@@ -1,4 +1,6 @@
 use crate::model::{TrayItem, WindowId};
+#[cfg(target_os = "windows")]
+pub(crate) use windows::remote_observation;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
 
@@ -380,6 +382,7 @@ pub enum GlobalShortcut {
     SwitchGroupNext,
     SwitchGroupPrevious,
     CommitSwitch,
+    CancelSwitch,
     Screenshot(ScreenshotAction),
     AudioChanged {
         available: bool,
@@ -503,8 +506,9 @@ mod tests {
 mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::{
-    NotificationFeed, TrayFeed, WindowFeed, activate_wifi_network, application_discovery,
-    application_icon, applications, audio_status, bluetooth_status, capture_active_window,
+    GuardedControlOrigin, GuardedControlOriginOwner, GuardedControlOutcome, NotificationFeed,
+    TrayFeed, WindowFeed, activate_wifi_network, application_discovery, application_icon,
+    applications, audio_status, bluetooth_status, capture_active_window,
     capture_active_window_to_file, capture_desktop, capture_pointer, configure_on_screen_keyboard,
     configured_primary_output, copy_image_to_clipboard, copy_temp_image_path,
     deliver_on_screen_keyboard_input, execute_run_command, handle_consumer_control,
@@ -515,11 +519,14 @@ pub use linux::{
     respond_runtime_diagnostics, respond_semantic_action, respond_semantic_target,
     secure_storage_state, select_audio_device, semantic_target_receiver, send_shell_command,
     set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
-    shell_readiness, show_window_system_menu, toggle_bluetooth_device,
+    shell_readiness, show_window_system_menu, submit_guarded_control, toggle_bluetooth_device,
     update_panel_fullscreen_state, wallpaper,
 };
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{capture_output, save_temp_image, shell_command_payload};
+pub(crate) use linux::{
+    capture_output, installed_application_signatures, run_signature_diagnostics, save_temp_image,
+    shell_command_payload,
+};
 
 #[cfg(target_os = "windows")]
 mod windows;
@@ -552,4 +559,9 @@ pub use unsupported::{
     send_shell_command, set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered,
     set_wifi_enabled, show_window_system_menu, toggle_bluetooth_device,
     update_panel_fullscreen_state, wallpaper,
+};
+
+#[cfg(target_os = "windows")]
+pub(crate) use windows::{
+    expose_trusted_control_window, prepare_trusted_control_window, verify_trusted_control_window,
 };

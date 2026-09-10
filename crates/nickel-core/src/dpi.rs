@@ -179,6 +179,17 @@ pub enum ApplicationScalePolicy {
     Custom(Scale120),
 }
 
+/// A write-ahead record. It is resolved only by a later authorized read-back;
+/// interrupted external setters are never assumed to have failed or succeeded.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ToolkitScaleIntent {
+    pub previous: String,
+    pub requested: String,
+    pub restoring: bool,
+    /// True only after this setter returned native terminal completion evidence.
+    pub terminal: bool,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ApplicationScaleSettings {
     pub policy: ApplicationScalePolicy,
@@ -187,7 +198,11 @@ pub struct ApplicationScaleSettings {
     pub owned_gtk_applied: Option<String>,
     pub owned_qt_previous: Option<String>,
     pub owned_qt_applied: Option<String>,
+    pub pending_gtk: Option<ToolkitScaleIntent>,
+    pub pending_qt: Option<ToolkitScaleIntent>,
 }
+
+const MAX_APPLICATION_SCALE_BYTES: usize = 64 * 1024;
 
 impl ApplicationScaleSettings {
     pub fn launch_environment(&self, linux: bool) -> BTreeMap<String, String> {
@@ -218,11 +233,16 @@ impl ApplicationScaleSettings {
     }
 
     pub fn load(path: &Path) -> io::Result<Self> {
-        let text = match fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
-            Err(error) => return Err(error),
+        let Some(bytes) = nickel_storage::read_regular_file(path, MAX_APPLICATION_SCALE_BYTES)?
+        else {
+            return Ok(Self::default());
         };
+        let text = String::from_utf8(bytes).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid application scale settings",
+            )
+        })?;
         let mut settings = Self::default();
         for line in text.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -244,12 +264,64 @@ impl ApplicationScaleSettings {
                 "gtk_applied" => settings.owned_gtk_applied = Some(value.into()),
                 "qt_previous" => settings.owned_qt_previous = Some(value.into()),
                 "qt_applied" => settings.owned_qt_applied = Some(value.into()),
+                "gtk_pending" | "qt_pending" => {
+                    let mut values = value.split('|');
+                    if let (Some(restore), Some(previous), Some(requested), terminal, None) = (
+                        values.next(),
+                        values.next(),
+                        values.next(),
+                        values.next(),
+                        values.next(),
+                    ) {
+                        if matches!(restore, "0" | "1")
+                            && previous.len() <= 64
+                            && requested.len() <= 64
+                            && matches!(terminal, None | Some("0") | Some("1"))
+                        {
+                            let intent = Some(ToolkitScaleIntent {
+                                previous: previous.into(),
+                                requested: requested.into(),
+                                restoring: restore == "1",
+                                terminal: terminal == Some("1"),
+                            });
+                            if key == "gtk_pending" {
+                                settings.pending_gtk = intent;
+                            } else {
+                                settings.pending_qt = intent;
+                            }
+                        } else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "invalid toolkit intent",
+                            ));
+                        }
+                    } else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid toolkit intent",
+                        ));
+                    }
+                }
                 _ => {}
             }
         }
         Ok(settings)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
+        #[cfg(target_os = "linux")]
+        {
+            self.stage(path)?.commit(|| Ok(()))?.sync()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            nickel_storage::atomic_write(path, self.encode()?)
+        }
+    }
+    pub fn stage(&self, path: &Path) -> io::Result<nickel_storage::StagedDurableWrite> {
+        nickel_storage::stage_durable_write(path, self.encode()?)
+    }
+    fn encode(&self) -> io::Result<String> {
         let policy = match self.policy {
             ApplicationScalePolicy::FollowNickel => "follow".into(),
             ApplicationScalePolicy::Unchanged => "unchanged".into(),
@@ -269,13 +341,85 @@ impl ApplicationScaleSettings {
         if let Some(value) = &self.owned_qt_applied {
             text.push_str(&format!("qt_applied={}\n", clean(value)));
         }
-        atomic_write(path, text)
+        for (name, intent) in [
+            ("gtk_pending", &self.pending_gtk),
+            ("qt_pending", &self.pending_qt),
+        ] {
+            if let Some(intent) = intent {
+                if [&intent.previous, &intent.requested].iter().any(|value| {
+                    value.len() > 64 || value.chars().any(|ch| ch.is_control() || ch == '|')
+                }) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid toolkit intent",
+                    ));
+                }
+                text.push_str(&format!(
+                    "{name}={}|{}|{}|{}\n",
+                    u8::from(intent.restoring),
+                    intent.previous,
+                    intent.requested,
+                    u8::from(intent.terminal)
+                ));
+            }
+        }
+        if text.len() > MAX_APPLICATION_SCALE_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "application scale settings exceed size limit",
+            ));
+        }
+        Ok(text)
     }
     pub fn load_default() -> io::Result<Self> {
         Self::load(&config_path("application-scale.conf")?)
     }
     pub fn save_default(&self) -> io::Result<()> {
         self.save(&config_path("application-scale.conf")?)
+    }
+}
+
+/// Cross-process ownership spans the complete toolkit transaction, not one rename.
+pub struct ApplicationScaleJournal {
+    _lock: nickel_storage::TransactionLock,
+    path: std::path::PathBuf,
+    expected: Option<Vec<u8>>,
+}
+impl ApplicationScaleJournal {
+    pub fn open_default() -> io::Result<Self> {
+        Self::open(config_path("application-scale.conf")?)
+    }
+    pub fn open(path: std::path::PathBuf) -> io::Result<Self> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&path)?;
+        let expected = Self::bytes(&path)?;
+        Ok(Self {
+            _lock: lock,
+            path,
+            expected,
+        })
+    }
+    fn bytes(path: &Path) -> io::Result<Option<Vec<u8>>> {
+        nickel_storage::read_regular_file(path, MAX_APPLICATION_SCALE_BYTES)
+    }
+    pub fn load(&self) -> io::Result<ApplicationScaleSettings> {
+        let settings = ApplicationScaleSettings::load(&self.path)?;
+        if Self::bytes(&self.path)? != self.expected {
+            return Err(io::Error::other("application scale settings changed"));
+        }
+        Ok(settings)
+    }
+    pub fn persist(&mut self, settings: &ApplicationScaleSettings) -> io::Result<()> {
+        settings
+            .stage(&self.path)?
+            .commit(|| {
+                if Self::bytes(&self.path)? != self.expected {
+                    return Err(io::Error::other("application scale settings changed"));
+                }
+                Ok(())
+            })?
+            .sync()?;
+        self.expected = Some(settings.encode()?.into_bytes());
+        Ok(())
     }
 }
 
@@ -294,6 +438,75 @@ mod tests {
             },
             scale: Scale120::new(scale).unwrap(),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn journal_serializes_independent_callers_and_rejects_unowned_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scale");
+        let mut first = ApplicationScaleJournal::open(path.clone()).unwrap();
+        assert_eq!(
+            ApplicationScaleJournal::open(path.clone())
+                .err()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        first.persist(&ApplicationScaleSettings::default()).unwrap();
+        assert_eq!(
+            ApplicationScaleSettings::default()
+                .save(&path)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        fs::write(&path, "policy=unchanged\n").unwrap();
+        assert!(first.persist(&ApplicationScaleSettings::default()).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "policy=unchanged\n");
+        drop(first);
+        assert_eq!(
+            ApplicationScaleJournal::open(path)
+                .unwrap()
+                .load()
+                .unwrap()
+                .policy,
+            ApplicationScalePolicy::Unchanged
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn application_scale_intent_rejects_malformed_input_and_denied_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("application-scale.conf");
+        for invalid in [
+            "gtk_pending=0|1",
+            "qt_pending=2|1|2",
+            "gtk_pending=0|1|2|3|4",
+        ] {
+            fs::write(&path, invalid).unwrap();
+            assert!(ApplicationScaleSettings::load(&path).is_err());
+        }
+        let original = ApplicationScaleSettings::default();
+        original.save(&path).unwrap();
+        let before = fs::read(&path).unwrap();
+        let mut changed = original;
+        changed.pending_qt = Some(ToolkitScaleIntent {
+            previous: "1".into(),
+            requested: "2".into(),
+            restoring: false,
+            terminal: false,
+        });
+        assert!(
+            changed
+                .stage(&path)
+                .unwrap()
+                .commit(|| Err(io::Error::other("revoked")))
+                .is_err()
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 2);
     }
 
     #[test]
@@ -471,10 +684,51 @@ mod tests {
             owned_gtk_applied: Some("2".into()),
             owned_qt_previous: Some("1.0".into()),
             owned_qt_applied: Some("1.25".into()),
+            pending_qt: Some(ToolkitScaleIntent {
+                previous: "1.25".into(),
+                requested: "1.5".into(),
+                restoring: false,
+                terminal: false,
+            }),
+            ..Default::default()
         };
         apps.save(&app_path).unwrap();
         assert_eq!(ApplicationScaleSettings::load(&app_path).unwrap(), apps);
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn application_scale_read_and_save_reject_oversized_files_without_partial_policy() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("application-scale.conf");
+        let mut boundary = String::from("policy=unchanged\n");
+        boundary.extend(std::iter::repeat_n(
+            'x',
+            MAX_APPLICATION_SCALE_BYTES - boundary.len(),
+        ));
+        fs::write(&path, &boundary).unwrap();
+        assert_eq!(
+            ApplicationScaleSettings::load(&path).unwrap().policy,
+            ApplicationScalePolicy::Unchanged
+        );
+        boundary.push('x');
+        fs::write(&path, &boundary).unwrap();
+        assert_eq!(
+            ApplicationScaleSettings::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        let saved = ApplicationScaleSettings::default();
+        saved.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+        let oversized = ApplicationScaleSettings {
+            owned_gtk_previous: Some("x".repeat(MAX_APPLICATION_SCALE_BYTES)),
+            ..saved
+        };
+        assert_eq!(
+            oversized.save(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
     }
 
     #[test]

@@ -578,6 +578,16 @@ impl ChatApplication {
 impl Application for ChatApplication {
     type Message = ChatMessage;
 
+    fn remote_access_protected(&self) -> bool {
+        self.state.login_pending
+            || self.state.login_challenge.is_some()
+            || self.remote_control_open
+            || self.state.remote_pairing.is_some()
+            || self.managing_hosts
+            || self.host_editor.is_some()
+            || (!self.state.account.authenticated && self.state.items.is_empty())
+    }
+
     fn update(&mut self, message: Self::Message) {
         // User activity commonly sends work to the controller. Restore low-latency polling;
         // empty polls will back off again without rebuilding the UI.
@@ -2037,6 +2047,50 @@ mod tests {
             0xf4f6f8, 0xe8edf4, 0xffffff, 0xd6dce5, 0xcbd2dc, 0x171a20, 0x4d5664, 0x075ca8,
             0xc9e5ff, 0x6c3fa0, 0xefe4ff,
         ))
+    }
+
+    #[test]
+    fn authentication_and_phone_permission_views_protect_remote_access() {
+        let backend = ReplayBackend::from_json(r#"{"name":"protection","events":[]}"#).unwrap();
+        let mut app = ChatApplication::new(BackendMode::Replay {
+            backend,
+            cwd: "/projects/nickel".into(),
+        });
+        assert!(
+            app.remote_access_protected(),
+            "initial sign-in view must be protected"
+        );
+        app.state.account.authenticated = true;
+        assert!(!app.remote_access_protected());
+        app.update(ChatMessage::OpenRemoteControl);
+        assert!(app.remote_access_protected());
+        app.update(ChatMessage::CloseRemoteControl);
+        assert!(!app.remote_access_protected());
+        app.update(ChatMessage::ManageRemoteHosts);
+        assert!(app.remote_access_protected());
+        app.update(ChatMessage::CloseRemoteHosts);
+        assert!(!app.remote_access_protected());
+        app.update(ChatMessage::AddRemoteHost);
+        assert!(app.remote_access_protected());
+        app.update(ChatMessage::CloseRemoteHosts);
+        assert!(!app.remote_access_protected());
+        app.state.apply(
+            app.state.generation,
+            ControllerEvent::LoginStarted(nickel_codex::LoginChallenge::DeviceCode {
+                login_id: "fixture".into(),
+                user_code: "PRIVATE-CODE".into(),
+                verification_url: "https://example.test/device".into(),
+            }),
+        );
+        assert!(
+            app.remote_access_protected(),
+            "device code is ordinary text but remains protected"
+        );
+        app.state.apply(
+            app.state.generation,
+            ControllerEvent::LoginCancelled("fixture".into()),
+        );
+        assert!(!app.remote_access_protected());
     }
 
     #[test]

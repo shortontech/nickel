@@ -1,13 +1,25 @@
 //! Shared native platform adapters used by Nickel applications.
 
+#[cfg(target_os = "linux")]
+pub mod bounded_dbus;
 mod default_apps;
+#[cfg(any(target_os = "windows", test))]
+mod executable_identity;
 #[cfg(target_os = "linux")]
 pub use default_apps::spawn_with_default;
+#[cfg(target_os = "windows")]
+pub mod local_control;
 mod maintenance;
 mod media;
 mod peripherals;
 mod platform_contract;
+#[cfg(target_os = "windows")]
+pub mod process_identity;
 mod toolkit_scale;
+mod toolkit_transaction;
+pub use toolkit_transaction::{
+    ScaleTransactionReport, ToolkitOutcome, ToolkitOutcomeKind, transact_application_scale,
+};
 
 pub use default_apps::{
     ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
@@ -35,11 +47,11 @@ pub use platform_contract::{
     AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,
 };
 #[cfg(target_os = "linux")]
-pub use toolkit_scale::LinuxToolkitScaleBackend;
+pub use toolkit_scale::{LinuxToolkitScaleBackend, PreparedToolkitCommand, RunningToolkitCommand};
 pub use toolkit_scale::{
-    ToolkitApplyReport, ToolkitCapability, ToolkitFamily, ToolkitScaleBackend, ToolkitWrite,
-    apply_toolkit_scale, reset_owned_toolkit_scale, supported_custom_scales,
-    toolkit_launch_environment,
+    ToolkitApplyReport, ToolkitCapability, ToolkitFamily, ToolkitRejection, ToolkitScaleBackend,
+    ToolkitWrite, ToolkitWriteError, apply_toolkit_scale, canonical_toolkit_value,
+    reset_owned_toolkit_scale, supported_custom_scales, toolkit_launch_environment,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,8 +101,9 @@ pub use windows::{appearance, apply_window_appearance, path_icon, show_hidden_fi
 #[cfg(target_os = "linux")]
 pub use linux::{
     desktop_entry_from_path, desktop_entry_is_application, installed_icon_themes,
-    network_manager_saved_wifi_connections, path_display_name, path_icon, path_icon_theme_revision,
-    path_icon_with_theme, path_icon_with_theme_at_size, publish_color_scheme, system_icon_theme,
+    network_manager_saved_wifi_connections, network_manager_saved_wifi_connections_bounded,
+    path_display_name, path_icon, path_icon_theme_revision, path_icon_with_theme,
+    path_icon_with_theme_at_size, publish_color_scheme, system_icon_theme,
 };
 
 #[cfg(not(target_os = "linux"))]
@@ -302,3 +315,8 @@ mod external_url_tests {
         );
     }
 }
+
+#[cfg(target_os = "linux")]
+mod toolkit_native_write;
+#[cfg(target_os = "linux")]
+pub use toolkit_native_write::{PreparedToolkitWrite, ToolkitWriteCompletion, read_qt_scale};

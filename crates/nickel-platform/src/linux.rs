@@ -320,6 +320,16 @@ pub fn desktop_entry_is_application(entry: &DesktopEntry) -> bool {
 pub fn network_manager_saved_wifi_connections(
     connection: &zbus::blocking::Connection,
 ) -> HashMap<Vec<u8>, zbus::zvariant::OwnedObjectPath> {
+    network_manager_saved_wifi_connections_bounded(connection, usize::MAX, || true)
+}
+
+/// Read at most `limit` saved profiles while the caller's original request stays
+/// valid. The ordinary local inventory retains its existing unbounded policy.
+pub fn network_manager_saved_wifi_connections_bounded(
+    connection: &zbus::blocking::Connection,
+    limit: usize,
+    mut continue_reading: impl FnMut() -> bool,
+) -> HashMap<Vec<u8>, zbus::zvariant::OwnedObjectPath> {
     use zbus::{
         blocking::Proxy,
         zvariant::{OwnedObjectPath, OwnedValue},
@@ -340,6 +350,8 @@ pub fn network_manager_saved_wifi_connections(
         .call::<_, _, Vec<OwnedObjectPath>>("ListConnections", &())
         .unwrap_or_default()
         .into_iter()
+        .take(limit)
+        .take_while(|_| continue_reading())
         .filter_map(|path| {
             let proxy = Proxy::new(
                 connection,

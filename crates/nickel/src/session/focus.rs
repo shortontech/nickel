@@ -89,6 +89,25 @@ impl PointerTarget<NickelSession> for PointerFocusTarget {
         delegate_pointer!(self, relative_motion(seat, data, event))
     }
     fn button(&self, seat: &Seat<NickelSession>, data: &mut NickelSession, event: &ButtonEvent) {
+        if let Self::Wayland(surface) = self
+            && !data.locked
+        {
+            let origin = if data.remote_input_dispatching {
+                data.remote_native_press.clone().map_or(
+                    super::remote_accessibility::PressOrigin::Denied,
+                    |(permit, window)| {
+                        super::remote_accessibility::PressOrigin::Remote(
+                            permit,
+                            window,
+                            data.remote_gtk_epoch,
+                        )
+                    },
+                )
+            } else {
+                super::remote_accessibility::PressOrigin::Local
+            };
+            super::remote_accessibility::record_pointer_press(surface, event, origin);
+        }
         delegate_pointer!(self, button(seat, data, event))
     }
     fn axis(&self, seat: &Seat<NickelSession>, data: &mut NickelSession, frame: AxisFrame) {

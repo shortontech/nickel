@@ -40,13 +40,77 @@ fn control_capability(
 
 impl NickelSession {
     pub(crate) fn sync_remote_control_indicators(&mut self) {
-        let grants = self
-            .remote_control
-            .control()
-            .lock()
-            .unwrap()
-            .granted_clients()
+        self.revalidate_remote_output_identification();
+        self.revalidate_remote_frame_trace();
+        self.revalidate_remote_pointer();
+        self.revalidate_remote_keyboard();
+        #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+        self.revalidate_remote_capture();
+        let control = self.remote_control.control();
+        let control = control.lock().unwrap();
+        let now = Instant::now();
+        self.local_cues.update(control.leases(), now);
+        let grants = control
+            .leases()
+            .iter()
+            .filter(|lease| lease.expires_at.is_none_or(|deadline| now < deadline))
+            .map(|lease| {
+                let label = control
+                    .granted_clients()
+                    .find(|client| client.id == lease.client_identity)
+                    .map(|client| client.label)
+                    .unwrap_or_else(|| "Agent".into());
+                let scope =
+                    self.remote_resource_label(&lease.scope).unwrap_or_else(|| {
+                        match &lease.scope {
+                            nickel_remote_control::leases::ResourceScope::FullSession => {
+                                "Full desktop".to_owned()
+                            }
+                            nickel_remote_control::leases::ResourceScope::Application(app) => {
+                                format!("{app} windows")
+                            }
+                            nickel_remote_control::leases::ResourceScope::Window(_) => {
+                                "Selected window".to_owned()
+                            }
+                            nickel_remote_control::leases::ResourceScope::Surface(_) => {
+                                "Nickel surface".to_owned()
+                            }
+                            nickel_remote_control::leases::ResourceScope::Output(_) => {
+                                "Selected display".to_owned()
+                            }
+                        }
+                    });
+                let scope = if lease.full_debug {
+                    "Full Control & Debug Nickel".to_owned()
+                } else {
+                    scope
+                };
+                let remaining = lease.expires_at.map_or_else(
+                    || "until logout".to_owned(),
+                    |deadline| format!("{}s", deadline.saturating_duration_since(now).as_secs()),
+                );
+                let peer = control.client_origin(&lease.client_identity).map_or_else(
+                    || "Peer unavailable".to_owned(),
+                    |origin| {
+                        format!(
+                            "{} {}",
+                            origin.address,
+                            if origin.tls { "TLS" } else { "HTTP" }
+                        )
+                    },
+                );
+                super::super::remote_indicator::IndicatorGrant {
+                    suspended: lease.suspended,
+                    connected: lease.is_connected(),
+                    id: lease.id,
+                    client: label,
+                    scope,
+                    remaining,
+                    peer,
+                }
+            })
             .collect::<Vec<_>>();
+        drop(control);
         if self.locked || grants.is_empty() {
             for id in self
                 .remote_indicator_surfaces
@@ -66,78 +130,32 @@ impl NickelSession {
         else {
             return;
         };
-        let mut capabilities = grants
-            .iter()
-            .flat_map(|client| client.capabilities.iter().copied())
-            .collect::<Vec<_>>();
-        capabilities.sort();
-        capabilities.dedup();
-        let capability_text = capabilities
-            .iter()
-            .map(|capability| format!("{capability:?}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let subtitle = format!(
-            "{} client{} - {} - Left Ctrl + Right Ctrl stops",
-            grants.len(),
-            if grants.len() == 1 { "" } else { "s" },
-            capability_text
-        );
+        let status = self.remote_control.status();
+        let transport = if status.endpoint.starts_with("https:") {
+            "HTTPS"
+        } else {
+            "Local HTTP"
+        };
         let outputs = self.internal_outputs();
         let desired = outputs
             .iter()
             .map(|(output, origin_x, origin_y)| {
-                let width = 420_u32.min(output.width.saturating_sub(24)).max(1);
-                let height = 64_u32.min(output.height.max(1));
-                let text_width = width.saturating_sub(32).max(1) as f32;
+                let width = 480_u32.min(output.width.saturating_sub(24)).max(1);
+                let height =
+                    super::super::remote_indicator::indicator_height(grants.len(), output.height);
                 let x = origin_x + output.width.saturating_sub(width).saturating_sub(12) as i32;
                 let y = origin_y + 12;
                 let placement = crate::session::InternalSurfacePlacement {
-                    role: crate::session::InternalSurfaceRole::PassiveOverlay,
+                    role: crate::session::InternalSurfaceRole::TrustedControl,
                     geometry: (x, y, width, height),
                     output: Some(output.name.clone()),
                 };
-                let scene = vec![
-                    nickel_ui::backend::PaintCommand::RoundedFill {
-                        rect: nickel_ui::Rect::new(0.0, 0.0, width as f32, height as f32),
-                        color: theme.surfaces.raised,
-                        radius: theme.radii.card,
-                    },
-                    nickel_ui::backend::PaintCommand::Stroke {
-                        rect: nickel_ui::Rect::new(
-                            0.5,
-                            0.5,
-                            width.saturating_sub(1).max(1) as f32,
-                            height.saturating_sub(1).max(1) as f32,
-                        ),
-                        color: theme.accent.ordinary,
-                        width: 1.0,
-                    },
-                    nickel_ui::backend::PaintCommand::Text {
-                        bounds: nickel_ui::Rect::new(16.0, 8.0, text_width, 22.0),
-                        text: "Remote AI Control active".into(),
-                        scale: 1.0,
-                        color: theme.text.primary,
-                        align: nickel_ui::TextAlign::Start,
-                        bold: true,
-                        wrap: false,
-                    },
-                    nickel_ui::backend::PaintCommand::Text {
-                        bounds: nickel_ui::Rect::new(16.0, 32.0, text_width, 22.0),
-                        text: subtitle.clone(),
-                        scale: 0.85,
-                        color: theme.text.secondary,
-                        align: nickel_ui::TextAlign::Start,
-                        bold: false,
-                        wrap: false,
-                    },
-                ];
-                (output.name.clone(), output.scale, placement, scene)
+                (output.name.clone(), output.scale, placement)
             })
             .collect::<Vec<_>>();
         let desired_names = desired
             .iter()
-            .map(|(name, _, _, _)| name.clone())
+            .map(|(name, _, _)| name.clone())
             .collect::<std::collections::HashSet<_>>();
         for name in self
             .remote_indicator_surfaces
@@ -150,12 +168,33 @@ impl NickelSession {
                 self.internal_ui.remove(id);
             }
         }
-        for (name, scale, placement, scene) in desired {
+        for (name, scale, placement) in desired {
+            use super::super::remote_indicator::RemoteIndicator;
             if let Some(id) = self.remote_indicator_surfaces.get(&name).copied() {
-                self.internal_ui.configure_scene(id, placement, scale);
-                self.internal_ui.update_scene(id, scene);
+                self.internal_ui.configure_surface(id, placement, scale);
+                if let Some(app) = self.internal_ui.application_mut::<RemoteIndicator>(id) {
+                    app.transport = transport.to_owned();
+                    app.grants = grants.clone();
+                    app.theme = theme;
+                }
+                self.internal_ui.step(
+                    id,
+                    nickel_ui::HostBatch {
+                        application_changed: true,
+                        ..Default::default()
+                    },
+                );
             } else {
-                let id = self.internal_ui.insert_scene(scene, placement, scale);
+                let id = self.internal_ui.insert(
+                    RemoteIndicator {
+                        theme,
+                        transport: transport.to_owned(),
+                        grants: grants.clone(),
+                        stop_requested: false,
+                    },
+                    placement,
+                    scale,
+                );
                 self.remote_indicator_surfaces.insert(name, id);
             }
         }
@@ -193,7 +232,8 @@ impl NickelSession {
             }
         };
         let control = self.remote_control.control();
-        let control = control.lock().unwrap();
+        let mut control = control.lock().unwrap();
+        control.reconcile_pending_lease_requests(Instant::now());
         let pending_clients = control
             .pending_clients()
             .map(
@@ -214,6 +254,13 @@ impl NickelSession {
             .granted_clients()
             .map(
                 |client| nickel_session_protocol::RemoteGrantedClientSnapshot {
+                    origin: control.client_origin(&client.id).map(|origin| {
+                        nickel_session_protocol::RemoteClientOrigin {
+                            address: origin.address.to_string(),
+                            tls: origin.tls,
+                        }
+                    }),
+                    blocked: control.lease_requests().is_blocked(&client.id),
                     id: client.id,
                     label: client.label,
                     capabilities: client
@@ -225,15 +272,141 @@ impl NickelSession {
                 },
             )
             .collect();
+        let (trace_events, trace_audit_evicted) =
+            control.trace_audit().snapshot().unwrap_or_default();
         ServerMessage::RemoteControl(nickel_session_protocol::RemoteControlSnapshot {
             requested_enabled: status.requested_enabled,
             effective,
             generation: status.generation,
             acknowledged_generation: status.acknowledged_generation,
-            endpoint: status.endpoint.into(),
+            endpoint: status.endpoint.clone(),
+            host_fingerprint: status.host_fingerprint.clone(),
+            environment_override: status.environment_override,
             diagnostic: status.diagnostic.clone(),
             pending_clients,
             granted_clients,
+            connection_audit: control
+                .connection_audit()
+                .map(
+                    |event| nickel_session_protocol::RemoteConnectionAuditEvent {
+                        generation: event.generation,
+                        observed_at_us: event
+                            .observed_at
+                            .saturating_duration_since(self.start_time)
+                            .as_micros()
+                            .min(u64::MAX as u128) as u64,
+                        client_id: event.client_id.clone(),
+                        address: event.origin.address,
+                        tls: event.origin.tls,
+                    },
+                )
+                .collect(),
+            connection_audit_evicted: control.connection_audit_evicted(),
+            lease_audit: control
+                .leases()
+                .audit()
+                .events()
+                .map(|event| nickel_session_protocol::RemoteLeaseAuditEvent {
+                    generation: event.generation,
+                    observed_at_us: event
+                        .observed_at
+                        .saturating_duration_since(self.start_time)
+                        .as_micros()
+                        .min(u64::MAX as u128) as u64,
+                    lease_id: event.lease_id,
+                    transition: event.transition,
+                    scope: event.scope,
+                    lifetime_limit_seconds: event.lifetime_limit.map(|duration| duration.as_secs()),
+                    full_debug: event.full_debug,
+                    allow_resumption: event.allow_resumption,
+                })
+                .collect(),
+            lease_audit_evicted: control.leases().audit().evicted(),
+            permission_audit: control
+                .lease_requests()
+                .audit()
+                .map(
+                    |event| nickel_session_protocol::RemotePermissionAuditEvent {
+                        generation: event.generation,
+                        observed_at_us: event
+                            .observed_at
+                            .saturating_duration_since(self.start_time)
+                            .as_micros()
+                            .min(u64::MAX as u128) as u64,
+                        client_id: event.client_id,
+                        outcome: event.outcome,
+                    },
+                )
+                .collect(),
+            permission_audit_evicted: control.lease_requests().audit_evicted(),
+            trace_audit: {
+                trace_events
+                    .into_iter()
+                    .map(|event| nickel_session_protocol::RemoteTraceAuditEvent {
+                        generation: event.generation,
+                        observed_at_us: event
+                            .observed_at
+                            .saturating_duration_since(self.start_time)
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64,
+                        client_id: event.client_id,
+                        lease_id: event.lease_id,
+                        trace_id: event.trace_id,
+                        category: event.category,
+                        transition: event.transition,
+                        duration_limit_seconds: event.duration_limit_seconds,
+                        elapsed_us: event.elapsed_us,
+                    })
+                    .collect()
+            },
+            trace_audit_evicted,
+
+            active_leases: control
+                .leases()
+                .iter()
+                .filter(|lease| {
+                    lease
+                        .expires_at
+                        .is_none_or(|deadline| Instant::now() < deadline)
+                })
+                .map(|lease| nickel_session_protocol::RemoteActiveLease {
+                    lease_id: lease.id,
+                    client_label: control
+                        .granted_clients()
+                        .find(|client| client.id == lease.client_identity)
+                        .map(|client| client.label)
+                        .unwrap_or_else(|| "Agent".into()),
+                    scope: lease.scope.clone(),
+                    resource_label: self.remote_resource_label(&lease.scope),
+                    remaining_seconds: lease.expires_at.map(|deadline| {
+                        deadline.saturating_duration_since(Instant::now()).as_secs()
+                    }),
+                    suspended: lease.suspended,
+                    full_debug: lease.full_debug,
+                })
+                .collect(),
+            pending_leases: control
+                .lease_requests()
+                .pending()
+                .map(
+                    |(client_id, request)| nickel_session_protocol::RemotePendingLease {
+                        pending_generation: control
+                            .lease_requests()
+                            .pending_generation(client_id)
+                            .expect("pending request has an incarnation"),
+                        client_id: client_id.to_owned(),
+                        client_label: control
+                            .granted_clients()
+                            .find(|client| client.id == client_id)
+                            .map(|client| client.label)
+                            .unwrap_or_else(|| "Connected client".into()),
+                        resource_label: self.remote_resource_label(&request.scope),
+                        changes: control.lease_requests().pending_changes(client_id),
+                        request: request.into(),
+                    },
+                )
+                .collect(),
         })
     }
 
@@ -896,6 +1069,19 @@ impl NickelSession {
                 self.sync_remote_control_indicators();
                 return self.remote_control_snapshot();
             }
+            SessionCommand::BlockRemoteClient { client_id, blocked } => {
+                let result = self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .block_client_local(&client_id, blocked);
+                if let Err(error) = result {
+                    return protocol_error(ErrorCode::InvalidRequest, error.to_string());
+                }
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
             SessionCommand::RevokeRemoteClient { client_id } => {
                 if !self
                     .remote_control
@@ -906,6 +1092,108 @@ impl NickelSession {
                 {
                     return protocol_error(ErrorCode::InvalidRequest, "client is not granted");
                 }
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::DecideRemoteLease {
+                pending_generation,
+                client_id,
+                request,
+                allow,
+            } => {
+                if allow && !self.remote_lease_target_live(&request.scope) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "lease target is unavailable or protected",
+                    );
+                }
+                let control = self.remote_control.control();
+                let mut control = control.lock().unwrap();
+                if allow {
+                    if let Err(error) = control.approve_lease_local(
+                        &client_id,
+                        &request.into(),
+                        pending_generation,
+                        Instant::now(),
+                    ) {
+                        return protocol_error(ErrorCode::InvalidRequest, error.to_string());
+                    }
+                } else {
+                    if !control.lease_requests_mut().deny_displayed_local(
+                        &client_id,
+                        &request.into(),
+                        pending_generation,
+                        Instant::now(),
+                    ) {
+                        return protocol_error(
+                            ErrorCode::InvalidRequest,
+                            "permission request changed",
+                        );
+                    }
+                }
+                drop(control);
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::ApproveRemoteLeaseDuration {
+                pending_generation,
+                client_id,
+                request,
+                duration_seconds,
+            } => {
+                if !self.remote_lease_target_live(&request.scope) {
+                    return protocol_error(
+                        ErrorCode::InvalidRequest,
+                        "lease target is unavailable or protected",
+                    );
+                }
+                let result = self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .approve_lease_with_duration_local(
+                        &client_id,
+                        &request.into(),
+                        pending_generation,
+                        duration_seconds.map(Duration::from_secs),
+                        Instant::now(),
+                    );
+                if let Err(error) = result {
+                    return protocol_error(ErrorCode::InvalidRequest, error.to_string());
+                }
+                self.sync_remote_control_indicators();
+                return self.remote_control_snapshot();
+            }
+            SessionCommand::ManageRemoteLease { lease_id, action } => {
+                use nickel_session_protocol::RemoteLeaseAction;
+                let control = self.remote_control.control();
+                let mut control = control.lock().unwrap();
+                let result = match action {
+                    RemoteLeaseAction::Pause => control.leases_mut().suspend_local(lease_id),
+                    RemoteLeaseAction::Resume => {
+                        if control
+                            .leases()
+                            .iter()
+                            .find(|lease| lease.id == lease_id)
+                            .is_some_and(|lease| !self.remote_lease_target_live(&lease.scope))
+                        {
+                            return protocol_error(
+                                ErrorCode::InvalidRequest,
+                                "lease target is unavailable or protected",
+                            );
+                        }
+                        control.leases_mut().resume_local(lease_id, Instant::now())
+                    }
+                    RemoteLeaseAction::Revoke => {
+                        control.leases_mut().revoke(lease_id);
+                        Ok(())
+                    }
+                };
+                if let Err(error) = result {
+                    return protocol_error(ErrorCode::InvalidRequest, error.to_string());
+                }
+                drop(control);
                 self.sync_remote_control_indicators();
                 return self.remote_control_snapshot();
             }
@@ -1167,7 +1455,7 @@ impl NickelSession {
             }),
         };
         if let Ok(frame) = encode(&message)
-            && let Ok(socket) = UnixDatagram::unbound()
+            && let Ok(socket) = notification_socket()
         {
             let _ = socket.send_to(&frame, reply_path);
         }
@@ -1189,7 +1477,64 @@ impl NickelSession {
             })
     }
 
+    pub(super) fn registry_window_geometry(&self, id: WindowId) -> Option<ProtocolGeometry> {
+        self.internal_window_surfaces
+            .get(&id)
+            .and_then(|surface| self.internal_ui.placement(*surface))
+            .map(|placement| ProtocolGeometry {
+                x: placement.geometry.0,
+                y: placement.geometry.1,
+                width: placement.geometry.2 as i32,
+                height: placement.geometry.3 as i32,
+            })
+            .or_else(|| {
+                self.window_for_registry_id(id)
+                    .and_then(|candidate| self.space.element_bbox(&candidate))
+                    .map(|bounds| ProtocolGeometry {
+                        x: bounds.loc.x,
+                        y: bounds.loc.y,
+                        width: bounds.size.w,
+                        height: bounds.size.h,
+                    })
+            })
+            .or_else(|| {
+                self.workspace_hidden_windows
+                    .get(&id)
+                    .map(|(hidden, location)| {
+                        let size = hidden.geometry().size;
+                        ProtocolGeometry {
+                            x: location.x,
+                            y: location.y,
+                            width: size.w,
+                            height: size.h,
+                        }
+                    })
+            })
+            .or_else(|| {
+                self.minimized_windows.get(&id).map(|(hidden, location)| {
+                    let size = hidden.geometry().size;
+                    ProtocolGeometry {
+                        x: location.x,
+                        y: location.y,
+                        width: size.w,
+                        height: size.h,
+                    }
+                })
+            })
+    }
+
     pub(super) fn protocol_windows(&mut self) -> Vec<WindowSnapshot> {
+        self.protocol_window_inventory(false)
+    }
+
+    pub(super) fn remote_protocol_windows(&mut self) -> Vec<WindowSnapshot> {
+        self.protocol_window_inventory(true)
+    }
+
+    fn protocol_window_inventory(
+        &mut self,
+        include_inactive_workspaces: bool,
+    ) -> Vec<WindowSnapshot> {
         let mut shell_ids = self
             .shell_windows()
             .filter_map(|window| {
@@ -1205,59 +1550,22 @@ impl NickelSession {
             .into_iter()
             .filter(|window| !shell_ids.contains(&window.id))
             .filter(|window| self.registry_window_is_mapped(window.id))
-            .filter(|window| self.workspaces.is_visible(&window.id))
+            .filter(|window| include_inactive_workspaces || self.workspaces.is_visible(&window.id))
+            .filter(|window| {
+                !include_inactive_workspaces || !self.remote_window_is_protected(window.id)
+            })
             .take(nickel_session_protocol::MAX_WINDOWS)
             .map(|window| {
                 let surface = self
                     .surface_windows
                     .iter()
                     .find_map(|(surface, id)| (*id == window.id).then_some(surface));
-                let geometry = self
-                    .internal_window_surfaces
-                    .get(&window.id)
-                    .and_then(|surface| self.internal_ui.placement(*surface))
-                    .map(|placement| ProtocolGeometry {
-                        x: placement.geometry.0,
-                        y: placement.geometry.1,
-                        width: placement.geometry.2 as i32,
-                        height: placement.geometry.3 as i32,
-                    })
-                    .or_else(|| {
-                        self.window_for_registry_id(window.id)
-                            .and_then(|candidate| self.space.element_bbox(&candidate))
-                            .map(|bounds| ProtocolGeometry {
-                                x: bounds.loc.x,
-                                y: bounds.loc.y,
-                                width: bounds.size.w,
-                                height: bounds.size.h,
-                            })
-                    })
-                    .or_else(|| {
-                        self.workspace_hidden_windows
-                            .get(&window.id)
-                            .map(|(hidden, location)| {
-                                let size = hidden.geometry().size;
-                                ProtocolGeometry {
-                                    x: location.x,
-                                    y: location.y,
-                                    width: size.w,
-                                    height: size.h,
-                                }
-                            })
-                    })
-                    .or_else(|| {
-                        self.minimized_windows
-                            .get(&window.id)
-                            .map(|(hidden, location)| {
-                                let size = hidden.geometry().size;
-                                ProtocolGeometry {
-                                    x: location.x,
-                                    y: location.y,
-                                    width: size.w,
-                                    height: size.h,
-                                }
-                            })
-                    });
+                let geometry = if include_inactive_workspaces {
+                    self.remote_window_geometry(window.id)
+                } else {
+                    self.registry_window_geometry(window.id)
+                };
+                let native = self.registry_native_window(window.id);
                 WindowSnapshot {
                     id: ProtocolWindowId(window.id.0),
                     application_id: window.app_id.clone(),
@@ -1267,20 +1575,15 @@ impl NickelSession {
                         || self.internal_minimized_windows.contains(&window.id),
                     maximized: surface
                         .is_some_and(|surface| self.maximized_restore.contains_key(surface))
-                        || self.space.elements().any(|candidate| {
-                            candidate.x11_surface().is_some_and(|x11| {
-                                self.x11_windows.get(&x11.window_id()).copied() == Some(window.id)
-                                    && x11.is_maximized()
-                            })
-                        }),
+                        || native
+                            .as_ref()
+                            .and_then(Window::x11_surface)
+                            .is_some_and(|x11| x11.is_maximized()),
                     fullscreen: surface
                         .is_some_and(|surface| self.fullscreen_restore.contains_key(surface))
-                        || self.space.elements().any(|candidate| {
-                            candidate.x11_surface().is_some_and(|x11| {
-                                self.x11_windows.get(&x11.window_id()).copied() == Some(window.id)
-                                    && self.x11_fullscreen_restore.contains_key(&x11.window_id())
-                            })
-                        }),
+                        || native
+                            .as_ref()
+                            .is_some_and(|window| self.is_fullscreen_window(window)),
                     geometry,
                     workspace: ProtocolWorkspaceId(
                         self.workspaces

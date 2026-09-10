@@ -165,6 +165,17 @@ impl XdgShellHandler for NickelSession {
             self.workspaces.add_window(id);
         }
         self.surface_windows.insert(surface.wl_surface().id(), id);
+        if let Some(pid) = surface
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .and_then(|credentials| u32::try_from(credentials.pid).ok())
+        {
+            self.schedule_remote_window_identity(
+                id,
+                crate::session::remote_identity::IdentitySource::WaylandPeer(pid),
+            );
+        }
         // The authenticated shell creates role-sized surfaces before the
         // app ID arrives. Giving those provisional surfaces an ordinary app
         // configure makes a hidden transient recreate as a full application
@@ -613,6 +624,18 @@ impl NickelSession {
     pub(crate) fn map_xdg_toplevel(&mut self, surface: &WlSurface) -> Option<Window> {
         let surface_id = surface.id();
         let window = self.xdg_toplevel_windows.get(&surface_id)?.clone();
+        // Placement needs the committed buffer bounds even while first map waits
+        // for asynchronous ownership evidence.
+        window.on_commit();
+        if !self.mapped_xdg_toplevels.contains(&surface_id)
+            && let Some(id) = self.surface_windows.get(&surface_id).copied()
+            && self.defer_remote_launch_map(
+                id,
+                super::super::state::remote_launch::DeferredLaunchMap::Wayland(surface.clone()),
+            )
+        {
+            return None;
+        }
         let current_focus_is_shell =
             self.seat
                 .get_keyboard()
@@ -707,19 +730,33 @@ impl NickelSession {
                 );
             }
         }
-        self.space.map_element(window.clone(), location, true);
+        let launch_mapped = self
+            .surface_windows
+            .get(&surface_id)
+            .copied()
+            .and_then(|id| {
+                self.with_remote_launch_placement(id, |session, work_area| {
+                    let replacement =
+                        shell_layout::centered_in(work_area, (size.w.max(1), size.h.max(1)));
+                    location = (replacement.x, replacement.y).into();
+                    session
+                        .xdg_toplevel_locations
+                        .insert(surface_id.clone(), location);
+                    session.space.map_element(window.clone(), location, true);
+                    Some(())
+                })
+            })
+            .is_some();
+        if !launch_mapped {
+            self.space.map_element(window.clone(), location, true);
+        }
         if let Some(toplevel) = window.toplevel() {
             self.update_window_metadata(toplevel);
-            if let Some(client_pid) = toplevel
-                .wl_surface()
-                .client()
-                .and_then(|client| client.get_credentials(&self.display_handle).ok())
-                .and_then(|credentials| u32::try_from(credentials.pid).ok())
-            {
-                self.observe_pending_launch_window(client_pid);
-            }
         }
         let registry_id = self.surface_windows.get(&surface_id).copied();
+        if let Some(id) = registry_id {
+            self.observe_pending_launch_window(id);
+        }
         if let Some(id) = registry_id.filter(|id| {
             !self.locked
                 && !self.shell_owned_windows.contains(id)

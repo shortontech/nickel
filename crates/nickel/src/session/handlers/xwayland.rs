@@ -32,6 +32,7 @@ use crate::session::{
     focus::KeyboardFocusTarget,
     grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
     handlers::{SelectionOwner, bounded_selection_mime_types},
+    shell_layout,
     window_registry::{WindowAdmission, WindowId, WindowMetadataSource},
 };
 
@@ -197,9 +198,51 @@ impl NickelSession {
         }
     }
 
-    fn map_x11_window(&mut self, surface: X11Surface, managed: bool) {
+    pub(crate) fn map_x11_window(&mut self, surface: X11Surface, managed: bool) {
         if self.x11_window(&surface).is_some() {
             return;
+        }
+        if managed && !self.x11_windows.contains_key(&surface.window_id()) {
+            let Some(id) = admit_managed_x11_window(&mut self.windows) else {
+                tracing::warn!(
+                    window = surface.window_id(),
+                    limit = nickel_session_protocol::MAX_WINDOWS,
+                    "rejected X11 window because the live window limit was reached"
+                );
+                if let Err(error) = surface.set_mapped(false) {
+                    tracing::warn!(?error, "failed to unmap rejected X11 window");
+                }
+                self.request_output_redraw();
+                return;
+            };
+            self.workspaces.add_window(id);
+            self.windows.update_metadata(
+                id,
+                WindowMetadataSource::X11,
+                Some(surface.title()),
+                Some(surface.class()),
+            );
+            self.x11_windows.insert(surface.window_id(), id);
+            self.schedule_remote_window_identity(
+                id,
+                crate::session::remote_identity::IdentitySource::X11Client(Box::new(
+                    surface.clone(),
+                )),
+            );
+            if let Some(wl_surface) = surface.wl_surface() {
+                self.surface_windows.insert(wl_surface.id(), id);
+            }
+        }
+        if managed {
+            let id = self.x11_windows[&surface.window_id()];
+            if self.defer_remote_launch_map(
+                id,
+                super::super::state::remote_launch::DeferredLaunchMap::X11(Box::new(
+                    surface.clone(),
+                )),
+            ) {
+                return;
+            }
         }
         let mut geometry = x11_map_geometry(
             surface.geometry(),
@@ -222,6 +265,9 @@ impl NickelSession {
             let _ = surface.configure(geometry);
         }
         if managed {
+            if !self.locked {
+                self.cancel_remote_keyboard();
+            }
             let requested_position = surface
                 .size_hints()
                 .is_some_and(|hints| hints.position.is_some());
@@ -245,35 +291,39 @@ impl NickelSession {
             }
         }
         let window = Window::new_x11_window(surface.clone());
-        self.space.map_element(window.clone(), geometry.loc, true);
-        if managed {
-            let Some(id) = admit_managed_x11_window(&mut self.windows) else {
-                tracing::warn!(
-                    window = surface.window_id(),
-                    limit = nickel_session_protocol::MAX_WINDOWS,
-                    "rejected X11 window because the live window limit was reached"
-                );
-                self.space.unmap_elem(&window);
-                if let Err(error) = surface.set_mapped(false) {
-                    tracing::warn!(?error, "failed to unmap rejected X11 window");
-                }
-                self.request_output_redraw();
+        let launch_mapped = managed
+            && self
+                .x11_windows
+                .get(&surface.window_id())
+                .copied()
+                .and_then(|id| {
+                    self.with_remote_launch_placement(id, |session, work_area| {
+                        let placed = shell_layout::centered_in(
+                            work_area,
+                            (geometry.size.w, geometry.size.h),
+                        );
+                        let replacement = Rectangle::new(
+                            (placed.x, placed.y).into(),
+                            (placed.width, placed.height).into(),
+                        );
+                        surface.configure(replacement).ok()?;
+                        surface.set_mapped(true).ok()?;
+                        geometry = replacement;
+                        session
+                            .space
+                            .map_element(window.clone(), geometry.loc, true);
+                        Some(())
+                    })
+                })
+                .is_some();
+        if !launch_mapped {
+            if managed && surface.set_mapped(true).is_err() {
                 return;
-            };
-            self.workspaces.add_window(id);
-            self.windows.update_metadata(
-                id,
-                WindowMetadataSource::X11,
-                Some(surface.title()),
-                Some(surface.class()),
-            );
-            self.x11_windows.insert(surface.window_id(), id);
-            if let Some(client_pid) = surface.pid() {
-                self.observe_pending_launch_window(client_pid);
             }
-            if let Some(wl_surface) = surface.wl_surface() {
-                self.surface_windows.insert(wl_surface.id(), id);
-            }
+            self.space.map_element(window.clone(), geometry.loc, true);
+        }
+        if managed {
+            let id = self.x11_windows[&surface.window_id()];
             if !self.locked {
                 self.space.elements().for_each(|candidate| {
                     candidate.set_activated(candidate == &window);
@@ -333,6 +383,10 @@ impl XWaylandShellHandler for NickelSession {
 }
 
 impl XwmHandler for NickelSession {
+    fn keyboard_focus_lost(&mut self, _xwm: XwmId, window: X11Surface) {
+        self.remote_keyboard_native_focus_lost(&window);
+    }
+
     fn xwm_state(&mut self, xwm: XwmId) -> &mut X11Wm {
         let (current, state) = self.xwm.as_mut().expect("XWM callback requires live state");
         assert_eq!(*current, xwm, "XWM callback came from stale instance");
@@ -344,14 +398,6 @@ impl XwmHandler for NickelSession {
     fn new_override_redirect_window(&mut self, _xwm: XwmId, _window: X11Surface) {}
 
     fn map_window_request(&mut self, _xwm: XwmId, window: X11Surface) {
-        if let Err(error) = window.set_mapped(true) {
-            tracing::warn!(
-                ?error,
-                window = window.window_id(),
-                "failed to map X11 window"
-            );
-            return;
-        }
         self.map_x11_window(window, true);
     }
 

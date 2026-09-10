@@ -166,6 +166,11 @@ pub trait SeatHandler: Sized + 'static {
     /// Callback that will be notified whenever the focus of the seat changes.
     fn focus_changed(&mut self, _seat: &Seat<Self>, _focused: Option<&Self::KeyboardFocus>) {}
 
+    /// Called after a focus-bound source's state is cleared and before the new
+    /// recipient is entered. The keyboard lock is held: do not re-enter keyboard
+    /// APIs. Platform adapters may cancel separately queued native input here.
+    fn focus_bound_source_cancelled(&mut self, _seat: &Seat<Self>, _source: keyboard::KeyboardSource) {}
+
     /// Callback that will be notified whenever a client requests to set a custom cursor image.
     fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
 

@@ -97,6 +97,25 @@ impl ControllerFamily {
     }
 }
 
+const MAX_EVENTS_PER_POLL: usize = 256;
+
+#[cfg(target_os = "linux")]
+pub struct NativeControllerDevice {
+    pub path: std::path::PathBuf,
+    /// Backend event codes mapped to buttons, including analog triggers.
+    pub button_codes: Vec<u32>,
+}
+
+/// Payload-free local controller ownership observation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerObservation {
+    pub available: bool,
+    pub held: bool,
+    pub activity: bool,
+    /// The bounded drain may have left events pending. Do not infer an idle seat.
+    pub backlog: bool,
+}
+
 pub struct ControllerInput {
     gilrs: Option<Gilrs>,
     normalizer: ControllerNormalizer,
@@ -105,6 +124,8 @@ pub struct ControllerInput {
     families: BTreeMap<ControllerId, ControllerFamily>,
     active_family: Option<ControllerFamily>,
     barrier_unix_ms: u64,
+    last_poll_events: usize,
+    last_poll_activity: bool,
 }
 
 impl ControllerInput {
@@ -148,11 +169,74 @@ impl ControllerInput {
             families,
             active_family: None,
             barrier_unix_ms: 0,
+            last_poll_events: 0,
+            last_poll_activity: false,
         }
     }
 
     pub fn connected(&self) -> bool {
         self.connected
+    }
+
+    /// Device nodes already identified as controllers by the active backend.
+    /// This supports native state queries without scanning unrelated input devices.
+    #[cfg(target_os = "linux")]
+    pub fn connected_devices(&self) -> Result<Vec<NativeControllerDevice>, &'static str> {
+        use gilrs::Button::*;
+        use gilrs::LinuxGamepadExt;
+        const MAX_DEVICES: usize = 32;
+        let gilrs = self
+            .gilrs
+            .as_ref()
+            .ok_or("controller backend unavailable")?;
+        let devices: Vec<_> = gilrs
+            .gamepads()
+            .filter(|(_, gamepad)| gamepad.is_connected())
+            .take(MAX_DEVICES + 1)
+            .map(|(_, gamepad)| NativeControllerDevice {
+                path: gamepad.devpath().to_owned(),
+                button_codes: [
+                    South,
+                    East,
+                    North,
+                    West,
+                    C,
+                    Z,
+                    LeftTrigger,
+                    LeftTrigger2,
+                    RightTrigger,
+                    RightTrigger2,
+                    Select,
+                    Start,
+                    Mode,
+                    LeftThumb,
+                    RightThumb,
+                    DPadUp,
+                    DPadDown,
+                    DPadLeft,
+                    DPadRight,
+                ]
+                .into_iter()
+                .filter_map(|button| gamepad.button_code(button).map(|code| code.into_u32()))
+                .collect(),
+            })
+            .collect();
+        if devices.len() > MAX_DEVICES {
+            return Err("controller observation exceeds device limit");
+        }
+        Ok(devices)
+    }
+
+    /// Observe through an independent device reader without dispatching actions.
+    /// Use a dedicated instance: observation suppresses this reader's repeats.
+    pub fn observe(&mut self, now: Instant) -> ControllerObservation {
+        self.poll_with_fence(now, false, ControllerFence::default);
+        ControllerObservation {
+            available: self.gilrs.is_some(),
+            held: self.normalizer.has_held_input(),
+            activity: self.last_poll_activity,
+            backlog: self.last_poll_events == MAX_EVENTS_PER_POLL,
+        }
     }
 
     /// Family of the controller that most recently produced meaningful input.
@@ -189,10 +273,15 @@ impl ControllerInput {
         F: FnOnce() -> ControllerFence,
     {
         let mut actions = Vec::new();
+        self.last_poll_events = 0;
+        self.last_poll_activity = false;
         let Some(gilrs) = &mut self.gilrs else {
             return actions;
         };
-        let events: Vec<_> = std::iter::from_fn(|| gilrs.next_event()).collect();
+        let events: Vec<_> = std::iter::from_fn(|| gilrs.next_event())
+            .take(MAX_EVENTS_PER_POLL)
+            .collect();
+        self.last_poll_events = events.len();
         let fence = match focused {
             None => ControllerFence::default(),
             Some((false, _)) => ControllerFence {
@@ -230,7 +319,11 @@ impl ControllerInput {
                 .then_some(ControllerId(usize::from(event.id) as u64));
             if let Some(event) = nickel_input::gilrs::event(&event, identity) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
+                let was_held = self.normalizer.has_held_input();
                 let signals = self.normalizer.handle(event, now_ms);
+                // Connection and sub-threshold stick drift are not user takeover.
+                // A press/release pair still counts even if this drain ends idle.
+                self.last_poll_activity |= was_held || self.normalizer.has_held_input();
                 if !admitted {
                     self.normalizer.suppress_held();
                 }

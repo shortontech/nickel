@@ -55,6 +55,37 @@ impl Default for OnScreenKeyboardState {
 }
 
 impl NickelSession {
+    pub(crate) fn inject_controlled_keyboard(
+        &mut self,
+        target: super::window_registry::WindowId,
+        action: nickel_remote_control::keyboard::KeyboardAction,
+    ) -> Result<(), String> {
+        action.validate()?;
+        if !self.remote_keyboard_target_matches(target) {
+            return Err("keyboard recipient changed or input is busy".into());
+        }
+        let input = match action {
+            nickel_remote_control::keyboard::KeyboardAction::Text { text } => {
+                OnScreenKeyboardInput::Text { text }
+            }
+            nickel_remote_control::keyboard::KeyboardAction::Key { keysym, modifiers } => {
+                OnScreenKeyboardInput::Key { keysym, modifiers }
+            }
+            _ => return Err("held keys require gesture ownership".into()),
+        };
+        // These bounded transactions run synchronously on the seat owner. No
+        // focus/event dispatch can interleave, and no remote key survives them.
+        let source = KeyboardSource::new_focus_bound_auxiliary();
+        let result = self.deliver_external_keyboard_input(source, input, 256);
+        if let Some(keyboard) = self.seat.get_keyboard() {
+            keyboard.release_source(self, source);
+        }
+        result.map_err(str::to_owned)?;
+        self.display_handle
+            .flush_clients()
+            .map_err(|error| error.to_string())
+    }
+
     /// One current recipient snapshot shared with the native shell, never a self-RPC.
     pub(crate) fn publish_internal_keyboard_snapshot(&mut self) {
         self.reconcile_keyboard_internal_recipient();
@@ -258,6 +289,17 @@ impl NickelSession {
             self.schedule_internal_ui_frame();
             return Ok(());
         }
+        self.deliver_external_keyboard_input(self.on_screen_keyboard.source, input, 16)
+    }
+
+    /// Shared virtual-input delivery; callers own recipient and authorization checks.
+    /// The complete chord/text is resolved before any event is emitted.
+    pub(crate) fn deliver_external_keyboard_input(
+        &mut self,
+        source: KeyboardSource,
+        input: OnScreenKeyboardInput,
+        maximum_characters: usize,
+    ) -> Result<(), &'static str> {
         let keyboard = self
             .seat
             .get_keyboard()
@@ -265,7 +307,7 @@ impl NickelSession {
         match input {
             OnScreenKeyboardInput::Text { text } => {
                 if text.is_empty()
-                    || text.chars().count() > 16
+                    || text.chars().count() > maximum_characters
                     || text.chars().any(char::is_control)
                 {
                     return Err("invalid on-screen keyboard text");
@@ -303,7 +345,7 @@ impl NickelSession {
                         focus.modifiers(&seat, self, modifiers, SERIAL_COUNTER.next_serial());
                         for state in [KeyState::Pressed, KeyState::Released] {
                             keyboard.input_from_source::<(), _>(
-                                self.on_screen_keyboard.source,
+                                source,
                                 self,
                                 code,
                                 state,
@@ -325,12 +367,6 @@ impl NickelSession {
                 }
             }
             OnScreenKeyboardInput::Key { keysym, modifiers } => {
-                if keysym == 0xff1b {
-                    tracing::warn!(
-                        epoch,
-                        "diagnostic: delivering Escape from the on-screen keyboard"
-                    );
-                }
                 // Only keyboard modifiers are accepted as a chord prefix.
                 if modifiers.len() > 5
                     || modifiers
@@ -348,7 +384,6 @@ impl NickelSession {
                         keys.push(code);
                     }
                 }
-                let source = self.on_screen_keyboard.source;
                 for code in &keys {
                     keyboard.input_from_source::<(), _>(
                         source,
@@ -380,7 +415,7 @@ impl NickelSession {
 
 /// Resolve the complete string before delivering anything, so unsupported text
 /// fails without partially typing or changing the recipient's modifiers.
-fn text_key_plan(
+pub(super) fn text_key_plan(
     keymap: &xkb::Keymap,
     layout: u32,
     text: &str,
@@ -470,5 +505,272 @@ mod tests {
     #[test]
     fn x11_text_resolves_altgr_and_non_us_letter_positions() {
         verify_layout("de", "hHzZyY@€äÄöÖß");
+    }
+}
+
+#[cfg(test)]
+mod focus_bound_source_tests {
+    use super::*;
+    use smithay::input::{
+        pointer::*,
+        touch::{
+            DownEvent, FrameMarker, MotionEvent as TouchMotionEvent, OrientationEvent, ShapeEvent,
+            TouchTarget, UpEvent,
+        },
+    };
+    use smithay::{
+        input::{Seat, SeatHandler, SeatState},
+        utils::{IsAlive, Serial},
+    };
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Recipient(u8);
+    impl IsAlive for Recipient {
+        fn alive(&self) -> bool {
+            true
+        }
+    }
+    #[derive(Debug, PartialEq)]
+    enum Event {
+        Enter(u8, Vec<u32>),
+        Leave(u8),
+        Release(u8, u32),
+        SourceCancelled,
+    }
+    struct State {
+        seats: SeatState<Self>,
+        events: Vec<Event>,
+    }
+    impl SeatHandler for State {
+        type KeyboardFocus = Recipient;
+        type PointerFocus = Recipient;
+        type TouchFocus = Recipient;
+        fn focus_bound_source_cancelled(&mut self, _: &Seat<Self>, _: KeyboardSource) {
+            self.events.push(Event::SourceCancelled);
+        }
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seats
+        }
+    }
+    impl KeyboardTarget<State> for Recipient {
+        fn enter(
+            &self,
+            _: &Seat<State>,
+            data: &mut State,
+            keys: Vec<smithay::input::keyboard::KeysymHandle<'_>>,
+            _: Serial,
+        ) {
+            let mut codes: Vec<_> = keys.iter().map(|key| key.raw_code().raw()).collect();
+            codes.sort_unstable();
+            data.events.push(Event::Enter(self.0, codes));
+        }
+        fn leave(&self, _: &Seat<State>, data: &mut State, _: Serial) {
+            data.events.push(Event::Leave(self.0));
+        }
+        fn key(
+            &self,
+            _: &Seat<State>,
+            data: &mut State,
+            key: smithay::input::keyboard::KeysymHandle<'_>,
+            state: KeyState,
+            _: Serial,
+            _: InputTime,
+        ) {
+            if state == KeyState::Released {
+                data.events
+                    .push(Event::Release(self.0, key.raw_code().raw()));
+            }
+        }
+        fn modifiers(&self, _: &Seat<State>, _: &mut State, _: ModifiersState, _: Serial) {}
+    }
+
+    #[allow(unused_variables)]
+    impl PointerTarget<State> for Recipient {
+        fn enter(&self, seat: &Seat<State>, data: &mut State, event: &MotionEvent) {}
+        fn motion(&self, seat: &Seat<State>, data: &mut State, event: &MotionEvent) {}
+        fn relative_motion(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &RelativeMotionEvent,
+        ) {
+        }
+        fn button(&self, seat: &Seat<State>, data: &mut State, event: &ButtonEvent) {}
+        fn axis(&self, seat: &Seat<State>, data: &mut State, frame: AxisFrame) {}
+        fn frame(&self, seat: &Seat<State>, data: &mut State) {}
+        fn leave(&self, seat: &Seat<State>, data: &mut State, serial: Serial, time: InputTime) {}
+        fn gesture_swipe_begin(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GestureSwipeBeginEvent,
+        ) {
+        }
+        fn gesture_swipe_update(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GestureSwipeUpdateEvent,
+        ) {
+        }
+        fn gesture_swipe_end(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GestureSwipeEndEvent,
+        ) {
+        }
+        fn gesture_pinch_begin(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GesturePinchBeginEvent,
+        ) {
+        }
+        fn gesture_pinch_update(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GesturePinchUpdateEvent,
+        ) {
+        }
+        fn gesture_pinch_end(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GesturePinchEndEvent,
+        ) {
+        }
+        fn gesture_hold_begin(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GestureHoldBeginEvent,
+        ) {
+        }
+        fn gesture_hold_end(
+            &self,
+            seat: &Seat<State>,
+            data: &mut State,
+            event: &GestureHoldEndEvent,
+        ) {
+        }
+    }
+    #[allow(unused_variables)]
+    impl TouchTarget<State> for Recipient {
+        fn down(&self, seat: &Seat<State>, data: &mut State, event: &DownEvent) {}
+        fn up(&self, seat: &Seat<State>, data: &mut State, event: &UpEvent) {}
+        fn motion(&self, seat: &Seat<State>, data: &mut State, event: &TouchMotionEvent) {}
+        fn frame(&self, seat: &Seat<State>, data: &mut State, marker: FrameMarker) {}
+        fn cancel(&self, seat: &Seat<State>, data: &mut State, marker: FrameMarker) {}
+        fn shape(&self, seat: &Seat<State>, data: &mut State, event: &ShapeEvent) {}
+        fn orientation(&self, seat: &Seat<State>, data: &mut State, event: &OrientationEvent) {}
+        fn last_frame(&self, seat: &Seat<State>, data: &mut State) -> Option<FrameMarker> {
+            unimplemented!()
+        }
+    }
+    #[test]
+    fn focus_transfer_releases_remote_keys_before_enter_and_preserves_other_sources() {
+        let mut data = State {
+            seats: SeatState::new(),
+            events: Vec::new(),
+        };
+        let mut seat = data.seats.new_seat("focus-bound-input-test");
+        let keyboard = seat.add_keyboard(Default::default(), 200, 25).unwrap();
+        keyboard.set_focus(&mut data, Some(Recipient(1)), SERIAL_COUNTER.next_serial());
+        let remote = KeyboardSource::new_focus_bound_auxiliary();
+        let other = KeyboardSource::new_auxiliary();
+        for (source, code) in [
+            (remote, 38),
+            (remote, 50),
+            (KeyboardSource::MAIN, 50),
+            (other, 54),
+        ] {
+            keyboard.input_from_source::<(), _>(
+                source,
+                &mut data,
+                Keycode::new(code),
+                KeyState::Pressed,
+                SERIAL_COUNTER.next_serial(),
+                InputTime::now(),
+                |_, _, _| FilterResult::Forward,
+            );
+        }
+        data.events.clear();
+        keyboard.set_focus(&mut data, Some(Recipient(1)), SERIAL_COUNTER.next_serial());
+        assert!(
+            data.events.is_empty(),
+            "unchanged focus must preserve remote holds"
+        );
+        keyboard.set_focus(&mut data, Some(Recipient(2)), SERIAL_COUNTER.next_serial());
+        assert_eq!(
+            data.events,
+            vec![
+                Event::Release(1, 38),
+                Event::SourceCancelled,
+                Event::Leave(1),
+                Event::Enter(2, vec![50, 54])
+            ]
+        );
+        assert_eq!(
+            keyboard.pressed_keys(),
+            [Keycode::new(54), Keycode::new(50)].into_iter().collect()
+        );
+        data.events.clear();
+        assert!(!keyboard.source_has_input(remote));
+        assert!(keyboard.source_has_input(KeyboardSource::MAIN));
+        keyboard.release_source(&mut data, remote);
+        assert!(
+            data.events.is_empty(),
+            "cancelled source must not release physical or other auxiliary keys"
+        );
+        assert!(
+            keyboard.modifier_state().shift,
+            "physical Shift must remain active"
+        );
+        keyboard.release_source(&mut data, other);
+        assert_eq!(data.events, vec![Event::Release(2, 54)]);
+        keyboard.input_from_source::<(), _>(
+            remote,
+            &mut data,
+            Keycode::new(38),
+            KeyState::Pressed,
+            SERIAL_COUNTER.next_serial(),
+            InputTime::now(),
+            |_, _, _| FilterResult::Forward,
+        );
+        data.events.clear();
+        keyboard.set_focus(&mut data, None, SERIAL_COUNTER.next_serial());
+        assert_eq!(
+            data.events,
+            vec![
+                Event::Release(2, 38),
+                Event::SourceCancelled,
+                Event::Leave(2)
+            ]
+        );
+        assert!(!keyboard.source_has_input(remote));
+        assert!(keyboard.modifier_state().shift);
+        keyboard.set_focus(&mut data, Some(Recipient(2)), SERIAL_COUNTER.next_serial());
+        let external = KeyboardSource::new_focus_bound_auxiliary();
+        let before = keyboard.pressed_keys();
+        assert!(keyboard.register_external_focus_bound_source(external));
+        assert!(keyboard.source_has_input(external));
+        assert_eq!(
+            keyboard.pressed_keys(),
+            before,
+            "external input must not alter the seat key state"
+        );
+        data.events.clear();
+        keyboard.set_focus(&mut data, Some(Recipient(3)), SERIAL_COUNTER.next_serial());
+        assert_eq!(
+            data.events,
+            vec![
+                Event::SourceCancelled,
+                Event::Leave(2),
+                Event::Enter(3, vec![50])
+            ]
+        );
+        assert!(!keyboard.source_has_input(external));
     }
 }

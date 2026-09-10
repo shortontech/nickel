@@ -120,6 +120,7 @@ struct ControllerState {
     active: bool,
     fingerprint: Option<String>,
     buttons: BTreeSet<ControllerButton>,
+    active_axes: BTreeSet<ControllerAxis>,
     suppressed_buttons: BTreeSet<ControllerButton>,
     axes_suppressed: bool,
     left_x: f32,
@@ -136,6 +137,14 @@ pub struct ControllerNormalizer {
 }
 
 impl ControllerNormalizer {
+    /// Physical ownership survives suppression until release, neutral, or removal.
+    /// Includes axes which do not produce shell navigation actions.
+    pub fn has_held_input(&self) -> bool {
+        self.states.values().any(|state| {
+            state.active && (!state.buttons.is_empty() || !state.active_axes.is_empty())
+        })
+    }
+
     pub fn new(config: ControllerConfig) -> Self {
         Self {
             config,
@@ -241,6 +250,15 @@ impl ControllerNormalizer {
                 let Some(state) = self.states.get_mut(&id).filter(|state| state.active) else {
                     return Vec::new();
                 };
+                let threshold = f32::from(self.config.release_threshold_milli) / 1_000.0;
+                if !value.is_finite() || value.abs() >= threshold {
+                    state.active_axes.insert(axis.clone());
+                } else {
+                    state.active_axes.remove(&axis);
+                }
+                if !value.is_finite() {
+                    return Vec::new();
+                }
                 match axis {
                     ControllerAxis::LeftX => state.left_x = value.clamp(-1.0, 1.0),
                     ControllerAxis::LeftY => state.left_y = value.clamp(-1.0, 1.0),
@@ -377,6 +395,7 @@ mod tests {
         assert!(!n.handle(button(KeyEdge::Pressed, false), 1).is_empty());
         assert!(!n.handle(axis(0.9), 2).is_empty());
         n.suppress_held();
+        assert!(n.has_held_input());
         assert!(!n.has_pending_repeat());
         assert!(n.tick(10_000).is_empty());
         assert!(n.handle(button(KeyEdge::Pressed, true), 10_001).is_empty());
@@ -386,8 +405,65 @@ mod tests {
                 .is_empty()
         );
         assert!(n.handle(axis(0.0), 10_004).is_empty());
+        assert!(!n.has_held_input());
         assert!(!n.handle(button(KeyEdge::Pressed, false), 10_005).is_empty());
         assert!(!n.handle(axis(-0.9), 10_006).is_empty());
+    }
+
+    #[test]
+    fn non_navigation_axes_hold_ownership_until_neutral_or_disconnect() {
+        let mut normalizer = ControllerNormalizer::default();
+        let id = ControllerId(1);
+        normalizer.handle(
+            ControllerEvent::Connected {
+                id,
+                identity: identity(None),
+            },
+            0,
+        );
+        for axis in [
+            ControllerAxis::RightX,
+            ControllerAxis::RightY,
+            ControllerAxis::LeftTrigger,
+            ControllerAxis::RightTrigger,
+        ] {
+            assert!(
+                normalizer
+                    .handle(
+                        ControllerEvent::Axis {
+                            id,
+                            axis: axis.clone(),
+                            value: 0.8,
+                        },
+                        1
+                    )
+                    .is_empty()
+            );
+            assert!(normalizer.has_held_input());
+            normalizer.suppress_held();
+            assert!(normalizer.has_held_input());
+            assert!(normalizer.tick(10_000).is_empty());
+            normalizer.handle(
+                ControllerEvent::Axis {
+                    id,
+                    axis,
+                    value: 0.0,
+                },
+                10_001,
+            );
+            assert!(!normalizer.has_held_input());
+        }
+        normalizer.handle(
+            ControllerEvent::Axis {
+                id,
+                axis: ControllerAxis::RightX,
+                value: f32::NAN,
+            },
+            10_002,
+        );
+        assert!(normalizer.has_held_input());
+        normalizer.handle(ControllerEvent::Disconnected { id }, 10_003);
+        assert!(!normalizer.has_held_input());
     }
 
     #[test]
@@ -567,6 +643,7 @@ mod tests {
                     )
                     .is_empty()
             );
+            assert!(!normalizer.has_held_input());
         }
         normalizer.handle(
             ControllerEvent::Axis {

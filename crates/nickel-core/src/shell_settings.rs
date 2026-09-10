@@ -1,12 +1,13 @@
-use nickel_storage::{atomic_write, config_path};
+use nickel_storage::{StagedWrite, config_path, read_regular_file, stage_write};
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
 };
 
 use crate::theme::{Appearance, ThemeMode, accent_from_hue, accent_hue};
 
 pub const SHELL_SETTINGS_VERSION: u8 = 1;
+const MAX_SETTINGS_BYTES: usize = 64 * 1024;
 pub const MAX_CONFIGURED_WORKSPACES: u8 = 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,13 +104,54 @@ impl ShellSettings {
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
-        let contents = fs::read_to_string(path)?;
+        let contents = Self::read_contents(path.as_ref())?.ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "shell settings file is missing")
+        })?;
+        Ok(Self::parse(&contents))
+    }
+
+    /// Transactions must not replace unreadable or newer configuration with
+    /// defaults. A missing file is the only default allowed on the write path.
+    pub fn load_for_update(path: impl AsRef<Path>) -> io::Result<Self> {
+        let Some(contents) = Self::read_contents(path.as_ref())? else {
+            return Ok(Self::default());
+        };
+        if contents
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .any(|(key, value)| {
+                key.trim() == "version"
+                    && value.trim().parse::<u8>().ok() != Some(SHELL_SETTINGS_VERSION)
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported shell settings version",
+            ));
+        }
+        Ok(Self::parse(&contents))
+    }
+
+    // Both ordinary reloads and transaction preparation use the same bounded
+    // regular-file reader. Disk I/O remains OS-bound; FIFOs and final symlinks
+    // are rejected without entering a blocking content read.
+    fn read_contents(path: &Path) -> io::Result<Option<String>> {
+        read_regular_file(path, MAX_SETTINGS_BYTES)?
+            .map(|bytes| {
+                String::from_utf8(bytes).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid shell settings UTF-8")
+                })
+            })
+            .transpose()
+    }
+
+    fn parse(contents: &str) -> Self {
         if let Some(version) = contents
             .lines()
             .find_map(|line| line.strip_prefix("version="))
             && version.trim().parse::<u8>().ok() != Some(SHELL_SETTINGS_VERSION)
         {
-            return Ok(Self::default());
+            return Self::default();
         }
         let mut settings = Self::default();
         for line in contents.lines() {
@@ -171,12 +213,26 @@ impl ShellSettings {
                 _ => {}
             }
         }
-        Ok(settings)
+        settings
     }
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
+        self.save_checked(path, || Ok(()))
+    }
+
+    pub fn save_checked(
+        &self,
+        path: impl AsRef<Path>,
+        check_commit: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
+        self.stage(path)?.commit(check_commit)
+    }
+
+    /// Prepare serialized settings without changing the destination. The caller
+    /// owns admission, current-state validation and authority at commit time.
+    pub fn stage(&self, path: impl AsRef<Path>) -> io::Result<StagedWrite> {
         let path = path.as_ref();
-        atomic_write(
+        stage_write(
             path,
             format!(
                 "version={}\nbar_on_all_displays={}\nall_windows_on_every_bar={}\ndesktop_count={}\ntheme={}\naccent_hue={}\naccent_intensity={}\nreduce_transparency={}\nanimations={}\nfile_icon_provider={}\nfile_icon_theme={}\npreferred_terminal={}\npreferred_file_manager={}\nidle_dim_seconds={}\nidle_lock_seconds={}\nidle_suspend_seconds={}\n",
@@ -272,6 +328,128 @@ mod tests {
         AnimationLevel, FileIconPreference, MAX_CONFIGURED_WORKSPACES, SHELL_SETTINGS_VERSION,
         ShellSettings, ThemePreference,
     };
+
+    #[test]
+    fn bounded_settings_load_preserves_missing_and_version_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings");
+        assert_eq!(
+            ShellSettings::load(&path).unwrap_err().kind(),
+            std::io::ErrorKind::NotFound
+        );
+        assert_eq!(
+            ShellSettings::load_for_update(&path).unwrap(),
+            ShellSettings::default()
+        );
+        std::fs::write(&path, "version=99\n").unwrap();
+        assert_eq!(
+            ShellSettings::load(&path).unwrap(),
+            ShellSettings::default()
+        );
+        assert!(ShellSettings::load_for_update(&path).is_err());
+        for contents in [vec![0xff], vec![b'x'; 64 * 1024 + 1]] {
+            std::fs::write(&path, contents).unwrap();
+            assert!(ShellSettings::load(&path).is_err());
+            assert!(ShellSettings::load_for_update(&path).is_err());
+        }
+    }
+
+    #[test]
+    fn nonregular_settings_child_probe() {
+        let Some(path) = std::env::var_os("NICKEL_SHELL_SETTINGS_TEST_PATH") else {
+            return;
+        };
+        let result = if std::env::var_os("NICKEL_SHELL_SETTINGS_TEST_UPDATE").is_some() {
+            ShellSettings::load_for_update(path)
+        } else {
+            ShellSettings::load(path)
+        };
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn both_settings_loaders_reject_nonregular_inputs_without_waiting() {
+        let root = tempfile::tempdir().unwrap();
+        let fifo = root.path().join("fifo");
+        use std::os::unix::ffi::OsStrExt;
+        let name = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: the owned terminated path remains live during mkfifo, and
+        // creation is restricted to the fixture's private temporary directory.
+        assert_eq!(unsafe { libc::mkfifo(name.as_ptr(), 0o600) }, 0);
+        let ordinary = root.path().join("ordinary");
+        std::fs::write(&ordinary, "version=1\n").unwrap();
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&ordinary, &link).unwrap();
+        let dangling = root.path().join("dangling");
+        std::os::unix::fs::symlink(root.path().join("missing"), &dangling).unwrap();
+        for update in [false, true] {
+            for path in [
+                &fifo,
+                std::path::Path::new("/dev/null"),
+                root.path(),
+                &link,
+                &dangling,
+            ] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "shell_settings::tests::nonregular_settings_child_probe",
+                    ])
+                    .env("NICKEL_SHELL_SETTINGS_TEST_PATH", path)
+                    .env_remove("NICKEL_SHELL_SETTINGS_TEST_UPDATE")
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null());
+                if update {
+                    command.env("NICKEL_SHELL_SETTINGS_TEST_UPDATE", "1");
+                }
+                let mut child = command.spawn().unwrap();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                loop {
+                    if let Some(status) = child.try_wait().unwrap() {
+                        assert!(status.success(), "loader update={update} accepted {path:?}");
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        panic!("loader update={update} blocked on {path:?}");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transaction_load_preserves_preferences_and_rejects_unreadable_or_newer_files() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shell-settings");
+        assert_eq!(
+            ShellSettings::load_for_update(&path).unwrap(),
+            ShellSettings::default()
+        );
+        let settings = ShellSettings {
+            desktop_count: 6,
+            idle_lock_seconds: Some(71),
+            preferred_terminal: Some("preserve-this-terminal".into()),
+            ..ShellSettings::default()
+        };
+        settings.save(&path).unwrap();
+        assert_eq!(ShellSettings::load_for_update(&path).unwrap(), settings);
+        for contents in [
+            b"version=99\nfuture_security_policy=retain\n".to_vec(),
+            b" version = unknown\n".to_vec(),
+            vec![0xff],
+            vec![b'x'; 64 * 1024 + 1],
+        ] {
+            std::fs::write(&path, &contents).unwrap();
+            assert!(ShellSettings::load_for_update(&path).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), contents);
+        }
+        assert!(ShellSettings::load_for_update(root.path()).is_err());
+    }
 
     #[test]
     fn defaults_to_two_display_friendly_bar_and_four_desktops() {

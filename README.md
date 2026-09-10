@@ -199,6 +199,8 @@ Protocol policies, compatibility evidence, and known limitations are tracked in
 The compositor lock authority, PAM boundary, and remaining native acceptance are documented in
 [`docs/session-locking.md`](docs/session-locking.md).
 
+Linux local audio cues require the libpulse development package to build and a running PulseAudio or PipeWire-Pulse service for playback.
+
 The direct backend requires DRM, GBM, libinput, udev, libseat, and EGL development packages. Build
 it without the nested backend:
 

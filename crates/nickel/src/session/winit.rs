@@ -135,6 +135,7 @@ pub fn init_winit(
     let mut damage_tracker = OutputDamageTracker::from_output(&output);
     let mut last_preview_capture = Instant::now() - Duration::from_secs(1);
     let mut last_preview_highlight = None;
+    let mut identification_cache = None;
     let mut pending_output_capture = None;
     let frame_icons = crate::session::window_frame::FrameIcons::load();
 
@@ -177,6 +178,7 @@ pub fn init_winit(
                 }
                 WinitEvent::Focus(true) => {}
                 WinitEvent::Redraw => {
+                    let trace_started = Instant::now();
                     state.flush_desktop_scenes_for_frame();
                     backend
                         .window()
@@ -216,6 +218,25 @@ pub fn init_winit(
                         damage_tracker = OutputDamageTracker::from_output(&output);
                     }
 
+                    let identification = state.output_identification_index(&output);
+                    let identify_badge = identification.map(|(generation, index)| {
+                        let cached = identification_cache.get_or_insert_with(|| (
+                            generation,
+                            index,
+                            crate::session::output_identification::identify_badge(index + 1),
+                        ));
+                        if cached.0 != generation || cached.1 != index {
+                            *cached = (
+                                generation,
+                                index,
+                                crate::session::output_identification::identify_badge(index + 1),
+                            );
+                        }
+                        cached.2.clone()
+                    });
+                    if identification.is_none() {
+                        identification_cache = None;
+                    }
                     let captured_frame = {
                         let (renderer, mut framebuffer) = backend.bind().unwrap();
                         let background_elements = state
@@ -278,7 +299,7 @@ pub fn init_winit(
                         overlay_elements.extend(
                             state
                                 .internal_ui
-                                .render_elements_for_layer(
+                                .render_elements_without_trusted(
                                     renderer,
                                     &output.name(),
                                     (0, 0).into(),
@@ -442,6 +463,21 @@ pub fn init_winit(
                             overlay_elements.splice(0..0, icon_elements);
                         }
 
+                        if let Some(badge) = identify_badge.as_ref()
+                            && let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                                renderer,
+                                (f64::from((size.w - 180).max(0) / 2), f64::from((size.h - 180).max(0) / 2)),
+                                badge, None, None, None, Kind::Unspecified,
+                            )
+                        {
+                            overlay_elements.insert(0, WinitFrameElement::from(element));
+                        }
+                        overlay_elements.splice(
+                            0..0,
+                            state.internal_ui
+                                .render_trusted_controls(renderer, &output.name(), (0, 0).into())
+                                .into_iter().map(WinitFrameElement::from),
+                        );
                         let recovery_visible = state.shell_recovery_visible();
                         if !recovery_visible {
                             state.recovery_ui.release_raster();
@@ -585,6 +621,11 @@ pub fn init_winit(
                         state.complete_output_capture(&path, result);
                     }
 
+                    if state.remote_capture_pending() {
+                        let (renderer, _) = backend.bind().unwrap();
+                        state.poll_remote_capture(renderer, (0, 0));
+                    }
+
                     if !state.locked && last_preview_capture.elapsed() >= PREVIEW_CAPTURE_INTERVAL
                     {
                         let wave = state.begin_preview_render_wave();
@@ -637,6 +678,8 @@ pub fn init_winit(
                     state.refresh_surface_scales();
                     state.popups.cleanup();
                     let _ = display.flush_clients();
+
+                    state.record_remote_frame_dispatch(&output.name(), trace_started.elapsed());
 
                     // Keep a bounded bootstrap pump so the initial XDG
                     // configure is flushed before clients can submit buffers.

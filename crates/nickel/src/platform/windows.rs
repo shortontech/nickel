@@ -1,3 +1,5 @@
+#[path = "windows_remote_observation.rs"]
+pub(crate) mod remote_observation;
 use std::{
     collections::{HashMap, HashSet},
     env,
@@ -93,7 +95,7 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR, w},
 };
 
-use nickel_core::hotkeys::{HotkeyAction, HotkeyOutcome, HotkeySnapshot, KeyCode, KeyEdge};
+use nickel_core::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
 use nickel_input::{
     AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
@@ -1070,7 +1072,6 @@ static WINDOWS_INPUT_ADAPTER: std::sync::OnceLock<Mutex<WindowsInputAdapter<Hotk
     std::sync::OnceLock::new();
 static WINDOW_SWITCH_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static INPUT_TRACE_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 static PANEL_FULLSCREEN_ACTIVE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static ORIGINAL_WORK_AREA: std::sync::Mutex<Option<RECT>> = std::sync::Mutex::new(None);
@@ -1143,6 +1144,7 @@ fn handle_native_keyboard_hook(
     registered_hotkey_owned: bool,
     alt_physically_held: bool,
 ) -> HookDisposition {
+    crate::windows_remote_control::observe_physical_key(event);
     // Alt changes the layout-translated virtual key for the physical grave key on some layouts
     // (for example to VK_HANJA). Preserve the physical shortcut using its stable scan code.
     let translated = physical_key(event.virtual_key, event.scan_code, event.extended);
@@ -1172,26 +1174,15 @@ fn handle_native_keyboard_hook(
     {
         adapter.observe_key_code(KeyCode::AltLeft, KeyEdge::Pressed);
     }
-    let (outcomes, snapshot) = windows_input_adapter()
+    let outcomes = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            let dispatch = adapter.handle_native(event);
-            let outcomes = dispatch
+            adapter
+                .handle_native(event)
                 .map(|dispatch| dispatch.outcomes)
-                .unwrap_or_default();
-            let snapshot = windows_input_snapshot(&adapter);
-            (outcomes, snapshot)
+                .unwrap_or_default()
         })
         .unwrap_or_default();
-    let outcome = outcomes
-        .first()
-        .map_or(HotkeyOutcome::default(), |item| HotkeyOutcome {
-            action: Some(item.action),
-            suppress: item.suppress,
-        });
-    if key != Some(KeyCode::KeyR) {
-        trace_input("key", key, Some(event.edge), outcome, snapshot);
-    }
     // The shared modifier-release binding deliberately dispatches only on the
     // release edge. Ownership still covers the preceding Super press so the
     // native Start menu cannot open alongside Nickel's launcher.
@@ -1257,84 +1248,6 @@ fn is_host_owned_action(action: HotkeyAction) -> bool {
     )
 }
 
-fn windows_input_snapshot(adapter: &WindowsInputAdapter<HotkeyAction>) -> HotkeySnapshot {
-    HotkeySnapshot {
-        super_held: adapter.modifier_held(AggregateModifier::Super),
-        alt_held: adapter.modifier_held(AggregateModifier::Alt),
-        shift_held: adapter.modifier_held(AggregateModifier::Shift),
-        control_held: adapter.modifier_held(AggregateModifier::Control),
-        tab_held: adapter.key_held(KeyCode::Tab),
-        grave_held: adapter.key_held(KeyCode::Backquote),
-        run_held: adapter.key_held(KeyCode::KeyR),
-        print_screen_held: adapter.key_held(KeyCode::PrintScreen),
-        left_held: adapter.key_held(KeyCode::ArrowLeft),
-        right_held: adapter.key_held(KeyCode::ArrowRight),
-        ..HotkeySnapshot::default()
-    }
-}
-
-fn input_trace_enabled() -> bool {
-    *INPUT_TRACE_ENABLED.get_or_init(|| {
-        env::var_os("NICKEL_INPUT_TRACE").is_some_and(|value| {
-            !matches!(
-                value.to_string_lossy().to_ascii_lowercase().as_str(),
-                "" | "0" | "false" | "no" | "off"
-            )
-        })
-    })
-}
-
-fn physical_key_states() -> (bool, bool, bool, bool, bool) {
-    const VK_LWIN: i32 = 0x5b;
-    const VK_RWIN: i32 = 0x5c;
-    const VK_MENU: i32 = 0x12;
-    const VK_SHIFT: i32 = 0x10;
-    const VK_TAB: i32 = 0x09;
-    const VK_OEM_3: i32 = 0xc0;
-    unsafe {
-        (
-            GetAsyncKeyState(VK_LWIN) < 0 || GetAsyncKeyState(VK_RWIN) < 0,
-            GetAsyncKeyState(VK_MENU) < 0,
-            GetAsyncKeyState(VK_SHIFT) < 0,
-            GetAsyncKeyState(VK_TAB) < 0,
-            GetAsyncKeyState(VK_OEM_3) < 0,
-        )
-    }
-}
-
-fn trace_input(
-    source: &str,
-    key: Option<KeyCode>,
-    edge: Option<KeyEdge>,
-    outcome: HotkeyOutcome,
-    state: HotkeySnapshot,
-) {
-    if !input_trace_enabled() {
-        return;
-    }
-    let foreground = unsafe { GetForegroundWindow() };
-    let (physical_super, physical_alt, physical_shift, physical_tab, physical_grave) =
-        physical_key_states();
-    eprintln!(
-        "input source={source} event={key:?} edge={edge:?} foreground={:?} \
-         physical[super={physical_super} alt={physical_alt} shift={physical_shift} tab={physical_tab} grave={physical_grave}] \
-         controller[super={} chord={} alt={} shift={} tab={} grave={} run={} switch={} launcher={}] \
-         suppress={} action={:?}",
-        foreground.0,
-        state.super_held,
-        state.super_chorded,
-        state.alt_held,
-        state.shift_held,
-        state.tab_held,
-        state.grave_held,
-        state.run_held,
-        state.switch_active,
-        state.launcher_visible,
-        outcome.suppress,
-        outcome.action
-    );
-}
-
 fn send_hotkey_action(action: Option<HotkeyAction>) {
     let shortcut = match action {
         Some(HotkeyAction::LockSession) => GlobalShortcut::LockState { locked: true },
@@ -1350,6 +1263,7 @@ fn send_hotkey_action(action: Option<HotkeyAction>) {
         Some(HotkeyAction::SwitchGroupNext) => GlobalShortcut::SwitchGroupNext,
         Some(HotkeyAction::SwitchGroupPrevious) => GlobalShortcut::SwitchGroupPrevious,
         Some(HotkeyAction::CommitSwitch) => GlobalShortcut::CommitSwitch,
+        Some(HotkeyAction::CancelSwitch) => GlobalShortcut::CancelSwitch,
         Some(HotkeyAction::CaptureActiveWindow) => {
             GlobalShortcut::Screenshot(ScreenshotAction::ActiveWindow)
         }
@@ -1434,17 +1348,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             }
             if release {
                 *drag = None;
-                let snapshot = windows_input_adapter()
-                    .lock()
-                    .map(|adapter| windows_input_snapshot(&adapter))
-                    .unwrap_or_default();
-                trace_input(
-                    "mouse-release",
-                    None,
-                    Some(KeyEdge::Released),
-                    HotkeyOutcome::default(),
-                    snapshot,
-                );
                 return HookDisposition::Suppress;
             }
             // Observe pointer motion without consuming it. Suppressing WM_MOUSEMOVE freezes the
@@ -1494,24 +1397,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         return HookDisposition::Forward;
     }
     let gesture = gesture.expect("a started pointer chord has a typed gesture");
-    let snapshot = windows_input_adapter()
-        .lock()
-        .map(|adapter| windows_input_snapshot(&adapter))
-        .unwrap_or_default();
-    trace_input(
-        if event.kind == NativePointerKind::PrimaryPressed {
-            "mouse-move"
-        } else {
-            "mouse-resize"
-        },
-        None,
-        Some(KeyEdge::Pressed),
-        HotkeyOutcome {
-            suppress: true,
-            action: None,
-        },
-        snapshot,
-    );
 
     let target = unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) };
     if target.0.is_null() {
@@ -1799,7 +1684,62 @@ pub fn launch_application(application: &Application) -> Result<Option<u32>, Laun
         .launch_command()
         .and_then(|command| command.split_first())
         .ok_or_else(|| LaunchError::MissingTarget(application.name().to_owned()))?;
+    if let Some(capture) =
+        crate::windows_application_registry::native::LaunchCapture::prepare(application)
+    {
+        return shell_execute_observed(capture);
+    }
     shell_execute(target, arguments)?;
+    Ok(None)
+}
+
+fn shell_execute_observed(
+    mut capture: crate::windows_application_registry::native::LaunchCapture,
+) -> Result<Option<u32>, LaunchError> {
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows::Win32::UI::Shell::{
+        SEE_MASK_NOASYNC, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    let target: Vec<u16> = capture.target().encode_utf16().chain([0]).collect();
+    let home = env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(|home| {
+            home.to_string_lossy()
+                .encode_utf16()
+                .chain([0])
+                .collect::<Vec<_>>()
+        });
+    let mut info = SHELLEXECUTEINFOW {
+        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+        fMask: SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC,
+        lpVerb: w!("open"),
+        lpFile: PCWSTR(target.as_ptr()),
+        lpDirectory: home
+            .as_ref()
+            .map_or(PCWSTR::null(), |home| PCWSTR(home.as_ptr())),
+        nShow: SW_SHOWNORMAL.0,
+        ..Default::default()
+    };
+    // SAFETY: Initialize COM for shell extensions on a launcher worker. A
+    // pre-existing apartment is left alone; successful initialization is balanced.
+    let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
+    // SAFETY: Initialized exact Win32 structure and live NUL-terminated strings.
+    // The shortcut file remains pinned by capture across this synchronous call.
+    capture.begin_invocation();
+    let launched = unsafe { ShellExecuteExW(&mut info) };
+    if initialized {
+        // SAFETY: Balances the successful initialization above on this thread.
+        unsafe { CoUninitialize() };
+    }
+    launched.map_err(|error| LaunchError::Platform(error.to_string()))?;
+    if info.hProcess.is_invalid() {
+        return Ok(None);
+    }
+    // SAFETY: NOCLOSEPROCESS transfers ownership of this successful result. DDE
+    // normally return no handle. Creation-time bounds independently reject a
+    // returned preexisting process before any application receipt is admitted.
+    let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess.0) };
+    capture.complete(process);
     Ok(None)
 }
 
@@ -2588,19 +2528,6 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
     let owner = icon.window as isize;
     let id = icon.id;
     let guid = tray_guid(icon);
-    if input_trace_enabled() {
-        eprintln!(
-            "tray receive operation={} owner={owner:#x} id={id} guid={guid:?} flags={:#x} \
-             callback={:#x} icon={:#x} state={:#x} state_mask={:#x} version={}",
-            tray_operation_name(message),
-            icon.flags,
-            icon.callback_message,
-            icon.icon,
-            icon.state,
-            icon.state_mask,
-            icon.version
-        );
-    }
     let Ok(mut items) = TRAY_ITEMS.lock() else {
         return false;
     };
@@ -2670,16 +2597,6 @@ fn update_tray_icon(message: u32, icon: &TrayNotifyIconData) -> bool {
             true
         }
         _ => false,
-    }
-}
-
-fn tray_operation_name(message: u32) -> &'static str {
-    match message {
-        value if value == NIM_ADD.0 => "add",
-        value if value == NIM_MODIFY.0 => "modify",
-        value if value == NIM_DELETE.0 => "delete",
-        value if value == NIM_SETVERSION.0 => "set-version",
-        _ => "unknown",
     }
 }
 
@@ -2854,35 +2771,26 @@ impl TrayFeed {
             };
             let wparam = WPARAM(((cursor.y as u16 as usize) << 16) | cursor.x as u16 as usize);
             let lparam = LPARAM(((icon.id as u16 as isize) << 16) | message as isize);
-            post_tray_callback(&icon, wparam, lparam, message);
+            post_tray_callback(&icon, wparam, lparam);
         } else {
             let wparam = WPARAM(icon.id as usize);
-            post_tray_callback(&icon, wparam, LPARAM(legacy_down as isize), legacy_down);
-            post_tray_callback(&icon, wparam, LPARAM(legacy_up as isize), legacy_up);
+            post_tray_callback(&icon, wparam, LPARAM(legacy_down as isize));
+            post_tray_callback(&icon, wparam, LPARAM(legacy_up as isize));
         }
     }
 }
 
-fn post_tray_callback(icon: &NativeTrayIcon, wparam: WPARAM, lparam: LPARAM, event: u32) {
+fn post_tray_callback(icon: &NativeTrayIcon, wparam: WPARAM, lparam: LPARAM) {
     unsafe {
-        let result = PostMessageW(
+        if PostMessageW(
             Some(HWND(icon.owner as *mut c_void)),
             icon.callback_message,
             wparam,
             lparam,
-        );
-        if input_trace_enabled() {
-            eprintln!(
-                "tray send owner={:#x} id={} guid={:?} version={} callback={:#x} \
-                 event={event:#x} wparam={:#x} lparam={:#x} result={result:?}",
-                icon.owner,
-                icon.id,
-                icon.guid,
-                icon.version,
-                icon.callback_message,
-                wparam.0,
-                lparam.0,
-            );
+        )
+        .is_err()
+        {
+            tracing::warn!("Windows tray callback delivery failed");
         }
     }
 }
@@ -3067,14 +2975,6 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 }
                 if attached_foreground {
                     let _ = AttachThreadInput(current_thread, foreground_thread, false);
-                }
-                if input_trace_enabled() {
-                    eprintln!(
-                        "input source=activate target={:?} previous={:?} current={:?} result={activated}",
-                        hwnd.0,
-                        foreground.0,
-                        GetForegroundWindow().0
-                    );
                 }
                 activated
             }
@@ -3343,28 +3243,32 @@ impl WindowFeed {
     }
 }
 
-unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
-    // SAFETY: EnumWindows invokes this callback with a valid top-level HWND.
+/// Shared read-only policy for task windows and remote observations. Enumeration
+/// callers own their separate bounds; only the bar path parks iconic windows.
+fn ordinary_window_metadata(hwnd: HWND) -> Option<(u32, String, String)> {
+    // SAFETY: Handle queries do not send input or mutate the target window.
     if unsafe { !IsWindowVisible(hwnd).as_bool() } {
-        return BOOL(1);
+        return None;
     }
-    let mut process_id = 0;
-    // SAFETY: process_id is valid writable storage for the duration of this call.
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
-    if process_id == std::process::id() {
-        return BOOL(1);
+    let mut pid = 0;
+    unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
     }
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    let title = window_title(hwnd)?;
+    let class = window_class(hwnd)?;
+    is_bar_eligible_window(hwnd, &class).then_some((pid, title, class))
+}
+
+unsafe extern "system" fn collect_window(hwnd: HWND, state: LPARAM) -> BOOL {
+    let Some((_process_id, title, class)) = ordinary_window_metadata(hwnd) else {
+        return BOOL(1);
+    };
+    // This presentation housekeeping belongs only to the existing bar feed.
     if unsafe { IsIconic(hwnd).as_bool() } {
         park_iconic_window(hwnd);
-    }
-    let Some(title) = window_title(hwnd) else {
-        return BOOL(1);
-    };
-    let Some(class) = window_class(hwnd) else {
-        return BOOL(1);
-    };
-    if !is_bar_eligible_window(hwnd, &class) {
-        return BOOL(1);
     }
     let application_id = Some(if is_nickel_host_terminal(&title) {
         ApplicationId::new("org.nickel.ShellTerminal")
@@ -3457,17 +3361,17 @@ fn is_last_visible_owned_window(hwnd: HWND) -> bool {
         if candidate.0.is_null() {
             candidate = hwnd;
         }
-        loop {
+        for _ in 0..64 {
             let popup = GetLastActivePopup(candidate);
             if popup == candidate {
-                break;
+                return candidate == hwnd;
             }
             candidate = popup;
             if IsWindowVisible(candidate).as_bool() {
-                break;
+                return candidate == hwnd;
             }
         }
-        candidate == hwnd
+        false
     }
 }
 
@@ -3488,7 +3392,7 @@ fn window_title(hwnd: HWND) -> Option<String> {
     if length <= 0 {
         return None;
     }
-    let mut buffer = vec![0_u16; length as usize + 1];
+    let mut buffer = vec![0_u16; (length as usize).min(4096) + 1];
     // SAFETY: buffer is writable and includes space for the terminating null.
     let copied = unsafe { GetWindowTextW(hwnd, &mut buffer) };
     (copied > 0).then(|| String::from_utf16_lossy(&buffer[..copied as usize]))
@@ -3681,6 +3585,103 @@ fn window_id(hwnd: HWND) -> WindowId {
 
 fn hwnd(window: WindowId) -> HWND {
     HWND(window.0 as usize as *mut c_void)
+}
+
+/// Affinity is one prerequisite only: it does not prove trusted z-order,
+/// accessibility or exclusion by every future capture implementation.
+pub(crate) fn prepare_trusted_control_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        LWA_ALPHA, SetLayeredWindowAttributes, SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+        WS_EX_LAYERED,
+    };
+    let hwnd = trusted_control_hwnd(window)?;
+    // GetWindowDisplayAffinity requires a layered window under DWM. Keep this
+    // ordinary opaque UI fully opaque; no input transparency is requested.
+    // SAFETY: the caller retains the current-process top-level Window.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | WS_EX_LAYERED.0 as isize);
+        if GetWindowLongPtrW(hwnd, GWL_EXSTYLE) & WS_EX_LAYERED.0 as isize == 0 {
+            return Err("cannot configure layered trusted window".to_owned());
+        }
+        SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA)
+            .map_err(|error| format!("cannot configure opaque trusted window: {error}"))?;
+    }
+    // SAFETY: this is a live top-level window borrowed from its winit owner.
+    unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) }
+        .map_err(|error| format!("cannot exclude trusted window from capture: {error}"))?;
+    verify_trusted_control_window(window)
+}
+
+/// Winit flag setters rewrite extended styles, dropping the layered bit. The
+/// trusted owner therefore shows/raises its retained HWND through this narrow
+/// adapter and checks actual native visibility rather than winit's cached flag.
+pub(crate) fn expose_trusted_control_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+    previously_visible: bool,
+) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindowVisible, SWP_SHOWWINDOW};
+    verify_trusted_control_window(window)?;
+    let hwnd = trusted_control_hwnd(window)?;
+    // SAFETY: this live HWND is retained by the owning winit Window.
+    unsafe {
+        if previously_visible && (!IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool()) {
+            return Err("trusted indicator is no longer visible".to_owned());
+        }
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        )
+        .map_err(|error| format!("cannot expose trusted indicator: {error}"))?;
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return Err("trusted indicator did not become visible".to_owned());
+        }
+    }
+    verify_trusted_control_window(window)
+}
+
+fn trusted_control_hwnd(window: &impl raw_window_handle::HasWindowHandle) -> Result<HWND, String> {
+    use windows::Win32::{
+        Graphics::Dwm::DwmIsCompositionEnabled,
+        UI::WindowsAndMessaging::{GA_ROOT, GetAncestor, GetWindowThreadProcessId},
+    };
+    let hwnd = window_hwnd(window).ok_or_else(|| "trusted window has no HWND".to_owned())?;
+    let mut process = 0;
+    // SAFETY: hwnd is borrowed from the live Window and process is writable.
+    let valid = unsafe {
+        GetWindowThreadProcessId(hwnd, Some(&raw mut process)) != 0
+            && process == std::process::id()
+            && GetAncestor(hwnd, GA_ROOT) == hwnd
+            && DwmIsCompositionEnabled().is_ok_and(|enabled| enabled.as_bool())
+    };
+    if !valid {
+        return Err("trusted window ownership or desktop composition is unavailable".to_owned());
+    }
+    Ok(hwnd)
+}
+
+pub(crate) fn verify_trusted_control_window(
+    window: &impl raw_window_handle::HasWindowHandle,
+) -> Result<(), String> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+    };
+    let hwnd = trusted_control_hwnd(window)?;
+    let mut affinity = 0;
+    // SAFETY: the owned window is retained and affinity points to writable storage.
+    unsafe { GetWindowDisplayAffinity(hwnd, &raw mut affinity) }
+        .map_err(|error| format!("cannot verify trusted capture affinity: {error}"))?;
+    if affinity != WDA_EXCLUDEFROMCAPTURE.0 {
+        return Err("trusted window capture exclusion is unavailable".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

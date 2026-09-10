@@ -44,7 +44,7 @@ pub enum WorkspaceDirection {
     Next,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Workspaces<WindowId> {
     ordered: Vec<Workspace<WindowId>>,
     membership: HashMap<WindowId, WorkspaceId>,
@@ -326,16 +326,33 @@ impl<WindowId: Clone + Eq + Hash> Workspaces<WindowId> {
         self.ordered[destination_index]
             .windows
             .extend(removed.windows.iter().cloned());
+        let preserve_active_focus = workspace != self.active
+            && destination_id == self.active
+            && self.ordered[destination_index].last_focused.is_some();
         if let Some(focused) = removed
             .last_focused
             .clone()
             .filter(|window| !self.focus_excluded.contains(window))
+            .filter(|_| !preserve_active_focus)
         {
             self.ordered[destination_index].last_focused = Some(focused);
         }
 
         if workspace != self.active {
-            return Ok(WorkspaceTransition::default());
+            return Ok(WorkspaceTransition {
+                hide: Vec::new(),
+                show: if destination_id == self.active {
+                    removed.windows
+                } else {
+                    Vec::new()
+                },
+                focus: self
+                    .ordered
+                    .iter()
+                    .find(|workspace| workspace.id == self.active)
+                    .and_then(|workspace| workspace.last_focused.clone())
+                    .filter(|window| !self.focus_excluded.contains(window)),
+            });
         }
         self.active = destination_id;
         let show = self.ordered[destination_index]
@@ -422,6 +439,45 @@ mod tests {
             }
         );
         assert!(!workspaces.is_visible(&"terminal"));
+    }
+
+    #[test]
+    fn removing_inactive_workspace_shows_transfers_without_stealing_active_focus() {
+        let mut workspaces = Workspaces::default();
+        workspaces.add_window("active");
+        workspaces.focused(&"active");
+        let first = workspaces.active();
+        let second = workspaces.create().unwrap();
+        workspaces.switch_to(second, None).unwrap();
+        workspaces.add_window("transferred");
+        workspaces.focused(&"transferred");
+        workspaces.switch_to(first, None).unwrap();
+        let transition = workspaces.remove(second).unwrap();
+        assert_eq!(transition.show, vec!["transferred"]);
+        assert!(transition.hide.is_empty());
+        assert_eq!(transition.focus, Some("active"));
+        assert_eq!(workspaces.workspace_for(&"transferred"), Some(first));
+        assert!(workspaces.is_visible(&"transferred"));
+        assert_eq!(workspaces.ordered()[0].last_focused, Some("active"));
+    }
+
+    #[test]
+    fn removing_into_an_inactive_neighbor_preserves_current_focus_without_showing_transfers() {
+        let mut workspaces = Workspaces::default();
+        workspaces.add_window("active");
+        workspaces.focused(&"active");
+        let first = workspaces.active();
+        let second = workspaces.create().unwrap();
+        let third = workspaces.create().unwrap();
+        workspaces.switch_to(third, None).unwrap();
+        workspaces.add_window("transferred");
+        workspaces.focused(&"transferred");
+        workspaces.switch_to(first, None).unwrap();
+        let transition = workspaces.remove(third).unwrap();
+        assert!(transition.show.is_empty() && transition.hide.is_empty());
+        assert_eq!(transition.focus, Some("active"));
+        assert_eq!(workspaces.workspace_for(&"transferred"), Some(second));
+        assert!(!workspaces.is_visible(&"transferred"));
     }
 
     #[test]

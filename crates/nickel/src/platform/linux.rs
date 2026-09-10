@@ -39,10 +39,18 @@ use crate::{
     },
 };
 
+#[path = "linux_guarded_control.rs"]
+mod linux_guarded_control;
+pub use linux_guarded_control::{
+    GuardedControlOrigin, GuardedControlOriginOwner, GuardedControlOutcome, submit_guarded_control,
+};
+
 #[path = "linux_audio.rs"]
 mod linux_audio;
 #[path = "linux_control.rs"]
 mod linux_control;
+#[path = "linux_discovery.rs"]
+mod linux_discovery;
 
 pub fn wallpaper() -> Wallpaper {
     Wallpaper::default()
@@ -478,6 +486,7 @@ pub fn update_panel_fullscreen_state() {}
 
 #[path = "../desktop_entries.rs"]
 mod desktop_entries;
+pub(crate) use desktop_entries::{installed_application_signatures, run_signature_diagnostics};
 
 const SESSION_CONTROL_ENV: &str = "NICKEL_SESSION_CONTROL";
 const SESSION_TOKEN_ENV: &str = "NICKEL_SESSION_TOKEN";
@@ -1211,7 +1220,11 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::CancelRemotePairing => "cancel-remote-pairing",
             SessionCommand::EmergencyStopRemoteControl => "emergency-stop-remote-control",
             SessionCommand::DecideRemoteClient { .. } => "decide-remote-client",
+            SessionCommand::DecideRemoteLease { .. } => "decide-remote-lease",
+            SessionCommand::ApproveRemoteLeaseDuration { .. } => "approve-remote-lease-duration",
+            SessionCommand::ManageRemoteLease { .. } => "manage-remote-lease",
             SessionCommand::RevokeRemoteClient { .. } => "revoke-remote-client",
+            SessionCommand::BlockRemoteClient { .. } => "block-remote-client",
             SessionCommand::ToggleLauncher => "toggle-launcher",
             SessionCommand::SetLauncherVisible { .. } => "set-launcher-visible",
             SessionCommand::SetLauncherVisibleFromController { .. } => {

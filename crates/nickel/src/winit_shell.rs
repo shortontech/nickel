@@ -297,6 +297,8 @@ pub enum SurfaceRole {
     Screenshot,
     OnScreenKeyboard,
     CodexChat,
+    #[cfg(target_os = "windows")]
+    TrustedControl,
 }
 
 #[cfg(target_os = "linux")]
@@ -535,6 +537,25 @@ impl WinitShell {
         })
     }
 
+    /// Payload-free wake for coalesced remote cleanup; never locks the event queue.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_cleanup_wake(&self) -> nickel_remote_control::ConnectionCleanupWake {
+        let event_thread = self.event_thread;
+        nickel_remote_control::ConnectionCleanupWake::new(move || {
+            // SAFETY: winit created the captured owner thread's message queue.
+            // No pointer or borrowed payload is passed; a retired thread fails closed.
+            unsafe {
+                PostThreadMessageW(
+                    event_thread,
+                    WM_APP + 0x4e,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                )
+            }
+            .is_ok()
+        })
+    }
+
     pub fn event_sender(&self) -> ShellEventSender {
         ShellEventSender {
             #[cfg(not(target_os = "windows"))]
@@ -613,6 +634,11 @@ impl WinitShell {
         self.retire_settled_output_surfaces(&output_names, Instant::now());
         if displays.is_empty() {
             for surface in &mut self.surfaces {
+                #[cfg(target_os = "windows")]
+                if surface.role == SurfaceRole::TrustedControl {
+                    // The trusted owner must reconcile topology before exposure.
+                    continue;
+                }
                 surface.display_connected = false;
                 surface.presenter = None;
                 surface.window.set_visible(false);
@@ -638,6 +664,11 @@ impl WinitShell {
                 || desired.contains(&(surface.output_name.clone(), SurfaceRole::Panel))
         });
         for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
             if output_role(surface.role)
                 && !desired.contains(&(surface.output_name.clone(), surface.role))
             {
@@ -704,6 +735,11 @@ impl WinitShell {
         let primary = displays[0];
         let primary_name = &output_names[0];
         for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
             if surface.display_connected
                 || matches!(
                     surface.role,
@@ -727,6 +763,11 @@ impl WinitShell {
         self.rebuild_surface_indices();
 
         for surface in &mut self.surfaces {
+            #[cfg(target_os = "windows")]
+            if surface.role == SurfaceRole::TrustedControl {
+                // The trusted owner must reconcile topology before exposure.
+                continue;
+            }
             if !surface.display_connected {
                 continue;
             }
@@ -1001,10 +1042,149 @@ impl WinitShell {
         Ok(id)
     }
 
+    /// Create an owned, initially hidden trusted indicator on one output.
+    ///
+    /// This does not establish native accessibility, persistence or a protected
+    /// capture pipeline. Only the production indicator owner can expose this
+    /// role after presentation; remote-control approval remains unavailable.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn create_trusted_control_surface(
+        &mut self,
+        output_name: &str,
+        leases: usize,
+    ) -> Result<SurfaceId, String> {
+        use winit::platform::windows::WindowAttributesExtWindows;
+        let (display_index, (geometry, _)) = self
+            .displays
+            .iter()
+            .enumerate()
+            .find(|(_, (_, name))| name == output_name)
+            .ok_or_else(|| "trusted indicator output is unavailable".to_owned())?;
+        let geometry = *geometry;
+        let (width, height) = crate::remote_indicator::indicator_physical_size(
+            leases,
+            geometry.width,
+            geometry.height,
+            geometry.scale,
+        );
+        let attributes = Window::default_attributes()
+            .with_title("Nickel Remote AI Control")
+            .with_active(false)
+            .with_skip_taskbar(true)
+            .with_position(winit::dpi::PhysicalPosition::new(geometry.x, geometry.y))
+            .with_inner_size(winit::dpi::PhysicalSize::new(width, height))
+            .with_decorations(false)
+            .with_resizable(false)
+            .with_visible(false);
+        #[allow(deprecated)]
+        let window = self
+            .events
+            .create_window(attributes)
+            .map_err(|error| error.to_string())?;
+        crate::platform::prepare_trusted_control_window(&window)?;
+        let id = SurfaceId(window.id());
+        let index = self.surfaces.len();
+        self.surface_indices.insert(id.0, index);
+        self.native_surface_indices.insert(window.id(), index);
+        self.surfaces.push(ShellSurface {
+            id,
+            role: SurfaceRole::TrustedControl,
+            application_id: "nickel.trusted-remote-control".to_owned(),
+            display_index,
+            output_name: output_name.to_owned(),
+            display_connected: true,
+            initial_exposed: false,
+            presenter: None,
+            last_host_change_token: None,
+            visible: false,
+            window,
+        });
+        Ok(id)
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn trusted_control_outputs(&self) -> Vec<(String, DisplayGeometry)> {
+        self.displays
+            .iter()
+            .map(|(geometry, name)| (name.clone(), *geometry))
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn resize_trusted_control_surface(
+        &mut self,
+        id: SurfaceId,
+        leases: usize,
+    ) -> Result<(), String> {
+        self.trusted_control_capture_affinity(id)?;
+        let surface = self.surface(id).ok_or("trusted surface disappeared")?;
+        let geometry = self
+            .displays
+            .iter()
+            .find(|(_, name)| name == &surface.output_name)
+            .map(|(geometry, _)| *geometry)
+            .ok_or("trusted output disappeared")?;
+        let (width, height) = crate::remote_indicator::indicator_physical_size(
+            leases,
+            geometry.width,
+            geometry.height,
+            geometry.scale,
+        );
+        let desired = winit::dpi::PhysicalSize::new(width, height);
+        if surface.window.inner_size() != desired {
+            let _ = surface.window.request_inner_size(desired);
+        }
+        Ok(())
+    }
+
+    /// Only the owning production indicator host can expose this role, after
+    /// presenting its first frame. Topmost is presentation policy, not proof of
+    /// secure-desktop persistence or readiness to grant remote control.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn expose_trusted_control_surface(&mut self, id: SurfaceId) -> Result<(), String> {
+        self.trusted_control_capture_affinity(id)?;
+        let surface = self.surface_mut(id).ok_or("trusted surface disappeared")?;
+        if surface.presenter.is_none() {
+            return Err("trusted indicator has no presented frame".to_owned());
+        }
+        crate::platform::expose_trusted_control_window(&surface.window, surface.visible)?;
+        surface.visible = true;
+        Ok(())
+    }
+
+    /// Check the actual retained owned window, never a caller-supplied HWND/title.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn trusted_control_capture_affinity(&self, id: SurfaceId) -> Result<(), String> {
+        let surface = self
+            .surface(id)
+            .filter(|surface| surface.role == SurfaceRole::TrustedControl)
+            .ok_or_else(|| "unknown trusted indicator".to_owned())?;
+        if !surface.display_connected
+            || !self
+                .displays
+                .iter()
+                .any(|(_, name)| name == &surface.output_name)
+        {
+            return Err("trusted indicator output is unavailable".to_owned());
+        }
+        crate::platform::verify_trusted_control_window(&surface.window)
+    }
+
     pub fn destroy_surface(&mut self, id: SurfaceId) {
         let Some(index) = self.surface_indices.remove(&id.0) else {
             return;
         };
+        #[cfg(target_os = "windows")]
+        if self.surfaces[index].role == SurfaceRole::TrustedControl {
+            // Purge queued events for a retired trusted surface before the
+            // generic close handler can mistake a stale CloseRequested for quit.
+            self.pending_events.retain(|event| !matches!(event,
+                ShellEvent::Input { surface, .. } | ShellEvent::FocusChanged { surface, .. }
+                | ShellEvent::LogicalResize { surface, .. } | ShellEvent::PixelResize { surface, .. }
+                | ShellEvent::PointerEntered { surface, .. } | ShellEvent::FileDrop { surface, .. }
+                | ShellEvent::Shown(surface) | ShellEvent::Hidden(surface)
+                | ShellEvent::CloseRequested(surface) | ShellEvent::Redraw(surface) if *surface == id));
+        }
         // Observe the process peak before dropping the presenter's last
         // diagnostics. A closed surface must release live bytes without
         // erasing the process-wide high-water mark.
@@ -1168,6 +1348,13 @@ impl WinitShell {
     }
 
     pub fn show(&mut self, id: SurfaceId) -> bool {
+        #[cfg(target_os = "windows")]
+        if self
+            .surface(id)
+            .is_some_and(|surface| surface.role == SurfaceRole::TrustedControl)
+        {
+            return false;
+        }
         let Some(index) = self.surface_indices.get(&id.0).copied() else {
             return false;
         };
@@ -1514,6 +1701,8 @@ impl WinitShell {
             SurfaceRole::Screenshot => SessionShellRole::Screenshot,
             SurfaceRole::OnScreenKeyboard => SessionShellRole::OnScreenKeyboard,
             SurfaceRole::CodexChat => unreachable!("chat surfaces are dynamic"),
+            #[cfg(target_os = "windows")]
+            SurfaceRole::TrustedControl => unreachable!("trusted surfaces are dynamic"),
         };
         #[cfg(not(target_os = "linux"))]
         let application_id = session_role.application_id().to_owned();
@@ -1841,6 +2030,8 @@ fn surface_geometry(
             true,
         ),
         SurfaceRole::CodexChat => unreachable!("chat surfaces are created dynamically"),
+        #[cfg(target_os = "windows")]
+        SurfaceRole::TrustedControl => unreachable!("trusted surfaces are created dynamically"),
         SurfaceRole::OnScreenKeyboard => {
             let height = nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT
                 .min(geometry.height.saturating_sub(1));

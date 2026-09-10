@@ -383,6 +383,23 @@ fn compositor_owned_shell_scenario_routes_focus_switching_and_files_without_tran
         }
     )));
 
+    // The Windows shortcut adapter forwards cancellation through this same
+    // production shell action without committing the highlighted candidate.
+    shell.task_switcher = TaskSwitcher::default();
+    shell
+        .task_switcher
+        .apply(HotkeyAction::SwitchNext, &switch_windows);
+    session.0.lock().unwrap().clear();
+    assert!(shell.global_shortcut(crate::platform::GlobalShortcut::CancelSwitch));
+    assert!(shell.task_switcher.session().is_none());
+    assert!(!session.0.lock().unwrap().iter().any(|command| matches!(
+        command,
+        crate::platform::ShellCommand::WindowAction {
+            action: crate::platform::WindowAction::Activate,
+            ..
+        }
+    )));
+
     let path = PathBuf::from("/tmp/internal-file-scenario");
     shell.launch_application(crate::model::Application::new(
         "place:test".into(),

@@ -1,3 +1,14 @@
+mod remote_indicator;
+#[cfg(any(test, target_os = "windows"))]
+mod trusted_accessibility;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_application_registry;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_emergency_chord;
+#[cfg(target_os = "windows")]
+mod windows_remote_control;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_resource_owner;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{
     ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
@@ -75,6 +86,7 @@ mod control_view;
 mod internal_shell;
 mod launcher_view;
 mod live_shell;
+mod local_cues;
 #[allow(dead_code)]
 mod model;
 mod notification;
@@ -1295,6 +1307,10 @@ fn sync_visibility(shell: &mut WinitShell, state: &LiveShell) {
         .map(|surface| (surface.id(), surface.role()))
         .collect::<Vec<_>>();
     for (id, role) in surfaces {
+        #[cfg(target_os = "windows")]
+        if role == SurfaceRole::TrustedControl {
+            continue;
+        }
         #[cfg(target_os = "linux")]
         if role == SurfaceRole::Launcher {
             continue;
@@ -2148,6 +2164,15 @@ pub fn run() -> Result<(), String> {
     wait_for_initial_display(&mut shell)?;
     shell.set_primary_output_name(platform::configured_primary_output())?;
     shell.create_shell_surfaces()?;
+    #[cfg(target_os = "windows")]
+    let mut remote_control =
+        match windows_remote_control::WindowsRemoteControl::start(shell.remote_cleanup_wake()) {
+            Ok(owner) => Some(owner),
+            Err(error) => {
+                tracing::warn!(%error, "Windows remote control remains unavailable");
+                None
+            }
+        };
     #[cfg(target_os = "linux")]
     wait_for_shell_readiness()?;
     let mut state = LiveShell::new()?;
@@ -2267,10 +2292,22 @@ pub fn run() -> Result<(), String> {
     let mut diagnostic_overdue_after_poll = Vec::new();
     let mut project_menu_changed_since_refresh = false;
     loop {
+        #[cfg(target_os = "windows")]
+        if let Some(owner) = &mut remote_control {
+            owner.poll();
+            owner.reconcile_indicators(&mut shell, state.semantic_theme());
+        }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
         let now = Instant::now();
         if controller_schedule.is_due(now) {
             for action in controller.poll_global(now) {
+                #[cfg(target_os = "windows")]
+                if remote_control
+                    .as_mut()
+                    .is_some_and(|owner| owner.indicator_controller(&mut shell, action))
+                {
+                    continue;
+                }
                 shell.begin_input_observation(Instant::now());
                 let result = handle_controller_action(
                     &mut shell,
@@ -2316,13 +2353,15 @@ pub fn run() -> Result<(), String> {
             .map(|deadline| deadline.min(next_deadline))
             .unwrap_or(next_deadline);
         let timeout = next_deadline.saturating_duration_since(Instant::now());
+        #[cfg(target_os = "windows")]
+        let timeout = timeout.min(Duration::from_millis(100));
         let event = shell.wait_event_timeout(timeout);
         if diagnostic_loop_started.elapsed() >= Duration::from_secs(1) {
             if diagnostic_loop_iterations >= 1 {
                 tracing::info!(
                     iterations = diagnostic_loop_iterations,
                     ?timeout,
-                    ?event,
+                    event_available = event.is_some(),
                     fast_due = fast_subscription.is_due(Instant::now()),
                     system_due = system_subscription.is_due(Instant::now()),
                     host_deadline = ?state.next_host_deadline(),
@@ -2333,6 +2372,14 @@ pub fn run() -> Result<(), String> {
             }
             diagnostic_loop_started = Instant::now();
             diagnostic_loop_iterations = 0;
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(ref event) = event
+            && remote_control
+                .as_mut()
+                .is_some_and(|owner| owner.indicator_event(&mut shell, event))
+        {
+            continue;
         }
         if let Some(ref event) = event
             && handle_codex_event(&mut codex, &mut shell, &mut state, event)?
@@ -2599,7 +2646,9 @@ pub fn run() -> Result<(), String> {
                 }
             }
             Some(ShellEvent::Redraw(_)) => {}
-            Some(event) => tracing::debug!(?event, "winit shell event"),
+            // Unhandled events may acquire text-bearing variants over time.
+            // Diagnostics must never format the raw event or its input payload.
+            Some(_) => {}
             None => {}
         }
         if shell

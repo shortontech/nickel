@@ -426,6 +426,12 @@ fn masked_text_field_semantics_never_publish_the_input_value() {
     );
     let password = &frame.semantic_nodes()[0];
 
+    assert!(frame.has_protected_text());
+    assert!(
+        !UiFrame::<()>::layout(Text::new("Ordinary"), Rect::new(0.0, 0.0, 100.0, 30.0))
+            .has_protected_text()
+    );
+
     assert_eq!(password.role, Some(SemanticRole::TextField));
     assert_eq!(password.name.as_deref(), Some("Password"));
     assert_eq!(password.actions, vec![ActionKind::SetValue]);
@@ -4512,5 +4518,51 @@ fn vertical_wheel_over_horizontal_overflow_chains_to_the_document() {
             .expect("outer document scroll")
             .offset,
         30.0
+    );
+}
+
+#[test]
+fn bounded_semantics_preserve_complete_projection_and_reject_small_budgets() {
+    let frame = UiFrame::layout(
+        Row::new().id("layout-parent").child(
+            TextField::on_change("ordinary input", map_query)
+                .id("query")
+                .accessibility_label("Search"),
+        ),
+        Rect::new(0.0, 0.0, 320.0, 40.0),
+    );
+    assert_eq!(
+        frame.bounded_semantic_nodes(64, 4096).unwrap(),
+        frame.semantic_nodes()
+    );
+    assert_eq!(
+        frame.bounded_semantic_nodes(1, 4096),
+        Err(BoundedSemanticError::BudgetExceeded)
+    );
+    assert_eq!(
+        frame.bounded_semantic_nodes(64, 0),
+        Err(BoundedSemanticError::BudgetExceeded)
+    );
+    let huge = UiFrame::layout(
+        TextField::on_change("display", map_query)
+            .id("x".repeat(8192))
+            .accessibility_label("name"),
+        Rect::new(0.0, 0.0, 320.0, 40.0),
+    );
+    assert_eq!(
+        huge.bounded_semantic_nodes(64, 4096),
+        Err(BoundedSemanticError::BudgetExceeded)
+    );
+}
+
+#[test]
+fn bounded_semantics_refuse_protected_values_without_publishing_lengths() {
+    let frame = UiFrame::layout(
+        TextField::on_change_masked_with_placeholder("secret", "Password", '•', map_query),
+        Rect::new(0.0, 0.0, 320.0, 40.0),
+    );
+    assert_eq!(
+        frame.bounded_semantic_nodes(64, 4096),
+        Err(BoundedSemanticError::ProtectedSurface)
     );
 }

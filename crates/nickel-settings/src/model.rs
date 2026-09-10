@@ -54,9 +54,9 @@ pub(super) struct SettingsApp {
     pub(super) codex_disable_confirmation: bool,
     pub(super) remote_control_settings: nickel_remote_control::RemoteAiControlSettings,
     pub(super) remote_control_runtime: nickel_session_protocol::RemoteControlSnapshot,
+    pub(super) remote_lease_custom_minutes: String,
     pub(super) remote_pairing: Option<nickel_session_protocol::RemotePairingSnapshot>,
     pub(super) remote_pairing_qr: Option<Arc<image::RgbaImage>>,
-    pub(super) remote_control_enable_confirmation: bool,
     pub(super) next_optional_feature_refresh: Instant,
     pub(super) shell_settings: ShellSettings,
     pub(super) shell_topology_generation: u64,
@@ -131,13 +131,28 @@ impl Default for SettingsApp {
         })
         .unwrap_or(nickel_session_protocol::RemoteControlSnapshot {
             requested_enabled: remote_control_settings.requested_enabled,
-            effective: nickel_session_protocol::RemoteControlEffectiveState::Disabled,
+            effective: nickel_session_protocol::RemoteControlEffectiveState::Rejected,
             generation: remote_control_settings.generation,
             acknowledged_generation: 0,
             endpoint: nickel_remote_control::MCP_ENDPOINT.into(),
-            diagnostic: None,
+            host_fingerprint: None,
+            environment_override: false,
+            diagnostic: Some(
+                "Remote control status is unavailable; the session has not acknowledged its listener state."
+                    .into(),
+            ),
             pending_clients: Vec::new(),
+            pending_leases: Vec::new(),
+            active_leases: Vec::new(),
             granted_clients: Vec::new(),
+            lease_audit: Vec::new(),
+            lease_audit_evicted: 0,
+            permission_audit: Vec::new(),
+            permission_audit_evicted: 0,
+            trace_audit: Vec::new(),
+            trace_audit_evicted: 0,
+            connection_audit: Vec::new(),
+            connection_audit_evicted: 0,
         });
         let application_scale_policy = nickel_core::dpi::ApplicationScaleSettings::load_default()
             .unwrap_or_default()
@@ -246,9 +261,9 @@ impl Default for SettingsApp {
             codex_disable_confirmation: false,
             remote_control_settings,
             remote_control_runtime,
+            remote_lease_custom_minutes: "20".into(),
             remote_pairing: None,
             remote_pairing_qr: None,
-            remote_control_enable_confirmation: false,
             next_optional_feature_refresh: Instant::now(),
             shell_settings,
             shell_topology_generation,

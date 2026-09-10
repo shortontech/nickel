@@ -162,6 +162,13 @@ impl<A: Clone> RegistrationTable<A> {
         self.by_id.clear();
     }
 
+    /// Current registrations only; deliberately excludes delivery and held state.
+    pub fn registrations(&self) -> impl Iterator<Item = (RegistrationId, &Registration<A>)> {
+        self.by_id
+            .iter()
+            .map(|(id, registration)| (*id, registration))
+    }
+
     pub fn registration(&self, id: RegistrationId) -> Option<&Registration<A>> {
         self.by_id.get(&id)
     }
