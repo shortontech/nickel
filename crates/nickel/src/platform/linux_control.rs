@@ -11,7 +11,9 @@ use zbus::{
 };
 
 use super::super::{
-    BluetoothDeviceStatus, BluetoothStatus, NetworkStatus, SystemStatusUpdate, WifiNetworkStatus,
+    BluetoothDeviceStatus, BluetoothStatus, CONNECTIVITY_DEVICE_LIMIT, CONNECTIVITY_TEXT_LIMIT,
+    ConnectivityRefresh, NetworkStatus, SystemStatusUpdate, WifiNetworkStatus,
+    bound_connectivity_refresh,
 };
 use nickel_session_protocol::ConsumerControl;
 
@@ -30,6 +32,7 @@ enum Command {
     SetBluetoothPowered(bool),
     SetBluetoothDiscovery(bool),
     ToggleBluetoothDevice(String),
+    RefreshConnectivity(mpsc::SyncSender<Result<ConnectivityRefresh, String>>),
 }
 
 struct ControlBackend {
@@ -362,6 +365,17 @@ pub fn toggle_bluetooth_device(id: &str) -> bool {
         .is_ok()
 }
 
+pub fn refresh_connectivity() -> Result<ConnectivityRefresh, String> {
+    let (reply, response) = mpsc::sync_channel(1);
+    backend()
+        .commands
+        .send(Command::RefreshConnectivity(reply))
+        .map_err(|_| "connectivity worker stopped".to_owned())?;
+    response
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "connectivity refresh timed out".to_owned())?
+}
+
 fn backend() -> &'static ControlBackend {
     BACKEND.get_or_init(|| {
         let network = Arc::new(RwLock::new(NetworkStatus::default()));
@@ -397,12 +411,29 @@ fn worker(
         let timeout = next_refresh.saturating_duration_since(Instant::now());
         match commands.recv_timeout(timeout) {
             Ok(command) => {
-                if let Some(connection) = system.as_ref()
-                    && let Err(error) = apply_command(connection, command)
-                {
-                    tracing::warn!(%error, "Linux Control Center command failed");
-                }
+                let refresh_reply = match command {
+                    Command::RefreshConnectivity(reply) => Some(reply),
+                    command => {
+                        if let Some(connection) = system.as_ref()
+                            && let Err(error) = apply_command(connection, command)
+                        {
+                            tracing::warn!(%error, "Linux Control Center command failed");
+                        }
+                        None
+                    }
+                };
                 next_refresh = Instant::now();
+                if refresh_reply.is_some() {
+                    refresh_connectivity_snapshot(
+                        system.as_ref(),
+                        &network,
+                        &bluetooth,
+                        &subscribers,
+                        refresh_reply,
+                    );
+                    next_refresh = Instant::now() + Duration::from_secs(2);
+                    continue;
+                }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
@@ -411,30 +442,58 @@ fn worker(
         if Instant::now() < next_refresh {
             continue;
         }
-        let network_snapshot = system
-            .as_ref()
-            .and_then(|connection| read_network_status(connection).ok())
-            .unwrap_or_default();
-        let bluetooth_snapshot = system
-            .as_ref()
-            .and_then(|connection| read_bluetooth_status(connection).ok())
-            .unwrap_or_default();
+        refresh_connectivity_snapshot(system.as_ref(), &network, &bluetooth, &subscribers, None);
+        next_refresh = Instant::now() + Duration::from_secs(2);
+    }
+}
+
+fn refresh_connectivity_snapshot(
+    system: Option<&Connection>,
+    network: &Arc<RwLock<NetworkStatus>>,
+    bluetooth: &Arc<RwLock<BluetoothStatus>>,
+    subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
+    reply: Option<mpsc::SyncSender<Result<ConnectivityRefresh, String>>>,
+) {
+    let (network_snapshot, network_partial) = system
+        .and_then(|connection| read_network_status(connection).ok())
+        .unwrap_or_default();
+    let (bluetooth_snapshot, bluetooth_partial) = system
+        .and_then(|connection| read_bluetooth_status(connection).ok())
+        .unwrap_or_default();
+    let mut refresh = bound_connectivity_refresh(network_snapshot, bluetooth_snapshot);
+    refresh.partial |= network_partial || bluetooth_partial;
+    let network_snapshot = refresh.network;
+    let bluetooth_snapshot = refresh.bluetooth;
+    if reply.is_none() {
         if let Ok(mut current) = network.write()
             && *current != network_snapshot
         {
             current.clone_from(&network_snapshot);
-            publish(&subscribers, SystemStatusUpdate::Network(network_snapshot));
+            publish(
+                subscribers,
+                SystemStatusUpdate::Network(network_snapshot.clone()),
+            );
         }
         if let Ok(mut current) = bluetooth.write()
             && *current != bluetooth_snapshot
         {
             current.clone_from(&bluetooth_snapshot);
             publish(
-                &subscribers,
-                SystemStatusUpdate::Bluetooth(bluetooth_snapshot),
+                subscribers,
+                SystemStatusUpdate::Bluetooth(bluetooth_snapshot.clone()),
             );
         }
-        next_refresh = Instant::now() + Duration::from_secs(2);
+    }
+    if let Some(reply) = reply {
+        let result = system
+            .is_some()
+            .then_some(ConnectivityRefresh {
+                network: network_snapshot,
+                bluetooth: bluetooth_snapshot,
+                partial: refresh.partial,
+            })
+            .ok_or_else(|| "system bus is unavailable".to_owned());
+        let _ = reply.send(result);
     }
 }
 
@@ -448,7 +507,7 @@ fn publish(
     }
 }
 
-fn read_network_status(connection: &Connection) -> zbus::Result<NetworkStatus> {
+fn read_network_status(connection: &Connection) -> zbus::Result<(NetworkStatus, bool)> {
     let manager = Proxy::new(
         connection,
         NETWORK_MANAGER,
@@ -461,10 +520,16 @@ fn read_network_status(connection: &Connection) -> zbus::Result<NetworkStatus> {
     let devices = manager
         .call::<_, _, Vec<OwnedObjectPath>>("GetDevices", &())
         .unwrap_or_default();
-    let saved = nickel_platform::network_manager_saved_wifi_connections(connection);
+    let mut partial = devices.len() > CONNECTIVITY_DEVICE_LIMIT;
+    let saved = nickel_platform::network_manager_saved_wifi_connections_bounded(
+        connection,
+        CONNECTIVITY_DEVICE_LIMIT,
+        || true,
+    );
+    partial |= saved.len() == CONNECTIVITY_DEVICE_LIMIT;
     let mut networks = Vec::new();
 
-    for device_path in devices {
+    for device_path in devices.into_iter().take(CONNECTIVITY_DEVICE_LIMIT) {
         let device = Proxy::new(
             connection,
             NETWORK_MANAGER,
@@ -486,7 +551,12 @@ fn read_network_status(connection: &Connection) -> zbus::Result<NetworkStatus> {
         let access_points = wireless
             .get_property::<Vec<OwnedObjectPath>>("AccessPoints")
             .unwrap_or_default();
-        for access_point_path in access_points {
+        partial |= access_points.len() > CONNECTIVITY_DEVICE_LIMIT;
+        for access_point_path in access_points.into_iter().take(CONNECTIVITY_DEVICE_LIMIT) {
+            if networks.len() == CONNECTIVITY_DEVICE_LIMIT {
+                partial = true;
+                break;
+            }
             let access_point = Proxy::new(
                 connection,
                 NETWORK_MANAGER,
@@ -496,7 +566,13 @@ fn read_network_status(connection: &Connection) -> zbus::Result<NetworkStatus> {
             let ssid = access_point
                 .get_property::<Vec<u8>>("Ssid")
                 .unwrap_or_default();
-            let name = String::from_utf8_lossy(&ssid).trim().to_owned();
+            let raw_name = String::from_utf8_lossy(&ssid);
+            partial |= raw_name.chars().count() > CONNECTIVITY_TEXT_LIMIT;
+            let name = raw_name
+                .trim()
+                .chars()
+                .take(CONNECTIVITY_TEXT_LIMIT)
+                .collect::<String>();
             if name.is_empty() {
                 continue;
             }
@@ -520,36 +596,43 @@ fn read_network_status(connection: &Connection) -> zbus::Result<NetworkStatus> {
     networks.dedup_by(|left, right| left.name == right.name);
     let active = networks.iter().find(|network| network.connected);
 
-    Ok(NetworkStatus {
-        available: true,
-        enabled,
-        connected: active.is_some(),
-        name: active
-            .map(|network| network.name.clone())
-            .unwrap_or_default(),
-        signal_percent: active.map(|network| network.signal_percent).unwrap_or(0),
-        networks,
-    })
+    Ok((
+        NetworkStatus {
+            available: true,
+            enabled,
+            connected: active.is_some(),
+            name: active
+                .map(|network| network.name.clone())
+                .unwrap_or_default(),
+            signal_percent: active.map(|network| network.signal_percent).unwrap_or(0),
+            networks,
+        },
+        partial,
+    ))
 }
 
-fn read_bluetooth_status(connection: &Connection) -> zbus::Result<BluetoothStatus> {
+fn read_bluetooth_status(connection: &Connection) -> zbus::Result<(BluetoothStatus, bool)> {
     let objects = managed_bluez_objects(connection)?;
+    let mut partial = objects.len() > CONNECTIVITY_DEVICE_LIMIT;
     let adapter = objects
         .iter()
         .find(|(_, interfaces)| interfaces.contains_key("org.bluez.Adapter1"));
     let Some((_, adapter_interfaces)) = adapter else {
-        return Ok(BluetoothStatus::default());
+        return Ok((BluetoothStatus::default(), partial));
     };
     let properties = &adapter_interfaces["org.bluez.Adapter1"];
     let powered = property::<bool>(properties, "Powered").unwrap_or(false);
     let discovering = property::<bool>(properties, "Discovering").unwrap_or(false);
     let mut devices = objects
         .iter()
+        .take(CONNECTIVITY_DEVICE_LIMIT)
         .filter_map(|(path, interfaces)| {
             let properties = interfaces.get("org.bluez.Device1")?;
-            let name = property::<String>(properties, "Alias")
+            let raw_name = property::<String>(properties, "Alias")
                 .or_else(|| property::<String>(properties, "Name"))
                 .unwrap_or_else(|| "Unknown device".into());
+            partial |= raw_name.chars().count() > CONNECTIVITY_TEXT_LIMIT;
+            let name = raw_name.chars().take(CONNECTIVITY_TEXT_LIMIT).collect();
             Some(BluetoothDeviceStatus {
                 id: path.as_str().to_owned(),
                 name,
@@ -565,12 +648,15 @@ fn read_bluetooth_status(connection: &Connection) -> zbus::Result<BluetoothStatu
             .then_with(|| right.paired.cmp(&left.paired))
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
     });
-    Ok(BluetoothStatus {
-        available: true,
-        powered,
-        discovering,
-        devices,
-    })
+    Ok((
+        BluetoothStatus {
+            available: true,
+            powered,
+            discovering,
+            devices,
+        },
+        partial,
+    ))
 }
 
 pub(super) fn managed_bluez_objects(connection: &Connection) -> zbus::Result<ManagedObjects> {
@@ -840,6 +926,9 @@ fn prepare_command_with_guard(
                 method: if connected { "Disconnect" } else { "Connect" },
             }
         }
+        Command::RefreshConnectivity(_) => {
+            return Err("refresh command cannot enter the mutation path".into());
+        }
     })
 }
 
@@ -1023,7 +1112,7 @@ fn bluetooth_adapter_path(connection: &Connection) -> Result<OwnedObjectPath, St
 
 #[cfg(test)]
 mod tests {
-    use super::{MPRIS_PLAYER_CAPACITY, MprisPlayer, MprisTracker};
+    use super::{MPRIS_PLAYER_CAPACITY, MprisPlayer, MprisTracker, refresh_connectivity_snapshot};
     use nickel_session_protocol::ConsumerControl;
 
     #[derive(Default)]
@@ -1040,6 +1129,42 @@ mod tests {
         fn set_wireless_enabled(&mut self, value: bool) {
             self.enabled = value;
         }
+    }
+
+    #[test]
+    fn requested_connectivity_preparation_never_publishes_before_owner_commit() {
+        let network = std::sync::Arc::new(std::sync::RwLock::new(super::NetworkStatus {
+            available: true,
+            ..Default::default()
+        }));
+        let bluetooth = std::sync::Arc::new(std::sync::RwLock::new(super::BluetoothStatus {
+            available: true,
+            ..Default::default()
+        }));
+        let (_sender, receiver) = crate::platform::status_mailbox::channel();
+        let subscribers = std::sync::Arc::new(std::sync::Mutex::new(vec![receiver.sender()]));
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        refresh_connectivity_snapshot(None, &network, &bluetooth, &subscribers, Some(reply));
+        assert!(response.recv().unwrap().is_err());
+        assert!(network.read().unwrap().available);
+        assert!(bluetooth.read().unwrap().available);
+        assert!(receiver.drain().is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires the native Linux system bus"]
+    fn native_connectivity_refresh_returns_a_bounded_production_snapshot() {
+        let refresh = super::refresh_connectivity().expect("native connectivity worker refresh");
+        assert!(refresh.network.networks.len() <= super::CONNECTIVITY_DEVICE_LIMIT);
+        assert!(refresh.bluetooth.devices.len() <= super::CONNECTIVITY_DEVICE_LIMIT);
+        assert!(refresh.network.networks.iter().all(|entry| {
+            entry.id.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+                && entry.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+        }));
+        assert!(refresh.bluetooth.devices.iter().all(|entry| {
+            entry.id.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+                && entry.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+        }));
     }
 
     #[test]

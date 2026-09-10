@@ -694,6 +694,13 @@ pub fn bluetooth_status() -> super::BluetoothStatus {
     super::BluetoothStatus::default()
 }
 
+pub(crate) fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh, String> {
+    Ok(super::bound_connectivity_refresh(
+        network_status(),
+        bluetooth_status(),
+    ))
+}
+
 pub fn set_bluetooth_powered(_powered: bool) -> bool {
     false
 }

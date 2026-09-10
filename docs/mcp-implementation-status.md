@@ -1360,3 +1360,18 @@ application directories completed within every catalog budget. Native cancellati
 and presented launcher/icon acceptance remain open. The installed Windows Rust target is currently insufficient for this
 slice because `x86_64-w64-mingw32-gcc` is unavailable, and no native Windows
 execution is claimed. No source files were added; the exact inventory remains 344.
+
+The safe platform re-query action now has an exact `connectivity` domain. Linux
+queues an acknowledged immediate NetworkManager/BlueZ observation on the existing
+production worker; requested preparation cannot publish or replace shell state.
+Windows uses its existing native connectivity readers on the bounded diagnostic
+worker. Device, access-point, saved-profile and BlueZ-object counts and retained
+IDs/labels are capped, with truncation reported as partial. After preparation the
+compositor rechecks full-debug authority, reserves shared input, rejects active
+physical, shell, touch, controller, grab or remote-held interaction, advances its
+own generation, and reconciles only the fresh returned snapshots. The outcome
+contains coarse availability, timing, generation and reconciliation without SSIDs,
+device names, paths, credentials or a pixel-presentation claim. Schema, bounds,
+prepublication and native Linux production-worker tests pass. Live delayed
+revocation and Control Center presentation acceptance and native Windows execution
+remain open. No source files were added; the exact inventory remains 344.

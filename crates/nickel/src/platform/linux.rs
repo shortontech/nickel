@@ -392,6 +392,10 @@ pub fn toggle_bluetooth_device(id: &str) -> bool {
     linux_control::toggle_bluetooth_device(id)
 }
 
+pub(crate) fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh, String> {
+    linux_control::refresh_connectivity()
+}
+
 pub fn audio_status() -> super::AudioStatus {
     linux_audio::status()
 }

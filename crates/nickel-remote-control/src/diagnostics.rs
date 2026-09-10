@@ -11,6 +11,10 @@ pub enum DiagnosticAction {
     RefreshScene,
     /// Rescan the bounded platform-owned installed-application catalog.
     RefreshApplicationInventory,
+    /// Ask one allowlisted production platform worker for a fresh observation.
+    RefreshPlatformStatus {
+        domain: PlatformRefreshDomain,
+    },
     StartFrameTrace {
         duration_seconds: u16,
     },
@@ -44,6 +48,25 @@ pub struct DiagnosticActionOutcome {
     /// Present only for an accepted output identification; never a presentation claim.
     pub output_identification: Option<OutputIdentificationOutcome>,
     pub application_inventory_refresh: Option<ApplicationInventoryRefreshOutcome>,
+    pub platform_refresh: Option<PlatformRefreshOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformRefreshDomain {
+    Connectivity,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct PlatformRefreshOutcome {
+    pub domain: PlatformRefreshDomain,
+    pub generation: u64,
+    pub preparation_duration_us: u64,
+    pub network_available: bool,
+    pub bluetooth_available: bool,
+    pub partial: bool,
+    /// The compositor reconciled the returned snapshots; this is not presentation confirmation.
+    pub reconciliation_confirmed: bool,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -614,6 +637,27 @@ mod output_identification_tests {
                 }))
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn platform_refresh_is_an_exact_allowlisted_domain_without_payloads() {
+        let action: DiagnosticAction = serde_json::from_value(serde_json::json!({
+            "refresh_platform_status": {"domain": "connectivity"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            action,
+            DiagnosticAction::RefreshPlatformStatus {
+                domain: PlatformRefreshDomain::Connectivity
+            }
+        ));
+        for value in [
+            serde_json::json!({"refresh_platform_status": {"domain": "all"}}),
+            serde_json::json!({"refresh_platform_status": {"domain": "permissions"}}),
+            serde_json::json!({"refresh_platform_status": {"domain": "connectivity", "path": "/"}}),
+        ] {
+            assert!(serde_json::from_value::<DiagnosticAction>(value).is_err());
         }
     }
 }

@@ -289,6 +289,11 @@ reconciliation and icon-cache owners, and routes the path-free diagnostic action
 through the existing bounded worker and compositor authority. The scan, catalog,
 metadata, and Windows recursion limits remain platform discovery policy rather
 than client-controlled payloads; the exact source inventory remains 344.
+Connectivity diagnostic refresh adds no source files. It reuses the production
+NetworkManager/BlueZ worker and `SystemStatusUpdate` compositor reconciliation,
+adding an acknowledged preparation command rather than another D-Bus owner. The
+wire schema exposes only a fixed domain and coarse outcome; bounded platform
+snapshots remain internal. The exact source inventory remains 344.
 GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed
 input provenance, while the bounded observer exposes only admitted metadata.

@@ -29,6 +29,10 @@ pub fn bluetooth_status() -> super::BluetoothStatus {
     super::BluetoothStatus::default()
 }
 
+pub(crate) fn refresh_connectivity_status() -> Result<super::ConnectivityRefresh, String> {
+    Err("connectivity refresh is unsupported on this platform".into())
+}
+
 pub fn set_bluetooth_powered(_powered: bool) -> bool {
     false
 }

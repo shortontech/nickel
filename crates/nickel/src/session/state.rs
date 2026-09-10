@@ -220,6 +220,7 @@ enum RemoteDesktopRequest {
         permit: nickel_remote_control::DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
         application_discovery: Option<PreparedApplicationDiscovery>,
+        platform_refresh: Option<PreparedPlatformRefresh>,
         reply: std::sync::mpsc::SyncSender<
             Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>,
         >,
@@ -341,6 +342,14 @@ struct RemoteDesktopBridge {
 
 struct PreparedApplicationDiscovery {
     discovery: crate::model::ApplicationDiscovery,
+    preparation_duration_us: u64,
+}
+
+struct PreparedPlatformRefresh {
+    domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
+    network: crate::platform::NetworkStatus,
+    bluetooth: crate::platform::BluetoothStatus,
+    partial: bool,
     preparation_duration_us: u64,
 }
 
@@ -935,7 +944,13 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             action,
             nickel_remote_control::diagnostics::DiagnosticAction::RefreshApplicationInventory
         );
-        let _diagnostic_admission = refresh_applications
+        let platform_domain = match &action {
+            nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus {
+                domain,
+            } => Some(*domain),
+            _ => None,
+        };
+        let _diagnostic_admission = (refresh_applications || platform_domain.is_some())
             .then(|| self.diagnostic_staging.acquire())
             .transpose()?;
         let application_discovery = if refresh_applications {
@@ -952,12 +967,34 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         } else {
             None
         };
+        let platform_refresh = if let Some(domain) = platform_domain {
+            permit.with_debug(false, || Ok(()))?;
+            let started = Instant::now();
+            let refresh = match domain {
+                nickel_remote_control::diagnostics::PlatformRefreshDomain::Connectivity => {
+                    crate::platform::refresh_connectivity_status()?
+                }
+            };
+            let preparation_duration_us =
+                started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            permit.with_debug(false, || Ok(()))?;
+            Some(PreparedPlatformRefresh {
+                domain,
+                network: refresh.network,
+                bluetooth: refresh.bluetooth,
+                partial: refresh.partial,
+                preparation_duration_us,
+            })
+        } else {
+            None
+        };
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender
             .try_send(RemoteDesktopRequest::DiagnosticAction {
                 permit,
                 action,
                 application_discovery,
+                platform_refresh,
                 reply,
             })
             .map_err(|_| "desktop diagnostic queue is busy or stopped".to_owned())?;
@@ -2056,6 +2093,7 @@ pub struct NickelSession {
     remote_settings_staging: Arc<remote_settings::SettingsStaging>,
     remote_observation_generation: u64,
     remote_application_inventory_generation: u64,
+    remote_platform_refresh_generation: u64,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -2857,12 +2895,17 @@ impl NickelSession {
                 permit,
                 action,
                 application_discovery,
+                platform_refresh,
                 reply,
             } => {
                 let protected = self.locked || self.shell_recovery_visible();
                 let refresh_applications = matches!(
                     &action,
                     nickel_remote_control::diagnostics::DiagnosticAction::RefreshApplicationInventory
+                );
+                let refresh_platform = matches!(
+                    &action,
+                    nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { .. }
                 );
                 let effect = || {
                     #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
@@ -2874,6 +2917,7 @@ impl NickelSession {
                     {
                         let mut output_identification = None;
                         let mut application_inventory_refresh = None;
+                        let mut platform_refresh_outcome = None;
                         match action.clone() {
                             nickel_remote_control::diagnostics::DiagnosticAction::IdentifyOutput { output } => {
                                 action.validate()?;
@@ -2970,6 +3014,66 @@ impl NickelSession {
                                 );
                                 self.sync_internal_shell_changes(Some(&changed));
                             }
+                            nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { domain } => {
+                                let prepared = platform_refresh.ok_or(
+                                    "platform refresh preparation is unavailable",
+                                )?;
+                                if prepared.domain != domain {
+                                    return Err("platform refresh domain changed before commit".into());
+                                }
+                                if self.internal_shell.is_none() {
+                                    return Err("internal shell unavailable".into());
+                                }
+                                let generation = self
+                                    .remote_platform_refresh_generation
+                                    .checked_add(1)
+                                    .ok_or("platform refresh generation exhausted")?;
+                                let controller_busy = self.poll_remote_controller_ownership();
+                                if controller_busy
+                                    || self.remote_held_keyboard.is_some()
+                                    || self.remote_held_pointer.is_some()
+                                    || !self.active_touch_slots.is_empty()
+                                    || self.internal_ui.pointer_interaction_active()
+                                    || self.internal_ui.desktop_keyboard_interaction_active()
+                                    || self.seat.get_keyboard().is_some_and(|keyboard| {
+                                        !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                                    })
+                                    || self
+                                        .seat
+                                        .get_pointer()
+                                        .is_some_and(|pointer| pointer.is_grabbed())
+                                    || self
+                                        .internal_shell
+                                        .as_ref()
+                                        .is_some_and(|shell| shell.pointer_interaction_active())
+                                {
+                                    return Err("shared input is busy or unavailable".into());
+                                }
+                                let network_available = prepared.network.available;
+                                let bluetooth_available = prepared.bluetooth.available;
+                                let shell = self.internal_shell.as_mut().unwrap();
+                                let mut changed = shell.apply_system_status_update(
+                                    crate::platform::SystemStatusUpdate::Network(prepared.network),
+                                );
+                                changed.extend(shell.apply_system_status_update(
+                                    crate::platform::SystemStatusUpdate::Bluetooth(prepared.bluetooth),
+                                ));
+                                changed.sort_unstable();
+                                changed.dedup();
+                                self.remote_platform_refresh_generation = generation;
+                                platform_refresh_outcome = Some(
+                                    nickel_remote_control::diagnostics::PlatformRefreshOutcome {
+                                        domain,
+                                        generation,
+                                        preparation_duration_us: prepared.preparation_duration_us,
+                                        network_available,
+                                        bluetooth_available,
+                                        partial: prepared.partial,
+                                        reconciliation_confirmed: true,
+                                    },
+                                );
+                                self.sync_internal_shell_changes(Some(&changed));
+                            }
                         }
                         #[cfg(feature = "backend-udev")]
                         self.invalidate_native_outputs();
@@ -2989,11 +3093,12 @@ impl NickelSession {
                                 presentation_confirmed: false,
                                 output_identification,
                                 application_inventory_refresh,
+                                platform_refresh: platform_refresh_outcome,
                             },
                         )
                     }
                 };
-                let result = if refresh_applications {
+                let result = if refresh_applications || refresh_platform {
                     permit.with_debug_input(protected, effect)
                 } else {
                     permit.with_debug(protected, effect)
@@ -5529,6 +5634,7 @@ impl NickelSession {
             remote_settings_staging,
             remote_observation_generation: 0,
             remote_application_inventory_generation: 0,
+            remote_platform_refresh_generation: 0,
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),

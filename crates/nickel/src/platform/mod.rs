@@ -79,6 +79,46 @@ pub struct BluetoothStatus {
     pub devices: Vec<BluetoothDeviceStatus>,
 }
 
+pub(crate) const CONNECTIVITY_DEVICE_LIMIT: usize = 256;
+pub(crate) const CONNECTIVITY_TEXT_LIMIT: usize = 512;
+
+#[derive(Clone, Debug)]
+pub(crate) struct ConnectivityRefresh {
+    pub network: NetworkStatus,
+    pub bluetooth: BluetoothStatus,
+    pub partial: bool,
+}
+
+pub(crate) fn bound_connectivity_refresh(
+    mut network: NetworkStatus,
+    mut bluetooth: BluetoothStatus,
+) -> ConnectivityRefresh {
+    let mut partial = network.networks.len() > CONNECTIVITY_DEVICE_LIMIT
+        || bluetooth.devices.len() > CONNECTIVITY_DEVICE_LIMIT;
+    network.networks.truncate(CONNECTIVITY_DEVICE_LIMIT);
+    bluetooth.devices.truncate(CONNECTIVITY_DEVICE_LIMIT);
+    let bounded = |value: &mut String, partial: &mut bool| {
+        if value.chars().count() > CONNECTIVITY_TEXT_LIMIT {
+            *value = value.chars().take(CONNECTIVITY_TEXT_LIMIT).collect();
+            *partial = true;
+        }
+    };
+    bounded(&mut network.name, &mut partial);
+    for entry in &mut network.networks {
+        bounded(&mut entry.id, &mut partial);
+        bounded(&mut entry.name, &mut partial);
+    }
+    for entry in &mut bluetooth.devices {
+        bounded(&mut entry.id, &mut partial);
+        bounded(&mut entry.name, &mut partial);
+    }
+    ConnectivityRefresh {
+        network,
+        bluetooth,
+        partial,
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct AudioDeviceStatus {
     pub id: String,
@@ -500,6 +540,51 @@ mod tests {
             "Nickel Terminal"
         )));
     }
+
+    #[test]
+    fn connectivity_refresh_bounds_cardinality_and_text_without_exposing_payloads() {
+        let long = "x".repeat(super::CONNECTIVITY_TEXT_LIMIT + 1);
+        let network = super::NetworkStatus {
+            name: long.clone(),
+            networks: (0..super::CONNECTIVITY_DEVICE_LIMIT + 1)
+                .map(|_| super::WifiNetworkStatus {
+                    id: long.clone(),
+                    name: long.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let bluetooth = super::BluetoothStatus {
+            devices: (0..super::CONNECTIVITY_DEVICE_LIMIT + 1)
+                .map(|_| super::BluetoothDeviceStatus {
+                    id: long.clone(),
+                    name: long.clone(),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let refresh = super::bound_connectivity_refresh(network, bluetooth);
+        assert!(refresh.partial);
+        assert_eq!(
+            refresh.network.networks.len(),
+            super::CONNECTIVITY_DEVICE_LIMIT
+        );
+        assert_eq!(
+            refresh.bluetooth.devices.len(),
+            super::CONNECTIVITY_DEVICE_LIMIT
+        );
+        assert!(refresh.network.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT);
+        assert!(refresh.network.networks.iter().all(|entry| {
+            entry.id.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+                && entry.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+        }));
+        assert!(refresh.bluetooth.devices.iter().all(|entry| {
+            entry.id.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+                && entry.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
+        }));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -525,8 +610,8 @@ pub use linux::{
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
     capture_output, installed_application_signatures, prepare_application_discovery,
-    publish_application_discovery, run_signature_diagnostics, save_temp_image,
-    shell_command_payload,
+    publish_application_discovery, refresh_connectivity_status, run_signature_diagnostics,
+    save_temp_image, shell_command_payload,
 };
 
 #[cfg(target_os = "windows")]
@@ -565,8 +650,10 @@ pub use unsupported::{
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{
     expose_trusted_control_window, prepare_application_discovery, prepare_trusted_control_window,
-    publish_application_discovery, verify_trusted_control_window,
+    publish_application_discovery, refresh_connectivity_status, verify_trusted_control_window,
 };
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) use unsupported::refresh_connectivity_status;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) use unsupported::{prepare_application_discovery, publish_application_discovery};
