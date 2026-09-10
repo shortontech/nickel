@@ -588,8 +588,21 @@ pub fn applications() -> Vec<Application> {
 }
 
 pub fn application_discovery() -> ApplicationDiscovery {
-    ApplicationDiscovery::ready(applications())
+    let (applications, truncated) = start_menu::load_application_discovery();
+    if truncated {
+        let mut report = crate::model::ApplicationDiscoveryReport::new();
+        report.record(crate::model::ApplicationSkipReason::Capacity);
+        ApplicationDiscovery::from_report(applications, report)
+    } else {
+        ApplicationDiscovery::ready(applications)
+    }
 }
+
+pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
+    application_discovery()
+}
+
+pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
 
 pub fn application_icon(reference: &str) -> Option<image::RgbaImage> {
     nickel_platform::path_icon(PathBuf::from(reference).as_path())

@@ -1041,6 +1041,14 @@ pub fn application_discovery() -> ApplicationDiscovery {
     desktop_entries::load_applications()
 }
 
+pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
+    desktop_entries::prepare_applications()
+}
+
+pub(crate) fn publish_application_discovery(discovery: &ApplicationDiscovery) {
+    desktop_entries::publish_prepared_applications(discovery);
+}
+
 fn session_request_on(
     socket: &std::os::unix::net::UnixDatagram,
     request: SessionRequest,

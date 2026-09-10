@@ -1359,6 +1359,31 @@ impl LiveShell {
         changed
     }
 
+    pub(crate) fn apply_application_discovery(
+        &mut self,
+        discovery: crate::model::ApplicationDiscovery,
+    ) -> (usize, bool) {
+        let applications = discovery.applications().len();
+        let partial = matches!(
+            discovery.status(),
+            crate::model::ApplicationDiscoveryStatus::PartialFailure
+        );
+        self.launcher_status =
+            application_discovery_status_label(discovery.status()).map(str::to_owned);
+        self.launcher
+            .replace_discovered_applications(discovery.into_applications());
+        self.launcher_icons.invalidate_application_inventory();
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        (applications, partial)
+    }
+
     pub(crate) fn apply_shell_settings(&mut self, shell_settings: ShellSettings) -> bool {
         let mut changed = false;
         self.launcher.set_places(crate::places::applications(

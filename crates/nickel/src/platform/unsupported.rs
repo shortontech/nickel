@@ -97,6 +97,12 @@ pub fn application_discovery() -> ApplicationDiscovery {
     ApplicationDiscovery::ready(applications())
 }
 
+pub(crate) fn prepare_application_discovery() -> ApplicationDiscovery {
+    application_discovery()
+}
+
+pub(crate) fn publish_application_discovery(_: &ApplicationDiscovery) {}
+
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     super::GlobalShortcutFeed::unavailable(
         nickel_input::global::UnavailableReason::UnsupportedPlatform,

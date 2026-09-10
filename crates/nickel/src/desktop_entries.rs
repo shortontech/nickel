@@ -124,6 +124,12 @@ pub(crate) fn installed_application_signatures() -> (u64, Arc<[Application]>, bo
 }
 
 pub fn load_applications() -> ApplicationDiscovery {
+    let discovery = prepare_applications();
+    publish_prepared_applications(&discovery);
+    discovery
+}
+
+pub(crate) fn prepare_applications() -> ApplicationDiscovery {
     let locales = get_languages_from_env();
     let desktops = current_desktop().unwrap_or_default();
     let icon_theme = icon_theme();
@@ -134,7 +140,6 @@ pub fn load_applications() -> ApplicationDiscovery {
         &desktops,
         &icon_theme,
     );
-    publish_run_signatures(discovery.applications());
     tracing::info!(
         scanned = discovery.report().scanned(),
         accepted = discovery.report().accepted(),
@@ -148,10 +153,15 @@ pub fn load_applications() -> ApplicationDiscovery {
         missing_exec = discovery.report().skipped(ApplicationSkipReason::MissingExec),
         invalid_exec = discovery.report().skipped(ApplicationSkipReason::InvalidExec),
         invalid_terminal = discovery.report().skipped(ApplicationSkipReason::InvalidTerminal),
+        capacity = discovery.report().skipped(ApplicationSkipReason::Capacity),
         status = ?discovery.status(),
         "desktop-entry discovery complete"
     );
     discovery
+}
+
+pub(crate) fn publish_prepared_applications(discovery: &ApplicationDiscovery) {
+    publish_run_signatures(discovery.applications());
 }
 
 fn discover_entries<I>(
@@ -165,8 +175,13 @@ where
 {
     let mut seen = HashSet::new();
     let mut applications = Vec::new();
+    let mut retained_metadata_bytes = 0_usize;
     let mut report = ApplicationDiscoveryReport::new();
-    for parsed in entries {
+    for (index, parsed) in entries.into_iter().enumerate() {
+        if index == crate::model::MAX_APPLICATION_SCAN_ENTRIES {
+            report.record(ApplicationSkipReason::Capacity);
+            break;
+        }
         report.record_scanned();
         let Ok(entry) = parsed else {
             report.record(ApplicationSkipReason::ParseFailure);
@@ -178,7 +193,20 @@ where
             continue;
         }
         match application_from_entry_result(&entry, locales, desktops, icon_theme) {
-            Ok(application) => applications.push(application),
+            Ok(application)
+                if applications.len() < crate::model::MAX_DISCOVERED_APPLICATIONS
+                    && retained_metadata_bytes
+                        .saturating_add(application.retained_metadata_bytes())
+                        <= crate::model::MAX_DISCOVERED_APPLICATION_METADATA_BYTES =>
+            {
+                retained_metadata_bytes =
+                    retained_metadata_bytes.saturating_add(application.retained_metadata_bytes());
+                applications.push(application);
+            }
+            Ok(_) => {
+                report.record(ApplicationSkipReason::Capacity);
+                break;
+            }
             Err(reason) => report.record(reason),
         }
     }
@@ -323,7 +351,7 @@ mod tests {
 
     use super::{
         RUN_SIGNATURE_ENTRY_LIMIT, RunSignatureIndex, application_from_entry,
-        application_from_entry_result, discover_entries,
+        application_from_entry_result, discover_entries, prepare_applications,
     };
     use crate::model::{
         Application, ApplicationDiscoveryStatus, ApplicationLaunchClass, ApplicationSkipReason,
@@ -525,5 +553,58 @@ mod tests {
         let bounded = RunSignatureIndex::build(&applications, 2);
         assert_eq!(bounded.diagnostics.entries, RUN_SIGNATURE_ENTRY_LIMIT);
         assert_eq!(bounded.diagnostics.skipped, 3);
+    }
+
+    #[test]
+    fn discovery_stops_at_the_scan_budget_and_reports_partial_state() {
+        let entries = std::iter::repeat_with(|| Err(()))
+            .take(crate::model::MAX_APPLICATION_SCAN_ENTRIES + 17);
+        let discovery = discover_entries(entries, &[], &[], "hicolor");
+        assert_eq!(
+            discovery.report().scanned(),
+            crate::model::MAX_APPLICATION_SCAN_ENTRIES
+        );
+        assert_eq!(
+            discovery.report().skipped(ApplicationSkipReason::Capacity),
+            1
+        );
+        assert_eq!(
+            discovery.status(),
+            ApplicationDiscoveryStatus::PartialFailure
+        );
+    }
+
+    #[test]
+    fn discovery_rejects_catalog_metadata_beyond_the_retained_budget() {
+        let oversized_name =
+            "x".repeat(crate::model::MAX_DISCOVERED_APPLICATION_METADATA_BYTES.saturating_add(1));
+        let entry = parse(&format!(
+            "[Desktop Entry]\nType=Application\nName={oversized_name}\nExec=oversized\n"
+        ));
+        let discovery = discover_entries([Ok(entry)], &[], &[], "hicolor");
+        assert!(discovery.applications().is_empty());
+        assert_eq!(
+            discovery.report().skipped(ApplicationSkipReason::Capacity),
+            1
+        );
+        assert_eq!(
+            discovery.status(),
+            ApplicationDiscoveryStatus::PartialFailure
+        );
+    }
+
+    #[test]
+    fn native_application_discovery_respects_every_catalog_budget() {
+        let discovery = prepare_applications();
+        assert!(discovery.report().scanned() <= crate::model::MAX_APPLICATION_SCAN_ENTRIES);
+        assert!(discovery.applications().len() <= crate::model::MAX_DISCOVERED_APPLICATIONS);
+        assert!(
+            discovery
+                .applications()
+                .iter()
+                .map(Application::retained_metadata_bytes)
+                .sum::<usize>()
+                <= crate::model::MAX_DISCOVERED_APPLICATION_METADATA_BYTES
+        );
     }
 }

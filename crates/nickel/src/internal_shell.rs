@@ -563,6 +563,20 @@ impl InternalShellCoordinator {
             .collect())
     }
 
+    pub(crate) fn apply_application_discovery(
+        &mut self,
+        discovery: crate::model::ApplicationDiscovery,
+    ) -> (Vec<InternalSurfaceId>, usize, bool) {
+        let (applications, partial) = self.shell.apply_application_discovery(discovery);
+        let changed = self
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry.role, SurfaceRole::Launcher | SurfaceRole::Panel))
+            .map(|entry| entry.id)
+            .collect();
+        (changed, applications, partial)
+    }
+
     /// Apply an already-authorized settings snapshot without rereading its file.
     pub(crate) fn apply_prepared_shell_settings(
         &mut self,

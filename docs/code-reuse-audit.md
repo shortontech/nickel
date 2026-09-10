@@ -283,6 +283,12 @@ The idle preference transaction adds one remote-control schema and one Nickel
 owner source (344 total). It reuses ShellSettings persistence and the existing
 session `IdleController`; it exposes only dim and suspend intervals. Lock timing,
 inhibitor ownership, authentication and system power actions remain excluded.
+Application inventory refresh adds no source files. It separates the existing
+platform discovery into preparation and publication, reuses the launcher/panel
+reconciliation and icon-cache owners, and routes the path-free diagnostic action
+through the existing bounded worker and compositor authority. The scan, catalog,
+metadata, and Windows recursion limits remain platform discovery policy rather
+than client-controlled payloads; the exact source inventory remains 344.
 GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed
 input provenance, while the bounded observer exposes only admitted metadata.

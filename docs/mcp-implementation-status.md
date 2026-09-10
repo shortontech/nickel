@@ -1344,3 +1344,19 @@ protected-field preservation and acknowledgement tests plus strict combined
 Clippy pass. Native compositor dimming and real suspend acceptance remain open;
 no test may suspend the user's active session. The exact source inventory now
 contains 344 Rust sources.
+
+Full-debug now exposes a path-free application inventory refresh through the
+production platform discovery, launcher/panel reconciliation, Linux run-signature
+publisher, and launcher icon-cache owner. One diagnostic worker admits the scan;
+entry, application, aggregate metadata, and Windows recursion bounds prevent an
+unbounded catalog from reaching the compositor. Authorization is checked before
+and after preparation and again while the compositor reserves shared input at the
+final commit; active physical, shell, remote-held, touch, controller, or grab state
+rejects reconciliation. The outcome reports its own generation, preparation time,
+accepted count, partial status, and owner reconciliation without claiming rendered
+pixels. Schema, scan-bound, launcher reconciliation, Linux compile, formatting,
+and focused tests pass. A read-only native Linux scan of this host's production
+application directories completed within every catalog budget. Native cancellation
+and presented launcher/icon acceptance remain open. The installed Windows Rust target is currently insufficient for this
+slice because `x86_64-w64-mingw32-gcc` is unavailable, and no native Windows
+execution is claimed. No source files were added; the exact inventory remains 344.

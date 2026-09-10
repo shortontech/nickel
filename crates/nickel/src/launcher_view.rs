@@ -427,6 +427,11 @@ impl LauncherIconCache {
             .retain(|key| !key.starts_with("structural:"));
     }
 
+    pub(crate) fn invalidate_application_inventory(&mut self) {
+        self.icons.clear();
+        self.insertion_order.clear();
+    }
+
     fn insert(&mut self, key: String, cached: CachedIcon) {
         let evictions_before = self.evictions;
         while self.icons.len() >= LAUNCHER_ICON_CACHE_CAPACITY {

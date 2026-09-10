@@ -219,6 +219,7 @@ enum RemoteDesktopRequest {
     DiagnosticAction {
         permit: nickel_remote_control::DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
+        application_discovery: Option<PreparedApplicationDiscovery>,
         reply: std::sync::mpsc::SyncSender<
             Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>,
         >,
@@ -335,6 +336,12 @@ struct RemoteDesktopBridge {
     cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     sender: channel::SyncSender<RemoteDesktopRequest>,
     settings_staging: Arc<remote_settings::SettingsStaging>,
+    diagnostic_staging: Arc<remote_worker::WorkerStaging>,
+}
+
+struct PreparedApplicationDiscovery {
+    discovery: crate::model::ApplicationDiscovery,
+    preparation_duration_us: u64,
 }
 
 impl RemoteDesktopBridge {
@@ -924,11 +931,33 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         permit: nickel_remote_control::DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
+        let refresh_applications = matches!(
+            action,
+            nickel_remote_control::diagnostics::DiagnosticAction::RefreshApplicationInventory
+        );
+        let _diagnostic_admission = refresh_applications
+            .then(|| self.diagnostic_staging.acquire())
+            .transpose()?;
+        let application_discovery = if refresh_applications {
+            permit.with_debug(false, || Ok(()))?;
+            let started = Instant::now();
+            let discovery = crate::platform::prepare_application_discovery();
+            let preparation_duration_us =
+                started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            permit.with_debug(false, || Ok(()))?;
+            Some(PreparedApplicationDiscovery {
+                discovery,
+                preparation_duration_us,
+            })
+        } else {
+            None
+        };
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender
             .try_send(RemoteDesktopRequest::DiagnosticAction {
                 permit,
                 action,
+                application_discovery,
                 reply,
             })
             .map_err(|_| "desktop diagnostic queue is busy or stopped".to_owned())?;
@@ -2026,6 +2055,7 @@ pub struct NickelSession {
     remote_cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     remote_settings_staging: Arc<remote_settings::SettingsStaging>,
     remote_observation_generation: u64,
+    remote_application_inventory_generation: u64,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -2826,9 +2856,15 @@ impl NickelSession {
             RemoteDesktopRequest::DiagnosticAction {
                 permit,
                 action,
+                application_discovery,
                 reply,
             } => {
-                let result = permit.with_debug(self.locked || self.shell_recovery_visible(), || {
+                let protected = self.locked || self.shell_recovery_visible();
+                let refresh_applications = matches!(
+                    &action,
+                    nickel_remote_control::diagnostics::DiagnosticAction::RefreshApplicationInventory
+                );
+                let effect = || {
                     #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
                     {
                         let _ = action;
@@ -2837,6 +2873,7 @@ impl NickelSession {
                     #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
                     {
                         let mut output_identification = None;
+                        let mut application_inventory_refresh = None;
                         match action.clone() {
                             nickel_remote_control::diagnostics::DiagnosticAction::IdentifyOutput { output } => {
                                 action.validate()?;
@@ -2885,6 +2922,54 @@ impl NickelSession {
                                 // permission changes, or requested geometry edits.
                                 self.space.refresh();
                             }
+                            nickel_remote_control::diagnostics::DiagnosticAction::RefreshApplicationInventory => {
+                                let prepared = application_discovery.ok_or(
+                                    "application inventory preparation is unavailable",
+                                )?;
+                                if self.internal_shell.is_none() {
+                                    return Err("internal shell unavailable".into());
+                                }
+                                let generation = self
+                                    .remote_application_inventory_generation
+                                    .checked_add(1)
+                                    .ok_or("application inventory generation exhausted")?;
+                                let controller_busy = self.poll_remote_controller_ownership();
+                                if controller_busy
+                                    || self.remote_held_keyboard.is_some()
+                                    || self.remote_held_pointer.is_some()
+                                    || !self.active_touch_slots.is_empty()
+                                    || self.internal_ui.pointer_interaction_active()
+                                    || self.internal_ui.desktop_keyboard_interaction_active()
+                                    || self.seat.get_keyboard().is_some_and(|keyboard| {
+                                        !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                                    })
+                                    || self
+                                        .seat
+                                        .get_pointer()
+                                        .is_some_and(|pointer| pointer.is_grabbed())
+                                    || self
+                                        .internal_shell
+                                        .as_ref()
+                                        .is_some_and(|shell| shell.pointer_interaction_active())
+                                {
+                                    return Err("shared input is busy or unavailable".into());
+                                }
+                                crate::platform::publish_application_discovery(&prepared.discovery);
+                                let shell = self.internal_shell.as_mut().unwrap();
+                                let (changed, applications, partial) =
+                                    shell.apply_application_discovery(prepared.discovery);
+                                self.remote_application_inventory_generation = generation;
+                                application_inventory_refresh = Some(
+                                    nickel_remote_control::diagnostics::ApplicationInventoryRefreshOutcome {
+                                        generation: self.remote_application_inventory_generation,
+                                        preparation_duration_us: prepared.preparation_duration_us,
+                                        applications: applications.min(u32::MAX as usize) as u32,
+                                        partial,
+                                        reconciliation_confirmed: true,
+                                    },
+                                );
+                                self.sync_internal_shell_changes(Some(&changed));
+                            }
                         }
                         #[cfg(feature = "backend-udev")]
                         self.invalidate_native_outputs();
@@ -2903,10 +2988,16 @@ impl NickelSession {
                                     as u64,
                                 presentation_confirmed: false,
                                 output_identification,
+                                application_inventory_refresh,
                             },
                         )
                     }
-                });
+                };
+                let result = if refresh_applications {
+                    permit.with_debug_input(protected, effect)
+                } else {
+                    permit.with_debug(protected, effect)
+                };
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ListSurfaces { permit, reply } => {
@@ -5293,11 +5384,13 @@ impl NickelSession {
             )
             .expect("failed to register remote lease expiration");
         let remote_settings_staging = Arc::new(remote_settings::SettingsStaging::default());
+        let remote_diagnostic_staging = Arc::new(remote_worker::WorkerStaging::default());
         let remote_desktop_authority: Arc<dyn nickel_remote_control::DesktopAuthority> =
             Arc::new(RemoteDesktopBridge {
                 cleanup_wake: remote_cleanup_wake.clone(),
                 sender: remote_desktop_tx,
                 settings_staging: remote_settings_staging.clone(),
+                diagnostic_staging: remote_diagnostic_staging,
             });
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
@@ -5435,6 +5528,7 @@ impl NickelSession {
             remote_cleanup_wake,
             remote_settings_staging,
             remote_observation_generation: 0,
+            remote_application_inventory_generation: 0,
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),

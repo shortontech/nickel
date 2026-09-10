@@ -9,6 +9,8 @@ pub enum DiagnosticAction {
     Repaint,
     /// Reconcile native scene/output membership using production housekeeping.
     RefreshScene,
+    /// Rescan the bounded platform-owned installed-application catalog.
+    RefreshApplicationInventory,
     StartFrameTrace {
         duration_seconds: u16,
     },
@@ -41,6 +43,17 @@ pub struct DiagnosticActionOutcome {
     pub presentation_confirmed: bool,
     /// Present only for an accepted output identification; never a presentation claim.
     pub output_identification: Option<OutputIdentificationOutcome>,
+    pub application_inventory_refresh: Option<ApplicationInventoryRefreshOutcome>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ApplicationInventoryRefreshOutcome {
+    pub generation: u64,
+    pub preparation_duration_us: u64,
+    pub applications: u32,
+    pub partial: bool,
+    /// The launcher/icon model accepted the catalog; this is not pixel presentation.
+    pub reconciliation_confirmed: bool,
 }
 
 pub const MAX_DIAGNOSTIC_WINDOWS: usize = 512;
@@ -584,5 +597,23 @@ mod output_identification_tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn application_refresh_has_no_path_or_scan_policy_payload() {
+        let action: DiagnosticAction =
+            serde_json::from_value(serde_json::json!("refresh_application_inventory")).unwrap();
+        assert!(matches!(
+            action,
+            DiagnosticAction::RefreshApplicationInventory
+        ));
+        for field in ["path", "root", "limit", "executable", "icon_theme"] {
+            assert!(
+                serde_json::from_value::<DiagnosticAction>(serde_json::json!({
+                    "refresh_application_inventory": {(field): true}
+                }))
+                .is_err()
+            );
+        }
     }
 }

@@ -83,6 +83,7 @@ pub enum ApplicationDiscoveryStatus {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum ApplicationSkipReason {
+    Capacity,
     ParseFailure,
     UnsupportedType,
     Hidden,
@@ -96,7 +97,8 @@ pub enum ApplicationSkipReason {
 }
 
 impl ApplicationSkipReason {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
+        Self::Capacity,
         Self::ParseFailure,
         Self::UnsupportedType,
         Self::Hidden,
@@ -111,23 +113,28 @@ impl ApplicationSkipReason {
 
     const fn index(self) -> usize {
         match self {
-            Self::ParseFailure => 0,
-            Self::UnsupportedType => 1,
-            Self::Hidden => 2,
-            Self::NoDisplay => 3,
-            Self::WrongDesktop => 4,
-            Self::MissingName => 5,
-            Self::EmptyName => 6,
-            Self::MissingExec => 7,
-            Self::InvalidExec => 8,
-            Self::InvalidTerminal => 9,
+            Self::Capacity => 0,
+            Self::ParseFailure => 1,
+            Self::UnsupportedType => 2,
+            Self::Hidden => 3,
+            Self::NoDisplay => 4,
+            Self::WrongDesktop => 5,
+            Self::MissingName => 6,
+            Self::EmptyName => 7,
+            Self::MissingExec => 8,
+            Self::InvalidExec => 9,
+            Self::InvalidTerminal => 10,
         }
     }
 
     const fn is_failure(self) -> bool {
         matches!(
             self,
-            Self::ParseFailure | Self::MissingName | Self::InvalidExec | Self::InvalidTerminal
+            Self::Capacity
+                | Self::ParseFailure
+                | Self::MissingName
+                | Self::InvalidExec
+                | Self::InvalidTerminal
         )
     }
 }
@@ -174,6 +181,10 @@ impl ApplicationDiscoveryReport {
         self.skipped[reason.index()] += 1;
     }
 }
+
+pub const MAX_APPLICATION_SCAN_ENTRIES: usize = 8_192;
+pub const MAX_DISCOVERED_APPLICATIONS: usize = 4_096;
+pub const MAX_DISCOVERED_APPLICATION_METADATA_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ApplicationDiscovery {
@@ -306,6 +317,22 @@ impl Application {
 
     pub fn working_directory(&self) -> Option<&Path> {
         self.working_directory.as_deref()
+    }
+
+    pub(crate) fn retained_metadata_bytes(&self) -> usize {
+        let path_bytes = |path: &Path| path.to_string_lossy().len();
+        self.id()
+            .len()
+            .saturating_add(self.identity_aliases.iter().map(String::len).sum())
+            .saturating_add(self.name.len())
+            .saturating_add(self.icon.as_ref().map_or(0, String::len))
+            .saturating_add(self.icon_path.as_deref().map_or(0, path_bytes))
+            .saturating_add(
+                self.launch_command
+                    .as_ref()
+                    .map_or(0, |command| command.iter().map(String::len).sum()),
+            )
+            .saturating_add(self.working_directory.as_deref().map_or(0, path_bytes))
     }
 
     pub fn with_launch_policy(

@@ -347,6 +347,27 @@ impl Launcher {
         self.refresh();
     }
 
+    pub fn replace_discovered_applications(&mut self, mut applications: Vec<Application>) {
+        let places = self
+            .applications
+            .iter()
+            .filter(|application| self.place_ids.contains(application.id()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut ids = applications
+            .iter()
+            .map(|application| application.id().to_owned())
+            .collect::<HashSet<_>>();
+        applications.extend(
+            places
+                .into_iter()
+                .filter(|application| ids.insert(application.id().to_owned())),
+        );
+        self.applications = applications;
+        self.taskbar_revision = std::sync::Arc::new(());
+        self.refresh();
+    }
+
     pub fn selected_result(&self) -> Option<&Application> {
         self.result_at(self.selected)
     }
@@ -933,6 +954,39 @@ mod tests {
         );
         assert_eq!(result[0].chat_count, Some(2));
         assert_eq!(result[2].last_used_at, None);
+    }
+
+    #[test]
+    fn replacing_discovery_preserves_places_and_reconciles_removed_results() {
+        let mut launcher = Launcher::new(vec![Application::new(
+            "old.desktop".into(),
+            "Old".into(),
+            None,
+            None,
+            None,
+        )]);
+        launcher.set_places(vec![Application::new(
+            "place:home".into(),
+            "Home".into(),
+            None,
+            None,
+            None,
+        )]);
+        launcher.open_search();
+        launcher.insert("Old");
+        assert_eq!(launcher.result_count(), 1);
+        launcher.replace_discovered_applications(vec![Application::new(
+            "new.desktop".into(),
+            "New".into(),
+            None,
+            None,
+            None,
+        )]);
+        assert_eq!(launcher.result_count(), 0);
+        launcher.clear_query();
+        launcher.set_view(LauncherView::Places);
+        assert_eq!(launcher.result_count(), 1);
+        assert_eq!(launcher.result_at(0).unwrap().id(), "place:home");
     }
 
     #[test]

@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::model::Application;
+use crate::model::{
+    Application, MAX_APPLICATION_SCAN_ENTRIES, MAX_DISCOVERED_APPLICATION_METADATA_BYTES,
+    MAX_DISCOVERED_APPLICATIONS,
+};
 use windows::Win32::{
     System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize},
     UI::Shell::{
@@ -16,6 +19,10 @@ use windows::Win32::{
 const START_MENU_RELATIVE: &str = "Microsoft/Windows/Start Menu/Programs";
 
 pub fn load_applications() -> Vec<Application> {
+    load_application_discovery().0
+}
+
+pub fn load_application_discovery() -> (Vec<Application>, bool) {
     let mut roots = [env::var_os("APPDATA"), env::var_os("PROGRAMDATA")]
         .into_iter()
         .flatten()
@@ -25,31 +32,57 @@ pub fn load_applications() -> Vec<Application> {
     if let Some(home) = env::var_os("HOME").or_else(|| env::var_os("USERPROFILE")) {
         roots.push(PathBuf::from(home).join("Desktop"));
     }
-    let mut applications = load_from_roots(&roots);
+    let (mut applications, mut truncated) = load_from_roots(&roots);
+    let mut retained_metadata_bytes = applications
+        .iter()
+        .map(Application::retained_metadata_bytes)
+        .sum::<usize>();
     let mut names = applications
         .iter()
         .map(|application| application.name().to_ascii_lowercase())
         .collect::<HashSet<_>>();
-    for application in load_packaged_applications() {
+    let (packaged, packaged_truncated) = load_packaged_applications();
+    truncated |= packaged_truncated;
+    for application in packaged {
         if names.insert(application.name().to_ascii_lowercase()) {
+            let bytes = application.retained_metadata_bytes();
+            if applications.len() == MAX_DISCOVERED_APPLICATIONS
+                || retained_metadata_bytes.saturating_add(bytes)
+                    > MAX_DISCOVERED_APPLICATION_METADATA_BYTES
+            {
+                truncated = true;
+                break;
+            }
+            retained_metadata_bytes = retained_metadata_bytes.saturating_add(bytes);
             applications.push(application);
         }
     }
     sort_applications(&mut applications);
-    applications
+    (applications, truncated)
 }
 
-fn load_from_roots(roots: &[PathBuf]) -> Vec<Application> {
+fn load_from_roots(roots: &[PathBuf]) -> (Vec<Application>, bool) {
     let mut shortcuts = Vec::new();
+    let mut truncated = false;
     for root in roots {
         let mut root_shortcuts = Vec::new();
-        collect_shortcuts(root, &mut root_shortcuts);
+        truncated |= collect_shortcuts(root, &mut root_shortcuts, 0);
         root_shortcuts.sort_by_key(|path| path.to_string_lossy().to_ascii_lowercase());
-        shortcuts.extend(root_shortcuts);
+        for shortcut in root_shortcuts {
+            if shortcuts.len() == MAX_APPLICATION_SCAN_ENTRIES {
+                truncated = true;
+                break;
+            }
+            shortcuts.push(shortcut);
+        }
+        if shortcuts.len() == MAX_APPLICATION_SCAN_ENTRIES {
+            break;
+        }
     }
 
     let mut names = HashSet::new();
     let mut applications = Vec::new();
+    let mut retained_metadata_bytes = 0_usize;
     for shortcut in shortcuts {
         let Some(name) = shortcut.file_stem().and_then(|name| name.to_str()) else {
             continue;
@@ -58,17 +91,29 @@ fn load_from_roots(roots: &[PathBuf]) -> Vec<Application> {
         if name.is_empty() || !names.insert(name.to_ascii_lowercase()) {
             continue;
         }
+        if applications.len() == MAX_DISCOVERED_APPLICATIONS {
+            truncated = true;
+            break;
+        }
         let path = shortcut.to_string_lossy().into_owned();
-        applications.push(Application::new(
+        let application = Application::new(
             format!("windows-shortcut:{}", path.to_ascii_lowercase()),
             name.to_owned(),
             Some(path.clone()),
             None,
             Some(vec![path]),
-        ));
+        );
+        let bytes = application.retained_metadata_bytes();
+        if retained_metadata_bytes.saturating_add(bytes) > MAX_DISCOVERED_APPLICATION_METADATA_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        retained_metadata_bytes = retained_metadata_bytes.saturating_add(bytes);
+        applications.push(application);
     }
     sort_applications(&mut applications);
-    applications
+    (applications, truncated)
 }
 
 fn sort_applications(applications: &mut [Application]) {
@@ -80,13 +125,13 @@ fn sort_applications(applications: &mut [Application]) {
     });
 }
 
-fn load_packaged_applications() -> Vec<Application> {
+fn load_packaged_applications() -> (Vec<Application>, bool) {
     // SAFETY: COM is initialized for this thread while the shell items are enumerated. A
     // successful call, including S_FALSE, is balanced with CoUninitialize.
     let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }.is_ok();
     let applications = unsafe { enumerate_apps_folder() }.unwrap_or_else(|error| {
         tracing::warn!(%error, "could not enumerate the Windows AppsFolder");
-        Vec::new()
+        (Vec::new(), false)
     });
     if initialized {
         // SAFETY: This balances the successful CoInitializeEx call above.
@@ -95,13 +140,22 @@ fn load_packaged_applications() -> Vec<Application> {
     applications
 }
 
-unsafe fn enumerate_apps_folder() -> windows::core::Result<Vec<Application>> {
+unsafe fn enumerate_apps_folder() -> windows::core::Result<(Vec<Application>, bool)> {
     // SAFETY: The known-folder identifier and bind-handler identifier are static Windows values.
     let folder: IShellItem =
         unsafe { SHGetKnownFolderItem(&FOLDERID_AppsFolder, KF_FLAG_DEFAULT, None)? };
     let items: IEnumShellItems = unsafe { folder.BindToHandler(None, &BHID_EnumItems)? };
     let mut applications = Vec::new();
+    let mut retained_metadata_bytes = 0_usize;
+    let mut scanned = 0_usize;
+    let mut truncated = false;
     loop {
+        if scanned == MAX_APPLICATION_SCAN_ENTRIES
+            || applications.len() == MAX_DISCOVERED_APPLICATIONS
+        {
+            truncated = true;
+            break;
+        }
         let mut fetched = 0;
         let mut item = [None];
         if unsafe { items.Next(&mut item, Some(&mut fetched)) }.is_err() || fetched == 0 {
@@ -110,20 +164,29 @@ unsafe fn enumerate_apps_folder() -> windows::core::Result<Vec<Application>> {
         let Some(item) = item[0].take() else {
             continue;
         };
+        scanned += 1;
         let name = unsafe { shell_item_name(&item, SIGDN_NORMALDISPLAY)? };
         let target = unsafe { shell_item_name(&item, SIGDN_DESKTOPABSOLUTEPARSING)? };
         if name.trim().is_empty() || target.trim().is_empty() {
             continue;
         }
-        applications.push(Application::new(
+        let application = Application::new(
             format!("windows-app:{}", target.to_ascii_lowercase()),
             name,
             Some(target.clone()),
             None,
             Some(vec![target]),
-        ));
+        );
+        let bytes = application.retained_metadata_bytes();
+        if retained_metadata_bytes.saturating_add(bytes) > MAX_DISCOVERED_APPLICATION_METADATA_BYTES
+        {
+            truncated = true;
+            break;
+        }
+        retained_metadata_bytes = retained_metadata_bytes.saturating_add(bytes);
+        applications.push(application);
     }
-    Ok(applications)
+    Ok((applications, truncated))
 }
 
 unsafe fn shell_item_name(
@@ -137,17 +200,24 @@ unsafe fn shell_item_name(
     Ok(text)
 }
 
-fn collect_shortcuts(directory: &Path, output: &mut Vec<PathBuf>) {
+fn collect_shortcuts(directory: &Path, output: &mut Vec<PathBuf>, depth: usize) -> bool {
+    if depth == 32 || output.len() == MAX_APPLICATION_SCAN_ENTRIES {
+        return true;
+    }
     let Ok(entries) = fs::read_dir(directory) else {
-        return;
+        return false;
     };
+    let mut truncated = false;
     for entry in entries.flatten() {
+        if output.len() == MAX_APPLICATION_SCAN_ENTRIES {
+            return true;
+        }
         let path = entry.path();
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
         if file_type.is_dir() {
-            collect_shortcuts(&path, output);
+            truncated |= collect_shortcuts(&path, output, depth + 1);
         } else if file_type.is_file()
             && path
                 .extension()
@@ -162,6 +232,7 @@ fn collect_shortcuts(directory: &Path, output: &mut Vec<PathBuf>) {
             output.push(path);
         }
     }
+    truncated
 }
 
 #[cfg(test)]

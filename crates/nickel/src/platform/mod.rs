@@ -524,7 +524,8 @@ pub use linux::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
-    capture_output, installed_application_signatures, run_signature_diagnostics, save_temp_image,
+    capture_output, installed_application_signatures, prepare_application_discovery,
+    publish_application_discovery, run_signature_diagnostics, save_temp_image,
     shell_command_payload,
 };
 
@@ -563,5 +564,9 @@ pub use unsupported::{
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{
-    expose_trusted_control_window, prepare_trusted_control_window, verify_trusted_control_window,
+    expose_trusted_control_window, prepare_application_discovery, prepare_trusted_control_window,
+    publish_application_discovery, verify_trusted_control_window,
 };
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) use unsupported::{prepare_application_discovery, publish_application_discovery};
