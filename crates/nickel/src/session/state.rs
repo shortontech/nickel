@@ -123,6 +123,21 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::terminal_presentation::Snapshot, String>,
         >,
     },
+    ReadKeyboardPreference {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_keyboard_preference::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::keyboard_preference::Snapshot, String>,
+        >,
+    },
+    KeyboardPreferenceTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::keyboard_preference::Transaction,
+        prepared: remote_keyboard_preference::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::keyboard_preference::Snapshot, String>,
+        >,
+    },
     ShellBehavior {
         permit: nickel_remote_control::DesktopPermit,
         transaction: ShellBehaviorTransaction,
@@ -622,6 +637,48 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .map_err(|_| "terminal presentation queue is busy or stopped")?;
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "terminal presentation result uncertain; read current state before retrying".to_owned()
+        })?
+    }
+    fn read_keyboard_preference(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_keyboard_preference::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadKeyboardPreference {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "keyboard preference queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "keyboard preference observation timed out")?
+    }
+    fn keyboard_preference_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::keyboard_preference::Transaction,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_keyboard_preference::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::KeyboardPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "keyboard preference queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "keyboard preference result uncertain; read current state before retrying".to_owned()
         })?
     }
     fn shell_behavior_transaction(
@@ -1883,6 +1940,7 @@ mod remote_capture;
 mod remote_controller;
 mod remote_diagnostics;
 mod remote_keyboard;
+mod remote_keyboard_preference;
 pub(super) mod remote_launch;
 pub(super) mod remote_launcher_favorites;
 mod remote_pointer;
@@ -2501,6 +2559,23 @@ impl NickelSession {
             } => {
                 let result =
                     self.remote_change_terminal_presentation(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadKeyboardPreference {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_keyboard_preference(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::KeyboardPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_keyboard_preference(&permit, transaction, prepared);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ShellBehavior {

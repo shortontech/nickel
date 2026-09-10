@@ -168,6 +168,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::terminal_presentation::Snapshot, String> {
         Err("terminal presentation transactions are unavailable on this backend".into())
     }
+    fn read_keyboard_preference(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::keyboard_preference::Snapshot, String> {
+        Err("keyboard preference observation is unavailable on this backend".into())
+    }
+    fn keyboard_preference_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::keyboard_preference::Transaction,
+    ) -> Result<crate::keyboard_preference::Snapshot, String> {
+        Err("keyboard preference transactions are unavailable on this backend".into())
+    }
     fn shell_behavior_transaction(
         &self,
         _permit: crate::DesktopPermit,
@@ -896,6 +909,13 @@ struct TerminalPresentationRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct KeyboardPreferenceRequest {
+    lease_id: u64,
+    transaction: crate::keyboard_preference::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct WindowActionRequest {
     lease_id: u64,
     window_id: String,
@@ -1536,6 +1556,62 @@ impl McpHandler {
                     .await
                     .map_err(|_| {
                         "terminal presentation result uncertain; read current state before retrying"
+                    })?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read the typed on-screen-keyboard preference and coarse runtime acknowledgement. Requires Full Control & Debug Nickel. Recipient identity, visibility, docking, geometry, input epochs and text state are excluded."
+    )]
+    async fn read_keyboard_preference(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::keyboard_preference::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadKeyboardPreference,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_keyboard_preference(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "keyboard preference observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Change only the Automatic, Enabled or Disabled on-screen-keyboard preference through the checked production optional-feature writer. Requires Full Control & Debug Nickel, fresh generation/prior state and idle shared input. Preserves Codex settings. Controller visibility, docking, geometry, recipient, environment override and input are excluded. Runtime acknowledgement may remain pending."
+    )]
+    async fn keyboard_preference_transaction(
+        &self,
+        Parameters(request): Parameters<KeyboardPreferenceRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::keyboard_preference::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::KeyboardPreferenceTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.keyboard_preference_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "keyboard preference result uncertain; read current state before retrying"
                     })?
                     .map(Json)
                 },

@@ -47,9 +47,11 @@ pub(crate) enum Method {
     WallpaperTransaction,
     ReadTerminalPresentation,
     TerminalPresentationTransaction,
+    ReadKeyboardPreference,
+    KeyboardPreferenceTransaction,
 }
 
-const METHODS: [&str; 37] = [
+const METHODS: [&str; 39] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -87,6 +89,8 @@ const METHODS: [&str; 37] = [
     "wallpaper_transaction",
     "read_terminal_presentation",
     "terminal_presentation_transaction",
+    "read_keyboard_preference",
+    "keyboard_preference_transaction",
 ];
 const BOUNDS: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 5.0];
 

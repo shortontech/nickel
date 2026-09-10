@@ -1276,3 +1276,15 @@ writer and preserving unrelated Codex/keyboard fields. All 14 optional-feature
 tests, the storage reuse audit and strict core Clippy pass. This is prerequisite
 storage work; the typed OSK preference transaction and runtime acknowledgement gate
 remain open.
+
+Full-debug now exposes the typed Automatic/Enabled/Disabled OSK preference through
+the production optional-feature writer. Preparation preserves every Codex field;
+the desktop owner checks fresh file revision, preference generation, lease,
+emergency epoch, request lifetime, deadline and shared input at commit. The schema
+rejects visibility, docking, height, environment override, recipient, epoch and
+text/input controls. Results include only coarse effective enablement, touchscreen
+presence, override status and runtime generation, with `pending` until the existing
+LiveShell configuration path acknowledges the committed generation. Portable
+schema, cancellation, local-replacement, preservation and acknowledgement tests
+and strict combined Clippy pass. Native touchscreen/override/teardown acceptance
+remains open. The exact source inventory now contains 338 Rust sources.

@@ -1,6 +1,6 @@
 //! Portable policy and persistence for optional Nickel features.
 
-use nickel_storage::{atomic_write, config_path, read_regular_file};
+use nickel_storage::{atomic_write, config_path, read_regular_file, stage_write};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -349,22 +349,87 @@ impl OptionalFeatureSettings {
     }
 
     fn write_unlocked(&self, path: &Path) -> io::Result<()> {
+        atomic_write(path, self.encode())
+    }
+
+    fn encode(&self) -> String {
         let source = match &self.codex_source {
             CodexSource::CompatibleInstalled => "installed".to_owned(),
             CodexSource::Bundled => "bundled".to_owned(),
             CodexSource::ApprovedRemote => "remote".to_owned(),
             CodexSource::Executable(path) => format!("executable:{}", path.to_string_lossy()),
         };
-        atomic_write(
-            path,
-            format!(
-                "version=1\ncodex.enabled={}\ncodex.generation={}\ncodex.source={source}\non_screen_keyboard.preference={}\non_screen_keyboard.generation={}\n",
-                self.codex_enabled,
-                self.codex_generation,
-                self.on_screen_keyboard.as_str(),
-                self.on_screen_keyboard_generation
-            ),
+        format!(
+            "version=1\ncodex.enabled={}\ncodex.generation={}\ncodex.source={source}\non_screen_keyboard.preference={}\non_screen_keyboard.generation={}\n",
+            self.codex_enabled,
+            self.codex_generation,
+            self.on_screen_keyboard.as_str(),
+            self.on_screen_keyboard_generation
         )
+    }
+}
+
+/// A keyboard-preference-only replacement which retains every Codex field and
+/// owns the cross-process lock through its checked atomic rename.
+pub struct PreparedKeyboardPreference {
+    path: PathBuf,
+    revision: Option<nickel_storage::RegularFileRevision>,
+    requested: OptionalFeatureSettings,
+    staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
+}
+
+impl PreparedKeyboardPreference {
+    pub fn prepare(
+        path: PathBuf,
+        prior: &OptionalFeatureSettings,
+        preference: crate::on_screen_keyboard::KeyboardPreference,
+    ) -> io::Result<Self> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&path)?;
+        let revision = nickel_storage::regular_file_revision(&path)?;
+        let current = match OptionalFeatureSettings::load(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && revision.is_none() => {
+                OptionalFeatureSettings::default()
+            }
+            Err(error) => return Err(error),
+        };
+        if nickel_storage::regular_file_revision(&path)? != revision || &current != prior {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "optional feature settings changed",
+            ));
+        }
+        let mut requested = current;
+        requested.on_screen_keyboard = preference;
+        requested.on_screen_keyboard_generation = requested
+            .on_screen_keyboard_generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("keyboard preference generation exhausted"))?;
+        let staged = stage_write(&path, requested.encode())?;
+        Ok(Self {
+            path,
+            revision,
+            requested,
+            staged,
+            _lock: lock,
+        })
+    }
+
+    pub fn commit(
+        self,
+        check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<OptionalFeatureSettings> {
+        self.staged.commit(|| {
+            if nickel_storage::regular_file_revision(&self.path)? != self.revision {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "optional feature settings changed",
+                ));
+            }
+            check()
+        })?;
+        Ok(self.requested)
     }
 }
 
@@ -568,7 +633,7 @@ fn parse_source(value: &str) -> CodexSource {
     }
 }
 
-fn settings_path() -> io::Result<PathBuf> {
+pub fn settings_path() -> io::Result<PathBuf> {
     config_path("optional-features")
 }
 
@@ -1009,5 +1074,55 @@ mod tests {
             OptionalFeatureRuntime::load(&path).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn staged_keyboard_change_preserves_codex_and_rejects_cancel_or_replacement() {
+        use crate::on_screen_keyboard::KeyboardPreference;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("optional-features");
+        let prior = OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 42,
+            codex_source: CodexSource::Executable("/private/codex".into()),
+            on_screen_keyboard_generation: 7,
+            ..Default::default()
+        };
+        prior.save(&path).unwrap();
+        let cancelled =
+            PreparedKeyboardPreference::prepare(path.clone(), &prior, KeyboardPreference::Enabled)
+                .unwrap();
+        assert!(
+            cancelled
+                .commit(|| Err(io::Error::other("cancelled")))
+                .is_err()
+        );
+        assert_eq!(OptionalFeatureSettings::load(&path).unwrap(), prior);
+
+        let stale =
+            PreparedKeyboardPreference::prepare(path.clone(), &prior, KeyboardPreference::Disabled)
+                .unwrap();
+        fs::write(
+            &path,
+            prior
+                .encode()
+                .replace("codex.generation=42", "codex.generation=43"),
+        )
+        .unwrap();
+        assert!(stale.commit(|| Ok(())).is_err());
+
+        let current = OptionalFeatureSettings::load(&path).unwrap();
+        let accepted = PreparedKeyboardPreference::prepare(
+            path.clone(),
+            &current,
+            KeyboardPreference::Enabled,
+        )
+        .unwrap()
+        .commit(|| Ok(()))
+        .unwrap();
+        assert_eq!(accepted.codex_generation, 43);
+        assert_eq!(accepted.codex_source, prior.codex_source);
+        assert_eq!(accepted.on_screen_keyboard, KeyboardPreference::Enabled);
+        assert_eq!(accepted.on_screen_keyboard_generation, 8);
     }
 }
