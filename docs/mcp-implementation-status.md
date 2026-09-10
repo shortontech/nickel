@@ -1267,3 +1267,12 @@ rename. Results explicitly apply to newly created terminals; existing terminals
 are unchanged. Portable schema, bounds, cancellation, hidden-field and file-ABA
 tests pass. Native terminal rendering acceptance and a safe typed launch-policy
 contract remain open. The exact source inventory now contains 336 Rust sources.
+
+Optional-feature preference and runtime persistence now share the 64 KiB regular
+file reader and reject nonregular, changing, oversized and non-UTF-8 transport.
+Preference updates use the shared cross-process transaction lock without event-loop
+polling, sleeps or stale-lock deletion, while retaining the existing atomic whole-file
+writer and preserving unrelated Codex/keyboard fields. All 14 optional-feature
+tests, the storage reuse audit and strict core Clippy pass. This is prerequisite
+storage work; the typed OSK preference transaction and runtime acknowledgement gate
+remain open.

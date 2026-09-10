@@ -217,6 +217,11 @@ revision comparison and checked replacement for both local and remote callers.
 `session::state::remote_wallpaper` adds lease, generation and input policy without
 duplicating storage or exposing the configured image path.
 
+`nickel-core::optional_features` now delegates bounded regular-file reads and
+cross-process update exclusion to `nickel-storage`. Its prior polling lock and
+stale-path deletion were removed; the two domain schemas and atomic serializers
+remain distinct because their fields and recovery behavior differ.
+
 The retained Windows executable-evidence adapter adds one platform source (311 total). It shares the existing kernel mapped-file verification with local transport, retains file pins independently of process lifetime, and does not promote executable equality into application membership.
 
 The shared bounded D-Bus transport adds one platform source (312 total). It validates frame lengths before delegating parsing to zbus and centralizes authentication, byte, frame and descriptor limits for typed platform consumers.

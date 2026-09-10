@@ -1,12 +1,12 @@
 //! Portable policy and persistence for optional Nickel features.
 
-use nickel_storage::{atomic_write, config_path};
+use nickel_storage::{atomic_write, config_path, read_regular_file};
 use std::{
-    fs, io,
+    io,
     path::{Path, PathBuf},
-    thread,
-    time::{Duration, SystemTime},
 };
+
+const MAX_SETTINGS_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OptionalFeatureId {
@@ -294,59 +294,22 @@ impl OptionalFeatureSettings {
 
     pub fn update(path: impl AsRef<Path>, update: impl FnOnce(&mut Self)) -> io::Result<Self> {
         let path = path.as_ref();
-        let lock = path.with_extension("lock");
-        if let Some(parent) = lock.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        let mut acquired = None;
-        for _ in 0..200 {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock)
-            {
-                Ok(file) => {
-                    acquired = Some(file);
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-                    let stale = fs::metadata(&lock)
-                        .and_then(|metadata| metadata.modified())
-                        .ok()
-                        .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                        .is_some_and(|age| age >= Duration::from_secs(10));
-                    if stale {
-                        let _ = fs::remove_file(&lock);
-                    }
-                    thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let guard = acquired.ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::WouldBlock,
-                "optional feature settings are busy",
-            )
-        })?;
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
         let mut settings = match Self::load(path) {
             Ok(settings) => settings,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default(),
-            Err(error) => {
-                drop(guard);
-                let _ = fs::remove_file(&lock);
-                return Err(error);
-            }
+            Err(error) => return Err(error),
         };
         update(&mut settings);
-        let result = settings.save(path);
-        drop(guard);
-        let _ = fs::remove_file(lock);
-        result.map(|()| settings)
+        settings.write_unlocked(path)?;
+        Ok(settings)
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
-        let contents = fs::read_to_string(path)?;
+        let bytes = read_regular_file(path.as_ref(), MAX_SETTINGS_BYTES)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let contents = std::str::from_utf8(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let mut settings = Self::default();
         for line in contents.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -381,6 +344,11 @@ impl OptionalFeatureSettings {
 
     pub fn save(&self, path: impl AsRef<Path>) -> io::Result<()> {
         let path = path.as_ref();
+        let _lock = nickel_storage::TransactionLock::try_acquire(path)?;
+        self.write_unlocked(path)
+    }
+
+    fn write_unlocked(&self, path: &Path) -> io::Result<()> {
         let source = match &self.codex_source {
             CodexSource::CompatibleInstalled => "installed".to_owned(),
             CodexSource::Bundled => "bundled".to_owned(),
@@ -447,7 +415,10 @@ impl OptionalFeatureRuntime {
     }
 
     pub fn load(path: impl AsRef<Path>) -> io::Result<Self> {
-        let contents = fs::read_to_string(path)?;
+        let bytes = read_regular_file(path.as_ref(), MAX_SETTINGS_BYTES)?
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        let contents = std::str::from_utf8(&bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         let mut runtime = Self::default();
         for line in contents.lines() {
             let Some((key, value)) = line.split_once('=') else {
@@ -608,6 +579,7 @@ fn runtime_path() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     fn capability(
         support: FeatureSupport,
         installation: FeatureInstallation,
@@ -1010,5 +982,32 @@ mod tests {
         assert_eq!(merged.codex_source, CodexSource::Bundled);
         assert_eq!(merged.codex_generation, 2);
         fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn settings_and_runtime_reject_oversized_and_non_utf8_transport() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("optional-features");
+        fs::write(&path, vec![b' '; MAX_SETTINGS_BYTES + 1]).unwrap();
+        assert_eq!(
+            OptionalFeatureSettings::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::write(&path, b"version=1\ninvalid=\xff\n").unwrap();
+        assert_eq!(
+            OptionalFeatureSettings::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        // Keep the two persisted schemas under the same transport bound.
+        fs::write(&path, vec![b' '; MAX_SETTINGS_BYTES + 1]).unwrap();
+        assert_eq!(
+            OptionalFeatureRuntime::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        fs::write(&path, b"version=1\ninvalid=\xff\n").unwrap();
+        assert_eq!(
+            OptionalFeatureRuntime::load(&path).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
     }
 }
