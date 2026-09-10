@@ -108,6 +108,21 @@ enum RemoteDesktopRequest {
         reply:
             std::sync::mpsc::SyncSender<Result<nickel_remote_control::wallpaper::Snapshot, String>>,
     },
+    ReadFileIcons {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: remote_file_icons::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::file_icons::Snapshot, String>,
+        >,
+    },
+    FileIconsTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::file_icons::Transaction,
+        prepared: remote_file_icons::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::file_icons::Snapshot, String>,
+        >,
+    },
     ReadTerminalPresentation {
         permit: nickel_remote_control::DesktopPermit,
         prepared: remote_terminal_presentation::PreparedRead,
@@ -595,6 +610,48 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .map_err(|_| "wallpaper queue is busy or stopped")?;
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "wallpaper result uncertain; read current wallpaper before retrying".to_owned()
+        })?
+    }
+    fn read_file_icons(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_file_icons::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadFileIcons {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "file icon settings queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "file icon settings observation timed out")?
+    }
+    fn file_icons_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::file_icons::Transaction,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = remote_file_icons::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::FileIconsTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "file icon settings queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "file icon settings result uncertain; read current state before retrying".to_owned()
         })?
     }
     fn read_terminal_presentation(
@@ -1859,6 +1916,7 @@ pub struct NickelSession {
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
     remote_wallpaper: remote_wallpaper::WallpaperState,
+    remote_file_icons: remote_file_icons::FileIconState,
     remote_terminal_presentation: remote_terminal_presentation::TerminalPresentationState,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
@@ -1939,6 +1997,7 @@ mod remote_application_scale;
 mod remote_capture;
 mod remote_controller;
 mod remote_diagnostics;
+mod remote_file_icons;
 mod remote_keyboard;
 mod remote_keyboard_preference;
 pub(super) mod remote_launch;
@@ -2541,6 +2600,23 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_wallpaper(&permit, transaction, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadFileIcons {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_file_icons(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::FileIconsTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_change_file_icons(&permit, transaction, prepared);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadTerminalPresentation {
@@ -5210,6 +5286,7 @@ impl NickelSession {
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),
             remote_wallpaper: Default::default(),
+            remote_file_icons: Default::default(),
             remote_terminal_presentation: Default::default(),
             remote_desktop_events: Default::default(),
             remote_frame_trace: None,

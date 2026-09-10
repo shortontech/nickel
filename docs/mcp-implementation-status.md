@@ -1296,3 +1296,20 @@ bounded busy result instead of crossing the remote transaction boundary. The
 revision check still rejects uncooperative file replacement and ABA. Focused
 local/remote exclusion, cancellation, expiry and ABA tests and strict combined
 Clippy pass.
+
+Full-debug now exposes file-icon provider and theme settings through a typed,
+path-free transaction. The installed catalog is platform-owned, deduplicated and
+bounded to 256 IDs of at most 128 bytes. Only an exact available catalog ID may be
+selected; Nickel and system-default choices remain explicit. Missing configured
+themes remain visible as unavailable so temporary removal does not erase intent,
+while malformed path-like legacy values remain preserved internally and are not
+disclosed. Observation generation includes settings revision, bounded catalog and
+provider-content revision. The shared ShellSettings lock and desktop owner enforce
+revision CAS, lease/emergency/deadline and idle-input checks before rename, then
+request the production cache reload without claiming pixel presentation. Portable
+schema, bounds, preservation and ABA tests pass. Native presented-icon acceptance
+remains open: this host has no Xvfb, its Wayland socket rejected nested EGL display
+creation, and nested X11 did not reach the authenticated test-control readiness
+barrier even with Mesa/software rendering. Both owned attempts were stopped before
+lease approval or mutation (`file-icons-native-results.txt`). The exact source
+inventory now contains 340 Rust sources.

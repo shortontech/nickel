@@ -23,6 +23,7 @@ pub use emergency::EmergencyStopHandle;
 pub mod desktop_events;
 pub mod diagnostics;
 mod event_subscriptions;
+pub mod file_icons;
 pub mod frame_trace;
 pub mod keyboard;
 pub mod keyboard_preference;

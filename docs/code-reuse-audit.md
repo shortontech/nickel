@@ -1,7 +1,7 @@
 # Nickel code-reuse disposition ledger
 
 Audit date: 2026-09-04; implementation dispositions and inventory refreshed through 2026-09-10.
-Scope: all 338 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
+Scope: all 340 inventoried Rust sources under `crates/`. The exact per-crate snapshot is checked in at
 `assets/code-reuse-source-inventory.tsv`; `reuse_authority` fails whenever a source or crate appears
 or disappears without review. Candidates were grouped by behavior, then traced through callers and
 tests; same-named trait implementations and platform translations were not treated as duplication.
@@ -62,7 +62,7 @@ density without creating parallel policy authorities.
 
 The original strict clone scan fell from 15 groups and 352 duplicated lines to 9 groups and approximately
 140 duplicated lines; the remaining groups are reviewed trait/fixture shapes or small local
-translations rather than competing product authorities. The exact 338-source inventory is current,
+translations rather than competing product authorities. The exact 340-source inventory is current,
 and the executable audit guards the storage, geometry, display-list, hit-test, and source-count
 boundaries against regression.
 
@@ -216,6 +216,13 @@ every cooperative ShellSettings save. Remote appearance and shell-behavior
 preparation retain the same lock across bounded read, staging and final checked
 replacement; their production owners add lease and input authority without a
 second persistence protocol.
+
+`nickel-remote-control::file_icons` owns the bounded, path-free provider/theme
+schema. `session::state::remote_file_icons` projects the platform-owned installed
+theme catalog, retains unavailable configured IDs, stages through ShellSettings,
+and requests the production shell/file-manager refresh after the desktop owner
+accepts the commit. Platform icon lookup and cache revision remain in
+`nickel-platform` and `nickel-file`.
 
 `nickel-remote-control::wallpaper` owns the path-free wire projection, while
 `nickel-core::wallpaper_settings::PreparedWallpaperSettings` owns locked staging,

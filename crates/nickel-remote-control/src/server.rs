@@ -155,6 +155,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::wallpaper::Snapshot, String> {
         Err("wallpaper transactions are unavailable on this backend".into())
     }
+    fn read_file_icons(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::file_icons::Snapshot, String> {
+        Err("file icon settings observation is unavailable on this backend".into())
+    }
+    fn file_icons_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::file_icons::Transaction,
+    ) -> Result<crate::file_icons::Snapshot, String> {
+        Err("file icon settings transactions are unavailable on this backend".into())
+    }
     fn read_terminal_presentation(
         &self,
         _permit: crate::DesktopPermit,
@@ -903,6 +916,13 @@ struct WallpaperRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct FileIconsRequest {
+    lease_id: u64,
+    transaction: crate::file_icons::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct TerminalPresentationRequest {
     lease_id: u64,
     transaction: crate::terminal_presentation::Transaction,
@@ -1501,6 +1521,59 @@ impl McpHandler {
                     .map_err(
                         |_| "wallpaper result uncertain; read current wallpaper before retrying",
                     )?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read the typed Nickel/System file-icon provider and bounded platform theme catalog. Requires Full Control & Debug Nickel. Theme values are identifiers, never paths; unavailable configured themes remain visible."
+    )]
+    async fn read_file_icons(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::file_icons::Snapshot>, String> {
+        self.metrics
+            .measure(crate::operation_metrics::Method::ReadFileIcons, async {
+                let permit = self.permit(&context, request.lease_id)?;
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    desktop_call(self.desktop.clone(), move |desktop| {
+                        desktop.read_file_icons(permit)
+                    }),
+                )
+                .await
+                .map_err(|_| "file icon settings observation timed out")?
+                .map(Json)
+            })
+            .await
+    }
+
+    #[tool(
+        description = "Select Nickel icons, the system default, or an exact ID from the bounded installed icon-theme catalog. Requires Full Control & Debug Nickel, fresh generation/prior state and idle shared input. Arbitrary paths are rejected. A committed result requests cache refresh without claiming pixel presentation."
+    )]
+    async fn file_icons_transaction(
+        &self,
+        Parameters(request): Parameters<FileIconsRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::file_icons::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::FileIconsTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.file_icons_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "file icon settings result uncertain; read current state before retrying"
+                    })?
                     .map(Json)
                 },
             )
