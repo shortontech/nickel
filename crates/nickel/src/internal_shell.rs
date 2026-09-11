@@ -1753,6 +1753,20 @@ mod tests {
         let replacement = coordinator.window_menu_generation().unwrap();
         assert!(coordinator.retire_window_menu(replacement));
         assert_eq!(coordinator.window_menu_generation(), None);
+        assert!(coordinator.open_window_menu_at(41, 20, 30));
+        let menu = coordinator
+            .surface(SurfaceRole::WindowContextMenu, None)
+            .unwrap()
+            .id;
+        coordinator.scene(menu).unwrap();
+        coordinator.step_slot(
+            menu,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Shortcut(nickel_ui::Shortcut::Escape)],
+                ..Default::default()
+            },
+        );
+        assert_eq!(coordinator.window_menu_generation(), None);
     }
 
     #[test]

@@ -2726,6 +2726,9 @@ impl LiveShell {
                     outcome.changed
                 }
             }
+            SurfaceRole::WindowContextMenu => {
+                self.window_menu_host_event(HostEvent::Shortcut(shortcut), width, height)
+            }
             SurfaceRole::Lock if self.locked => {
                 let outcome = self.lock_host.step(HostBatch {
                     surface_size: Some((width, height)),
@@ -3594,6 +3597,17 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        self.window_menu_host_event(
+            HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            },
+            width,
+            height,
+        )
+    }
+
+    fn window_menu_host_event(&mut self, event: HostEvent, width: u32, height: u32) -> bool {
         if self.application_menu_target.is_some() {
             if self.application_menu_host.is_none() {
                 let _ = self.application_menu_scene();
@@ -3603,10 +3617,7 @@ impl LiveShell {
             };
             let outcome = host.step(HostBatch {
                 surface_size: Some((width, height)),
-                events: vec![HostEvent::Normalized {
-                    input,
-                    clipboard_text: None,
-                }],
+                events: vec![event],
                 ..HostBatch::default()
             });
             let actions = host.application_mut().take_effects();
@@ -3624,10 +3635,7 @@ impl LiveShell {
         };
         let outcome = host.step(HostBatch {
             surface_size: Some((width, height)),
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            }],
+            events: vec![event],
             ..HostBatch::default()
         });
         for failure in &outcome.failures {
