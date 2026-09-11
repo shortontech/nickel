@@ -1390,6 +1390,13 @@ fn validate_fixed_metrics(metrics: &str, known_methods: &BTreeSet<String>) -> Re
         "unauthorized",
     ];
     let duration_bounds = ["0.001", "0.01", "0.1", "1", "5", "+Inf"];
+    let rate_limit_categories = [
+        "global_concurrency",
+        "global_rate",
+        "client_concurrency",
+        "client_rate",
+        "client_capacity",
+    ];
     for line in metrics.lines().filter(|line| !line.starts_with('#')) {
         let Some((metric, labelled)) = line.split_once('{') else {
             continue;
@@ -1451,6 +1458,14 @@ fn validate_fixed_metrics(metrics: &str, known_methods: &BTreeSet<String>) -> Re
                         .contains(&values.get("outcome").copied().unwrap_or_default())
                 {
                     return Err("permission metrics exposed a non-fixed outcome label".into());
+                }
+            }
+            "nickel_mcp_rate_limited_total" => {
+                if values.len() != 1
+                    || !rate_limit_categories
+                        .contains(&values.get("category").copied().unwrap_or_default())
+                {
+                    return Err("rate-limit metrics exposed a non-fixed category label".into());
                 }
             }
             _ => {
