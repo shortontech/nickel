@@ -180,6 +180,19 @@ impl PreparedTerminalSettings {
     }
 
     pub fn commit(self, check: impl FnOnce() -> io::Result<()>) -> io::Result<TerminalSettings> {
+        self.commit_with_revision(check)
+            .map(|(settings, _revision)| settings)
+    }
+
+    /// Commit and capture the exact replacement revision while the cooperative
+    /// transaction lock is still held.
+    pub fn commit_with_revision(
+        self,
+        check: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<(
+        TerminalSettings,
+        Option<nickel_storage::RegularFileRevision>,
+    )> {
         self.staged.commit(|| {
             if nickel_storage::regular_file_revision(&self.path)? != self.revision {
                 return Err(io::Error::new(
@@ -189,7 +202,8 @@ impl PreparedTerminalSettings {
             }
             check()
         })?;
-        Ok(self.requested)
+        let revision = nickel_storage::regular_file_revision(&self.path)?;
+        Ok((self.requested, revision))
     }
 }
 

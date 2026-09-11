@@ -1854,9 +1854,28 @@ revisions. Commit repeats the appearance transaction's protected-focus,
 shared-input, physical-input epoch, deadline and permit checks before replacement,
 then advances the production launcher icon generation and requests a live cache
 refresh. The response claims that refresh request, not decoded or presented pixels.
-Wallpaper and terminal-presentation trait methods remain unavailable on the Windows authority;
+Wallpaper trait methods remain unavailable on the Windows authority;
 `windows_settings_worker` therefore remains an explicit diagnostic gap. Native
 Windows cache and presented-icon acceptance remain open.
+
+Windows now implements typed terminal-presentation reads and transactions against
+the production `TerminalSettings` file consumed by `nickel-terminal` at process
+creation. Preparation uses the bounded 64 KiB regular-file reader, generation and
+prior-value comparison, a cooperative transaction lock, and staged whole-file
+replacement. The owner rechecks full-debug authority, protected shell focus,
+remote holds, local pointer activity, physical-input idleness, the request-start
+local-input epoch, request deadline and permit at the replacement boundary. It
+captures the committed native file revision while the lock remains held so later
+reads can identify local replacement without retaining hidden values. The schema
+contains the complete font, size, scrollback, cursor, color and close-on-success
+subset; it reports only presence booleans for custom shell and initial directory,
+preserves both values, and rejects executable, command and path fields. The result
+truthfully reports that production consumes changes for newly created terminal
+processes; it does not claim mutation of terminals that already loaded their
+settings. Portable owner tests, Windows cross-compilation, strict cross-Clippy and
+compatibility-layer execution cover the transaction mechanics. Native Windows
+font rendering, unchanged-existing-terminal behavior, focus/input arbitration and
+revocation acceptance remain open.
 
 Windows now implements typed idle-policy and on-screen-keyboard preference reads
 and transactions through the same production settings and winit-owner boundary.

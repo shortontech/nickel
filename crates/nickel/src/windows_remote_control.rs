@@ -625,6 +625,19 @@ enum OwnerRequest {
         deadline: Instant,
         reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
     },
+    ReadTerminalPresentation {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_terminal_presentation::PreparedRead,
+        reply: SyncSender<Result<nickel_remote_control::terminal_presentation::Snapshot, String>>,
+    },
+    TerminalPresentationTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::terminal_presentation::Transaction,
+        prepared: Box<crate::windows_remote_terminal_presentation::PreparedChange>,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::terminal_presentation::Snapshot, String>>,
+    },
     ReadCodexPreference {
         permit: DesktopPermit,
         prepared: crate::windows_remote_codex::PreparedRead,
@@ -1379,6 +1392,62 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .ok_or("Windows file icon transaction expired before dispatch")?;
         receiver.recv_timeout(remaining).map_err(|_| {
             "Windows file icon result uncertain; read current state before retrying".to_owned()
+        })?
+    }
+    fn read_terminal_presentation(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_terminal_presentation::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows terminal presentation observation expired before dispatch")?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadTerminalPresentation {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows terminal presentation observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn terminal_presentation_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::terminal_presentation::Transaction,
+    ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_terminal_presentation::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows terminal presentation transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::TerminalPresentationTransaction {
+                permit,
+                transaction,
+                prepared: Box::new(prepared),
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows terminal presentation result uncertain; read current state before retrying"
+                .to_owned()
         })?
     }
     fn read_codex_preference(
@@ -2396,6 +2465,7 @@ pub(crate) struct WindowsRemoteControl {
     appearance: crate::windows_remote_settings::AppearanceState,
     application_scale: crate::windows_remote_application_scale::State,
     file_icons: crate::windows_remote_settings::FileIconState,
+    terminal_presentation: crate::windows_remote_terminal_presentation::State,
     idle_preferences: crate::windows_remote_settings::IdleState,
     launcher_favorites: crate::windows_remote_launcher_favorites::FavoritesState,
     shell_focus: Option<ShellFocusState>,
@@ -2579,6 +2649,7 @@ impl WindowsRemoteControl {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            terminal_presentation: Default::default(),
             idle_preferences: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,
@@ -3102,6 +3173,43 @@ impl WindowsRemoteControl {
                                 transaction,
                                 prepared,
                                 deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadTerminalPresentation {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.read_terminal_presentation(&permit, prepared, shell, state)
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::TerminalPresentationTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_terminal_presentation(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                *prepared,
+                                deadline,
+                                expected_local_input_epoch,
                             )
                         },
                     );
@@ -3647,6 +3755,99 @@ impl WindowsRemoteControl {
                 .min(u128::from(u64::MAX)) as u64,
             true,
         )
+    }
+
+    fn read_terminal_presentation(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_terminal_presentation::PreparedRead,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current(Instant::now())?;
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        permit.with_debug(protected, || {
+            self.terminal_presentation.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_terminal_presentation(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::terminal_presentation::Transaction,
+        prepared: crate::windows_remote_terminal_presentation::PreparedChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("terminal presentation transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            self.terminal_presentation
+                .validate(&prepared, &transaction, Instant::now())?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    if !crate::windows_remote_input::physical_input_idle() {
+                        return Err("shared input is busy".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            Ok(())
+        });
+        let committed = match committed {
+            Some(committed) => committed,
+            None => {
+                authorization?;
+                return Err(
+                    "terminal presentation unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        // nickel-terminal loads this file when creating a new process. Record
+        // the exact committed file revision even when revocation wins the
+        // post-effect check, so the owner never reports stale runtime state.
+        let snapshot = self.terminal_presentation.observe_committed(
+            &committed,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        )?;
+        authorization?;
+        Ok(snapshot)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7470,6 +7671,7 @@ mod tests {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            terminal_presentation: Default::default(),
             idle_preferences: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,

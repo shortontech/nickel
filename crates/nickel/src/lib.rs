@@ -20,6 +20,8 @@ mod windows_remote_launcher_favorites;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_remote_settings;
 #[cfg(any(test, target_os = "windows"))]
+mod windows_remote_terminal_presentation;
+#[cfg(any(test, target_os = "windows"))]
 mod windows_resource_owner;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_shell_diagnostics;
