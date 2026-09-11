@@ -86,3 +86,50 @@ window admission for these real examples. It does not prove Flatpak/shared-runti
 or broker identity, remote application launch, transients, cross-output/workspace
 movement, Xwayland application behavior, physical input, assistive workflows, or
 native Windows acceptance.
+
+## Output and workspace movement
+
+Run the ordinary-client matrix with `--movement` to include movement acceptance:
+
+```sh
+target/debug/nickel-linux-remote-control-acceptance --movement
+```
+
+This implies `--ordinary-scopes` and requires the same two repository examples.
+Before startup, the harness creates one desktop entry for the real counter
+example under its private `XDG_DATA_HOME`; it does not install a host application.
+The production catalog must report the same verified executable identity as the
+live counter window before the negative launch test is admitted.
+
+The nested test-control capability creates a second Smithay output, publishes its
+Wayland output global and runs production relayout. The harness creates a workspace
+through the production session command and uses its returned authoritative state.
+The resulting tests prove:
+
+- A window lease and an application lease each retain native key delivery after
+  the window moves to the second output, changes workspace there, and returns to
+  the original workspace/output. Trusted owner queries confirm full geometry
+  containment and workspace membership; the actual client confirms each key.
+- An output lease permits input on its output, omits the moved window from its
+  inventory and denies focus/capture/keyboard outside that output, then permits
+  native input again on return using the same lease. The outside keyboard target
+  is focused locally first to rule out a focus-only rejection.
+- The application lease cannot enumerate or launch the unrelated real catalog
+  executable after movement. Launch must fail specifically because the target is
+  outside the application lease, not because its catalog entry is absent/stale.
+- No movement requests another approval or changes the existing authority audit.
+
+Native Wayland acceptance passed September 11, 2026, on `d2ca964` plus this change.
+All preceding ordinary/shell cases and the combined diagnostic/capture/input stress,
+privacy and emergency checks also passed. Five focused harness tests and strict
+harness Clippy passed. Evidence: `/tmp/nickel-native-movement-build.log`,
+`/tmp/nickel-native-movement-focused.log` and
+`/tmp/nickel-native-movement-wayland.log`. The added workspace/output were removed,
+all example processes reaped, and the owned compositor/runtime cleaned afterward.
+
+The extra output is virtual: it exercises live Wayland clients and production
+compositor resource/geometry/workspace authority, but has no independent physical
+display presenter. This is not physical multi-monitor, DRM, mixed-DPI presentation,
+Xwayland, or Windows acceptance. Continuous held-input movement and transient/broker
+identity remain separate cases. The real negative launch test does not prove an
+authorized application launch or output-placement workflow.

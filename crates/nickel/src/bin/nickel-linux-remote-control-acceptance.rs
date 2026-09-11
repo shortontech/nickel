@@ -84,6 +84,9 @@ fn run() -> Result<Outcome, String> {
         .ok_or("acceptance harness has no parent directory")?;
     let nickel = sibling(directory, "nickel")?;
     let runtime = RuntimeDirectory::create()?;
+    if ordinary_scopes::movement_enabled() {
+        ordinary_scopes::prepare_movement_catalog(runtime.path(), directory)?;
+    }
     let capability_file = runtime.path().join("shell-environment");
     let address = reserve_loopback_address()?;
 
@@ -237,7 +240,8 @@ fn exercise(
         true,
     )?;
     let mut stress = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
-    let ordinary_scopes = env::args().any(|argument| argument == "--ordinary-scopes");
+    let ordinary_scopes = ordinary_scopes::movement_enabled()
+        || env::args().any(|argument| argument == "--ordinary-scopes");
     let lease_id = if ordinary_scopes {
         ordinary_scopes::exercise(&environment, address, &identity, stress.lease_id)?
     } else {
