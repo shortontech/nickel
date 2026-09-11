@@ -678,19 +678,28 @@ impl Owner {
         output_name: Option<&str>,
         authorized_surface_ancestors: &[ResourceId],
     ) -> bool {
-        let Some(output) =
-            output_name.and_then(|name| self.outputs.get(name).map(|record| &record.identity))
-        else {
-            return false;
-        };
-        scope.covers(&ResourceEvidence {
+        self.shell_surface_resource(scope, surface, output_name, authorized_surface_ancestors)
+            .is_some()
+    }
+
+    fn shell_surface_resource<'a>(
+        &'a self,
+        scope: &ResourceScope,
+        surface: &'a ResourceId,
+        output_name: Option<&str>,
+        authorized_surface_ancestors: &'a [ResourceId],
+    ) -> Option<ResourceEvidence<'a>> {
+        let output =
+            output_name.and_then(|name| self.outputs.get(name).map(|record| &record.identity))?;
+        let evidence = ResourceEvidence {
             surface: Some(surface),
             window: None,
             verified_application: None,
             output: Some(output),
             authorized_surface_ancestors,
             protected: false,
-        })
+        };
+        scope.covers(&evidence).then_some(evidence)
     }
 
     pub(crate) fn output_generation(&self, name: &str) -> Option<u64> {
@@ -1013,6 +1022,344 @@ mod tests {
             std::slice::from_ref(&parent),
         ));
     }
+
+    #[test]
+    fn production_owner_lease_scope_matrix_survives_actions_without_reprompt_or_widening() {
+        use nickel_remote_control::{ControlPlane, DesktopPermit, lease_requests};
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        #[derive(Clone, Copy)]
+        enum Action {
+            Observe,
+            Input,
+        }
+
+        #[derive(Clone, Copy)]
+        enum Target<'a> {
+            Window(usize),
+            Surface {
+                identity: &'a ResourceId,
+                output: &'a str,
+                ancestors: &'a [ResourceId],
+            },
+        }
+
+        #[derive(Clone, Copy)]
+        enum ScopeKind {
+            Surface,
+            Window,
+            Application,
+            Output,
+            FullSession,
+        }
+
+        fn identified_window(native: usize, x: i32, application: &str, active: bool) -> Window {
+            let mut value = window(native, x);
+            value.pid = 100 + native as u32;
+            value.created = 200 + native as u64;
+            value.thread = 300 + native as u32;
+            value.application = Some(application.into());
+            value.active = active;
+            value
+        }
+
+        fn reconcile(
+            owner: &mut Owner,
+            editor_x: i32,
+            terminal_focused: bool,
+            include_new_windows: bool,
+        ) {
+            let mut windows = vec![
+                identified_window(
+                    1,
+                    editor_x,
+                    "windows:catalog-launch:editor",
+                    !terminal_focused,
+                ),
+                identified_window(2, 300, "windows:catalog-launch:terminal", terminal_focused),
+            ];
+            if include_new_windows {
+                windows.extend([
+                    identified_window(3, 500, "windows:catalog-launch:editor", false),
+                    identified_window(4, 1300, "windows:catalog-launch:viewer", false),
+                ]);
+            }
+            owner
+                .reconcile(
+                    windows,
+                    vec![output(1, "left", 0, 1000), output(2, "right", 1000, 1000)],
+                    |_| {},
+                )
+                .unwrap();
+        }
+
+        fn dispatch(
+            owner: &Owner,
+            permit: &DesktopPermit,
+            target: Target<'_>,
+            action: Action,
+            effects: &mut usize,
+        ) -> Result<(), String> {
+            let scope = permit.resource_scope()?;
+            let evidence = match target {
+                Target::Window(native) => {
+                    let record = owner
+                        .windows
+                        .get(&native)
+                        .ok_or("production owner has no such window")?;
+                    owner
+                        .window_resource(&scope, &record.identity.id, record.identity.generation)
+                        .map(|(_, evidence)| evidence)
+                        .ok_or("production owner rejected window scope")?
+                }
+                Target::Surface {
+                    identity,
+                    output,
+                    ancestors,
+                } => owner
+                    .shell_surface_resource(&scope, identity, Some(output), ancestors)
+                    .ok_or("production owner rejected shell surface scope")?,
+            };
+            match action {
+                Action::Observe => permit.with_resource(&evidence, || {
+                    *effects += 1;
+                    Ok(())
+                }),
+                Action::Input => permit.with_input(&evidence, || {
+                    *effects += 1;
+                    Ok(())
+                }),
+            }
+        }
+
+        let cases = [
+            ("surface", ScopeKind::Surface),
+            ("window", ScopeKind::Window),
+            ("application", ScopeKind::Application),
+            ("output", ScopeKind::Output),
+            ("full session", ScopeKind::FullSession),
+        ];
+
+        for (case_index, (case_name, kind)) in cases.into_iter().enumerate() {
+            let mut owner = Owner::default();
+            reconcile(&mut owner, 100, false, false);
+            let leased_surface = ResourceId {
+                id: "windows-shell:editor".into(),
+                generation: 41,
+            };
+            let child_surface = ResourceId {
+                id: "windows-shell:editor-dialog".into(),
+                generation: 42,
+            };
+            let unrelated_surface = ResourceId {
+                id: "windows-shell:unrelated-dialog".into(),
+                generation: 43,
+            };
+            let leased_window = owner.windows[&1].identity.clone();
+            let leased_output = owner.outputs["left"].identity.clone();
+            let scope = match kind {
+                ScopeKind::Surface => ResourceScope::Surface(leased_surface.clone()),
+                ScopeKind::Window => ResourceScope::Window(leased_window),
+                ScopeKind::Application => {
+                    ResourceScope::Application("windows:catalog-launch:editor".into())
+                }
+                ScopeKind::Output => ResourceScope::Output(leased_output),
+                ScopeKind::FullSession => ResourceScope::FullSession,
+            };
+
+            let now = Instant::now();
+            let control = Arc::new(Mutex::new(ControlPlane::default()));
+            let (identity, lease) = {
+                let mut control = control.lock().unwrap();
+                control.set_enabled(true);
+                let identity = control.connect_identity(case_name).unwrap();
+                let watch = control
+                    .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                    .unwrap();
+                control
+                    .activate_connection_watch(
+                        &identity.client_id,
+                        &identity.token,
+                        watch,
+                        false,
+                        now,
+                    )
+                    .unwrap();
+                let request = lease_requests::LeaseRequest {
+                    renewal: None,
+                    scope: scope.clone(),
+                    duration: Some(Duration::from_secs(1200)),
+                    allow_resumption: false,
+                    full_debug: false,
+                };
+                assert!(
+                    control
+                        .request_lease(&identity.client_id, &identity.token, request.clone(), now,)
+                        .unwrap(),
+                    "{case_name} did not create its one permission request"
+                );
+                let generation = control
+                    .lease_requests()
+                    .pending_generation(&identity.client_id)
+                    .unwrap();
+                let lease = control
+                    .approve_lease_local(&identity.client_id, &request, generation, now)
+                    .unwrap();
+                (identity, lease)
+            };
+            let permission_events = vec![
+                lease_requests::Outcome::Submitted,
+                lease_requests::Outcome::Approved,
+            ];
+            assert_eq!(
+                control
+                    .lock()
+                    .unwrap()
+                    .lease_requests()
+                    .audit()
+                    .map(|event| event.outcome)
+                    .collect::<Vec<_>>(),
+                permission_events
+            );
+            let permit = || {
+                DesktopPermit::from_active_lease(
+                    control.clone(),
+                    identity.client_id.clone(),
+                    identity.token.clone(),
+                    lease,
+                )
+                .unwrap()
+            };
+            let mut effects = 0;
+            let primary = match kind {
+                ScopeKind::Surface => Target::Surface {
+                    identity: &leased_surface,
+                    output: "left",
+                    ancestors: &[],
+                },
+                _ => Target::Window(1),
+            };
+
+            macro_rules! check {
+                ($scenario:expr, $target:expr, $action:expr, $expected:expr $(,)?) => {{
+                    let expected: [bool; 5] = $expected;
+                    let before = effects;
+                    let result = dispatch(&owner, &permit(), $target, $action, &mut effects);
+                    assert_eq!(
+                        result.is_ok(),
+                        expected[case_index],
+                        "{} scope disagreed with production-owner scenario {:?}: {:?}",
+                        case_name,
+                        $scenario,
+                        result
+                    );
+                    assert_eq!(
+                        effects,
+                        before + usize::from(expected[case_index]),
+                        "{} scope dispatched a rejected effect for {}",
+                        case_name,
+                        $scenario
+                    );
+                    let control = control.lock().unwrap();
+                    assert_eq!(
+                        control.lease_requests().pending().count(),
+                        0,
+                        "{} scope reprompted after {}",
+                        case_name,
+                        $scenario
+                    );
+                    assert_eq!(
+                        control
+                            .lease_requests()
+                            .audit()
+                            .map(|event| event.outcome)
+                            .collect::<Vec<_>>(),
+                        permission_events,
+                        "{} scope recorded another permission decision after {}",
+                        case_name,
+                        $scenario
+                    );
+                }};
+            }
+
+            check!("first observation", primary, Action::Observe, [true; 5]);
+            check!("second input", primary, Action::Input, [true; 5]);
+
+            reconcile(&mut owner, 100, true, false);
+            check!(
+                "original resource after focus changed",
+                primary,
+                Action::Observe,
+                [true; 5],
+            );
+            check!(
+                "newly focused different application",
+                Target::Window(2),
+                Action::Input,
+                [false, false, false, true, true],
+            );
+
+            reconcile(&mut owner, 1100, true, false);
+            let moved_primary = match kind {
+                ScopeKind::Surface => Target::Surface {
+                    identity: &leased_surface,
+                    output: "right",
+                    ancestors: &[],
+                },
+                _ => Target::Window(1),
+            };
+            check!(
+                "leased resource moved to another output",
+                moved_primary,
+                Action::Input,
+                [true, true, true, false, true],
+            );
+
+            reconcile(&mut owner, 1100, true, true);
+            check!(
+                "new window from the leased application on the leased output",
+                Target::Window(3),
+                Action::Observe,
+                [false, false, true, true, true],
+            );
+            check!(
+                "verified child transient on the leased output",
+                Target::Surface {
+                    identity: &child_surface,
+                    output: "left",
+                    ancestors: std::slice::from_ref(&leased_surface),
+                },
+                Action::Input,
+                [true, false, false, true, true],
+            );
+            check!(
+                "unrelated transient on the leased output",
+                Target::Surface {
+                    identity: &child_surface,
+                    output: "left",
+                    ancestors: std::slice::from_ref(&unrelated_surface),
+                },
+                Action::Observe,
+                [false, false, false, true, true],
+            );
+            check!(
+                "different application on the leased output",
+                Target::Window(2),
+                Action::Input,
+                [false, false, false, true, true],
+            );
+            check!(
+                "different application outside the leased output",
+                Target::Window(4),
+                Action::Observe,
+                [false, false, false, false, true],
+            );
+            assert!(effects >= 3, "{case_name} did not sustain multiple actions");
+            assert_eq!(control.lock().unwrap().leases().iter().count(), 1);
+        }
+    }
+
     #[test]
     fn approval_scope_requires_the_exact_live_owner_incarnation() {
         let mut app = window(1, 10);
