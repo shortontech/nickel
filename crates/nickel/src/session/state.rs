@@ -342,6 +342,8 @@ struct RemoteDesktopBridge {
 
 struct PreparedApplicationDiscovery {
     discovery: crate::model::ApplicationDiscovery,
+    observation_started: Instant,
+    observed: Instant,
     preparation_duration_us: u64,
 }
 
@@ -967,9 +969,12 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             let discovery = crate::platform::prepare_application_discovery();
             let preparation_duration_us =
                 started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            let observed = Instant::now();
             permit.with_debug(false, || Ok(()))?;
             Some(PreparedApplicationDiscovery {
                 discovery,
+                observation_started: started,
+                observed,
                 preparation_duration_us,
             })
         } else {
@@ -2142,6 +2147,8 @@ pub struct NickelSession {
     remote_diagnostic_staging: Arc<remote_worker::WorkerStaging>,
     remote_observation_generation: u64,
     remote_application_inventory_generation: u64,
+    remote_application_inventory_refresh:
+        Option<nickel_remote_control::diagnostics::ApplicationInventoryRefreshOutcome>,
     remote_platform_refresh_generation: u64,
     remote_platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
     remote_appearance: remote_appearance::AppearanceState,
@@ -3073,12 +3080,25 @@ impl NickelSession {
                                 application_inventory_refresh = Some(
                                     nickel_remote_control::diagnostics::ApplicationInventoryRefreshOutcome {
                                         generation: self.remote_application_inventory_generation,
+                                        observation_started_at_us: prepared
+                                            .observation_started
+                                            .saturating_duration_since(self.start_time)
+                                            .as_micros()
+                                            .min(u128::from(u64::MAX)) as u64,
+                                        observed_at_us: prepared
+                                            .observed
+                                            .saturating_duration_since(self.start_time)
+                                            .as_micros()
+                                            .min(u128::from(u64::MAX)) as u64,
                                         preparation_duration_us: prepared.preparation_duration_us,
+                                        stale: false,
                                         applications: applications.min(u32::MAX as usize) as u32,
                                         partial,
                                         reconciliation_confirmed: true,
                                     },
                                 );
+                                self.remote_application_inventory_refresh =
+                                    application_inventory_refresh.clone();
                                 self.sync_internal_shell_changes(Some(&changed));
                             }
                             nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { domain } => {
@@ -3661,6 +3681,10 @@ impl NickelSession {
                                 .iter()
                                 .map(|refresh| refresh.retained_at(observed_at_us))
                                 .collect(),
+                            application_inventory_refresh: self
+                                .remote_application_inventory_refresh
+                                .as_ref()
+                                .map(|refresh| refresh.retained_at(observed_at_us)),
                             codex_feature: self.remote_codex_feature_diagnostic(
                                 self.remote_observation_generation,
                                 observed_at_us,
@@ -5940,6 +5964,7 @@ impl NickelSession {
             remote_diagnostic_staging,
             remote_observation_generation: 0,
             remote_application_inventory_generation: 0,
+            remote_application_inventory_refresh: None,
             remote_platform_refresh_generation: 0,
             remote_platform_refreshes: Vec::new(),
             remote_appearance: Default::default(),

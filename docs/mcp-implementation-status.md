@@ -1477,6 +1477,13 @@ data. An owned PipeWire/X11 fixture refreshed real dummy-sink state and correlat
 the retained record and idle worker with the enclosing snapshot observation.
 Unimplemented platform queries remain explicitly unavailable.
 
+The latest bounded installed-application refresh is retained by the same coherent
+snapshot with its native discovery interval, generation, freshness, application
+count, partial result and launcher reconciliation status. It contains no catalog
+IDs, names, paths, scan roots or errors. The owned launcher fixture refreshed the
+real isolated catalog, correlated the retained record with the snapshot timestamp,
+and then passed its mutation, semantic, stale-write, scope and revocation matrix.
+
 Ordinary shell presentation insertions and retirements now enter the same
 bounded event stream with a generation-bearing surface identity, fixed role and
 visibility bit. Lock, trusted-control and unsupported Codex roles never enter

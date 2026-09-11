@@ -109,11 +109,24 @@ impl PlatformRefreshOutcome {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct ApplicationInventoryRefreshOutcome {
     pub generation: u64,
+    pub observation_started_at_us: u64,
+    pub observed_at_us: u64,
     pub preparation_duration_us: u64,
+    pub stale: bool,
     pub applications: u32,
     pub partial: bool,
     /// The launcher/icon model accepted the catalog; this is not pixel presentation.
     pub reconciliation_confirmed: bool,
+}
+
+impl ApplicationInventoryRefreshOutcome {
+    pub const FRESH_FOR_US: u64 = 5_000_000;
+
+    pub fn retained_at(&self, observed_at_us: u64) -> Self {
+        let mut retained = self.clone();
+        retained.stale = observed_at_us.saturating_sub(self.observed_at_us) > Self::FRESH_FOR_US;
+        retained
+    }
 }
 
 pub const MAX_DIAGNOSTIC_WINDOWS: usize = 512;
@@ -575,6 +588,8 @@ pub struct DiagnosticSnapshot {
     pub platform: PlatformDiagnostic,
     /// Latest bounded production query for each allowlisted platform domain.
     pub platform_refreshes: Vec<PlatformRefreshOutcome>,
+    /// Latest bounded production installed-application catalog refresh.
+    pub application_inventory_refresh: Option<ApplicationInventoryRefreshOutcome>,
     /// Current compositor-owned optional-feature projection; no source paths,
     /// account data, project data, or provider diagnostics are retained.
     pub codex_feature: Option<CodexFeatureDiagnostic>,
@@ -796,6 +811,35 @@ mod output_identification_tests {
                 }))
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn retained_application_inventory_reports_its_own_freshness() {
+        let refresh = ApplicationInventoryRefreshOutcome {
+            generation: 8,
+            observation_started_at_us: 100,
+            observed_at_us: 140,
+            preparation_duration_us: 40,
+            stale: false,
+            applications: 12,
+            partial: true,
+            reconciliation_confirmed: true,
+        };
+        assert!(
+            !refresh
+                .retained_at(
+                    refresh.observed_at_us + ApplicationInventoryRefreshOutcome::FRESH_FOR_US
+                )
+                .stale
+        );
+        let retained = refresh.retained_at(
+            refresh.observed_at_us + ApplicationInventoryRefreshOutcome::FRESH_FOR_US + 1,
+        );
+        assert!(retained.stale);
+        let value = serde_json::to_value(retained).unwrap();
+        for excluded in ["application_ids", "paths", "errors", "scan_roots"] {
+            assert!(value.get(excluded).is_none());
         }
     }
 
