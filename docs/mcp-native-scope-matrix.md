@@ -78,10 +78,8 @@ history. All fixture processes are killed and reaped on both success and failure
 
 Native Wayland acceptance passed September 11, 2026, on `2426214` plus this change,
 including the complete earlier shell/privacy/emergency checks. Five focused
-harness tests and strict harness Clippy passed. Evidence:
-`/tmp/nickel-native-ordinary-scopes-build.log`,
-`/tmp/nickel-native-ordinary-scopes-focused.log`, and
-`/tmp/nickel-native-ordinary-scopes-wayland.log`.
+harness tests and strict harness Clippy passed. The commands above reproduce the
+acceptance path.
 
 This proves ordinary native Wayland executable identity and later same-application
 window admission for these real examples. It does not prove Flatpak/shared-runtime
