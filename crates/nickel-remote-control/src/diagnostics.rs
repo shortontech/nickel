@@ -190,6 +190,12 @@ pub struct PreviewDiagnostic {
     pub presentation_generation: u64,
     pub readback_bytes: u64,
     pub capture_failures: u64,
+    /// Native compositor-owned preview presentation state where preview pixels
+    /// are never read back into Nickel. None means the backend has no such owner.
+    pub native_presentation_generation: Option<u64>,
+    /// Failed native preview registration/update attempts. This is distinct
+    /// from capture_failures because no pixel capture was attempted.
+    pub native_presentation_failures: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -436,6 +442,12 @@ pub struct InternalRendererDiagnostic {
     pub fallback_partial_repaints: u64,
     pub texture_import_failures: u64,
     pub fallback_import_failures: u64,
+    /// Successful native presentation commits observed by this presenter.
+    /// None means the backend does not distinguish rendering from presentation.
+    pub presentation_generation: Option<u64>,
+    /// Native presentation attempts that failed before commit. None means the
+    /// backend does not own a truthful presentation-failure counter.
+    pub presentation_failures: Option<u64>,
 }
 
 /// The existing shell-behavior transaction domain, excluding security settings.

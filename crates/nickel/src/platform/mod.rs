@@ -1132,9 +1132,9 @@ pub use unsupported::{
 
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{
-    expose_trusted_control_window, prepare_application_discovery, prepare_trusted_control_window,
-    publish_application_discovery, refresh_audio_status, refresh_connectivity_status,
-    verify_trusted_control_window,
+    expose_trusted_control_window, native_preview_diagnostics, prepare_application_discovery,
+    prepare_trusted_control_window, publish_application_discovery, refresh_audio_status,
+    refresh_connectivity_status, verify_trusted_control_window,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

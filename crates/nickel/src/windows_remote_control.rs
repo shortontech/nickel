@@ -3150,13 +3150,19 @@ impl WindowsRemoteControl {
             let pointer_held = self.pointer_hold.is_some();
             let shell_behavior_state = state.remote_shell_behavior_state();
             let shell_input_observations = shell.remote_shell_surface_observations(state);
+            let protected_desktop = !self.desktop_unlocked
+                || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
             let (shell_surfaces, shell_surfaces_truncated) =
                 crate::windows_shell_diagnostics::project(
-                    !self.desktop_unlocked
-                        || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
+                    protected_desktop,
                     shell_input_observations.iter().cloned(),
                 );
-            let (shell_image_cache, projected_resources) =
+            let shell_renderers = crate::windows_shell_diagnostics::project_presenters(
+                protected_desktop,
+                observed_at_us,
+                shell_input_observations.iter().cloned(),
+            );
+            let (shell_image_cache, mut projected_resources) =
                 crate::windows_shell_diagnostics::project_image_cache(
                     generation,
                     observed_at_us,
@@ -3166,8 +3172,13 @@ impl WindowsRemoteControl {
                             .is_some_and(|native| projected_native_windows.contains(&native))
                     }),
                 );
-            let protected_desktop = !self.desktop_unlocked
-                || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+            projected_resources.renderer_surfaces = shell_renderers.len() as u64;
+            projected_resources.software_frame_bytes =
+                shell_renderers.iter().fold(0_u64, |total, renderer| {
+                    total.saturating_add(renderer.software_frame_bytes)
+                });
+            let native_preview =
+                crate::platform::native_preview_diagnostics(&projected_native_windows);
             let map_recipient =
                 |native: Option<usize>, compositor_grabbed: bool, remote_hold_active: bool| {
                     let Some(native) = native else {
@@ -3293,7 +3304,7 @@ impl WindowsRemoteControl {
                 workspaces: Vec::new(),
                 internal_applications: Vec::new(),
                 internal_renderers: Vec::new(),
-                shell_renderers: Vec::new(),
+                shell_renderers,
                 shell_image_cache: Some(shell_image_cache),
                 projected_resources,
                 pending_effects: PendingEffectsDiagnostic {
@@ -3320,6 +3331,10 @@ impl WindowsRemoteControl {
                     presentation_generation: 0,
                     readback_bytes: 0,
                     capture_failures: 0,
+                    native_presentation_generation: native_preview
+                        .map(|preview| preview.presentation_generation),
+                    native_presentation_failures: native_preview
+                        .map(|preview| preview.presentation_failures),
                 },
                 metrics: permit.operation_metrics_snapshot(),
                 admission: permit.admission_snapshot(),
@@ -3366,8 +3381,8 @@ impl WindowsRemoteControl {
                     "windows_virtual_workspaces".into(),
                     "windows_internal_applications".into(),
                     "windows_shell_surfaces_without_production_scene_identity".into(),
-                    "windows_renderer_and_shared_presenter_cache_accounting".into(),
-                    "windows_preview_state".into(),
+                    "windows_shared_renderer_and_presenter_cache_accounting".into(),
+                    "windows_preview_pixel_readback".into(),
                     "windows_maintenance_platform_refresh".into(),
                     "windows_settings_worker".into(),
                     "windows_frame_trace".into(),

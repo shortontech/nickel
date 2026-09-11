@@ -1271,7 +1271,26 @@ static PREVIEW_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
 static CONTEXT_MENU_WINDOW_HANDLE: std::sync::atomic::AtomicIsize =
     std::sync::atomic::AtomicIsize::new(0);
-static DWM_THUMBNAILS: Mutex<Vec<isize>> = Mutex::new(Vec::new());
+#[derive(Default)]
+struct DwmPreviewState {
+    thumbnails: Vec<isize>,
+    sources: Vec<usize>,
+    presentation_generation: u64,
+    presentation_failures: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativePreviewDiagnostics {
+    pub(crate) presentation_generation: u64,
+    pub(crate) presentation_failures: u64,
+}
+
+static DWM_PREVIEW_STATE: Mutex<DwmPreviewState> = Mutex::new(DwmPreviewState {
+    thumbnails: Vec::new(),
+    sources: Vec::new(),
+    presentation_generation: 0,
+    presentation_failures: 0,
+});
 static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static WINDOW_DRAG: Mutex<Option<WindowDrag>> = Mutex::new(None);
@@ -3239,6 +3258,7 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
     clear_dwm_thumbnails();
     let destination = PREVIEW_WINDOW_HANDLE.load(Ordering::Relaxed);
     if destination == 0 {
+        record_dwm_preview_failures(1);
         return false;
     }
     let destination = HWND(destination as *mut c_void);
@@ -3270,18 +3290,54 @@ fn show_dwm_previews(windows: &[WindowId]) -> bool {
             ..Default::default()
         };
         if unsafe { DwmUpdateThumbnailProperties(thumbnail, &properties) }.is_ok() {
-            registered.push(thumbnail);
+            registered.push((thumbnail, source.0 as usize));
         } else {
             unsafe {
                 let _ = DwmUnregisterThumbnail(thumbnail);
             }
         }
     }
-    let success = registered.len() == windows.len();
-    if let Ok(mut thumbnails) = DWM_THUMBNAILS.lock() {
-        *thumbnails = registered;
+    let failed = windows.len().saturating_sub(registered.len());
+    let success = failed == 0;
+    if let Ok(mut state) = DWM_PREVIEW_STATE.lock() {
+        state.presentation_failures = state
+            .presentation_failures
+            .saturating_add(u64::try_from(failed).unwrap_or(u64::MAX));
+        state.thumbnails = registered.iter().map(|(thumbnail, _)| *thumbnail).collect();
+        state.sources = registered.into_iter().map(|(_, source)| source).collect();
+        state.presentation_generation = state.presentation_generation.saturating_add(1);
     }
     success
+}
+
+fn record_dwm_preview_failures(count: u64) {
+    if let Ok(mut state) = DWM_PREVIEW_STATE.lock() {
+        state.presentation_failures = state.presentation_failures.saturating_add(count);
+    }
+}
+
+pub(crate) fn native_preview_diagnostics(
+    allowed_sources: &std::collections::HashSet<usize>,
+) -> Option<NativePreviewDiagnostics> {
+    DWM_PREVIEW_STATE
+        .lock()
+        .ok()
+        .and_then(|state| project_native_preview_diagnostics(&state, allowed_sources))
+}
+
+fn project_native_preview_diagnostics(
+    state: &DwmPreviewState,
+    allowed_sources: &std::collections::HashSet<usize>,
+) -> Option<NativePreviewDiagnostics> {
+    (!state.sources.is_empty()
+        && state
+            .sources
+            .iter()
+            .all(|source| allowed_sources.contains(source)))
+    .then_some(NativePreviewDiagnostics {
+        presentation_generation: state.presentation_generation,
+        presentation_failures: state.presentation_failures,
+    })
 }
 
 fn contain_rect(bounds: RECT, source: SIZE) -> RECT {
@@ -3332,14 +3388,19 @@ fn monitor_work_area(window: HWND) -> Option<RECT> {
 }
 
 fn clear_dwm_thumbnails() {
-    let Ok(mut thumbnails) = DWM_THUMBNAILS.lock() else {
+    let Ok(mut state) = DWM_PREVIEW_STATE.lock() else {
         return;
     };
-    for thumbnail in thumbnails.drain(..) {
+    if state.thumbnails.is_empty() {
+        return;
+    }
+    for thumbnail in state.thumbnails.drain(..) {
         unsafe {
             let _ = DwmUnregisterThumbnail(thumbnail);
         }
     }
+    state.sources.clear();
+    state.presentation_generation = state.presentation_generation.saturating_add(1);
 }
 
 pub fn launcher_visibility_applied(visible: bool) {
@@ -3865,12 +3926,15 @@ pub(crate) fn verify_trusted_control_window(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use windows::Win32::Foundation::RECT;
 
     use super::{
-        TrayNotifyIconData, application_icon, clamp_preview_x, contain_rect, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, project_windows_shortcuts, rectangle_covers,
+        DwmPreviewState, NativePreviewDiagnostics, TrayNotifyIconData, application_icon,
+        clamp_preview_x, contain_rect, executable_icon, is_nickel_host_terminal,
+        is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
+        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
         restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
     };
 
@@ -4116,5 +4180,27 @@ mod tests {
         assert_eq!(requests[0].virtual_key, 0x52);
         assert_ne!(requests[0].virtual_key, 0x5b);
         assert_ne!(requests[0].virtual_key, 0x5c);
+    }
+
+    #[test]
+    fn native_preview_diagnostics_require_every_current_source() {
+        let state = DwmPreviewState {
+            thumbnails: vec![11, 12],
+            sources: vec![101, 102],
+            presentation_generation: 7,
+            presentation_failures: 1,
+        };
+        let complete = HashSet::from([101, 102]);
+        assert_eq!(
+            project_native_preview_diagnostics(&state, &complete),
+            Some(NativePreviewDiagnostics {
+                presentation_generation: 7,
+                presentation_failures: 1,
+            })
+        );
+        assert!(project_native_preview_diagnostics(&state, &HashSet::from([101])).is_none());
+        assert!(
+            project_native_preview_diagnostics(&DwmPreviewState::default(), &complete).is_none()
+        );
     }
 }

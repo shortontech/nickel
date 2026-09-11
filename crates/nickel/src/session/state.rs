@@ -3791,6 +3791,8 @@ impl NickelSession {
                                     .presentation_generation,
                                 readback_bytes: self.preview_counters.readback_bytes,
                                 capture_failures: self.preview_counters.capture_failures,
+                                native_presentation_generation: None,
+                                native_presentation_failures: None,
                             },
                             metrics: permit.operation_metrics_snapshot(),
                             admission: permit.admission_snapshot(),

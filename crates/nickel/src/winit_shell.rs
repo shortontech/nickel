@@ -441,6 +441,12 @@ pub struct ShellSurface {
     /// Monotonic identity for this native surface incarnation. It changes when
     /// a native window is replaced even if its logical shell role is retained.
     diagnostic_generation: u64,
+    #[cfg(target_os = "windows")]
+    presentation_generation: u64,
+    #[cfg(target_os = "windows")]
+    presentation_failures: u64,
+    #[cfg(target_os = "windows")]
+    presented_frame_bytes: u64,
     window: Window,
 }
 
@@ -1082,6 +1088,9 @@ impl WinitShell {
             redraw_pending: scene
                 .is_some_and(|token| surface.last_host_change_token != Some(token)),
             keyboard_focused: surface.window.has_focus(),
+            presentation_generation: surface.presentation_generation,
+            presentation_failures: surface.presentation_failures,
+            presented_frame_bytes: surface.presented_frame_bytes,
         }
     }
 
@@ -1152,6 +1161,12 @@ impl WinitShell {
             display_connected: true,
             initial_exposed: false,
             presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
             last_host_change_token: None,
             visible: true,
             diagnostic_generation,
@@ -1215,6 +1230,12 @@ impl WinitShell {
             display_connected: true,
             initial_exposed: false,
             presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
             last_host_change_token: None,
             visible: false,
             diagnostic_generation,
@@ -1421,11 +1442,23 @@ impl WinitShell {
             logical_width: logical.width,
             logical_height: logical.height,
         };
-        let damage = entry
+        let result = entry
             .presenter
             .as_mut()
             .expect("shell presenter initialized")
-            .present(geometry, graphics, commands)?;
+            .present(geometry, graphics, commands);
+        #[cfg(target_os = "windows")]
+        if result.is_err() {
+            entry.presentation_failures = entry.presentation_failures.saturating_add(1);
+        }
+        let damage = result?;
+        #[cfg(target_os = "windows")]
+        if !damage.is_empty() {
+            entry.presentation_generation = entry.presentation_generation.saturating_add(1);
+            entry.presented_frame_bytes = u64::from(physical.width)
+                .saturating_mul(u64::from(physical.height))
+                .saturating_mul(4);
+        }
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
         if warm {
             push_bounded(&mut self.warm_present_us, elapsed_us);
@@ -1951,6 +1984,12 @@ impl WinitShell {
             display_connected: true,
             initial_exposed: false,
             presenter: None,
+            #[cfg(target_os = "windows")]
+            presentation_generation: 0,
+            #[cfg(target_os = "windows")]
+            presentation_failures: 0,
+            #[cfg(target_os = "windows")]
+            presented_frame_bytes: 0,
             last_host_change_token: None,
             // Start reconciled as visible even when the native window was
             // requested hidden so the first policy pass performs the real

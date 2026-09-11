@@ -647,6 +647,8 @@ impl NickelSession {
                     fallback_partial_repaints: state.fallback_partial_repaints,
                     texture_import_failures: state.texture_import_failures,
                     fallback_import_failures: state.fallback_import_failures,
+                    presentation_generation: None,
+                    presentation_failures: None,
                 })
             })
             .collect()

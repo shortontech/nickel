@@ -1,8 +1,9 @@
 use crate::winit_shell::SurfaceRole;
 use nickel_remote_control::desktop_events::ShellEventRole;
 use nickel_remote_control::diagnostics::{
-    MAX_DIAGNOSTIC_SHELL_SURFACES, ProjectedResourceDiagnostic, ShellDiagnosticRole,
-    ShellImageCacheDiagnostic, ShellSurfaceDiagnostic,
+    InternalRendererDiagnostic, MAX_DIAGNOSTIC_SHELL_SURFACES, ProjectedResourceDiagnostic,
+    RendererFallbackReason, RendererPolicy, ShellDiagnosticRole, ShellImageCacheDiagnostic,
+    ShellSurfaceDiagnostic,
 };
 
 #[derive(Clone, Debug)]
@@ -19,6 +20,65 @@ pub(crate) struct SurfaceObservation {
     pub(crate) scale_factor: f32,
     pub(crate) redraw_pending: bool,
     pub(crate) keyboard_focused: bool,
+    pub(crate) presentation_generation: u64,
+    pub(crate) presentation_failures: u64,
+    pub(crate) presented_frame_bytes: u64,
+}
+
+/// Project only presenter state owned by the exact ordinary surface. The
+/// software rasterizer and its caches are shared, so this deliberately excludes
+/// their allocation and cache accounting.
+pub(crate) fn project_presenters(
+    protected_desktop: bool,
+    observed_at_us: u64,
+    observations: impl IntoIterator<Item = SurfaceObservation>,
+) -> Vec<InternalRendererDiagnostic> {
+    if protected_desktop {
+        return Vec::new();
+    }
+    observations
+        .into_iter()
+        .filter_map(|observation| {
+            diagnostic_role(observation.role)?;
+            if observation.protected
+                || !observation.native_visible
+                || !observation.canonical_visible
+                || observation.generation == 0
+                || observation.scene_generation.is_none()
+            {
+                return None;
+            }
+            Some(InternalRendererDiagnostic {
+                surface: format!("windows-shell:{}", observation.generation),
+                surface_generation: observation.generation,
+                observed_at_us,
+                mode: if observation.presentation_generation == 0 {
+                    "pending"
+                } else {
+                    "software_shared_memory"
+                }
+                .into(),
+                configured_mode: RendererPolicy::Software,
+                fallback_reason: Some(RendererFallbackReason::RequestedSoftware),
+                gpu_frames: 0,
+                // Native present completion is reported separately below;
+                // the shared renderer does not expose per-surface render work.
+                fallback_frames: 0,
+                software_frame_bytes: observation.presented_frame_bytes,
+                fallback_raster_bytes: 0,
+                fallback_buffer_creations: 0,
+                fallback_buffer_reuses: 0,
+                fallback_upload_damage_bytes: 0,
+                fallback_full_repaints: 0,
+                fallback_partial_repaints: 0,
+                texture_import_failures: 0,
+                fallback_import_failures: 0,
+                presentation_generation: Some(observation.presentation_generation),
+                presentation_failures: Some(observation.presentation_failures),
+            })
+        })
+        .take(MAX_DIAGNOSTIC_SHELL_SURFACES)
+        .collect()
 }
 
 pub(crate) fn input_surface(
@@ -257,7 +317,30 @@ mod tests {
             scale_factor: 1.25,
             redraw_pending: true,
             keyboard_focused: true,
+            presentation_generation: 3,
+            presentation_failures: 1,
+            presented_frame_bytes: 240_000,
         }
+    }
+
+    #[test]
+    fn presenter_projection_uses_only_per_surface_production_state() {
+        let mut protected = observation(SurfaceRole::Panel, 2);
+        protected.protected = true;
+        let records = project_presenters(
+            false,
+            91,
+            [observation(SurfaceRole::Launcher, 1), protected],
+        );
+        assert_eq!(records.len(), 1);
+        let record = &records[0];
+        assert_eq!(record.surface, "windows-shell:1");
+        assert_eq!(record.observed_at_us, 91);
+        assert_eq!(record.presentation_generation, Some(3));
+        assert_eq!(record.presentation_failures, Some(1));
+        assert_eq!(record.fallback_frames, 0);
+        assert_eq!(record.software_frame_bytes, 240_000);
+        assert_eq!(record.fallback_raster_bytes, 0);
     }
 
     #[test]
