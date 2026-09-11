@@ -355,6 +355,7 @@ enum PreparedPlatformRefreshData {
     Connectivity(crate::platform::ConnectivityRefresh),
     Audio(crate::platform::AudioRefresh),
     Peripherals(crate::platform::PeripheralRefresh),
+    Maintenance(crate::platform::MaintenanceRefresh),
 }
 
 impl RemoteDesktopBridge {
@@ -986,6 +987,11 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
                 nickel_remote_control::diagnostics::PlatformRefreshDomain::Peripherals => {
                     PreparedPlatformRefreshData::Peripherals(
                         crate::platform::refresh_peripheral_status()?,
+                    )
+                }
+                nickel_remote_control::diagnostics::PlatformRefreshDomain::Maintenance => {
+                    PreparedPlatformRefreshData::Maintenance(
+                        crate::platform::refresh_maintenance_status()?,
                     )
                 }
             };
@@ -3060,8 +3066,11 @@ impl NickelSession {
                                 }
                                 let (mut changed, network_available, bluetooth_available, audio_available,
                                     printers_available, volumes_available, filesystems_available,
-                                    printer_count, volume_count, filesystem_count, partial,
-                                    reconciliation_confirmed) =
+                                    printer_count, volume_count, filesystem_count,
+                                    maintenance_available, updates_available, restart_required,
+                                    firewall_healthy, malware_protection_healthy,
+                                    known_permission_states, secure_storage_status_available,
+                                    partial, reconciliation_confirmed) =
                                     match (domain, prepared.data) {
                                         (
                                             nickel_remote_control::diagnostics::PlatformRefreshDomain::Connectivity,
@@ -3080,7 +3089,9 @@ impl NickelSession {
                                                 crate::platform::SystemStatusUpdate::Bluetooth(refresh.bluetooth),
                                             ));
                                             (changed, network_available, bluetooth_available, false,
-                                                false, false, false, 0, 0, 0, refresh.partial, true)
+                                                false, false, false, 0, 0, 0,
+                                                false, None, None, None, None, 0, false,
+                                                refresh.partial, true)
                                         }
                                         (
                                             nickel_remote_control::diagnostics::PlatformRefreshDomain::Audio,
@@ -3095,7 +3106,9 @@ impl NickelSession {
                                                 crate::platform::SystemStatusUpdate::Audio(refresh.audio),
                                             );
                                             (changed, false, false, available,
-                                                false, false, false, 0, 0, 0, refresh.partial, true)
+                                                false, false, false, 0, 0, 0,
+                                                false, None, None, None, None, 0, false,
+                                                refresh.partial, true)
                                         }
                                         (
                                             nickel_remote_control::diagnostics::PlatformRefreshDomain::Peripherals,
@@ -3105,6 +3118,20 @@ impl NickelSession {
                                                 refresh.printers_available, refresh.volumes_available,
                                                 refresh.filesystems_available, refresh.printer_count,
                                                 refresh.volume_count, refresh.filesystem_count,
+                                                false, None, None, None, None, 0, false,
+                                                refresh.partial, false)
+                                        }
+                                        (
+                                            nickel_remote_control::diagnostics::PlatformRefreshDomain::Maintenance,
+                                            PreparedPlatformRefreshData::Maintenance(refresh),
+                                        ) => {
+                                            (Vec::new(), false, false, false,
+                                                false, false, false, 0, 0, 0,
+                                                refresh.maintenance_available, refresh.updates_available,
+                                                refresh.restart_required, refresh.firewall_healthy,
+                                                refresh.malware_protection_healthy,
+                                                refresh.known_permission_states,
+                                                refresh.secure_storage_status_available,
                                                 refresh.partial, false)
                                         }
                                         _ => return Err("platform refresh data changed before commit".into()),
@@ -3126,6 +3153,13 @@ impl NickelSession {
                                         printer_count,
                                         volume_count,
                                         filesystem_count,
+                                        maintenance_available,
+                                        updates_available,
+                                        restart_required,
+                                        firewall_healthy,
+                                        malware_protection_healthy,
+                                        known_permission_states,
+                                        secure_storage_status_available,
                                         partial,
                                         reconciliation_confirmed,
                                     },

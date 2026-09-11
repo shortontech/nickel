@@ -289,13 +289,14 @@ reconciliation and icon-cache owners, and routes the path-free diagnostic action
 through the existing bounded worker and compositor authority. The scan, catalog,
 metadata, and Windows recursion limits remain platform discovery policy rather
 than client-controlled payloads; the exact source inventory remains 344.
-Connectivity, audio, and peripheral diagnostic refresh add no source files. They
-reuse the production NetworkManager/BlueZ and PipeWire workers,
+Connectivity, audio, peripheral, and maintenance diagnostic refresh add no
+source files. They reuse the production NetworkManager/BlueZ and PipeWire workers,
 `SystemStatusUpdate` compositor reconciliation, and the production peripheral
-service. Peripheral helper processes have owned process-group deadlines and
-bounded retained output. Its path-bearing snapshot is reduced to availability and
-counts before owner delivery. The wire schema exposes only fixed domains and
-coarse outcomes; bounded platform snapshots remain internal. The exact source
+and maintenance services. Linux helper processes have owned process-group
+deadlines and bounded retained output; Secret Service reads reuse the bounded
+authenticated D-Bus transport. Path- and detail-bearing snapshots are reduced to
+coarse status before owner delivery. The wire schema exposes only fixed domains
+and coarse outcomes; bounded platform snapshots remain internal. The exact source
 inventory remains 344.
 GTK-shell association and AT-SPI
 observation stay separate: the compositor owns surface identity and delayed

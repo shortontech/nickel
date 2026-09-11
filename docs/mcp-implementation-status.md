@@ -1361,8 +1361,8 @@ and presented launcher/icon acceptance remain open. The installed Windows Rust t
 slice because `x86_64-w64-mingw32-gcc` is unavailable, and no native Windows
 execution is claimed. No source files were added; the exact inventory remains 344.
 
-The safe platform re-query action now has exact `connectivity`, `audio`, and
-`peripherals` domains.
+The safe platform re-query action now has exact `connectivity`, `audio`,
+`peripherals`, and `maintenance` domains.
 Linux queues acknowledged immediate NetworkManager/BlueZ or PipeWire observations
 on their existing production workers; requested preparation cannot publish or
 replace shell state. Windows uses its existing native status readers on the bounded
@@ -1378,6 +1378,16 @@ refresh reuses the production service after bounding its helper process groups t
 64 KiB per output stream. The private snapshot is reduced before owner delivery to availability,
 counts, and partial status, excluding printer/job identities, volume and filesystem paths, provider
 details, and errors; it makes no compositor reconciliation or presentation claim. Native Linux
-timeout, output-flood, production-service refresh, and redaction tests pass. Live delayed
-revocation and Control Center presentation acceptance and native Windows execution
-remain open. No source files were added; the exact inventory remains 344.
+timeout, output-flood, production-service refresh, and redaction tests pass.
+Maintenance refresh reuses the production service after routing Linux PackageKit
+and firewall helpers through the same bounded runner and Secret Service through
+the bounded authenticated D-Bus transport. It returns update/restart facts,
+optional firewall and malware health, a known-permission-state count, secure
+storage observation availability, and partial status. It excludes provider and
+distribution names, permission identities, errors, commands, and credential
+state. The native Linux production backend and redaction tests pass.
+Live delayed revocation and Control Center presentation acceptance and native Windows execution
+remain open. The diagnostic returns unavailable on Windows rather than invoking
+the maintenance service's unbounded PowerShell helpers; native job containment
+and acceptance are required before that path can open. No source files were
+added; the exact inventory remains 344.

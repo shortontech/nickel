@@ -10,7 +10,7 @@ use std::{
 };
 
 #[cfg(target_os = "linux")]
-use std::path::Path;
+use std::{path::Path, time::Duration};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MaintenanceProvider {
@@ -425,10 +425,12 @@ impl LinuxMaintenance {
             ));
         }
         let observed_at = SystemTime::now();
-        match std::process::Command::new("pkcon")
-            .args(["get-updates", "--plain", "--noninteractive"])
-            .output()
-        {
+        match super::peripherals::bounded_command_output(
+            "pkcon",
+            &["get-updates", "--plain", "--noninteractive"],
+            Duration::from_secs(2),
+            64 * 1024,
+        ) {
             Ok(output) if output.status.success() => {
                 let available = packagekit_update_count(&String::from_utf8_lossy(&output.stdout));
                 Observation {
@@ -525,7 +527,13 @@ fn linux_secure_storage_readiness()
     const SERVICE_INTERFACE: &str = "org.freedesktop.Secret.Service";
     const COLLECTION_INTERFACE: &str = "org.freedesktop.Secret.Collection";
 
-    let connection = zbus::blocking::Connection::session()?;
+    let address = zbus::Address::session()?;
+    let connection = crate::bounded_dbus::connect_blocking(
+        address,
+        crate::bounded_dbus::Limits::ACCESSIBILITY,
+        Duration::from_millis(300),
+    )
+    .map_err(std::io::Error::other)?;
     let dbus = zbus::blocking::fdo::DBusProxy::new(&connection)?;
     let name = zbus::names::BusName::try_from(SERVICE)?;
     if !dbus.name_has_owner(name)? {
@@ -961,7 +969,12 @@ fn command_health(
     observed_at: SystemTime,
     classify: impl FnOnce(&str) -> ProtectionHealth,
 ) -> Observation<ProtectionHealth> {
-    match std::process::Command::new(program).args(arguments).output() {
+    match super::peripherals::bounded_command_output(
+        program,
+        arguments,
+        Duration::from_secs(2),
+        64 * 1024,
+    ) {
         Ok(output) if output.status.success() => Observation {
             state: ObservationState::Current,
             value: Some(classify(&String::from_utf8_lossy(&output.stdout))),
@@ -985,17 +998,20 @@ fn command_health(
 
 #[cfg(target_os = "linux")]
 fn run_packagekit(arguments: &[&str]) -> Result<MaintenanceOutcome, MaintenanceError> {
-    let output = std::process::Command::new("pkcon")
-        .args(arguments)
-        .output()
-        .map_err(|error| MaintenanceError {
-            class: if error.kind() == std::io::ErrorKind::PermissionDenied {
-                MaintenanceFailureClass::Authorization
-            } else {
-                MaintenanceFailureClass::ProviderUnavailable
-            },
-            detail: format!("PackageKit could not start: {error}"),
-        })?;
+    let output = super::peripherals::bounded_command_output(
+        "pkcon",
+        arguments,
+        Duration::from_secs(2),
+        64 * 1024,
+    )
+    .map_err(|error| MaintenanceError {
+        class: if error.kind() == std::io::ErrorKind::PermissionDenied {
+            MaintenanceFailureClass::Authorization
+        } else {
+            MaintenanceFailureClass::ProviderUnavailable
+        },
+        detail: format!("PackageKit could not start: {error}"),
+    })?;
     if output.status.success() {
         return Ok(MaintenanceOutcome::Accepted);
     }

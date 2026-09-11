@@ -154,6 +154,76 @@ pub(crate) struct PeripheralRefresh {
     pub partial: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct MaintenanceRefresh {
+    pub maintenance_available: bool,
+    pub updates_available: Option<u32>,
+    pub restart_required: Option<bool>,
+    pub firewall_healthy: Option<bool>,
+    pub malware_protection_healthy: Option<bool>,
+    pub known_permission_states: u32,
+    pub secure_storage_status_available: bool,
+    pub partial: bool,
+}
+
+fn summarize_maintenance(snapshot: nickel_platform::MaintenanceSnapshot) -> MaintenanceRefresh {
+    use nickel_platform::{ObservationState, ProtectionHealth};
+    let current = |state| state == ObservationState::Current;
+    let updates = current(snapshot.updates.state)
+        .then_some(snapshot.updates.value.as_ref())
+        .flatten();
+    let firewall = current(snapshot.protection.firewall.state)
+        .then_some(snapshot.protection.firewall.value.as_ref())
+        .flatten();
+    let malware = current(snapshot.protection.malware_protection.state)
+        .then_some(snapshot.protection.malware_protection.value.as_ref())
+        .flatten();
+    let secure_storage_status_available =
+        current(snapshot.secure_storage.state) && snapshot.secure_storage.value.is_some();
+    let known_permission_states = snapshot
+        .permissions
+        .iter()
+        .filter(|status| {
+            status.global_enabled.state == ObservationState::Current
+                && status.global_enabled.value.is_some()
+        })
+        .count()
+        .min(u32::MAX as usize) as u32;
+    let partial = updates.is_none()
+        || firewall.is_none()
+        || malware.is_none()
+        || !secure_storage_status_available
+        || known_permission_states as usize != snapshot.permissions.len();
+    MaintenanceRefresh {
+        maintenance_available: updates.is_some()
+            || firewall.is_some()
+            || malware.is_some()
+            || secure_storage_status_available
+            || known_permission_states != 0,
+        updates_available: updates.map(|status| status.available),
+        restart_required: updates.map(|status| status.restart_required),
+        firewall_healthy: firewall.map(|health| *health == ProtectionHealth::Healthy),
+        malware_protection_healthy: malware.map(|health| *health == ProtectionHealth::Healthy),
+        known_permission_states,
+        secure_storage_status_available,
+        partial,
+    }
+}
+
+pub(crate) fn refresh_maintenance_status() -> Result<MaintenanceRefresh, String> {
+    #[cfg(target_os = "windows")]
+    return Err(
+        "bounded Windows maintenance diagnostics are unavailable until native job containment is installed"
+            .into(),
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    nickel_platform::maintenance_service()
+        .inspect()
+        .map(summarize_maintenance)
+        .map_err(|error| error.to_string())
+}
+
 fn summarize_peripherals(snapshot: nickel_platform::PeripheralSnapshot) -> PeripheralRefresh {
     let printers_available = snapshot.printers.is_ok();
     let volumes_available = snapshot.volumes.is_ok();
@@ -722,6 +792,66 @@ mod tests {
                 partial: true,
             }
         );
+    }
+
+    #[test]
+    fn maintenance_refresh_retains_health_without_provider_or_error_details() {
+        use std::time::SystemTime;
+        fn current<T>(value: T) -> nickel_platform::Observation<T> {
+            nickel_platform::Observation {
+                state: nickel_platform::ObservationState::Current,
+                value: Some(value),
+                observed_at: Some(SystemTime::now()),
+                detail: Some("private provider detail".into()),
+            }
+        }
+        let refresh = super::summarize_maintenance(nickel_platform::MaintenanceSnapshot {
+            provider: nickel_platform::MaintenanceProvider::LinuxPackageKit {
+                distribution: "private distribution".into(),
+            },
+            updates: current(nickel_platform::UpdateStatus {
+                available: 3,
+                phase: nickel_platform::UpdatePhase::Idle,
+                restart_required: true,
+                last_successful_check: Some(SystemTime::now()),
+            }),
+            protection: nickel_platform::ProtectionStatus {
+                firewall: current(nickel_platform::ProtectionHealth::Healthy),
+                malware_protection: nickel_platform::Observation {
+                    state: nickel_platform::ObservationState::Failed,
+                    value: None,
+                    observed_at: Some(SystemTime::now()),
+                    detail: Some("private failure".into()),
+                },
+            },
+            permissions: vec![nickel_platform::PermissionStatus {
+                kind: nickel_platform::PermissionKind::Camera,
+                global_enabled: current(true),
+                per_application_consent: true,
+                mutation: nickel_platform::PermissionMutation::NativeConsent,
+            }],
+            secure_storage: current(nickel_platform::SecureStorageReadiness::Locked),
+        });
+        assert_eq!(
+            refresh,
+            super::MaintenanceRefresh {
+                maintenance_available: true,
+                updates_available: Some(3),
+                restart_required: Some(true),
+                firewall_healthy: Some(true),
+                malware_protection_healthy: None,
+                known_permission_states: 1,
+                secure_storage_status_available: true,
+                partial: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "queries live PackageKit, firewall, and Secret Service providers"]
+    fn live_maintenance_refresh_returns_only_coarse_status() {
+        let _ = super::refresh_maintenance_status().expect("live maintenance refresh");
     }
 
     #[cfg(target_os = "linux")]

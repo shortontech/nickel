@@ -276,7 +276,7 @@ fn command_output(program: &str, arguments: &[&str]) -> std::io::Result<std::pro
 }
 
 #[cfg(target_os = "linux")]
-fn bounded_command_output(
+pub(crate) fn bounded_command_output(
     program: &str,
     arguments: &[&str],
     timeout: std::time::Duration,
