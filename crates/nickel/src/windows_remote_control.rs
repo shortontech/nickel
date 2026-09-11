@@ -113,6 +113,30 @@ fn windows_key_chord(keysym: u32, modifiers: &[u32]) -> Result<Vec<u8>, String> 
     Ok(keys)
 }
 
+fn windows_diagnostic_logs() -> Option<nickel_remote_control::diagnostics::DiagnosticLogSnapshot> {
+    use nickel_remote_control::diagnostics::{DiagnosticLogRecord, DiagnosticLogSnapshot};
+    let snapshot = nickel_logging::diagnostics::snapshot()?;
+    Some(DiagnosticLogSnapshot {
+        collecting: snapshot.collecting,
+        generation: snapshot.generation,
+        observed_at_us: snapshot.observed_at_us,
+        evicted: snapshot.evicted,
+        contention_drops: snapshot.contention_drops,
+        records: snapshot
+            .records
+            .into_iter()
+            .map(|record| DiagnosticLogRecord {
+                generation: record.generation,
+                observed_at_us: record.observed_at_us,
+                level: record.level.to_owned(),
+                target: record.target.chars().take(128).collect(),
+                source_file: record.file.map(|file| file.chars().take(256).collect()),
+                source_line: record.line,
+            })
+            .collect(),
+    })
+}
+
 const NOT_READY: &str = "Windows control approval remains unavailable";
 fn error(message: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
@@ -207,6 +231,11 @@ enum OwnerRequest {
         prepared: Box<crate::platform::remote_observation::Prepared>,
         request: PointerOwnerAction,
         reply: SyncSender<Result<(), String>>,
+    },
+    Diagnostic {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        reply: SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String>>,
     },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
@@ -336,9 +365,26 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
     fn diagnostic_snapshot(
         &self,
-        _permit: DesktopPermit,
+        permit: DesktopPermit,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String> {
-        Err(NOT_READY.into())
+        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
+            &permit,
+        )?);
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::Diagnostic {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
     }
     fn list_windows(
         &self,
@@ -682,6 +728,14 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.perform_pointer_action(permit, *prepared, request);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::Diagnostic {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = self.perform_diagnostic_snapshot(permit, *prepared);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -1218,6 +1272,176 @@ impl WindowsRemoteControl {
                 result
             }
         }
+    }
+
+    fn perform_diagnostic_snapshot(
+        &mut self,
+        permit: DesktopPermit,
+        mut prepared: crate::platform::remote_observation::Prepared,
+    ) -> Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String> {
+        use nickel_remote_control::diagnostics::*;
+
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
+        let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let lease_metrics = permit.lease_metrics_snapshot(observed_at_us);
+        let scope = permit.resource_scope()?;
+        let snapshot = permit.with_debug(!self.desktop_unlocked, || {
+            self.observation_generation = self
+                .observation_generation
+                .checked_add(1)
+                .ok_or("Windows observation generations exhausted")?;
+            let generation = self.observation_generation;
+            let windows: Vec<_> = self
+                .resources
+                .windows(&scope)
+                .map(|(window, _)| window)
+                .collect();
+            let outputs: Vec<_> = self
+                .resources
+                .outputs(&scope)
+                .map(|(output, _)| output)
+                .collect();
+            let mut active = windows.iter().filter(|window| window.active);
+            let focused_window = active.next().map(|window| window.id.clone());
+            let focused_window = active.next().is_none().then_some(focused_window).flatten();
+            let keyboard_held = self.keyboard_hold.is_some();
+            let pointer_held = self.pointer_hold.is_some();
+            let keyboard = focused_window.as_ref().map(|window| InputDeviceDiagnostic {
+                focused_window: Some(window.clone()),
+                focused_surface: None,
+                compositor_grabbed: false,
+                remote_hold_active: keyboard_held,
+            });
+
+            let pointer = self
+                .pointer_hold
+                .as_ref()
+                .map(|held| InputDeviceDiagnostic {
+                    focused_window: Some(held.window_id.clone()),
+                    focused_surface: None,
+                    compositor_grabbed: false,
+                    remote_hold_active: pointer_held,
+                });
+            Ok(DiagnosticSnapshot {
+                observation_generation: generation,
+                observed_at_us,
+                windows,
+                outputs,
+                workspaces: Vec::new(),
+                internal_applications: Vec::new(),
+                internal_renderers: Vec::new(),
+                shell_renderers: Vec::new(),
+                shell_image_cache: None,
+                projected_resources: ProjectedResourceDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    renderer_surfaces: 0,
+                    software_frame_bytes: 0,
+                    fallback_raster_bytes: 0,
+                    shell_image_entries: 0,
+                    shell_image_bytes: 0,
+                },
+                pending_effects: PendingEffectsDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    desktop_scene_updates: 0,
+                    image_copy_frames: 0,
+                    launch_observations: 0,
+                    output_retirements: 0,
+                    shell_focus_pending: false,
+                },
+                shell_surfaces: Vec::new(),
+                focused_window,
+                input: InputDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    keyboard,
+                    pointer,
+                    pointer_hit_test: None,
+                },
+                shortcuts: ShortcutDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    registration_revision: None,
+                    capability: ShortcutDiagnosticCapability::BackendUnavailable,
+                    registrations: Vec::new(),
+                    unprojected_bindings: 0,
+                    truncated: false,
+                },
+                stacking_front_to_back: Vec::new(),
+                preview: PreviewDiagnostic {
+                    presentation_generation: 0,
+                    readback_bytes: 0,
+                    capture_failures: 0,
+                },
+                metrics: permit.operation_metrics_snapshot(),
+                admission: permit.admission_snapshot(),
+                lease_metrics,
+                platform: PlatformDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    backend: Some(CompositorBackend::Winit),
+                    keyboard_present: true,
+                    pointer_present: true,
+                    touch_present: false,
+                    xwayland_connected: false,
+                    xwayland_restart_pending: false,
+                    isolated_x11_keyboard_initialized: false,
+                    native_keyboard_worker_initialized: false,
+                },
+                platform_refreshes: Vec::new(),
+                application_inventory_refresh: None,
+                codex_feature: None,
+                shell_behavior: ShellBehaviorDiagnostic {
+                    observation_generation: generation,
+                    observed_at_us,
+                    topology_generation: 0,
+                    bar_on_all_displays: false,
+                    all_windows_on_every_bar: false,
+                    configured_desktop_count: 0,
+                    runtime_desktop_count: 0,
+                },
+                settings_worker: None,
+                diagnostic_worker: None,
+                application_launch: ApplicationLaunchDiagnostic {
+                    preparation: None,
+                    tracked_children: 0,
+                    child_capacity: 0,
+                },
+                external_accessibility: None,
+                recent_events: nickel_remote_control::desktop_events::DesktopEvents::default()
+                    .snapshot(),
+                diagnostic_logs: windows_diagnostic_logs(),
+                frame_trace: None,
+                trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
+                truncated: false,
+                unavailable_domains: vec![
+                    "windows_virtual_workspaces".into(),
+                    "windows_internal_application_and_shell_surfaces".into(),
+                    "windows_renderer_and_resource_accounting".into(),
+                    "windows_pointer_recipient_and_hit_testing".into(),
+                    "windows_shortcut_inventory".into(),
+                    "windows_preview_state".into(),
+                    "windows_platform_refreshes".into(),
+                    "windows_shell_behavior".into(),
+                    "windows_settings_and_diagnostic_workers".into(),
+                    "windows_application_launch_state".into(),
+                    "windows_external_accessibility".into(),
+                    "windows_desktop_event_stream".into(),
+                    "windows_frame_trace".into(),
+                ],
+            })
+        })?;
+        prepared.revalidate()?;
+        if self
+            .resource_lifecycle
+            .as_ref()
+            .is_none_or(|lifecycle| lifecycle.serial() != prepared.serial)
+        {
+            return Err("Windows resources changed during diagnostic collection".into());
+        }
+        permit.check_live()?;
+        Ok(snapshot)
     }
 
     fn perform_window_action(
