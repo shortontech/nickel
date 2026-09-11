@@ -5821,6 +5821,13 @@ impl LiveShell {
                 );
             }
             ControlAction::ToggleAudioSection => {}
+            ControlAction::SetAudioMuted(muted) => {
+                if platform::audio_status().muted != muted {
+                    platform::handle_consumer_control(
+                        nickel_session_protocol::ConsumerControl::VolumeMute,
+                    );
+                }
+            }
             ControlAction::SetAudioVolume(volume) => {
                 log_control_result("set-audio-volume", platform::set_audio_volume(volume));
             }

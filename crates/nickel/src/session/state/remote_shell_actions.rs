@@ -337,10 +337,12 @@ impl NickelSession {
     }
 
     pub(crate) fn invalidate_remote_shell_actions(&mut self) {
+        self.remote_devices.invalidate();
         self.remote_shell_origins.clear();
     }
 
     pub(super) fn expire_remote_shell_origins(&mut self) {
+        self.remote_devices.expire();
         let now = Instant::now();
         self.remote_shell_origins.retain(|_, entry| {
             if entry.standing {

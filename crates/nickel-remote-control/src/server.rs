@@ -129,6 +129,20 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::application_scale::TransactionOutcome, String> {
         Err("application scaling is unavailable on this backend".into())
     }
+    fn read_device_settings(
+        &self,
+        _permit: crate::DesktopPermit,
+        _domain: crate::device_settings::Domain,
+    ) -> Result<crate::device_settings::Snapshot, String> {
+        Err("device settings unavailable on this backend".into())
+    }
+    fn control_device_settings(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::device_settings::Transaction,
+    ) -> Result<crate::device_settings::Outcome, String> {
+        Err("device settings unavailable on this backend".into())
+    }
     fn read_appearance(
         &self,
         _permit: crate::DesktopPermit,
@@ -979,6 +993,19 @@ struct ApplicationScaleRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct DeviceReadRequest {
+    lease_id: u64,
+    domain: crate::device_settings::Domain,
+}
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DeviceControlRequest {
+    lease_id: u64,
+    transaction: crate::device_settings::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AppearanceRequest {
     lease_id: u64,
     transaction: crate::appearance::Transaction,
@@ -1511,6 +1538,62 @@ impl McpHandler {
         context: RequestContext<RoleServer>,
     ) -> Result<Json<crate::application_scale::TransactionOutcome>, String> {
         self.metrics.measure(crate::operation_metrics::Method::ApplicationScaleTransaction,async{let permit=self.permit(&context,request.lease_id)?;tokio::time::timeout(std::time::Duration::from_secs(2),desktop_call(self.desktop.clone(),move|desktop|desktop.application_scale_transaction(permit,request.transaction))).await.map_err(|_|"application scale result uncertain; read current state before retrying")?.map(Json)}).await
+    }
+
+    #[tool(
+        description = "Read bounded effective audio volume/mute, Wi-Fi power, or Bluetooth power/discovery with a fresh native observation generation. Requires full-session Full Control & Debug Nickel. No device identifiers, addresses, network names or secrets are returned. Native state may change after observation; unavailable state is an error, never invented defaults."
+    )]
+    async fn read_device_settings(
+        &self,
+        Parameters(request): Parameters<DeviceReadRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::device_settings::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadDeviceSettings,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_device_settings(permit, request.domain)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "device observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+    #[tool(
+        description = "Apply one typed device control using a fresh generation and complete prior values from read_device_settings. Requires full-session Full Control & Debug Nickel and idle shared input. Revalidates the native target incarnation and observed prior values before guarded native submission; this is not an atomic native CAS. Confirmation is native observed effect, not UI presentation. Discovery stop releases only this lease's owned discovery session. Requested/uncertain outcomes require rereading, never automatic retry. No pairing PINs, secrets, addresses or arbitrary commands."
+    )]
+    async fn control_device_settings(
+        &self,
+        Parameters(request): Parameters<DeviceControlRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::device_settings::Outcome>, String> {
+        if !request.transaction.valid() {
+            return Err("invalid device transaction".into());
+        }
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ControlDeviceSettings,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.control_device_settings(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "device result uncertain; read current state before retrying")?
+                    .map(Json)
+                },
+            )
+            .await
     }
 
     #[tool(
@@ -3720,7 +3803,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            46,
+            48,
             "a newly published tool must be explicitly classified"
         );
 

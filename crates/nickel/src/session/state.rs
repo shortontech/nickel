@@ -1,3 +1,4 @@
+use nickel_remote_control::DesktopPermit;
 use std::{
     collections::{HashMap, HashSet},
     ffi::OsString,
@@ -22,6 +23,27 @@ fn notification_socket() -> std::io::Result<UnixDatagram> {
 }
 
 enum RemoteDesktopRequest {
+    ReadDeviceSettings {
+        permit: DesktopPermit,
+        observed: crate::platform::GuardedDeviceObservation,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::device_settings::Snapshot, String>,
+        >,
+    },
+    BeginDeviceSettings {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::device_settings::Transaction,
+        reply: std::sync::mpsc::SyncSender<Result<remote_device_settings::Prepared, String>>,
+    },
+    FinishDeviceSettings {
+        permit: DesktopPermit,
+        registration: u64,
+        outcome: crate::platform::GuardedControlOutcome,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::device_settings::Outcome, String>,
+        >,
+    },
+
     ApplicationScale {
         permit: nickel_remote_control::DesktopPermit,
         request: remote_application_scale::Request,
@@ -596,6 +618,64 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         transaction: nickel_remote_control::application_scale::Transaction,
     ) -> Result<nickel_remote_control::application_scale::TransactionOutcome, String> {
         remote_application_scale::transact(self, permit, transaction)
+    }
+    fn read_device_settings(
+        &self,
+        permit: DesktopPermit,
+        domain: nickel_remote_control::device_settings::Domain,
+    ) -> Result<nickel_remote_control::device_settings::Snapshot, String> {
+        let observed = crate::platform::read_guarded_device(domain, &permit)?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadDeviceSettings {
+                permit,
+                observed,
+                reply,
+            })
+            .map_err(|_| "device owner queue unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "device observation timed out")?
+    }
+    fn control_device_settings(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::device_settings::Transaction,
+    ) -> Result<nickel_remote_control::device_settings::Outcome, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::BeginDeviceSettings {
+                permit: permit.clone(),
+                transaction,
+                reply,
+            })
+            .map_err(|_| "device owner queue unavailable")?;
+        let prepared = response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "device admission timed out")??;
+        let outcome = match crate::platform::submit_guarded_control(
+            prepared.action,
+            permit.clone(),
+            prepared.ticket,
+        ) {
+            Ok(response) => response
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or(crate::platform::GuardedControlOutcome::Uncertain),
+            Err(_) => crate::platform::GuardedControlOutcome::Unavailable,
+        };
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::FinishDeviceSettings {
+                permit,
+                registration: prepared.registration,
+                outcome,
+                reply,
+            })
+            .map_err(|_| "device result uncertain")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "device result uncertain")?
     }
     fn read_appearance(
         &self,
@@ -2277,6 +2357,7 @@ pub struct NickelSession {
     remote_platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
     remote_external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
+    remote_devices: remote_device_settings::DeviceState,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -2368,6 +2449,7 @@ mod remote_application_scale;
 mod remote_capture;
 mod remote_codex_preference;
 mod remote_controller;
+mod remote_device_settings;
 mod remote_diagnostics;
 mod remote_display_layout;
 mod remote_file_icons;
@@ -3073,6 +3155,31 @@ impl NickelSession {
             }
             RemoteDesktopRequest::ApplicationScale { permit, request } => {
                 self.remote_application_scale(permit, request);
+            }
+            RemoteDesktopRequest::ReadDeviceSettings {
+                permit,
+                observed,
+                reply,
+            } => {
+                let result = self.remote_read_device_settings(&permit, observed);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::BeginDeviceSettings {
+                permit,
+                transaction,
+                reply,
+            } => {
+                let result = self.remote_begin_device_settings(&permit, transaction);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::FinishDeviceSettings {
+                permit,
+                registration,
+                outcome,
+                reply,
+            } => {
+                let result = self.remote_finish_device_settings(&permit, registration, outcome);
+                let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadAppearance {
                 permit,
@@ -5435,6 +5542,9 @@ impl NickelSession {
                 .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
                 .map_or(1.0, |(output, _, _)| output.scale);
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
+                if shell.remote_access_protected(surface.id) {
+                    self.remote_devices.invalidate();
+                }
                 if shell.remote_access_protected(surface.id)
                     || self
                         .internal_ui
@@ -6341,6 +6451,7 @@ impl NickelSession {
             remote_platform_refresh_generation: 0,
             remote_platform_refreshes: Vec::new(),
             remote_external_accessibility: None,
+            remote_devices: Default::default(),
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),

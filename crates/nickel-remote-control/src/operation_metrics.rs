@@ -38,6 +38,8 @@ pub(crate) enum Method {
     ClientConnection,
     SurfaceSemantics,
     SurfaceSemanticAction,
+    ReadDeviceSettings,
+    ControlDeviceSettings,
     ReadAppearance,
     AppearanceTransaction,
     ReadDefaultAssociation,
@@ -65,7 +67,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 51] = [
+    pub(crate) const ALL: [Self; 53] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -94,6 +96,8 @@ impl Method {
         Self::ClientConnection,
         Self::SurfaceSemantics,
         Self::SurfaceSemanticAction,
+        Self::ReadDeviceSettings,
+        Self::ControlDeviceSettings,
         Self::ReadAppearance,
         Self::AppearanceTransaction,
         Self::ReadDefaultAssociation,
@@ -124,7 +128,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 51] = [
+const METHODS: [&str; 53] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -153,6 +157,8 @@ const METHODS: [&str; 51] = [
     "client_connection",
     "inspect_surface",
     "surface_semantic_action",
+    "read_device_settings",
+    "control_device_settings",
     "read_appearance",
     "appearance_transaction",
     "read_default_association",

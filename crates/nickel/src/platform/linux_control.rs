@@ -1057,12 +1057,35 @@ pub(super) fn execute_guarded(
         return Outcome::Unavailable;
     }
 
+    if origin.expects_device() {
+        let domain = if service == NETWORK_MANAGER {
+            nickel_remote_control::device_settings::Domain::Wifi
+        } else {
+            nickel_remote_control::device_settings::Domain::Bluetooth
+        };
+        let target = match &prepared {
+            PreparedControl::Property { path, .. } | PreparedControl::Method { path, .. } => {
+                path.as_str()
+            }
+            _ => return Outcome::Unavailable,
+        };
+        if origin.validate_bus_target(&owner, target).is_err() {
+            return Outcome::Unavailable;
+        }
+        let observed = observe_device_on(&connection, domain);
+        if observed
+            .as_ref()
+            .map_or(true, |value| origin.validate_observation(value).is_err())
+        {
+            return Outcome::Unavailable;
+        }
+    }
     // The dedicated connection has no exported objects and no other writer.
     // Recheck authority at every native write. Incomplete messages retire the
     // dedicated socket, so no later task can send the abandoned remainder.
     let mut attempted = false;
     let mut not_accepted = false;
-    let result = permit.with_input_boundary(&evidence, |boundary| {
+    let result = origin.with_boundary(&permit, &evidence, |boundary| {
         permit.check_commit_boundary(boundary)?;
         origin.check()?;
         attempted = true;
@@ -1129,6 +1152,27 @@ mod tests {
         fn set_wireless_enabled(&mut self, value: bool) {
             self.enabled = value;
         }
+    }
+
+    #[test]
+    #[ignore = "requires explicitly owned private D-Bus daemon"]
+    fn private_wifi_fixture_service_for_mcp() {
+        assert_eq!(
+            std::env::var("NICKEL_TEST_WIFI_FIXTURE_SERVICE").unwrap(),
+            "1"
+        );
+        let address = std::env::var("NICKEL_TEST_GUARDED_DBUS_ADDRESS").unwrap();
+        assert!(address.starts_with("unix:path=/tmp/nickel-guarded-standing/"));
+        let _service = zbus::blocking::connection::Builder::address(address.as_str())
+            .unwrap()
+            .name(super::NETWORK_MANAGER)
+            .unwrap()
+            .serve_at(super::NETWORK_MANAGER_PATH, PrivateWifi::default())
+            .unwrap()
+            .build()
+            .unwrap();
+        std::fs::write("/tmp/nickel-guarded-standing/wifi-ready", "ready").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(120));
     }
 
     #[test]
@@ -1347,4 +1391,83 @@ mod tests {
         );
         assert_eq!(tracker.players.len(), MPRIS_PLAYER_CAPACITY);
     }
+}
+
+pub(super) fn observe_device_on(
+    connection: &Connection,
+    domain: nickel_remote_control::device_settings::Domain,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    use super::linux_device_settings::{GuardedDeviceObservation, NativeIdentity};
+    use nickel_remote_control::device_settings::{Domain, Values};
+    let service = match domain {
+        Domain::Wifi => NETWORK_MANAGER,
+        Domain::Bluetooth => BLUEZ,
+        _ => return Err("unsupported connectivity domain".into()),
+    };
+    let owner = service_owner(connection, service).ok_or("device service unavailable")?;
+    let path = if domain == Domain::Wifi {
+        NETWORK_MANAGER_PATH.to_owned()
+    } else {
+        let objects =
+            managed_bluez_objects(connection).map_err(|_| "Bluetooth inventory unavailable")?;
+        if objects.len() > 128 {
+            return Err("Bluetooth inventory exceeded bound".into());
+        }
+        let adapters = objects
+            .iter()
+            .filter(|(_, interfaces)| interfaces.contains_key("org.bluez.Adapter1"))
+            .collect::<Vec<_>>();
+        if adapters.len() != 1 {
+            return Err("Bluetooth adapter selection is ambiguous or unavailable".into());
+        }
+        adapters[0].0.to_string()
+    };
+    let values = if domain == Domain::Wifi {
+        Values::Wifi {
+            powered: observed_property(
+                connection,
+                &owner,
+                &path,
+                NETWORK_MANAGER,
+                "WirelessEnabled",
+            )
+            .ok_or("Wi-Fi power unobserved")?,
+        }
+    } else {
+        Values::Bluetooth {
+            powered: observed_property(connection, &owner, &path, "org.bluez.Adapter1", "Powered")
+                .ok_or("Bluetooth power unobserved")?,
+            discovering: observed_property(
+                connection,
+                &owner,
+                &path,
+                "org.bluez.Adapter1",
+                "Discovering",
+            )
+            .ok_or("Bluetooth discovery unobserved")?,
+        }
+    };
+    if service_owner(connection, service).as_ref() != Some(&owner) {
+        return Err("device service changed".into());
+    }
+    Ok(GuardedDeviceObservation {
+        values,
+        identity: NativeIdentity::Bus { owner, path },
+    })
+}
+pub(super) fn observe_guarded_device(
+    domain: nickel_remote_control::device_settings::Domain,
+    permit: &nickel_remote_control::DesktopPermit,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    permit.check_live()?;
+    let address = zbus::Address::system().map_err(|_| "device bus unavailable")?;
+    let (connection, _) = nickel_platform::bounded_dbus::connect_guarded_blocking(
+        address,
+        nickel_platform::bounded_dbus::Limits::ACCESSIBILITY,
+        Duration::from_millis(300),
+    )
+    .map_err(|_| "device bus unavailable")?;
+    let observation = observe_device_on(&connection, domain)?;
+    permit.check_live()?;
+    Ok(observation)
 }

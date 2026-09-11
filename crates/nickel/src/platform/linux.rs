@@ -39,6 +39,9 @@ use crate::{
     },
 };
 
+#[path = "linux_device_settings.rs"]
+mod linux_device_settings;
+pub use linux_device_settings::{GuardedDeviceObservation, read_guarded_device};
 #[path = "linux_guarded_control.rs"]
 mod linux_guarded_control;
 pub use linux_guarded_control::{

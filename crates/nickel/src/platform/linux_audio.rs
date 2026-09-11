@@ -37,6 +37,7 @@ enum AudioCommand {
     SetVolume(u8),
     AdjustVolume(i8),
     ToggleMute,
+    SetMuted(bool),
     SelectOutput(String),
     Refresh(mpsc::SyncSender<Result<AudioRefresh, String>>),
 }
@@ -51,12 +52,14 @@ struct AudioBackend {
 struct Sink {
     node: Node,
     name: String,
+    serial: Option<u64>,
     description: String,
     exposed: bool,
     driver_id: Option<u32>,
     channel_volumes: Vec<f32>,
     volume_observed: bool,
     muted: bool,
+    mute_observed: bool,
 }
 
 #[derive(Default)]
@@ -67,6 +70,7 @@ struct Graph {
     metadata_id: Option<u32>,
     proxy_admissions: usize,
     invalid_inventory: bool,
+    cookie: Option<u32>,
 }
 
 // Count lifetime admissions, not current map occupancy: the native Core may
@@ -338,6 +342,14 @@ fn create_connection(
     core.add_listener(events);
     let registry = core.registry().map_err(|error| error.to_string())?;
     let graph = Arc::new(Mutex::new(Graph::default()));
+    let info_graph = Arc::clone(&graph);
+    let mut info_events = CoreEvents::default();
+    info_events.info = Some(Box::new(move |info| {
+        if let Ok(mut graph) = info_graph.lock() {
+            graph.cookie = Some(info.cookie);
+        }
+    }));
+    core.add_listener(info_events);
     let listener_graph = Arc::clone(&graph);
     let listener_snapshot = Arc::clone(snapshot);
     let listener_subscribers = Arc::clone(subscribers);
@@ -387,12 +399,14 @@ fn create_connection(
                     graph.sinks.insert(id, Sink {
                         node: node.clone(),
                         name,
+                        serial: props.get("object.serial").and_then(|value| value.parse().ok()),
                         description,
                         exposed,
                         driver_id,
                         channel_volumes: vec![0.0],
                         volume_observed: false,
                         muted: false,
+                        mute_observed: false,
                     });
                     publish(listener_snapshot, listener_subscribers, &graph);
                 }
@@ -453,6 +467,7 @@ pub(super) fn execute_guarded(
     use crate::control_view::ControlAction;
     let command = match &action {
         ControlAction::SetAudioVolume(volume) if *volume <= 100 => AudioCommand::SetVolume(*volume),
+        ControlAction::SetAudioMuted(muted) => AudioCommand::SetMuted(*muted),
         ControlAction::SelectAudioDevice { id } if id.len() <= 512 => {
             AudioCommand::SelectOutput(id.clone())
         }
@@ -503,11 +518,14 @@ pub(super) fn execute_guarded(
     }
 
     let mut attempted = false;
-    let result = permit.with_input_boundary(&evidence, |boundary| {
+    let result = origin.with_boundary(&permit, &evidence, |boundary| {
         permit.check_commit_boundary(boundary)?;
         origin.check()?;
         if graph.lock().map_or(true, |graph| graph.invalid_inventory) {
             return Err("PipeWire inventory is ambiguous or exceeded its bound".into());
+        }
+        if origin.expects_device() {
+            origin.validate_observation(&device_observation(graph)?)?;
         }
         apply_command(command, graph)?;
         // Only this bounded message belongs to this connection. Each partial
@@ -561,6 +579,9 @@ pub(super) fn execute_guarded(
         return Outcome::Uncertain;
     }
     let confirmed = graph.lock().ok().is_some_and(|current| match action {
+        ControlAction::SetAudioMuted(muted) => {
+            effective_sink(&current).is_ok_and(|sink| sink.mute_observed && sink.muted == muted)
+        }
         ControlAction::SetAudioVolume(volume) => effective_sink(&current).is_ok_and(|sink| {
             sink.volume_observed && average_volume(&sink.channel_volumes) == volume
         }),
@@ -674,6 +695,7 @@ fn update_props(
         }
         if let Some(muted) = muted {
             sink.muted = muted;
+            sink.mute_observed = true;
         }
         publish(snapshot, subscribers, &graph);
     }
@@ -782,6 +804,17 @@ fn apply_command(command: AudioCommand, graph: &Arc<Mutex<Graph>>) -> Result<(),
             let current = i16::from(average_volume(&sink.channel_volumes));
             set_effective_volume(&graph, (current + i16::from(delta)).clamp(0, 100) as u8)
         }
+        AudioCommand::SetMuted(muted) => effective_sink(&graph)?
+            .node
+            .set_param(
+                ParamType::Props,
+                ObjectType::Props,
+                0,
+                Box::new(move |builder| {
+                    builder.push_property(Prop::Mute, PropertyFlags::empty(), muted)
+                }),
+            )
+            .map_err(|error| error.to_string()),
         AudioCommand::ToggleMute => {
             let sink = effective_sink(&graph)?;
             let muted = sink.muted;
@@ -1191,4 +1224,45 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+fn device_observation(
+    graph: &Mutex<Graph>,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    use super::linux_device_settings::{GuardedDeviceObservation, NativeIdentity};
+    let graph = graph.lock().map_err(|_| "audio observation unavailable")?;
+    if graph.invalid_inventory {
+        return Err("audio inventory unavailable".into());
+    }
+    let sink = effective_sink(&graph)?;
+    if !sink.volume_observed || !sink.mute_observed {
+        return Err("audio properties unobserved".into());
+    }
+    Ok(GuardedDeviceObservation {
+        values: nickel_remote_control::device_settings::Values::Audio {
+            volume_percent: average_volume(&sink.channel_volumes),
+            muted: sink.muted,
+        },
+        identity: NativeIdentity::Audio {
+            cookie: graph.cookie.ok_or("audio server identity unavailable")?,
+            serial: sink.serial.ok_or("audio node identity unavailable")?,
+        },
+    })
+}
+pub(super) fn observe_guarded(
+    permit: &nickel_remote_control::DesktopPermit,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    let snapshot = Arc::new(RwLock::new(AudioStatus::default()));
+    let subscribers = Arc::new(Mutex::new(Vec::new()));
+    let connection = create_connection(&snapshot, &subscribers, true)?;
+    for _ in 0..3 {
+        permit.check_live()?;
+        audio_roundtrip(
+            &connection.core,
+            &connection.main_loop,
+            &connection.completed,
+        )?;
+    }
+    permit.check_live()?;
+    device_observation(&connection.graph)
 }

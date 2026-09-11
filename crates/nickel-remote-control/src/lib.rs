@@ -3,6 +3,8 @@
 //! Transport adapters may present pairing challenges and MCP requests, but only this state
 //! machine can turn a locally approved client into a scoped capability.
 
+pub mod device_settings;
+
 use std::collections::{BTreeMap, VecDeque};
 use std::time::Duration;
 

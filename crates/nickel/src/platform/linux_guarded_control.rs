@@ -22,6 +22,7 @@ pub enum GuardedControlOutcome {
 struct OriginState {
     live: AtomicBool,
     standing: AtomicBool,
+    expected: Option<super::linux_device_settings::GuardedDeviceObservation>,
 }
 pub struct GuardedControlOriginOwner(Arc<OriginState>);
 
@@ -38,6 +39,14 @@ impl GuardedControlOriginOwner {
         Self(Arc::new(OriginState {
             live: AtomicBool::new(true),
             standing: AtomicBool::new(false),
+            expected: None,
+        }))
+    }
+    pub fn for_device(expected: super::linux_device_settings::GuardedDeviceObservation) -> Self {
+        Self(Arc::new(OriginState {
+            live: AtomicBool::new(true),
+            standing: AtomicBool::new(false),
+            expected: Some(expected),
         }))
     }
     pub fn ticket(&self) -> GuardedControlOrigin {
@@ -56,6 +65,44 @@ impl Drop for GuardedControlOriginOwner {
     }
 }
 impl GuardedControlOrigin {
+    pub(super) fn validate_observation(
+        &self,
+        current: &super::linux_device_settings::GuardedDeviceObservation,
+    ) -> Result<(), String> {
+        self.check()?;
+        if self
+            .0
+            .expected
+            .as_ref()
+            .is_some_and(|expected| expected != current)
+        {
+            return Err("device observation changed".into());
+        }
+        Ok(())
+    }
+    pub(super) fn validate_bus_target(&self, owner: &str, path: &str) -> Result<(), String> {
+        if let Some(expected) = &self.0.expected
+            && !matches!(&expected.identity,super::linux_device_settings::NativeIdentity::Bus{owner:current,path:target} if current==owner && target==path)
+        {
+            return Err("device target incarnation changed".into());
+        }
+        Ok(())
+    }
+    pub(super) fn expects_device(&self) -> bool {
+        self.0.expected.is_some()
+    }
+    pub(super) fn with_boundary<T>(
+        &self,
+        permit: &DesktopPermit,
+        evidence: &nickel_remote_control::leases::ResourceEvidence<'_>,
+        action: impl FnOnce(&nickel_remote_control::CommitBoundary) -> Result<T, String>,
+    ) -> Result<T, String> {
+        if self.expects_device() {
+            permit.with_debug_input_deadline(false, action)
+        } else {
+            permit.with_input_boundary(evidence, action)
+        }
+    }
     pub(super) fn set_standing(&self, active: bool) {
         self.0.standing.store(active, Ordering::Release);
     }
@@ -84,6 +131,7 @@ pub fn submit_guarded_control(
 ) -> Result<mpsc::Receiver<GuardedControlOutcome>, &'static str> {
     match &action {
         ControlAction::SetAudioVolume(value) if *value <= 100 => {}
+        ControlAction::SetAudioMuted(_) => {}
         ControlAction::SelectAudioDevice { id }
             if !id.is_empty() && id.len() <= 512 && !id.chars().any(char::is_control) => {}
         ControlAction::SetWifiEnabled(_)
@@ -103,6 +151,7 @@ pub fn submit_guarded_control(
                 while let Ok(job) = rx.recv() {
                     let result = match job.action {
                         ControlAction::SetAudioVolume(_)
+                        | ControlAction::SetAudioMuted(_)
                         | ControlAction::SelectAudioDevice { .. } => {
                             super::linux_audio::execute_guarded(job.action, job.permit, job.origin)
                         }

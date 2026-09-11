@@ -262,11 +262,29 @@ fn invoke(
     else {
         return Outcome::Unavailable;
     };
+    if origin.expects_device() {
+        if origin
+            .validate_bus_target(&session.owner, &session.adapter)
+            .is_err()
+        {
+            return Outcome::Unavailable;
+        }
+        let observed = super::linux_control::observe_device_on(
+            &session.connection,
+            nickel_remote_control::device_settings::Domain::Bluetooth,
+        );
+        if observed
+            .as_ref()
+            .map_or(true, |value| origin.validate_observation(value).is_err())
+        {
+            return Outcome::Unavailable;
+        }
+    }
     let serial = message.primary_header().serial_num();
     let mut replies = zbus::MessageStream::from(session.connection.inner());
     let mut attempted = false;
     let mut not_accepted = false;
-    let result = permit.with_input_boundary(&evidence(), |boundary| {
+    let result = origin.with_boundary(permit, &evidence(), |boundary| {
         permit.check_commit_boundary(boundary)?;
         origin.check()?;
         attempted = true;
@@ -474,12 +492,16 @@ mod tests {
             .unwrap();
         assert!(confirmed_reply(&valid, serial, ":1.10"));
     }
-    struct PrivateBluez(Arc<Mutex<HashSet<String>>>);
+    struct PrivateBluez(Arc<Mutex<HashSet<String>>>, bool);
     #[zbus::interface(name = "org.bluez.Adapter1")]
     impl PrivateBluez {
         #[zbus(property)]
         fn powered(&self) -> bool {
-            true
+            self.1
+        }
+        #[zbus(property)]
+        fn set_powered(&mut self, value: bool) {
+            self.1 = value;
         }
         #[zbus(property)]
         fn discovering(&self) -> bool {
@@ -523,7 +545,7 @@ mod tests {
             .unwrap()
             .serve_at("/", zbus::fdo::ObjectManager)
             .unwrap()
-            .serve_at("/org/bluez/hci0", PrivateBluez(Arc::clone(&owners)))
+            .serve_at("/org/bluez/hci0", PrivateBluez(Arc::clone(&owners), true))
             .unwrap()
             .build()
             .unwrap();
@@ -564,7 +586,7 @@ mod tests {
             .unwrap()
             .name(BLUEZ)
             .unwrap()
-            .serve_at("/org/bluez/hci0", PrivateBluez(Arc::clone(&owners)))
+            .serve_at("/org/bluez/hci0", PrivateBluez(Arc::clone(&owners), true))
             .unwrap()
             .build()
             .unwrap();

@@ -860,6 +860,7 @@ impl NickelSession {
                     && matches!(
                         action,
                         crate::control_view::ControlAction::SetAudioVolume(_)
+                            | crate::control_view::ControlAction::SetAudioMuted(_)
                             | crate::control_view::ControlAction::SelectAudioDevice { .. }
                             | crate::control_view::ControlAction::SetWifiEnabled(_)
                             | crate::control_view::ControlAction::SetBluetoothPowered(_)

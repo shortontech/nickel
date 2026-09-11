@@ -97,6 +97,7 @@ fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
         | ControlAction::ToggleBluetoothDevice { .. }
         | ControlAction::ToggleAudioSection
         | ControlAction::SetAudioVolume(_)
+        | ControlAction::SetAudioMuted(_)
         | ControlAction::SelectAudioDevice { .. }
         | ControlAction::RequestSessionAction(_)
         | ControlAction::CancelSessionAction => RemoteActionDisposition::Guarded,

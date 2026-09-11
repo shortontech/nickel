@@ -43,6 +43,7 @@ pub enum ControlAction {
     ToggleBluetoothDevice { id: String },
     ToggleAudioSection,
     SetAudioVolume(u8),
+    SetAudioMuted(bool),
     SelectAudioDevice { id: String },
     SwitchWorkspace(u64),
     CreateWorkspace,
