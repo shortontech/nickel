@@ -4809,11 +4809,25 @@ mod tests {
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        // Materialize embedded fixtures so a cached test binary remains valid
+        // after the worktree that compiled it has been removed.
+        let fixtures = tempfile::tempdir().unwrap();
+        let certificate_path = fixtures.path().join("localhost-cert.pem");
+        let private_key_path = fixtures.path().join("localhost-key.pem");
+        std::fs::write(
+            &certificate_path,
+            include_bytes!("../tests/fixtures/localhost-cert.pem"),
+        )
+        .unwrap();
+        std::fs::write(
+            &private_key_path,
+            include_bytes!("../tests/fixtures/localhost-key.pem"),
+        )
+        .unwrap();
         let config = crate::listener::ListenerConfig::parse(
             Some(&address.to_string()),
-            Some(fixtures.join("localhost-cert.pem")),
-            Some(fixtures.join("localhost-key.pem")),
+            Some(certificate_path),
+            Some(private_key_path),
         )
         .unwrap();
         let control = Arc::new(Mutex::new(ControlPlane::default()));
