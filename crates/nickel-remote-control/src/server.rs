@@ -4724,6 +4724,7 @@ mod tests {
         let metrics = http("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert!(metrics.starts_with("HTTP/1.1 200"), "{metrics}");
         assert!(metrics.contains("nickel_mcp_active_leases 0"));
+        assert!(metrics.contains("nickel_mcp_rate_limited_total{category=\"client_capacity\"} 0"));
         for secret in [
             identities[0].0.as_str(),
             identities[0].1.as_str(),

@@ -14,6 +14,12 @@ struct Gate {
     updated: Instant,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GateRejection {
+    Concurrency,
+    Rate,
+}
+
 impl Gate {
     fn new(now: Instant, burst: usize) -> Self {
         Self {
@@ -23,17 +29,55 @@ impl Gate {
         }
     }
 
-    fn acquire(&mut self, now: Instant, concurrency: usize, burst: usize) -> bool {
+    fn acquire(
+        &mut self,
+        now: Instant,
+        concurrency: usize,
+        burst: usize,
+    ) -> Result<(), GateRejection> {
         self.tokens = (self.tokens
             + now.saturating_duration_since(self.updated).as_secs_f64() * burst as f64 / 2.0)
             .min(burst as f64);
         self.updated = now;
-        if self.active >= concurrency || self.tokens < 1.0 {
-            return false;
+        if self.active >= concurrency {
+            return Err(GateRejection::Concurrency);
+        }
+        if self.tokens < 1.0 {
+            return Err(GateRejection::Rate);
         }
         self.active += 1;
         self.tokens -= 1.0;
-        true
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(usize)]
+enum AdmissionRejection {
+    GlobalConcurrency,
+    GlobalRate,
+    ClientConcurrency,
+    ClientRate,
+    ClientCapacity,
+}
+
+impl AdmissionRejection {
+    const ALL: [Self; 5] = [
+        Self::GlobalConcurrency,
+        Self::GlobalRate,
+        Self::ClientConcurrency,
+        Self::ClientRate,
+        Self::ClientCapacity,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::GlobalConcurrency => "global_concurrency",
+            Self::GlobalRate => "global_rate",
+            Self::ClientConcurrency => "client_concurrency",
+            Self::ClientRate => "client_rate",
+            Self::ClientCapacity => "client_capacity",
+        }
     }
 }
 
@@ -44,6 +88,7 @@ struct State {
     clients: HashMap<String, Gate>,
     admitted: u64,
     rejected: u64,
+    rejections_by_category: [u64; AdmissionRejection::ALL.len()],
 }
 
 pub(crate) struct AdmissionLimits(Mutex<State>);
@@ -57,6 +102,7 @@ impl AdmissionLimits {
             clients: HashMap::new(),
             admitted: 0,
             rejected: 0,
+            rejections_by_category: [0; AdmissionRejection::ALL.len()],
         })))
     }
 
@@ -69,25 +115,37 @@ impl AdmissionLimits {
     ) -> Option<Admission> {
         let mut state = self.0.lock().unwrap();
         state.generation = state.generation.saturating_add(1);
-        let accepted = if let Some(client) = client {
+        let result = if let Some(client) = client {
             state.clients.retain(|_, gate| {
                 gate.active > 0
                     || now.saturating_duration_since(gate.updated) < Duration::from_secs(60)
             });
             if !state.clients.contains_key(client) && state.clients.len() >= 128 {
-                false
+                Err(AdmissionRejection::ClientCapacity)
             } else {
                 state
                     .clients
                     .entry(client.to_owned())
                     .or_insert_with(|| Gate::new(now, 32))
                     .acquire(now, 4, 32)
+                    .map_err(|rejection| match rejection {
+                        GateRejection::Concurrency => AdmissionRejection::ClientConcurrency,
+                        GateRejection::Rate => AdmissionRejection::ClientRate,
+                    })
             }
         } else {
-            state.global.acquire(now, 32, 128)
+            state
+                .global
+                .acquire(now, 32, 128)
+                .map_err(|rejection| match rejection {
+                    GateRejection::Concurrency => AdmissionRejection::GlobalConcurrency,
+                    GateRejection::Rate => AdmissionRejection::GlobalRate,
+                })
         };
-        if !accepted {
+        if let Err(rejection) = result {
             state.rejected = state.rejected.saturating_add(1);
+            state.rejections_by_category[rejection as usize] =
+                state.rejections_by_category[rejection as usize].saturating_add(1);
             return None;
         }
         if client.is_none() {
@@ -118,10 +176,23 @@ impl AdmissionLimits {
 
     pub(crate) fn metrics(&self) -> String {
         let state = self.0.lock().unwrap();
-        format!(
+        use std::fmt::Write;
+        let mut text = format!(
             "# TYPE nickel_mcp_requests_admitted_total counter\nnickel_mcp_requests_admitted_total {}\n# TYPE nickel_mcp_admission_rejections_total counter\nnickel_mcp_admission_rejections_total {}\n# TYPE nickel_mcp_requests_active gauge\nnickel_mcp_requests_active {}\n",
             state.admitted, state.rejected, state.global.active
-        )
+        );
+        text.push_str("# HELP nickel_mcp_rate_limited_total Requests rejected by a fixed listener admission bound.\n# TYPE nickel_mcp_rate_limited_total counter\n");
+        for (category, count) in AdmissionRejection::ALL
+            .iter()
+            .zip(state.rejections_by_category)
+        {
+            let _ = writeln!(
+                text,
+                "nickel_mcp_rate_limited_total{{category=\"{}\"}} {count}",
+                category.label()
+            );
+        }
+        text
     }
 }
 
@@ -209,7 +280,14 @@ mod tests {
         assert!(limits.acquire(Some("authenticated-b"), now).is_some());
         drop(client);
         assert!(limits.acquire(Some("authenticated-a"), now).is_some());
-        assert!(!limits.metrics().contains("authenticated-"));
+        let metrics = limits.metrics();
+        assert!(
+            metrics.contains("nickel_mcp_rate_limited_total{category=\"global_concurrency\"} 1")
+        );
+        assert!(
+            metrics.contains("nickel_mcp_rate_limited_total{category=\"client_concurrency\"} 1")
+        );
+        assert!(!metrics.contains("authenticated-"));
     }
 
     #[test]
@@ -229,11 +307,42 @@ mod tests {
             drop(limits.acquire(Some(&id.to_string()), now).unwrap());
         }
         assert!(limits.acquire(Some("overflow"), now).is_none());
+        let metrics = limits.metrics();
+        assert!(metrics.contains("nickel_mcp_rate_limited_total{category=\"client_rate\"} 1"));
+        assert!(metrics.contains("nickel_mcp_rate_limited_total{category=\"client_capacity\"} 1"));
         assert!(
             limits
                 .acquire(Some("new"), now + Duration::from_secs(63))
                 .is_some()
         );
         assert_eq!(limits.0.lock().unwrap().clients.len(), 1);
+    }
+
+    #[test]
+    fn public_rejection_metrics_have_complete_fixed_categories() {
+        let limits = AdmissionLimits::new();
+        let now = Instant::now();
+        for _ in 0..128 {
+            drop(limits.acquire(None, now).unwrap());
+        }
+        assert!(limits.acquire(None, now).is_none());
+
+        let metrics = limits.metrics();
+        let lines: Vec<_> = metrics
+            .lines()
+            .filter(|line| line.starts_with("nickel_mcp_rate_limited_total{"))
+            .collect();
+        assert_eq!(lines.len(), AdmissionRejection::ALL.len());
+        for category in AdmissionRejection::ALL {
+            assert_eq!(
+                lines
+                    .iter()
+                    .filter(|line| line.contains(&format!("category=\"{}\"", category.label())))
+                    .count(),
+                1
+            );
+        }
+        assert!(metrics.contains("nickel_mcp_rate_limited_total{category=\"global_rate\"} 1"));
+        assert!(!metrics.contains("client_id"));
     }
 }
