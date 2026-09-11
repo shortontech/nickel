@@ -1,1 +1,2 @@
 # file	expected_references	semantic_owner	reason	review
+crates/nickel/src/windows_remote_input.rs	1	Windows external-window resource owner	Converts an authorized client-relative point through Win32 and rejects occlusion by a different root HWND immediately before native input; external application pixels are outside Nickel UI host authority	Review when the Windows platform adapter exposes an equivalent generation-bound target validation contract

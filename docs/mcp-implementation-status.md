@@ -154,11 +154,18 @@ The pinned launch is retained by a two-second, one-shot commit gate through the
 final `DesktopPermit` check. Its future callback contract permits only resuming
 an already-created suspended broker and local bookkeeping; it excludes shell
 execution, IPC, waits, allocation, and broker construction while the authority
-mutex is held. The current callback refuses and reports the broker unavailable
-before any native effect. Authenticated inherited transfer of the pinned shortcut
-and ancestor handles remains required before the broker can safely run
-`ShellExecuteExW`; output-scoped launch also requires verified first-map placement.
-Windows cross-build and strict cross-Clippy passed, but no native launch is claimed.
+mutex is held. A suspended one-shot broker receives only an exact inherited handle
+allowlist containing the pinned shortcut, its pinned ancestors, fixed protocol
+pipes, response and acknowledgement events, and the parent process handle. Fixed
+versioned nonce-bound records authenticate the exchange. The broker derives the
+launch target from the pinned shortcut, calls `ShellExecuteExW`, publishes the
+complete response before signaling readiness, and retains any returned process
+handle until the parent acknowledges it. Parent death, timeout, cancellation, or
+an unacknowledged response closes that handle; the commit callback's only native
+effect is `ResumeThread`. Windows cross-build, strict cross-Clippy, three broker
+protocol tests under Proton, and malformed standalone-invocation rejection passed.
+Native Windows launch remains unverified, and output-scoped launch still requires
+verified first-map placement.
 
 Catalog preparation now reads application-scale settings once per request and
 applies that snapshot to every inspected entry, avoiding repeated reads and mixed
