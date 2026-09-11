@@ -12517,6 +12517,83 @@ mod protocol_tests {
     }
 
     #[test]
+    fn output_capture_rejects_visible_protected_application_content() {
+        struct CaptureApp {
+            protected: bool,
+        }
+        impl nickel_ui::Application for CaptureApp {
+            type Message = ();
+
+            fn update(&mut self, _: ()) {}
+
+            fn remote_access_protected(&self) -> bool {
+                self.protected
+            }
+
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("private capture fixture")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.refresh_remote_output_identities();
+        let identity = session.remote_output_identity("file-test".into()).unwrap();
+
+        let elsewhere = session.internal_ui.insert(
+            CaptureApp { protected: true },
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (0, 0, 100, 100),
+                output: Some("another-output".into()),
+            },
+            1.0,
+        );
+        assert!(session.output_capture_evidence(&identity).is_ok());
+
+        let application = session.internal_ui.insert(
+            CaptureApp { protected: false },
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        assert!(session.output_capture_evidence(&identity).is_ok());
+        session
+            .internal_ui
+            .application_mut::<CaptureApp>(application)
+            .unwrap()
+            .protected = true;
+        assert_eq!(
+            session.output_capture_evidence(&identity).unwrap_err(),
+            "output capture contains protected content"
+        );
+
+        session
+            .internal_ui
+            .application_mut::<CaptureApp>(application)
+            .unwrap()
+            .protected = false;
+        let trusted = session.internal_ui.insert(
+            CaptureApp { protected: true },
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::TrustedControl,
+                geometry: (0, 0, 100, 40),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        assert!(session.internal_ui.remote_access_protected(trusted));
+        assert!(session.output_capture_evidence(&identity).is_ok());
+
+        assert!(session.internal_ui.remove(application));
+        assert!(session.internal_ui.remove(elsewhere));
+        assert!(session.internal_ui.remove(trusted));
+    }
+
+    #[test]
     fn window_retirement_revokes_its_lease_after_the_current_authorized_dispatch() {
         use crate::session::window_registry::{WindowAdmission, WindowId};
         use nickel_remote_control::leases::{ResourceId, ResourceScope};

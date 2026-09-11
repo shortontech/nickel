@@ -50,6 +50,46 @@ pub(super) struct RemoteCaptureWork {
 }
 
 impl NickelSession {
+    fn output_contains_unexcluded_protected_content(
+        &self,
+        output: &smithay::output::Output,
+    ) -> bool {
+        let protected_internal = self
+            .internal_ui
+            .ids_for_output(&output.name())
+            .any(|surface| {
+                self.internal_ui.placement(surface).is_none_or(|placement| {
+                    placement.role != crate::session::InternalSurfaceRole::TrustedControl
+                        && self.internal_ui.remote_access_protected(surface)
+                })
+            });
+        if protected_internal {
+            return true;
+        }
+
+        self.space.elements().any(|window| {
+            if !self
+                .space
+                .outputs_for_element(window)
+                .iter()
+                .any(|candidate| candidate == output)
+            {
+                return false;
+            }
+            let id = window
+                .wl_surface()
+                .and_then(|surface| self.surface_windows.get(&surface.id()))
+                .copied()
+                .or_else(|| {
+                    window
+                        .x11_surface()
+                        .and_then(|surface| self.x11_windows.get(&surface.window_id()))
+                        .copied()
+                });
+            id.is_none_or(|id| self.remote_window_is_protected(id))
+        })
+    }
+
     pub(super) fn output_capture_evidence(
         &self,
         identity: &nickel_remote_control::leases::ResourceId,
@@ -76,6 +116,9 @@ impl NickelSession {
             || width.saturating_mul(height) > 16_777_216
         {
             return Err("output capture dimensions exceed limit".into());
+        }
+        if self.output_contains_unexcluded_protected_content(output) {
+            return Err("output capture contains protected content".into());
         }
         Ok(output.clone())
     }
