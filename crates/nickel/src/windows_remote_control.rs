@@ -8260,7 +8260,6 @@ fn windows_unavailable_diagnostic_domains()
         Domain::WindowsVirtualWorkspaceCreateSwitchRemove,
         Domain::WindowsPerSurfaceRendererCacheAttribution,
         Domain::WindowsPreviewPixelReadback,
-        Domain::WindowsOutputPixelCapture,
         Domain::WindowsSettingsWorker,
     ]
 }
@@ -8707,6 +8706,15 @@ mod tests {
                 .unwrap()
                 .contains("windows_internal_applications")
         );
+    }
+    #[test]
+    fn implemented_windows_capture_and_pointer_domains_are_not_reported_unavailable() {
+        use nickel_remote_control::diagnostics::UnavailableDiagnosticDomain as Domain;
+
+        let unavailable = windows_unavailable_diagnostic_domains();
+        assert!(!unavailable.contains(&Domain::WindowsOutputPixelCapture));
+        assert!(!unavailable.contains(&Domain::WindowsNonWindowPointerTargets));
+        assert!(unavailable.contains(&Domain::WindowsSettingsWorker));
     }
     #[test]
     fn windows_owner_preserves_pending_request_when_trusted_chrome_is_unavailable() {
