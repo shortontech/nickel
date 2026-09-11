@@ -494,6 +494,8 @@ pub struct WinitShell {
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
     next_surface_diagnostic_generation: u64,
+    #[cfg(target_os = "windows")]
+    shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
 }
 
 impl WinitShell {
@@ -539,7 +541,37 @@ impl WinitShell {
             primary_output_name: None,
             active_output_name: None,
             next_surface_diagnostic_generation: 0,
+            #[cfg(target_os = "windows")]
+            shortcut_diagnostics: None,
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn set_shortcut_diagnostics(
+        &mut self,
+        source: crate::platform::WindowsShortcutDiagnosticSource,
+    ) {
+        self.shortcut_diagnostics = Some(source);
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn shortcut_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
+        self.shortcut_diagnostics.as_ref().map_or_else(
+            || nickel_remote_control::diagnostics::ShortcutDiagnostic {
+                observation_generation,
+                observed_at_us,
+                registration_revision: None,
+                capability: nickel_remote_control::diagnostics::ShortcutDiagnosticCapability::BackendUnavailable,
+                registrations: Vec::new(),
+                unprojected_bindings: 0,
+                truncated: false,
+            },
+            |source| source.snapshot(observation_generation, observed_at_us),
+        )
     }
 
     fn next_surface_diagnostic_generation(&mut self) -> Result<u64, String> {

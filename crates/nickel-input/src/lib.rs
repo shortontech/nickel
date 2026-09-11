@@ -577,6 +577,11 @@ impl<A: Clone> ShortcutEngine<A> {
         self.bindings = bindings.into_iter().collect();
     }
 
+    /// Configured shortcut metadata only; excludes every device and delivery state.
+    pub fn bindings(&self) -> impl Iterator<Item = &Binding<A>> {
+        self.bindings.iter()
+    }
+
     /// Records that a non-key gesture used the currently held modifiers.
     ///
     /// Backends use this for gestures such as Super+pointer move/resize so a

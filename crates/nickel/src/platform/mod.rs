@@ -1,5 +1,7 @@
 use crate::model::{TrayItem, WindowId};
 #[cfg(target_os = "windows")]
+pub(crate) use windows::WindowsShortcutDiagnosticSource;
+#[cfg(target_os = "windows")]
 pub(crate) use windows::remote_observation;
 pub(crate) mod status_mailbox;
 use nickel_input::global::{ShortcutCapability, ShortcutOwnership};
@@ -705,6 +707,8 @@ pub struct GlobalShortcutFeed {
     pub receiver: std::sync::mpsc::Receiver<GlobalShortcut>,
     pub ownership: ShortcutOwnership,
     pub capability: ShortcutCapability,
+    #[cfg(target_os = "windows")]
+    pub(crate) diagnostics: windows::WindowsShortcutDiagnosticSource,
 }
 
 impl GlobalShortcutFeed {
@@ -714,6 +718,8 @@ impl GlobalShortcutFeed {
             receiver,
             ownership: ShortcutOwnership::OperatingSystem,
             capability: ShortcutCapability::Unavailable(reason),
+            #[cfg(target_os = "windows")]
+            diagnostics: WindowsShortcutDiagnosticSource::unavailable(),
         }
     }
 }

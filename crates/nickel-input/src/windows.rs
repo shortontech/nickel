@@ -141,6 +141,11 @@ impl<A: Clone> WindowsInputAdapter<A> {
         self.alt_graph_active = false;
     }
 
+    /// Configured shortcut metadata only; excludes pressed keys and event ordering.
+    pub fn bindings(&self) -> impl Iterator<Item = &crate::Binding<A>> {
+        self.engine.bindings()
+    }
+
     fn normalize(&mut self, event: NativeKeyboardEvent) -> KeyEvent {
         self.next_order += 1;
         let physical = physical_key(event.virtual_key, event.scan_code, event.extended);

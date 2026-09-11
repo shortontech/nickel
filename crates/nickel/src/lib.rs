@@ -2206,6 +2206,8 @@ pub fn run() -> Result<(), String> {
         .save_default();
     let hotkey_feed = platform::launcher_hotkey_receiver();
     state.set_global_shortcut_capability(&hotkey_feed.capability);
+    #[cfg(target_os = "windows")]
+    shell.set_shortcut_diagnostics(hotkey_feed.diagnostics.clone());
     tracing::info!(
         ownership = ?hotkey_feed.ownership,
         capability = ?hotkey_feed.capability,

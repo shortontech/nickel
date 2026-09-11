@@ -924,10 +924,24 @@ pub struct IPolicyConfig_Vtbl {
 pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     let (sender, receiver) = mpsc::channel();
     let (startup_sender, startup_receiver) = mpsc::sync_channel(1);
+    let diagnostic_state = Arc::new(Mutex::new(WindowsShortcutOwnerState {
+        capability: nickel_input::global::ShortcutCapability::Unavailable(
+            nickel_input::global::UnavailableReason::MissingRuntime,
+        ),
+        registration_revision: None,
+    }));
+    let hook_diagnostic_state = Arc::clone(&diagnostic_state);
     let capability = match thread::Builder::new()
         .name("nickel-super-key".into())
-        .spawn(move || run_super_key_hook(sender, startup_sender))
-    {
+        .spawn(move || {
+            run_super_key_hook(sender, startup_sender, &hook_diagnostic_state);
+            if let Ok(mut state) = hook_diagnostic_state.lock() {
+                state.capability = nickel_input::global::ShortcutCapability::Unavailable(
+                    nickel_input::global::UnavailableReason::MissingRuntime,
+                );
+                state.registration_revision = None;
+            }
+        }) {
         Ok(_) => startup_receiver
             .recv_timeout(Duration::from_secs(2))
             .unwrap_or_else(|error| {
@@ -946,8 +960,121 @@ pub fn launcher_hotkey_receiver() -> super::GlobalShortcutFeed {
     super::GlobalShortcutFeed {
         receiver,
         ownership: nickel_input::global::ShortcutOwnership::OperatingSystem,
-        capability,
+        capability: capability.clone(),
+        diagnostics: WindowsShortcutDiagnosticSource {
+            state: diagnostic_state,
+        },
     }
+}
+
+struct WindowsShortcutOwnerState {
+    capability: nickel_input::global::ShortcutCapability,
+    registration_revision: Option<u64>,
+}
+
+#[derive(Clone)]
+pub(crate) struct WindowsShortcutDiagnosticSource {
+    state: Arc<Mutex<WindowsShortcutOwnerState>>,
+}
+
+impl WindowsShortcutDiagnosticSource {
+    pub(crate) fn unavailable() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(WindowsShortcutOwnerState {
+                capability: nickel_input::global::ShortcutCapability::Unavailable(
+                    nickel_input::global::UnavailableReason::MissingRuntime,
+                ),
+                registration_revision: None,
+            })),
+        }
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
+        let owner = self.state.try_lock().ok().map(|state| {
+            let capability = if matches!(
+                state.capability,
+                nickel_input::global::ShortcutCapability::Available
+            ) {
+                nickel_remote_control::diagnostics::ShortcutDiagnosticCapability::Available
+            } else {
+                nickel_remote_control::diagnostics::ShortcutDiagnosticCapability::BackendUnavailable
+            };
+            (capability, state.registration_revision)
+        });
+        let adapter = windows_input_adapter().try_lock().ok();
+        project_windows_shortcuts(
+            observation_generation,
+            observed_at_us,
+            owner,
+            adapter.as_deref(),
+        )
+    }
+}
+
+fn project_windows_shortcuts(
+    observation_generation: u64,
+    observed_at_us: u64,
+    owner: Option<(
+        nickel_remote_control::diagnostics::ShortcutDiagnosticCapability,
+        Option<u64>,
+    )>,
+    adapter: Option<&WindowsInputAdapter<HotkeyAction>>,
+) -> nickel_remote_control::diagnostics::ShortcutDiagnostic {
+    use nickel_input::{PhysicalKey, ShortcutKey};
+    use nickel_remote_control::diagnostics::{
+        MAX_DIAGNOSTIC_SHORTCUTS, ShortcutDiagnostic, ShortcutDiagnosticCapability,
+        ShortcutRegistrationDiagnostic,
+    };
+    let available = owner.is_some_and(|(capability, revision)| {
+        capability == ShortcutDiagnosticCapability::Available && revision.is_some()
+    }) && adapter.is_some();
+    let mut snapshot = ShortcutDiagnostic {
+        observation_generation,
+        observed_at_us,
+        registration_revision: if available {
+            owner.and_then(|(_, revision)| revision)
+        } else {
+            None
+        },
+        capability: owner
+            .map(|(capability, _)| capability)
+            .unwrap_or(ShortcutDiagnosticCapability::BackendUnavailable),
+        registrations: Vec::new(),
+        unprojected_bindings: 0,
+        truncated: false,
+    };
+    let Some(adapter) = adapter.filter(|_| available) else {
+        snapshot.capability = ShortcutDiagnosticCapability::BackendUnavailable;
+        snapshot.registration_revision = None;
+        return snapshot;
+    };
+    for (index, binding) in adapter.bindings().enumerate() {
+        if index == MAX_DIAGNOSTIC_SHORTCUTS {
+            snapshot.truncated = true;
+            break;
+        }
+        let ShortcutKey::Physical(PhysicalKey::Code(key)) = &binding.shortcut.key else {
+            snapshot.unprojected_bindings += 1;
+            continue;
+        };
+        snapshot.registrations.push(ShortcutRegistrationDiagnostic {
+            registration_id: index as u64 + 1,
+            physical_key: format!("{key:?}"),
+            action: format!("{:?}", binding.action),
+            modifiers: binding
+                .shortcut
+                .modifiers
+                .iter()
+                .map(|modifier| format!("{modifier:?}"))
+                .collect(),
+            trigger: format!("{:?}", binding.shortcut.trigger),
+        });
+    }
+    snapshot
 }
 
 pub fn handle_focused_shortcut(key: KeyCode, edge: KeyEdge) {
@@ -971,6 +1098,7 @@ pub fn handle_focused_shortcut(key: KeyCode, edge: KeyEdge) {
 fn run_super_key_hook(
     sender: Sender<GlobalShortcut>,
     startup: mpsc::SyncSender<nickel_input::global::ShortcutCapability>,
+    diagnostic_state: &Arc<Mutex<WindowsShortcutOwnerState>>,
 ) {
     SHORTCUT_SENDER.set(sender).ok();
     let run = native_hotkey_requests()[0];
@@ -979,6 +1107,7 @@ fn run_super_key_hook(
     let activation_registrations = Arc::clone(&registrations);
     let ready_run = run;
     let activation_run = run;
+    let ready_diagnostic_state = diagnostic_state.clone();
     run_native_hook_loop(
         NativeHookCallbacks {
             keyboard: Arc::new(handle_native_keyboard_hook),
@@ -1018,12 +1147,22 @@ fn run_super_key_hook(
                         );
                         registrations.1 = registration;
                     }
-                    let _ = startup.send(nickel_input::global::ShortcutCapability::Available);
+                    let available = nickel_input::global::ShortcutCapability::Available;
+                    if let Ok(mut state) = ready_diagnostic_state.lock() {
+                        state.capability = available.clone();
+                        state.registration_revision = Some(1);
+                    }
+                    let _ = startup.send(available);
                 }
                 Err(error) => {
-                    let _ = startup.send(nickel_input::global::ShortcutCapability::Unavailable(
+                    let unavailable = nickel_input::global::ShortcutCapability::Unavailable(
                         nickel_input::global::UnavailableReason::Backend(error),
-                    ));
+                    );
+                    if let Ok(mut state) = ready_diagnostic_state.lock() {
+                        state.capability = unavailable.clone();
+                        state.registration_revision = None;
+                    }
+                    let _ = startup.send(unavailable);
                 }
             }),
         },
@@ -3731,9 +3870,69 @@ mod tests {
     use super::{
         TrayNotifyIconData, application_icon, clamp_preview_x, contain_rect, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, rectangle_covers, restore_legacy_icon_alpha,
-        should_restore_on_activation, windows_pid_descends_from,
+        parse_windows_command, project_windows_shortcuts, rectangle_covers,
+        restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
     };
+
+    #[test]
+    fn shortcut_diagnostic_projects_only_confirmed_fixed_registration_metadata() {
+        use nickel_core::hotkeys::HotkeyAction;
+        use nickel_input::{
+            Binding, LogicalKey, Shortcut, ShortcutKey, ShortcutTrigger,
+            windows::WindowsInputAdapter,
+        };
+        use nickel_remote_control::diagnostics::ShortcutDiagnosticCapability;
+
+        let adapter = WindowsInputAdapter::new([
+            nickel_core::hotkeys::default_bindings()
+                .into_iter()
+                .next()
+                .expect("Nickel has a built-in shortcut"),
+            Binding {
+                shortcut: Shortcut {
+                    key: ShortcutKey::Logical(LogicalKey::Character("typed secret".into())),
+                    modifiers: Default::default(),
+                    trigger: ShortcutTrigger::Pressed,
+                },
+                action: HotkeyAction::ShowRun,
+                suppress: true,
+            },
+        ]);
+        let snapshot = project_windows_shortcuts(
+            7,
+            11,
+            Some((ShortcutDiagnosticCapability::Available, Some(1))),
+            Some(&adapter),
+        );
+        assert_eq!(snapshot.registration_revision, Some(1));
+        assert_eq!(snapshot.registrations.len(), 1);
+        assert_eq!(snapshot.unprojected_bindings, 1);
+        assert!(snapshot.registrations.iter().all(|registration| {
+            registration.physical_key != "typed secret"
+                && registration.action != "typed secret"
+                && registration
+                    .modifiers
+                    .iter()
+                    .all(|modifier| modifier != "typed secret")
+                && registration.trigger != "typed secret"
+        }));
+    }
+
+    #[test]
+    fn unavailable_shortcut_owner_cannot_publish_configured_bindings() {
+        use nickel_input::windows::WindowsInputAdapter;
+        use nickel_remote_control::diagnostics::ShortcutDiagnosticCapability;
+
+        let adapter = WindowsInputAdapter::new(nickel_core::hotkeys::default_bindings());
+        let snapshot = project_windows_shortcuts(
+            7,
+            11,
+            Some((ShortcutDiagnosticCapability::BackendUnavailable, None)),
+            Some(&adapter),
+        );
+        assert_eq!(snapshot.registration_revision, None);
+        assert!(snapshot.registrations.is_empty());
+    }
 
     #[test]
     fn native_tray_wire_layout_uses_packed_32_bit_handles() {

@@ -1760,3 +1760,15 @@ change acceptance remains open. The shared shell-behavior schema has no separate
 configuration generation; Windows therefore reports the current owner values and
 does not relabel the whole-snapshot observation generation as a configuration
 version.
+
+Windows shortcut diagnostics now read the production low-level shortcut adapter
+owned by the native hook and the hook's live startup/termination capability. The
+snapshot is capped at 128 inspected bindings and includes a fixed registration
+revision only while both owners are available. It projects physical key, modifier,
+trigger and product-action enum names; logical or native string-bearing bindings
+are counted without exposing their contents. Pressed keys, text input, delivery
+history, hook events and emergency-control state are not reachable through this
+projection. An unavailable or contended owner publishes no registrations, and the
+generic `windows_shortcut_inventory` unavailable-domain marker has been removed.
+Cross-compilation and focused compatibility-layer tests do not establish native
+Windows hook lifecycle behavior, which remains open for native acceptance.
