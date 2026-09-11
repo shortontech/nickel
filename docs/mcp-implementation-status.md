@@ -1800,3 +1800,14 @@ projection. An unavailable or contended owner publishes no registrations, and th
 generic `windows_shortcut_inventory` unavailable-domain marker has been removed.
 Cross-compilation and focused compatibility-layer tests do not establish native
 Windows hook lifecycle behavior, which remains open for native acceptance.
+
+Windows temporary frame tracing now samples the production `WinitShell::present`
+completion path. The shell-to-owner queue holds at most 256 payload-free records;
+overflow advances the trace generation and eviction count so loss remains visible.
+Each retained record contains only its generation, owner-relative time, the current
+output incarnation generation and CPU dispatch duration. Starting, recording,
+stopping, expiry and replacement remain owned by the existing full-debug permit and
+trace audit; revocation prevents later samples from entering the trace. This is CPU
+presentation dispatch timing, not GPU completion or pixel capture. Windows
+cross-compilation and compatibility-layer tests do not establish native frame timing
+or presentation responsiveness, which remain open for native acceptance.

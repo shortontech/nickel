@@ -502,6 +502,10 @@ pub struct WinitShell {
     next_surface_diagnostic_generation: u64,
     #[cfg(target_os = "windows")]
     shortcut_diagnostics: Option<crate::platform::WindowsShortcutDiagnosticSource>,
+    #[cfg(target_os = "windows")]
+    remote_frame_dispatches: VecDeque<(String, u64)>,
+    #[cfg(target_os = "windows")]
+    remote_frame_dispatch_drops: u64,
 }
 
 impl WinitShell {
@@ -549,7 +553,21 @@ impl WinitShell {
             next_surface_diagnostic_generation: 0,
             #[cfg(target_os = "windows")]
             shortcut_diagnostics: None,
+            #[cfg(target_os = "windows")]
+            remote_frame_dispatches: VecDeque::with_capacity(
+                nickel_remote_control::frame_trace::MAX_FRAME_TRACE_RECORDS,
+            ),
+            #[cfg(target_os = "windows")]
+            remote_frame_dispatch_drops: 0,
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn take_remote_frame_dispatches(&mut self) -> (u64, Vec<(String, u64)>) {
+        (
+            std::mem::take(&mut self.remote_frame_dispatch_drops),
+            self.remote_frame_dispatches.drain(..).collect(),
+        )
     }
 
     #[cfg(target_os = "windows")]
@@ -1452,14 +1470,25 @@ impl WinitShell {
             entry.presentation_failures = entry.presentation_failures.saturating_add(1);
         }
         let damage = result?;
-        #[cfg(target_os = "windows")]
-        if !damage.is_empty() {
-            entry.presentation_generation = entry.presentation_generation.saturating_add(1);
-            entry.presented_frame_bytes = u64::from(physical.width)
-                .saturating_mul(u64::from(physical.height))
-                .saturating_mul(4);
-        }
         let elapsed_us = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        #[cfg(target_os = "windows")]
+        {
+            if !damage.is_empty() {
+                entry.presentation_generation = entry.presentation_generation.saturating_add(1);
+                entry.presented_frame_bytes = u64::from(physical.width)
+                    .saturating_mul(u64::from(physical.height))
+                    .saturating_mul(4);
+            }
+            if self.remote_frame_dispatches.len()
+                == nickel_remote_control::frame_trace::MAX_FRAME_TRACE_RECORDS
+            {
+                self.remote_frame_dispatches.pop_front();
+                self.remote_frame_dispatch_drops =
+                    self.remote_frame_dispatch_drops.saturating_add(1);
+            }
+            self.remote_frame_dispatches
+                .push_back((entry.output_name.clone(), elapsed_us));
+        }
         if warm {
             push_bounded(&mut self.warm_present_us, elapsed_us);
             if let (Some(before), Some(after)) = (

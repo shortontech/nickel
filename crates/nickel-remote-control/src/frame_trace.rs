@@ -74,6 +74,13 @@ impl History {
             cpu_dispatch_us: micros(duration),
         });
     }
+    fn record_drops(&mut self, now: Instant, count: u64) {
+        if !self.active(now) || count == 0 {
+            return;
+        }
+        self.generation = self.generation.saturating_add(count);
+        self.evicted = self.evicted.saturating_add(count);
+    }
     fn snapshot(&self, now: Instant) -> FrameTraceSnapshot {
         FrameTraceSnapshot {
             category: self.category,
@@ -182,6 +189,20 @@ impl FrameTrace {
             })
             .is_ok()
     }
+    pub fn record_drops(&mut self, protected: bool, count: u64) -> bool {
+        if !self.revalidate(protected) {
+            return false;
+        }
+        let Ok(permit) = self.permit.continued_observation() else {
+            return false;
+        };
+        permit
+            .with_debug(protected, || {
+                self.history.record_drops(Instant::now(), count);
+                Ok(())
+            })
+            .is_ok()
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -203,6 +224,13 @@ mod tests {
         assert_eq!(snapshot.records.len(), 256);
         assert_eq!(snapshot.records[0].generation, 45);
         assert_eq!(snapshot.records[0].cpu_dispatch_us, 42);
+        let mut dropped = History::new(60, now, FrameTraceCategory::NestedFrameDispatch).unwrap();
+        dropped.record_drops(now, 9);
+        dropped.record(now, 7, Duration::from_micros(2));
+        let snapshot = dropped.snapshot(now);
+        assert_eq!(snapshot.generation, 10);
+        assert_eq!(snapshot.evicted, 9);
+        assert_eq!(snapshot.records[0].generation, 10);
         let mut stopped = History::new(60, now, FrameTraceCategory::NestedFrameDispatch).unwrap();
         stopped.stopped = true;
         stopped.record(now, 7, Duration::ZERO);

@@ -386,6 +386,12 @@ impl Owner {
             protected: false,
         })
     }
+
+    pub(crate) fn output_generation(&self, name: &str) -> Option<u64> {
+        self.outputs
+            .get(name)
+            .map(|record| record.identity.generation)
+    }
     pub(crate) fn outputs<'a>(
         &'a self,
         scope: &'a ResourceScope,

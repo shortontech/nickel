@@ -238,8 +238,8 @@ fn revoke_native_resource(
         for id in ids {
             control.leases_mut().revoke(id);
         }
-        // Native input remains unavailable. Its future release owner must drain
-        // cancelled holds before event dispatch; permit invalidation happens here.
+        // The owner drains invalidated native holds immediately after lifecycle
+        // reconciliation and before dispatching another queued request.
     }
 }
 fn resource_label(scope: &nickel_remote_control::leases::ResourceScope) -> String {
@@ -1514,6 +1514,7 @@ pub(crate) struct WindowsRemoteControl {
     platform_refresh_generation: u64,
     platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
+    remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     indicators: std::collections::HashMap<String, IndicatorSurface>,
     authority: Arc<WindowsDesktopAuthority>,
     desktop_session: Option<u32>,
@@ -1659,6 +1660,7 @@ impl WindowsRemoteControl {
             platform_refresh_generation: 0,
             platform_refreshes: Vec::new(),
             platform_refresh_worker,
+            remote_frame_trace: None,
             indicators: Default::default(),
             authority,
             desktop_session,
@@ -1709,7 +1711,40 @@ impl WindowsRemoteControl {
         }
     }
     pub(crate) fn poll(&mut self, shell: &mut WinitShell, state: &crate::live_shell::LiveShell) {
+        self.collect_frame_dispatches(shell, state);
         self.poll_with_shell(Some((shell, state)));
+    }
+
+    fn collect_frame_dispatches(
+        &mut self,
+        shell: &mut WinitShell,
+        state: &crate::live_shell::LiveShell,
+    ) {
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        if self
+            .remote_frame_trace
+            .as_mut()
+            .is_some_and(|trace| !trace.revalidate(protected))
+        {
+            self.remote_frame_trace = None;
+        }
+        let (dropped, dispatches) = shell.take_remote_frame_dispatches();
+        if let Some(trace) = self.remote_frame_trace.as_mut()
+            && !trace.record_drops(protected, dropped)
+        {
+            self.remote_frame_trace = None;
+            return;
+        }
+        for (output, elapsed_us) in dispatches {
+            let generation = self.resources.output_generation(&output);
+            if let (Some(trace), Some(generation)) = (self.remote_frame_trace.as_mut(), generation)
+                && !trace.record(protected, generation, Duration::from_micros(elapsed_us))
+            {
+                self.remote_frame_trace = None;
+                break;
+            }
+        }
     }
 
     /// Retain only fixed, production-owned shell visibility and keyboard-focus
@@ -3374,7 +3409,10 @@ impl WindowsRemoteControl {
                     .map(|snapshot| snapshot.retained_at(observed_at_us)),
                 recent_events: self.desktop_events.snapshot(),
                 diagnostic_logs: windows_diagnostic_logs(),
-                frame_trace: None,
+                frame_trace: self
+                    .remote_frame_trace
+                    .as_ref()
+                    .map(|trace| trace.snapshot()),
                 trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
                 truncated: shell_surfaces_truncated,
                 unavailable_domains: vec![
@@ -3385,7 +3423,6 @@ impl WindowsRemoteControl {
                     "windows_preview_pixel_readback".into(),
                     "windows_maintenance_platform_refresh".into(),
                     "windows_settings_worker".into(),
-                    "windows_frame_trace".into(),
                 ],
             })
         })?;
@@ -3421,6 +3458,8 @@ impl WindowsRemoteControl {
                     | DiagnosticAction::RefreshScene
                     | DiagnosticAction::RefreshApplicationInventory
                     | DiagnosticAction::RefreshPlatformStatus { .. }
+                    | DiagnosticAction::StartFrameTrace { .. }
+                    | DiagnosticAction::StopFrameTrace
             ) {
                 Ok(())
             } else {
@@ -3438,6 +3477,36 @@ impl WindowsRemoteControl {
             }
             DiagnosticAction::RefreshApplicationInventory => {
                 self.applications.request_refresh();
+            }
+            DiagnosticAction::StartFrameTrace { duration_seconds } => {
+                permit.with_debug(!self.desktop_unlocked, || {
+                    if self
+                        .remote_frame_trace
+                        .as_ref()
+                        .is_some_and(|trace| trace.active())
+                    {
+                        return Err("frame trace capacity reached".into());
+                    }
+                    self.remote_frame_trace = Some(
+                        nickel_remote_control::frame_trace::FrameTrace::new_authorized(
+                            permit.clone(),
+                            *duration_seconds,
+                            nickel_remote_control::frame_trace::FrameTraceCategory::NestedFrameDispatch,
+                        )?,
+                    );
+                    Ok(())
+                })?;
+            }
+            DiagnosticAction::StopFrameTrace => {
+                permit.with_debug(!self.desktop_unlocked, || {
+                    if let Some(trace) = self.remote_frame_trace.as_mut() {
+                        if !trace.owned_by(&permit) {
+                            return Err("frame trace belongs to another lease".into());
+                        }
+                        trace.stop();
+                    }
+                    Ok(())
+                })?;
             }
             DiagnosticAction::RefreshPlatformStatus { domain } => {
                 let prepared = platform_refresh
@@ -4946,6 +5015,7 @@ mod tests {
             platform_refresh_generation: 0,
             platform_refreshes: Vec::new(),
             platform_refresh_worker: platform_refresh_worker.clone(),
+            remote_frame_trace: None,
             indicators: Default::default(),
             authority: Arc::new(WindowsDesktopAuthority {
                 sender,
