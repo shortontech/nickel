@@ -29,6 +29,8 @@ pub use default_apps::{
     open_once_supported, open_once_with, open_with_default,
 };
 
+#[cfg(target_os = "windows")]
+pub use maintenance::inspect_windows_maintenance_bounded;
 pub use maintenance::{
     MaintenanceAction, MaintenanceBackend, MaintenanceError, MaintenanceFailureClass,
     MaintenanceOutcome, MaintenanceProvider, MaintenanceService, MaintenanceSnapshot, Observation,

@@ -341,14 +341,24 @@ fn summarize_maintenance(snapshot: nickel_platform::MaintenanceSnapshot) -> Main
 
 pub(crate) fn refresh_maintenance_status() -> Result<MaintenanceRefresh, String> {
     #[cfg(target_os = "windows")]
-    return Err(
-        "bounded Windows maintenance diagnostics are unavailable until native job containment is installed"
-            .into(),
+    return refresh_windows_maintenance_status(
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
+        std::sync::Arc::new(|| false),
     );
 
     #[cfg(not(target_os = "windows"))]
     nickel_platform::maintenance_service()
         .inspect()
+        .map(summarize_maintenance)
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn refresh_windows_maintenance_status(
+    deadline: std::time::Instant,
+    cancelled: std::sync::Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<MaintenanceRefresh, String> {
+    nickel_platform::inspect_windows_maintenance_bounded(deadline, cancelled)
         .map(summarize_maintenance)
         .map_err(|error| error.to_string())
 }
@@ -1057,6 +1067,24 @@ mod tests {
     #[ignore = "queries live PackageKit, firewall, and Secret Service providers"]
     fn live_maintenance_refresh_returns_only_coarse_status() {
         let _ = super::refresh_maintenance_status().expect("live maintenance refresh");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn live_windows_maintenance_refresh_uses_bounded_production_provider() {
+        let refresh = super::refresh_windows_maintenance_status(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+            std::sync::Arc::new(|| false),
+        )
+        .expect("bounded Windows maintenance refresh");
+        assert_eq!(
+            refresh.maintenance_available,
+            refresh.updates_available.is_some()
+                || refresh.firewall_healthy.is_some()
+                || refresh.malware_protection_healthy.is_some()
+                || refresh.known_permission_states != 0
+                || refresh.secure_storage_status_available
+        );
     }
 
     #[cfg(target_os = "linux")]

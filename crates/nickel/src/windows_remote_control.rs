@@ -615,6 +615,7 @@ enum PreparedWindowsPlatformRefreshData {
     Connectivity(crate::platform::ConnectivityRefresh),
     Audio(crate::platform::AudioRefresh),
     Peripherals(crate::platform::PeripheralRefresh),
+    Maintenance(crate::platform::MaintenanceRefresh),
     DefaultAssociations(crate::platform::DefaultAssociationsRefresh),
 }
 
@@ -693,10 +694,10 @@ fn prepare_windows_platform_refresh(
     const DEADLINE: Duration = Duration::from_secs(2);
 
     permit.with_debug(false, || Ok(()))?;
-    if domain == PlatformRefreshDomain::Maintenance {
-        return Err("bounded Windows maintenance diagnostics remain unavailable because the production PowerShell provider has no cancellable job containment".into());
-    }
     let observation_started = Instant::now();
+    let maintenance_deadline =
+        observation_started + DEADLINE.saturating_sub(Duration::from_millis(100));
+    let cancellation_permit = permit.clone();
     let data = run_windows_platform_refresh_worker(worker, DEADLINE, move || match domain {
         PlatformRefreshDomain::Connectivity => crate::platform::refresh_connectivity_status()
             .map(PreparedWindowsPlatformRefreshData::Connectivity),
@@ -709,7 +710,11 @@ fn prepare_windows_platform_refresh(
             crate::platform::refresh_default_associations()
                 .map(PreparedWindowsPlatformRefreshData::DefaultAssociations)
         }
-        PlatformRefreshDomain::Maintenance => unreachable!("rejected before worker start"),
+        PlatformRefreshDomain::Maintenance => crate::platform::refresh_windows_maintenance_status(
+            maintenance_deadline,
+            Arc::new(move || cancellation_permit.check_live().is_err()),
+        )
+        .map(PreparedWindowsPlatformRefreshData::Maintenance),
     })?;
     let observed = Instant::now();
     permit.with_debug(false, || Ok(()))?;
@@ -3421,7 +3426,6 @@ impl WindowsRemoteControl {
                     "windows_shell_surfaces_without_production_scene_identity".into(),
                     "windows_shared_renderer_and_presenter_cache_accounting".into(),
                     "windows_preview_pixel_readback".into(),
-                    "windows_maintenance_platform_refresh".into(),
                     "windows_settings_worker".into(),
                 ],
             })
@@ -3533,6 +3537,13 @@ impl WindowsRemoteControl {
                         association_targets_queried,
                         effective_associations,
                         directly_writable_associations,
+                        maintenance_available,
+                        updates_available,
+                        restart_required,
+                        firewall_healthy,
+                        malware_protection_healthy,
+                        known_permission_states,
+                        secure_storage_status_available,
                         partial,
                         reconciliation_confirmed,
                     ) = match prepared.data {
@@ -3550,6 +3561,13 @@ impl WindowsRemoteControl {
                             0,
                             0,
                             0,
+                            false,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            false,
                             refresh.partial,
                             false,
                         ),
@@ -3567,6 +3585,13 @@ impl WindowsRemoteControl {
                             0,
                             0,
                             0,
+                            false,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            false,
                             refresh.partial,
                             false,
                         ),
@@ -3584,6 +3609,37 @@ impl WindowsRemoteControl {
                             0,
                             0,
                             0,
+                            false,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            false,
+                            refresh.partial,
+                            false,
+                        ),
+                        PreparedWindowsPlatformRefreshData::Maintenance(refresh) => (
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            0,
+                            0,
+                            0,
+                            false,
+                            0,
+                            0,
+                            0,
+                            refresh.maintenance_available,
+                            refresh.updates_available,
+                            refresh.restart_required,
+                            refresh.firewall_healthy,
+                            refresh.malware_protection_healthy,
+                            refresh.known_permission_states,
+                            refresh.secure_storage_status_available,
                             refresh.partial,
                             false,
                         ),
@@ -3601,6 +3657,13 @@ impl WindowsRemoteControl {
                             refresh.targets_queried,
                             refresh.effective_associations,
                             refresh.directly_writable_associations,
+                            false,
+                            None,
+                            None,
+                            None,
+                            None,
+                            0,
+                            false,
                             refresh.partial,
                             false,
                         ),
@@ -3631,13 +3694,13 @@ impl WindowsRemoteControl {
                         printer_count,
                         volume_count,
                         filesystem_count,
-                        maintenance_available: false,
-                        updates_available: None,
-                        restart_required: None,
-                        firewall_healthy: None,
-                        malware_protection_healthy: None,
-                        known_permission_states: 0,
-                        secure_storage_status_available: false,
+                        maintenance_available,
+                        updates_available,
+                        restart_required,
+                        firewall_healthy,
+                        malware_protection_healthy,
+                        known_permission_states,
+                        secure_storage_status_available,
                         associations_available,
                         association_targets_queried,
                         effective_associations,

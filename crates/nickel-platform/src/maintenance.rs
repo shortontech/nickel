@@ -9,6 +9,33 @@ use std::{
     time::SystemTime,
 };
 
+#[cfg(target_os = "windows")]
+use std::{
+    cell::RefCell,
+    io::Read,
+    os::windows::{io::AsRawHandle, process::CommandExt},
+    process::{Command, Stdio},
+    time::{Duration, Instant},
+};
+
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{CloseHandle, HANDLE},
+    System::{
+        Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+        },
+        JobObjects::{
+            AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+            SetInformationJobObject, TerminateJobObject,
+        },
+        Threading::{
+            CREATE_NO_WINDOW, CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME,
+        },
+    },
+};
+
 #[cfg(target_os = "linux")]
 use std::{path::Path, time::Duration};
 
@@ -631,7 +658,171 @@ impl MaintenanceBackend for LinuxMaintenance {
 
 #[cfg(target_os = "windows")]
 fn windows_powershell(script: &str) -> Result<String, MaintenanceError> {
-    let output = std::process::Command::new("powershell.exe")
+    const DEFAULT_DEADLINE: Duration = Duration::from_secs(30);
+    let context = WINDOWS_MAINTENANCE_BOUND.with(|slot| slot.borrow().clone());
+    let deadline = context
+        .as_ref()
+        .map_or_else(|| Instant::now() + DEFAULT_DEADLINE, |value| value.deadline);
+    let cancelled = context.map(|value| value.cancelled);
+    windows_powershell_contained(script, deadline, cancelled.as_deref())
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_POWERSHELL_OUTPUT_LIMIT: usize = 64 * 1024;
+
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct WindowsMaintenanceBound {
+    deadline: Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+#[cfg(target_os = "windows")]
+thread_local! {
+    static WINDOWS_MAINTENANCE_BOUND: RefCell<Option<WindowsMaintenanceBound>> = const { RefCell::new(None) };
+}
+
+/// Run the production Windows maintenance inspection under one absolute
+/// deadline and a live authority check. Every PowerShell process is suspended
+/// until it belongs to a kill-on-close job, so timeout and revocation cannot
+/// leave a helper or one of its descendants running.
+#[cfg(target_os = "windows")]
+pub fn inspect_windows_maintenance_bounded(
+    deadline: Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<MaintenanceSnapshot, MaintenanceError> {
+    if Instant::now() >= deadline || cancelled() {
+        return Err(MaintenanceError {
+            class: MaintenanceFailureClass::Cancelled,
+            detail: "Windows maintenance inspection was cancelled".into(),
+        });
+    }
+    let previous = WINDOWS_MAINTENANCE_BOUND.with(|slot| {
+        slot.replace(Some(WindowsMaintenanceBound {
+            deadline,
+            cancelled,
+        }))
+    });
+    struct Restore(Option<WindowsMaintenanceBound>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            WINDOWS_MAINTENANCE_BOUND.with(|slot| {
+                slot.replace(self.0.take());
+            });
+        }
+    }
+    let _restore = Restore(previous);
+    maintenance_service().inspect()
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsJob(HANDLE);
+
+#[cfg(target_os = "windows")]
+impl WindowsJob {
+    fn new() -> Result<Self, MaintenanceError> {
+        let handle = unsafe { CreateJobObjectW(None, None) }.map_err(windows_provider_error)?;
+        let job = Self(handle);
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        unsafe {
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                (&raw const limits).cast(),
+                std::mem::size_of_val(&limits) as u32,
+            )
+        }
+        .map_err(windows_provider_error)?;
+        Ok(job)
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for WindowsJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_provider_error(error: windows::core::Error) -> MaintenanceError {
+    MaintenanceError {
+        class: MaintenanceFailureClass::ProviderUnavailable,
+        detail: format!("Windows authority is unavailable: {error}"),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn resume_suspended_process(process_id: u32) -> Result<(), MaintenanceError> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) }
+        .map_err(windows_provider_error)?;
+    struct Snapshot(HANDLE);
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+    let snapshot = Snapshot(snapshot);
+    let mut entry = THREADENTRY32 {
+        dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+        ..Default::default()
+    };
+    let mut present = unsafe { Thread32First(snapshot.0, &mut entry).is_ok() };
+    while present {
+        if entry.th32OwnerProcessID == process_id {
+            let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) }
+                .map_err(windows_provider_error)?;
+            let resumed = unsafe { ResumeThread(thread) };
+            unsafe {
+                let _ = CloseHandle(thread);
+            }
+            if resumed == u32::MAX {
+                return Err(windows_provider_error(windows::core::Error::from_thread()));
+            }
+            return Ok(());
+        }
+        present = unsafe { Thread32Next(snapshot.0, &mut entry).is_ok() };
+    }
+    Err(MaintenanceError {
+        class: MaintenanceFailureClass::ProviderUnavailable,
+        detail: "Windows authority process has no resumable thread".into(),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn drain_bounded(mut pipe: impl Read, limit: usize) -> Vec<u8> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 4096];
+    loop {
+        match pipe.read(&mut buffer) {
+            Ok(0) | Err(_) => return retained,
+            Ok(read) => {
+                let remaining = limit.saturating_sub(retained.len());
+                retained.extend_from_slice(&buffer[..read.min(remaining)]);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_powershell_contained(
+    script: &str,
+    deadline: Instant,
+    cancelled: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<String, MaintenanceError> {
+    if Instant::now() >= deadline || cancelled.is_some_and(|check| check()) {
+        return Err(MaintenanceError {
+            class: MaintenanceFailureClass::Cancelled,
+            detail: "Windows authority request expired or was revoked".into(),
+        });
+    }
+    let job = WindowsJob::new()?;
+    let mut child = Command::new("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
@@ -639,7 +830,11 @@ fn windows_powershell(script: &str) -> Result<String, MaintenanceError> {
             "-Command",
             script,
         ])
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .creation_flags(CREATE_SUSPENDED.0 | CREATE_NO_WINDOW.0)
+        .spawn()
         .map_err(|error| MaintenanceError {
             class: if error.kind() == std::io::ErrorKind::PermissionDenied {
                 MaintenanceFailureClass::Authorization
@@ -648,20 +843,68 @@ fn windows_powershell(script: &str) -> Result<String, MaintenanceError> {
             },
             detail: format!("Windows authority could not start: {error}"),
         })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    let process = HANDLE(child.as_raw_handle());
+    if let Err(error) = unsafe { AssignProcessToJobObject(job.0, process) } {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(windows_provider_error(error));
+    }
+    if let Err(error) = resume_suspended_process(child.id()) {
+        let _ = unsafe { TerminateJobObject(job.0, 70) };
+        let _ = child.wait();
+        return Err(error);
+    }
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
+    let stdout_reader =
+        std::thread::spawn(move || drain_bounded(stdout, WINDOWS_POWERSHELL_OUTPUT_LIMIT));
+    let stderr_reader =
+        std::thread::spawn(move || drain_bounded(stderr, WINDOWS_POWERSHELL_OUTPUT_LIMIT));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) if Instant::now() < deadline && !cancelled.is_some_and(|check| check()) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => {
+                let _ = unsafe { TerminateJobObject(job.0, 70) };
+                break child.wait().map_err(|_| MaintenanceError {
+                    class: MaintenanceFailureClass::Cancelled,
+                    detail: "Windows authority request expired or was revoked".into(),
+                });
+            }
+            Err(error) => {
+                let _ = unsafe { TerminateJobObject(job.0, 70) };
+                let _ = child.wait();
+                break Err(MaintenanceError {
+                    class: MaintenanceFailureClass::ProviderUnavailable,
+                    detail: format!("Windows authority process could not be observed: {error}"),
+                });
+            }
+        }
+    }?;
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    if Instant::now() >= deadline || cancelled.is_some_and(|check| check()) {
+        return Err(MaintenanceError {
+            class: MaintenanceFailureClass::Cancelled,
+            detail: "Windows authority request expired or was revoked".into(),
+        });
+    }
+    if status.success() {
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
     } else {
         let diagnostic = format!(
             "{}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            String::from_utf8_lossy(&stdout),
+            String::from_utf8_lossy(&stderr)
         );
-        let class = classify_command_failure(output.status.code(), &diagnostic);
+        let class = classify_command_failure(status.code(), &diagnostic);
         Err(MaintenanceError {
             class,
             detail: format!(
                 "Windows authority reported a {class:?} failure ({})",
-                output.status
+                status
             ),
         })
     }
