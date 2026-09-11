@@ -119,9 +119,11 @@ example under its private `XDG_DATA_HOME`; it does not install a host applicatio
 The production catalog must report the same verified executable identity as the
 live counter window before the negative launch test is admitted.
 
-The nested test-control capability creates a second Smithay output, publishes its
-Wayland output global and runs production relayout. The harness creates a workspace
-through the production session command and uses its returned authoritative state.
+The nested test-control capability creates a second Smithay output at 180/120
+fractional scale with a 90-degree transform, publishes its Wayland output global,
+and runs production relayout. The harness verifies the transformed logical geometry,
+creates a workspace through the production session command, and uses its returned
+authoritative state.
 The resulting tests prove:
 
 - A window lease and an application lease each retain native key delivery after
@@ -138,10 +140,14 @@ The resulting tests prove:
 - A separate output lease enumerates and launches that real catalog executable.
   The immediate outcome confirms the requested spawn and output while truthfully
   leaving placement unconfirmed; the harness then observes the resulting native
-  window inside that output and uses the same lease for focus and capture.
+  window inside that output and uses the same lease for focus, capture, and a
+  final global pointer hit confined to that output generation.
 - No movement requests another approval or changes the existing authority audit.
 
-Native Wayland acceptance passed September 11, 2026, on `d0d5fbb` plus this change.
+The earlier 1x normal-transform movement path passed September 11, 2026, on
+`d0d5fbb` plus its original movement change. That historical run predates the
+fractional-scale and transform assertions described here and does not establish
+their current native runtime result.
 All preceding ordinary/shell cases and the combined diagnostic/capture/input stress,
 privacy and emergency checks also passed. Six focused harness tests and strict
 harness/example Clippy passed. The combined stress check completed 27 requests in
@@ -150,9 +156,10 @@ above reproduce the acceptance path. The added workspace/output were removed, al
 example processes reaped, and the owned compositor/runtime cleaned afterward.
 
 The extra output is virtual: it exercises live Wayland clients and production
-compositor resource/geometry/workspace authority, but has no independent physical
-display presenter. This is not physical multi-monitor, DRM, mixed-DPI presentation,
-Xwayland, or Windows acceptance. The positive launch uses a directly executed
+compositor resource/geometry/workspace authority across mixed logical scale and
+output transform, but has no independent physical display presenter. This is not
+physical multi-monitor, DRM, physical mixed-DPI presentation, Xwayland, or Windows
+acceptance. The positive launch uses a directly executed
 repository fixture; broker/daemon and Flatpak launch attribution remain separate
 cases. Transient identity remains separate, and held-input coverage is described
 below.

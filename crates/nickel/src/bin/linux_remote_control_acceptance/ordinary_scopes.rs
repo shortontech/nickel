@@ -233,11 +233,27 @@ impl Movement {
                     name: MOVEMENT_OUTPUT.into(),
                     logical_width: 1280,
                     logical_height: 720,
-                    scale_120: 120,
-                    transform: nickel_session_protocol::OutputTransform::Normal,
+                    scale_120: 180,
+                    transform: nickel_session_protocol::OutputTransform::Rotate90,
                 },
             },
         )?;
+        let ServerMessage::Outputs(native_outputs) =
+            session_message(environment, Request::Query(Query::Outputs))?
+        else {
+            return Err("native transformed output observation unavailable".into());
+        };
+        let native_secondary = native_outputs
+            .iter()
+            .find(|output| output.name == MOVEMENT_OUTPUT)
+            .ok_or("nested transformed output was not mapped")?;
+        if native_secondary.scale_120 != 180
+            || native_secondary.transform != nickel_session_protocol::OutputTransform::Rotate90
+            || native_secondary.geometry.width != 1280
+            || native_secondary.geometry.height != 720
+        {
+            return Err("nested output lost its fractional scale or transform geometry".into());
+        }
         let outputs = scope_call(
             address,
             identity,
@@ -566,6 +582,28 @@ impl Movement {
             "capture_window",
             window_arguments(lease, &window),
         )?;
+        let global_x = i32::try_from(window["x"].as_i64().ok_or("launched window x missing")?)
+            .map_err(|_| "launched window x exceeds i32")?
+            .checked_add(1)
+            .ok_or("launched window x overflow")?;
+        let global_y = i32::try_from(window["y"].as_i64().ok_or("launched window y missing")?)
+            .map_err(|_| "launched window y exceeds i32")?
+            .checked_add(1)
+            .ok_or("launched window y overflow")?;
+        scope_call(
+            address,
+            identity,
+            "pointer_action",
+            json!({
+                "lease_id": lease,
+                "target": {
+                    "kind": "output", "output_id": self.secondary.id,
+                    "generation": self.secondary.generation
+                },
+                "x": global_x, "y": global_y,
+                "action": {"kind": "move"}
+            }),
+        )?;
         let inventory = scope_call(
             address,
             identity,
@@ -584,7 +622,7 @@ impl Movement {
         require_unchanged_scope_approval(&approved, &remote_snapshot(environment)?, lease, &scope)?;
         revoke_scope(environment, lease)?;
         println!(
-            "PASS: output lease launched the real catalog application, production placement confined its mapped window to that output, and focus/capture required no new approval"
+            "PASS: output lease launched the real catalog application, production placement and final global pointer hit stayed confined on the fractional transformed output, and focus/capture required no new approval"
         );
         Ok(())
     }

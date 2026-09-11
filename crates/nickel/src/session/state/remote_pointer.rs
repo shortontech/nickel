@@ -370,10 +370,24 @@ impl NickelSession {
             } else if continuing {
                 let mut held = self.remote_held_pointer.take().unwrap();
                 let delivered = permit.continue_input(&held.owner, &evidence, || {
-                    self.inject_controlled_pointer(&target, global_x, global_y, PointerAction::Move)
+                    self.inject_controlled_pointer(
+                        &target,
+                        global_x,
+                        global_y,
+                        PointerAction::Move,
+                    )?;
+                    if matches!(action, PointerAction::DragEnd) {
+                        // A release can commit a client drag, popup grab, or compositor
+                        // move/resize. Keep it inside the same resource and cancellation
+                        // boundary as the final resolved motion.
+                        self.release_controlled_pointer(held.button);
+                    }
+                    Ok(())
                 });
-                if delivered.is_err() || matches!(action, PointerAction::DragEnd) {
+                if delivered.is_err() {
                     self.release_controlled_pointer(held.button);
+                    drop(held);
+                } else if matches!(action, PointerAction::DragEnd) {
                     drop(held);
                 } else {
                     held.requested_x = x;

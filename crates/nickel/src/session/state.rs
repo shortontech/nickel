@@ -12025,6 +12025,15 @@ mod protocol_tests {
         use nickel_remote_control::pointer::PointerTarget;
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "fractional-rotated".into(),
+                logical_width: 800,
+                logical_height: 600,
+                scale_120: 180,
+                transform: OutputTransform::Rotate90,
+            })
+            .unwrap();
         session.refresh_remote_output_identities();
         let desktop = session
             .internal_shell
@@ -12103,6 +12112,100 @@ mod protocol_tests {
             session
                 .resolve_remote_pointer_target(&PointerTarget::Desktop, -1, -1)
                 .is_err()
+        );
+
+        let transformed = session
+            .space
+            .outputs()
+            .find(|output| output.name() == "fractional-rotated")
+            .unwrap()
+            .clone();
+        let transformed_geometry = session.space.output_geometry(&transformed).unwrap();
+        assert_eq!(transformed.current_scale().fractional_scale(), 1.5);
+        assert_eq!(
+            transformed.current_transform(),
+            smithay::utils::Transform::_90
+        );
+        assert_eq!(transformed_geometry.size, (800, 600).into());
+        let transformed_generation = session.remote_output_generations["fractional-rotated"].1;
+        let transformed_target = PointerTarget::Output {
+            output_id: "fractional-rotated".into(),
+            generation: transformed_generation,
+        };
+        let transformed_point = (
+            transformed_geometry.loc.x + transformed_geometry.size.w - 1,
+            transformed_geometry.loc.y + transformed_geometry.size.h - 1,
+        );
+        let transformed_resolved = session
+            .resolve_remote_pointer_target(
+                &transformed_target,
+                transformed_point.0,
+                transformed_point.1,
+            )
+            .unwrap();
+        assert_eq!(
+            (transformed_resolved.global_x, transformed_resolved.global_y),
+            transformed_point
+        );
+        assert!(
+            session
+                .resolve_remote_pointer_target(
+                    &transformed_target,
+                    transformed_geometry.loc.x - 1,
+                    transformed_geometry.loc.y,
+                )
+                .is_err(),
+            "the adjacent output must stay outside a fractional transformed target"
+        );
+
+        let scaled_surface = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| {
+                surface.role == crate::winit_shell::SurfaceRole::Desktop
+                    && surface.output.as_deref() == Some("fractional-rotated")
+            })
+            .map(|surface| session.internal_shell_surfaces[&surface.id])
+            .expect("fractional transformed output has a production desktop surface");
+        let scaled_placement = session
+            .internal_ui
+            .placement(scaled_surface)
+            .unwrap()
+            .clone();
+        let scaled_surface_target = PointerTarget::Surface {
+            surface_id: format!("internal:{}", scaled_surface.snapshot_token()),
+            generation: scaled_surface.snapshot_token(),
+        };
+        let scaled_local_edge = (
+            scaled_placement.geometry.2 as i32 - 1,
+            scaled_placement.geometry.3 as i32 / 2,
+        );
+        let scaled_edge = session
+            .resolve_remote_pointer_target(
+                &scaled_surface_target,
+                scaled_local_edge.0,
+                scaled_local_edge.1,
+            )
+            .unwrap();
+        assert_eq!(
+            (scaled_edge.global_x, scaled_edge.global_y),
+            (
+                scaled_placement.geometry.0 + scaled_local_edge.0,
+                scaled_placement.geometry.1 + scaled_local_edge.1,
+            )
+        );
+        assert!(
+            session
+                .resolve_remote_pointer_target(
+                    &scaled_surface_target,
+                    scaled_placement.geometry.2 as i32,
+                    scaled_local_edge.1,
+                )
+                .is_err(),
+            "surface-local coordinates cannot enter scale or decoration overflow"
         );
 
         session.internal_ui.insert(

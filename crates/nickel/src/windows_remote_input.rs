@@ -198,18 +198,21 @@ pub(crate) fn global_pointer_hit(screen_x: i32, screen_y: i32) -> Result<GlobalP
 }
 
 pub(crate) fn target_point(native: usize, x: i32, y: i32) -> Result<(i32, i32), String> {
-    if x < 0 || y < 0 {
-        return Err("Windows pointer coordinate is outside the client area".into());
-    }
     let hwnd = HWND(native as *mut std::ffi::c_void);
     let mut rect = RECT::default();
     // SAFETY: hwnd came from the freshly revalidated resource owner and rect is
     // writable for the duration of the call.
     unsafe { GetClientRect(hwnd, &mut rect) }
         .map_err(|_| "Windows client geometry is unavailable")?;
-    if x >= rect.right || y >= rect.bottom {
-        return Err("Windows pointer coordinate is outside the client area".into());
-    }
+    let width = rect
+        .right
+        .checked_sub(rect.left)
+        .ok_or("Windows client geometry is invalid")?;
+    let height = rect
+        .bottom
+        .checked_sub(rect.top)
+        .ok_or("Windows client geometry is invalid")?;
+    crate::windows_resource_owner::client_pointer_coordinate(x, y, width, height)?;
     let mut point = POINT { x, y };
     // SAFETY: same live hwnd and writable point as above.
     if !unsafe { ClientToScreen(hwnd, &mut point) }.as_bool() {

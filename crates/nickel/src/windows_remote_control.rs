@@ -6271,6 +6271,30 @@ impl WindowsRemoteControl {
             y,
             action,
         } = request;
+        if matches!(
+            action,
+            nickel_remote_control::pointer::PointerAction::DragCancel
+        ) {
+            let owned = self
+                .pointer_hold
+                .as_ref()
+                .is_some_and(|held| held.target == target && held.authority.owned_by(&permit));
+            if !owned {
+                return Err("request does not own this input gesture".into());
+            }
+            // Cancellation is cleanup, so stale coordinates, occlusion, or a moved
+            // resource must not strand the synthesized button. The exact gesture
+            // identity still prevents an old request from releasing a newer owner.
+            let held = self.pointer_hold.take().unwrap();
+            let result = permit
+                .check_live()
+                .and_then(|()| held.authority.check_live())
+                .and_then(|()| crate::windows_remote_input::release_button(held.button));
+            if result.is_err() {
+                crate::windows_remote_input::release_all();
+            }
+            return result;
+        }
         self.reconcile_prepared_resources(&permit, &mut prepared)?;
         let scope = permit.resource_scope()?;
         let (_, target_resource) =
@@ -6401,8 +6425,7 @@ impl WindowsRemoteControl {
                 held.deadline = Instant::now() + Duration::from_secs(30);
                 Ok(())
             }
-            nickel_remote_control::pointer::PointerAction::DragEnd
-            | nickel_remote_control::pointer::PointerAction::DragCancel => {
+            nickel_remote_control::pointer::PointerAction::DragEnd => {
                 let owned = self
                     .pointer_hold
                     .as_ref()
@@ -6411,28 +6434,22 @@ impl WindowsRemoteControl {
                     return Err("request does not own this input gesture".into());
                 }
                 let held = self.pointer_hold.take().unwrap();
-                let cancelled = matches!(
-                    action,
-                    nickel_remote_control::pointer::PointerAction::DragCancel
-                );
                 let input_epoch = local_input_epoch();
                 let result =
                     permit.continue_input(&held.authority, target_resource.evidence(), || {
-                        if !cancelled {
-                            if local_input_epoch() != input_epoch {
-                                return Err("local input cancelled the pointer gesture".into());
-                            }
-                            move_to_windows_pointer_target(
-                                &self.resources,
-                                &prepared,
-                                &scope,
-                                &target,
-                                x,
-                                y,
-                            )?;
+                        if local_input_epoch() != input_epoch {
+                            return Err("local input cancelled the pointer gesture".into());
                         }
+                        move_to_windows_pointer_target(
+                            &self.resources,
+                            &prepared,
+                            &scope,
+                            &target,
+                            x,
+                            y,
+                        )?;
                         let released = crate::windows_remote_input::release_button(held.button);
-                        if !cancelled && local_input_epoch() != input_epoch {
+                        if local_input_epoch() != input_epoch {
                             crate::windows_remote_input::release_all();
                             return Err("local input interrupted the pointer gesture".into());
                         }
@@ -6442,6 +6459,9 @@ impl WindowsRemoteControl {
                     crate::windows_remote_input::release_all();
                 }
                 result
+            }
+            nickel_remote_control::pointer::PointerAction::DragCancel => {
+                unreachable!("drag cancellation returns before target resolution")
             }
         }
     }

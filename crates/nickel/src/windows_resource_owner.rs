@@ -101,6 +101,21 @@ pub(crate) fn absolute_pointer_axis(value: i32, origin: i32, length: i32) -> Res
     Ok((((i64::from(value) - i64::from(origin)) * 65_535) / i64::from(length - 1)) as i32)
 }
 
+/// Validate a client-local point before native client-to-screen conversion.
+/// The caller supplies `GetClientRect` dimensions, which deliberately exclude
+/// title bars, borders, shadows, and other non-client decoration.
+pub(crate) fn client_pointer_coordinate(
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Result<(), String> {
+    if width <= 0 || height <= 0 || x < 0 || y < 0 || x >= width || y >= height {
+        return Err("Windows pointer coordinate is outside the client area".into());
+    }
+    Ok(())
+}
+
 pub(crate) enum PointerTargetResource<'a> {
     Window {
         native: usize,
@@ -1847,6 +1862,16 @@ mod tests {
         assert!(absolute_pointer_axis(-1921, -1920, 3840).is_err());
         assert!(absolute_pointer_axis(1920, -1920, 3840).is_err());
         assert!(absolute_pointer_axis(0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn window_pointer_coordinates_exclude_non_client_decorations_and_edges() {
+        assert!(client_pointer_coordinate(0, 0, 800, 600).is_ok());
+        assert!(client_pointer_coordinate(799, 599, 800, 600).is_ok());
+        for point in [(-1, 0), (0, -1), (800, 0), (0, 600)] {
+            assert!(client_pointer_coordinate(point.0, point.1, 800, 600).is_err());
+        }
+        assert!(client_pointer_coordinate(0, 0, 0, 600).is_err());
     }
 
     #[test]
