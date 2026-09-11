@@ -35,9 +35,8 @@ cargo build -p nickel --features backend-winit --bin nickel --bin nickel-linux-r
 target/debug/nickel-linux-remote-control-acceptance
 ```
 
-Evidence for this run: `/tmp/nickel-native-scope-matrix-build.log` and
-`/tmp/nickel-native-scope-matrix-wayland.log`. A missing host backend produces
-`SKIP`, which must not be counted as native acceptance.
+The commands above are the reproducible evidence path. A missing host backend
+produces `SKIP`, which must not be counted as native acceptance.
 
 Ordinary window and application scopes remain uncovered: this fixture owns shell
 resources and does not invent application identities. The new matrix does not
