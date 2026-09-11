@@ -4,6 +4,7 @@
 //! owner performs only a revision check and atomic replacement at a fresh,
 //! continuously-authorized commit boundary.
 
+use crate::wallpaper_selection::{CandidateRevision, Catalog, ValidatedSelection};
 use nickel_core::shell_settings::ShellSettings;
 use nickel_core::{
     on_screen_keyboard::KeyboardPreference as CoreKeyboardPreference,
@@ -859,16 +860,30 @@ pub(crate) struct PreparedWallpaperRead {
     path: PathBuf,
     revision: Option<RegularFileRevision>,
     settings: nickel_core::wallpaper_settings::WallpaperSettings,
+    catalog: Catalog,
 }
 
 impl PreparedWallpaperRead {
     pub(crate) fn prepare() -> Result<Self, String> {
-        Self::at(
-            nickel_core::wallpaper_settings::settings_path().map_err(|_| WALLPAPER_UNAVAILABLE)?,
-        )
+        Self::prepare_with_check(|| Ok(()))
+    }
+
+    pub(crate) fn prepare_with_check(
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        check()?;
+        let path =
+            nickel_core::wallpaper_settings::settings_path().map_err(|_| WALLPAPER_UNAVAILABLE)?;
+        let catalog = Catalog::discover(&mut check)?;
+        check()?;
+        Self::at_with_catalog(path, catalog)
     }
 
     fn at(path: PathBuf) -> Result<Self, String> {
+        Self::at_with_catalog(path, Catalog::discover(|| Ok(()))?)
+    }
+
+    fn at_with_catalog(path: PathBuf, catalog: Catalog) -> Result<Self, String> {
         let revision = regular_file_revision(&path).map_err(|_| WALLPAPER_UNAVAILABLE)?;
         let settings = match nickel_core::wallpaper_settings::WallpaperSettings::load(&path) {
             Ok(settings) => settings,
@@ -884,6 +899,7 @@ impl PreparedWallpaperRead {
             path,
             revision,
             settings,
+            catalog,
         })
     }
 
@@ -907,29 +923,52 @@ pub(crate) struct PreparedWallpaperChange {
     prior: PreparedWallpaperRead,
     requested: nickel_core::wallpaper_settings::WallpaperSettings,
     staged: nickel_core::wallpaper_settings::PreparedWallpaperSettings,
+    selected: Option<ValidatedSelection>,
 }
 
 impl PreparedWallpaperChange {
     pub(crate) fn prepare(
         transaction: &nickel_remote_control::wallpaper::Transaction,
     ) -> Result<Self, String> {
-        Self::from_read(PreparedWallpaperRead::prepare()?, transaction)
+        Self::prepare_with_check(transaction, || Ok(()))
+    }
+
+    pub(crate) fn prepare_with_check(
+        transaction: &nickel_remote_control::wallpaper::Transaction,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        let prior = PreparedWallpaperRead::prepare_with_check(&mut check)?;
+        Self::from_read_with_check(prior, transaction, &mut check)
     }
 
     fn from_read(
         prior: PreparedWallpaperRead,
         transaction: &nickel_remote_control::wallpaper::Transaction,
     ) -> Result<Self, String> {
+        Self::from_read_with_check(prior, transaction, &mut || Ok(()))
+    }
+
+    fn from_read_with_check(
+        prior: PreparedWallpaperRead,
+        transaction: &nickel_remote_control::wallpaper::Transaction,
+        check: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
         use nickel_remote_control::wallpaper::Change;
         if transaction.generation == 0 || prior.configured() != transaction.prior {
             return Err(WALLPAPER_STALE.into());
         }
         let mut requested = prior.settings.clone();
-        match transaction.change {
+        let mut selected = None;
+        match &transaction.change {
             Change::SetPosition { position } => {
-                requested.position = core_wallpaper_position(position)
+                requested.position = core_wallpaper_position(*position)
             }
             Change::ResetCustomImage {} => requested.image = None,
+            Change::SelectApprovedImage { image_id } => {
+                let validated = prior.catalog.validate_selection(image_id, check)?;
+                requested.image = Some(validated.path.clone());
+                selected = Some(validated);
+            }
         }
         let staged = nickel_core::wallpaper_settings::PreparedWallpaperSettings::prepare(
             prior.path.clone(),
@@ -948,6 +987,7 @@ impl PreparedWallpaperChange {
             prior,
             requested,
             staged,
+            selected,
         })
     }
 
@@ -963,6 +1003,9 @@ impl PreparedWallpaperChange {
                         io::ErrorKind::TimedOut,
                         "wallpaper commit expired",
                     ));
+                }
+                if let Some(selected) = &self.selected {
+                    selected.ensure_current().map_err(io::Error::other)?;
                 }
                 check_boundary().map_err(io::Error::other)
             })
@@ -984,6 +1027,7 @@ pub(crate) struct WallpaperState {
     observed: Option<(
         Option<RegularFileRevision>,
         nickel_remote_control::wallpaper::Preferences,
+        Vec<CandidateRevision>,
     )>,
 }
 
@@ -995,7 +1039,11 @@ impl WallpaperState {
         runtime_reload_requested: bool,
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
         let configured = prepared.configured();
-        let value = (prepared.revision.clone(), configured.clone());
+        let value = (
+            prepared.revision.clone(),
+            configured.clone(),
+            prepared.catalog.revisions(),
+        );
         if self.observed.as_ref() != Some(&value) {
             self.generation = self
                 .generation
@@ -1007,6 +1055,8 @@ impl WallpaperState {
             generation: self.generation,
             observed_at_us,
             configured,
+            images: prepared.catalog.choices(prepared.settings.image.as_deref()),
+            selected_image_decoded: false,
             runtime_reload_requested,
         })
     }
@@ -1018,9 +1068,14 @@ impl WallpaperState {
     ) -> Result<(), String> {
         if self.generation == u64::MAX
             || self.generation != transaction.generation
-            || self.observed.as_ref().is_none_or(|(revision, configured)| {
-                revision != &prepared.prior.revision || configured != &transaction.prior
-            })
+            || self
+                .observed
+                .as_ref()
+                .is_none_or(|(revision, configured, catalog_revisions)| {
+                    revision != &prepared.prior.revision
+                        || configured != &transaction.prior
+                        || catalog_revisions != &prepared.prior.catalog.revisions()
+                })
         {
             return Err(WALLPAPER_STALE.into());
         }

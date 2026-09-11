@@ -120,6 +120,7 @@ mod platform;
 mod screenshot;
 mod session_host;
 mod softbuffer_presenter;
+mod wallpaper_selection;
 mod window_preview;
 #[cfg(target_os = "windows")]
 mod windows_launch_broker;

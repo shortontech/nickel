@@ -796,7 +796,7 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
         let _staging = self.settings_staging.acquire()?;
         permit.with_debug(false, || Ok(()))?;
-        let prepared = remote_wallpaper::PreparedRead::prepare()?;
+        let prepared = remote_wallpaper::PreparedRead::prepare_with_check(|| permit.check_live())?;
         permit.with_debug(false, || Ok(()))?;
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender
@@ -817,7 +817,9 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
         let _staging = self.settings_staging.acquire()?;
         permit.with_debug(false, || Ok(()))?;
-        let prepared = remote_wallpaper::PreparedChange::prepare(&transaction)?;
+        let prepared = remote_wallpaper::PreparedChange::prepare_with_check(&transaction, || {
+            permit.check_live()
+        })?;
         permit.with_debug(false, || Ok(()))?;
         let (reply, response) = std::sync::mpsc::sync_channel(1);
         self.sender

@@ -1778,7 +1778,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Read typed Nickel wallpaper layout state. Requires Full Control & Debug Nickel. Reports only whether a custom image is configured; image paths and contents are excluded. The result is configuration state, not presented pixels."
+        description = "Read typed Nickel wallpaper layout state and the bounded opaque approved-image catalog. Requires Full Control & Debug Nickel. Image paths and contents are excluded. The result is configuration state, not presented pixels."
     )]
     async fn read_wallpaper(
         &self,
@@ -1802,7 +1802,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Change the typed wallpaper position or reset the custom image through the checked production writer. Requires Full Control & Debug Nickel, a fresh generation/prior snapshot, and idle shared input. Paths and image contents are never accepted. A committed result requests a live shell reload but does not confirm presented pixels."
+        description = "Change the typed wallpaper position, reset the custom image, or select an opaque ID from the current bounded approved-image catalog through the checked production writer. Requires Full Control & Debug Nickel, a fresh generation/prior snapshot, idle shared input, and a bounded successful decode. Paths and image contents are never accepted. A committed result requests a live shell reload but does not confirm presented pixels."
     )]
     async fn wallpaper_transaction(
         &self,

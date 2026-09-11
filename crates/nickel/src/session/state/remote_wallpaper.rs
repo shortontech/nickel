@@ -1,5 +1,6 @@
 //! Wallpaper settings are prepared off-thread and committed by the desktop owner.
 use super::NickelSession;
+use crate::wallpaper_selection::{CandidateRevision, Catalog, ValidatedSelection};
 use nickel_core::wallpaper_settings::{
     PreparedWallpaperSettings, WallpaperPosition, WallpaperSettings, settings_path,
 };
@@ -46,14 +47,25 @@ pub(super) struct PreparedRead {
     path: PathBuf,
     revision: Option<RegularFileRevision>,
     settings: WallpaperSettings,
+    catalog: Catalog,
 }
 
 impl PreparedRead {
-    pub(super) fn prepare() -> Result<Self, String> {
-        Self::at(settings_path().map_err(|_| UNAVAILABLE)?)
+    pub(super) fn prepare_with_check(
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
+        check()?;
+        let path = settings_path().map_err(|_| UNAVAILABLE)?;
+        let catalog = Catalog::discover(&mut check)?;
+        check()?;
+        Self::at_with_catalog(path, catalog)
     }
 
     fn at(path: PathBuf) -> Result<Self, String> {
+        Self::at_with_catalog(path, Catalog::discover(|| Ok(()))?)
+    }
+
+    fn at_with_catalog(path: PathBuf, catalog: Catalog) -> Result<Self, String> {
         let revision = regular_file_revision(&path).map_err(|_| UNAVAILABLE)?;
         let settings = match WallpaperSettings::load(&path) {
             Ok(settings) => settings,
@@ -69,6 +81,7 @@ impl PreparedRead {
             path,
             revision,
             settings,
+            catalog,
         })
     }
 
@@ -83,57 +96,95 @@ impl PreparedRead {
 pub(super) struct PreparedChange {
     prior: PreparedRead,
     staged: PreparedWallpaperSettings,
+    selected: Option<ValidatedSelection>,
 }
 
 impl PreparedChange {
-    pub(super) fn prepare(transaction: &Transaction) -> Result<Self, String> {
+    pub(super) fn prepare_with_check(
+        transaction: &Transaction,
+        mut check: impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
         if transaction.generation == 0 {
             return Err(STALE.into());
         }
-        let prior = PreparedRead::prepare()?;
-        Self::from_read(prior, transaction)
+        let prior = PreparedRead::prepare_with_check(&mut check)?;
+        Self::from_read_with_check(prior, transaction, &mut check)
     }
 
-    fn from_read(prior: PreparedRead, transaction: &Transaction) -> Result<Self, String> {
+    fn from_read_with_check(
+        prior: PreparedRead,
+        transaction: &Transaction,
+        check: &mut impl FnMut() -> Result<(), String>,
+    ) -> Result<Self, String> {
         if preferences(&prior.settings) != transaction.prior {
             return Err(STALE.into());
         }
         let mut requested = prior.settings.clone();
-        match transaction.change {
-            Change::SetPosition { position } => requested.position = core_position(position),
+        let mut selected = None;
+        match &transaction.change {
+            Change::SetPosition { position } => requested.position = core_position(*position),
             Change::ResetCustomImage {} => requested.image = None,
+            Change::SelectApprovedImage { image_id } => {
+                let validated = prior.catalog.validate_selection(image_id, check)?;
+                requested.image = Some(validated.path.clone());
+                selected = Some(validated);
+            }
         }
         let staged =
             PreparedWallpaperSettings::prepare(prior.path.clone(), &prior.settings, requested)
                 .map_err(|_| STALE)?;
-        Ok(Self { prior, staged })
+        Ok(Self {
+            prior,
+            staged,
+            selected,
+        })
+    }
+
+    fn commit(self, check: impl FnOnce() -> io::Result<()>) -> io::Result<WallpaperSettings> {
+        let selected = self.selected;
+        self.staged.commit(|| {
+            if let Some(selected) = &selected {
+                selected.ensure_current().map_err(io::Error::other)?;
+            }
+            check()
+        })
     }
 }
 
 #[derive(Default)]
 pub(super) struct WallpaperState {
     generation: u64,
-    observed: Option<(Option<RegularFileRevision>, Preferences)>,
+    observed: Option<(
+        Option<RegularFileRevision>,
+        Preferences,
+        Vec<CandidateRevision>,
+    )>,
 }
 
 impl WallpaperState {
     fn observe(&mut self, read: &PreparedRead, observed_at_us: u64) -> Result<Snapshot, String> {
         let configured = preferences(&read.settings);
-        if self
-            .observed
-            .as_ref()
-            .is_none_or(|value| value != &(read.revision.clone(), configured.clone()))
-        {
+        let catalog_revisions = read.catalog.revisions();
+        if self.observed.as_ref().is_none_or(|value| {
+            value
+                != &(
+                    read.revision.clone(),
+                    configured.clone(),
+                    catalog_revisions.clone(),
+                )
+        }) {
             self.generation = self
                 .generation
                 .checked_add(1)
                 .ok_or("wallpaper generation exhausted")?;
-            self.observed = Some((read.revision.clone(), configured.clone()));
+            self.observed = Some((read.revision.clone(), configured.clone(), catalog_revisions));
         }
         Ok(Snapshot {
             generation: self.generation,
             observed_at_us,
             configured,
+            images: read.catalog.choices(read.settings.image.as_deref()),
+            selected_image_decoded: false,
             runtime_reload_requested: false,
         })
     }
@@ -141,9 +192,14 @@ impl WallpaperState {
     fn validate(&self, prepared: &PreparedChange, transaction: &Transaction) -> Result<(), String> {
         if self.generation == u64::MAX
             || self.generation != transaction.generation
-            || self.observed.as_ref().is_none_or(|(revision, configured)| {
-                revision != &prepared.prior.revision || configured != &transaction.prior
-            })
+            || self
+                .observed
+                .as_ref()
+                .is_none_or(|(revision, configured, catalog_revisions)| {
+                    revision != &prepared.prior.revision
+                        || configured != &transaction.prior
+                        || catalog_revisions != &prepared.prior.catalog.revisions()
+                })
         {
             return Err(STALE.into());
         }
@@ -208,7 +264,6 @@ impl NickelSession {
             self.remote_wallpaper.validate(&prepared, &transaction)?;
             committed = Some(
                 prepared
-                    .staged
                     .commit(|| {
                         permit
                             .check_commit_boundary(boundary)
@@ -239,6 +294,8 @@ impl NickelSession {
             .as_micros()
             .min(u128::from(u64::MAX)) as u64;
         let mut snapshot = self.remote_wallpaper.observe(&read, observed_at_us)?;
+        snapshot.selected_image_decoded =
+            matches!(transaction.change, Change::SelectApprovedImage { .. });
         snapshot.runtime_reload_requested = true;
         Ok(snapshot)
     }
@@ -271,7 +328,7 @@ mod tests {
         let prepared = PreparedChange::from_read(read, &transaction).unwrap();
         state.validate(&prepared, &transaction).unwrap();
         std::fs::write(&path, "image=/private/wallpaper.png\nposition=tile\n").unwrap();
-        assert!(prepared.staged.commit(|| Ok(())).is_err());
+        assert!(prepared.commit(|| Ok(())).is_err());
         assert_eq!(
             WallpaperSettings::load(&path).unwrap().position,
             WallpaperPosition::Tile

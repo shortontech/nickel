@@ -110,6 +110,29 @@
     }
 
     #[test]
+    fn failed_wallpaper_decode_preserves_the_last_presentable_image() {
+        let directory = tempfile::tempdir().expect("wallpaper fixture directory");
+        let valid_path = directory.path().join("valid.png");
+        let invalid_path = directory.path().join("invalid.png");
+        RgbaImage::from_pixel(8, 8, Rgba([44, 55, 66, 255]))
+            .save(&valid_path)
+            .unwrap();
+        std::fs::write(&invalid_path, b"not an image").unwrap();
+
+        let mut shell = LiveShell::new().expect("live shell");
+        assert!(shell.refresh_configured_wallpaper(Some(valid_path)));
+        shell.scene(SurfaceRole::Desktop, 320, 200);
+        let prior = shell.wallpaper.clone().expect("decoded wallpaper");
+
+        assert!(shell.refresh_configured_wallpaper(Some(invalid_path)));
+        shell.scene(SurfaceRole::Desktop, 320, 200);
+        assert!(Arc::ptr_eq(
+            shell.wallpaper.as_ref().expect("prior wallpaper retained"),
+            &prior
+        ));
+    }
+
+    #[test]
     fn desktop_refresh_retains_only_icons_with_unchanged_meaningful_metadata() {
         let stable = std::path::PathBuf::from("/desktop/stable.desktop");
         let changed = std::path::PathBuf::from("/desktop/changed.desktop");

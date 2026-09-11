@@ -494,6 +494,7 @@ pub struct LiveShell {
     notification_history_visible: bool,
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper_source_fingerprint: Option<WallpaperSourceFingerprint>,
+    wallpaper_loaded_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper: Option<Arc<image::RgbaImage>>,
     wallpaper_size: (u32, u32),
     desktop_host: nickel_ui::UiHost<DesktopApplication>,
@@ -831,6 +832,8 @@ impl LiveShell {
         let wallpaper_source_fingerprint = wallpaper_path
             .as_deref()
             .and_then(wallpaper_source_fingerprint);
+        let wallpaper_loaded_source_fingerprint =
+            wallpaper.as_ref().and(wallpaper_source_fingerprint.clone());
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         let panel_icon = crate::icons::load_svg_bytes(
@@ -980,6 +983,7 @@ impl LiveShell {
             notification_history_visible: false,
             wallpaper_path,
             wallpaper_source_fingerprint,
+            wallpaper_loaded_source_fingerprint,
             wallpaper,
             wallpaper_size,
             desktop_host,
@@ -1612,8 +1616,11 @@ impl LiveShell {
 
         self.wallpaper_path = configured_path;
         self.wallpaper_source_fingerprint = next_fingerprint;
-        self.wallpaper_size = (0, 0);
-        self.wallpaper = None;
+        self.wallpaper_loaded_source_fingerprint = None;
+        if self.wallpaper_path.is_none() {
+            self.wallpaper_size = (0, 0);
+            self.wallpaper = None;
+        }
         self.desktop_application_dirty = true;
         true
     }
@@ -5110,17 +5117,28 @@ impl LiveShell {
 
     fn load_wallpaper_for(&mut self, width: u32, height: u32) {
         let requested = (width.max(1), height.max(1));
-        let Some(target) = wallpaper_cache_target(self.wallpaper_size, requested) else {
-            return;
+        let source_changed =
+            self.wallpaper_loaded_source_fingerprint != self.wallpaper_source_fingerprint;
+        let target = if source_changed {
+            requested
+        } else {
+            let Some(target) = wallpaper_cache_target(self.wallpaper_size, requested) else {
+                return;
+            };
+            target
         };
         let Some(path) = self.wallpaper_path.as_deref() else {
             return;
         };
         let Ok(image) = image::open(path) else {
+            // A failed replacement must not blank the last successfully decoded
+            // desktop. Retry only when the source fingerprint changes again.
+            self.wallpaper_loaded_source_fingerprint = self.wallpaper_source_fingerprint.clone();
             return;
         };
         self.wallpaper = Some(Arc::new(image.thumbnail(target.0, target.1).into_rgba8()));
         self.wallpaper_size = target;
+        self.wallpaper_loaded_source_fingerprint = self.wallpaper_source_fingerprint.clone();
     }
 
     fn sync_notification_host(&mut self, width: u32, height: u32) {

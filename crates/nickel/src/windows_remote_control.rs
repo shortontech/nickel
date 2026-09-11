@@ -1443,7 +1443,10 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
         permit.with_debug(false, || Ok(()))?;
-        let prepared = crate::windows_remote_settings::PreparedWallpaperRead::prepare()?;
+        let prepared =
+            crate::windows_remote_settings::PreparedWallpaperRead::prepare_with_check(|| {
+                permit.check_live()
+            })?;
         permit.with_debug(false, || Ok(()))?;
         let completion = permit.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
@@ -1468,8 +1471,10 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
-        let prepared =
-            crate::windows_remote_settings::PreparedWallpaperChange::prepare(&transaction)?;
+        let prepared = crate::windows_remote_settings::PreparedWallpaperChange::prepare_with_check(
+            &transaction,
+            || permit.check_live(),
+        )?;
         permit.with_debug(false, || Ok(()))?;
         if Instant::now() >= deadline {
             return Err("Windows wallpaper preparation timed out".into());
@@ -4167,14 +4172,19 @@ impl WindowsRemoteControl {
             state.apply_wallpaper_settings(read.settings().clone());
             return Err("wallpaper changed; read current wallpaper before retrying".into());
         }
-        self.wallpaper.observe(
+        let mut snapshot = self.wallpaper.observe(
             &read,
             self.start_time
                 .elapsed()
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
             true,
-        )
+        )?;
+        snapshot.selected_image_decoded = matches!(
+            transaction.change,
+            nickel_remote_control::wallpaper::Change::SelectApprovedImage { .. }
+        );
+        Ok(snapshot)
     }
 
     fn read_terminal_presentation(
