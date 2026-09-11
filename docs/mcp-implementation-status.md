@@ -11,7 +11,7 @@ native checks alone do not establish completion.
 | Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. Lease approval and resumption remain denied. | Complete trusted indication, synchronous cancellation, secure-desktop observation, native operations and local accessibility; validate on Windows and across machines. |
 | Logical client disconnect/resumption | Lease requests, local approvals, reconnects and desktop permits now require an unexpired owner-ready watch. Last-watch loss invalidates authority and triggers native cleanup; overlapping watches preserve connection continuity. | The stdio client adapter and saturation/cancellation fixes are integrated; complete broader native lifecycle acceptance. See `mcp-connection-watch.md`. |
 | Launch under an output lease | Verified Wayland/X11 launch ancestry now drives output placement before scene insertion, under the original lease and output incarnation. Nested native success/cancellation/replacement tests passed. | Complete broker/daemon attribution and broader physical, overload, deadline and cancellation acceptance. |
-| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary notifications, previews, menus, screenshot UI and on-screen keyboard transients use their production host's visibility and protected-tree evidence. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation and node ordinal. | Complete unsupported Codex transient/content projection, shell semantic actions and external accessibility, internal decoration hit testing, effects, GPU timing, shared renderer resources/caches, remaining event and trace categories, and platform queries. |
+| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary notifications, previews, menus, screenshot UI and on-screen keyboard transients use their production host's visibility and protected-tree evidence. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation/node ordinal or a fixed Nickel frame role. | Complete unsupported Codex transient/content projection, shell semantic actions and external accessibility, effects, GPU timing, shared renderer resources/caches, remaining event and trace categories, and platform queries. |
 | Physical DRM trace acceptance | Production DRM render dispatch is instrumented. The active seat is shared with the user's compositor. | Test on an isolated seat or machine; primary-GPU selection does not isolate the current udev backend's device enumeration. |
 | Full native acceptance | Recent native work uses a separate Xvfb-backed compositor with its own Xwayland and Wayland clients. | Complete the specifications' physical emergency-stop, assistive workflow, mixed-DPI/multi-output, Windows, and cross-machine gates. |
 
@@ -1445,3 +1445,10 @@ physical test input to an advertised local semantic bound, and reported the
 current menu surface plus a semantic generation and node. The fixture's broader
 scope, protected-process, provider-timeout, revocation and lock checks also
 passed; all owned native processes were stopped afterward.
+
+The same pointer record now reports Nickel-owned hosted-window decorations as
+one of a fixed titlebar, window-button, or resize-edge role. It reuses the
+production frame hit test and exposes no pointer coordinates, window title, or
+client payload. Focused owner coverage places the pointer on both a live button
+node and a hosted titlebar. With semantic and frame hits represented, the broad
+`internal_hit_testing` unavailable marker has been removed.

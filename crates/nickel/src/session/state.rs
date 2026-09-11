@@ -3572,7 +3572,6 @@ impl NickelSession {
                             truncated,
                             unavailable_domains: [
                                 "shell_transients_without_host_owned_protection_and_codex_content",
-                                "internal_decoration_hit_testing",
                                 "external_accessibility_not_embedded_in_snapshot",
                                 "effects",
                                 "native_gpu_renderer_timing",
@@ -12306,9 +12305,17 @@ mod protocol_tests {
                 .semantic_node
                 .is_some()
         );
+        session
+            .inject_test_input(nickel_session_protocol::TestInput::PointerMove { x: 0, y: 70 })
+            .unwrap();
+        let frame_hit = session.remote_input_diagnostic(&windows, &records, 8, 12);
+        assert_eq!(
+            frame_hit.pointer_hit_test.unwrap().decoration,
+            Some(nickel_remote_control::diagnostics::InternalDecorationHit::Titlebar)
+        );
         assert!(
             session
-                .remote_input_diagnostic(&windows, &[], 8, 12)
+                .remote_input_diagnostic(&windows, &[], 9, 13)
                 .pointer_hit_test
                 .is_none(),
             "unprojected internal applications must remain unavailable"

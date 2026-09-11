@@ -1268,10 +1268,19 @@ impl NickelSession {
         };
         let pointer_hit_test = self.seat.get_pointer().and_then(|pointer| {
             let point = pointer.current_location();
-            if let Some((surface, _)) = self.internal_ui.surface_at(
-                (point.x, point.y),
-                self.client_scene_under(point) && !self.internal_applications_are_foremost(),
-            ) {
+            let frame_hit = self.internal_ui.internal_frame_target((point.x, point.y));
+            let internal_hit = frame_hit
+                .map(|(surface, part)| (surface, Some(part)))
+                .or_else(|| {
+                    self.internal_ui
+                        .surface_at(
+                            (point.x, point.y),
+                            self.client_scene_under(point)
+                                && !self.internal_applications_are_foremost(),
+                        )
+                        .map(|(surface, _)| (surface, None))
+                });
+            if let Some((surface, frame_part)) = internal_hit {
                 if self.internal_ui.remote_access_protected(surface) {
                     return None;
                 }
@@ -1316,6 +1325,7 @@ impl NickelSession {
                             surface: Some(identity),
                             semantic_tree_generation: semantic_hit.map(|hit| hit.0),
                             semantic_node: semantic_hit.map(|hit| hit.1),
+                            decoration: None,
                         },
                     );
                 }
@@ -1328,6 +1338,7 @@ impl NickelSession {
                         surface: None,
                         semantic_tree_generation: semantic_hit.map(|hit| hit.0),
                         semantic_node: semantic_hit.map(|hit| hit.1),
+                        decoration: frame_part.map(internal_decoration_hit),
                     },
                 );
             }
@@ -1341,6 +1352,7 @@ impl NickelSession {
                     surface: None,
                     semantic_tree_generation: None,
                     semantic_node: None,
+                    decoration: None,
                 },
             )
         });
@@ -1435,6 +1447,27 @@ impl NickelSession {
             pointer,
             pointer_hit_test,
         }
+    }
+}
+
+fn internal_decoration_hit(
+    part: crate::session::window_frame::FramePart,
+) -> nickel_remote_control::diagnostics::InternalDecorationHit {
+    use crate::session::window_frame::FramePart;
+    use nickel_remote_control::diagnostics::InternalDecorationHit;
+    match part {
+        FramePart::Titlebar => InternalDecorationHit::Titlebar,
+        FramePart::Minimize => InternalDecorationHit::Minimize,
+        FramePart::Maximize => InternalDecorationHit::Maximize,
+        FramePart::Close => InternalDecorationHit::Close,
+        FramePart::ResizeNorth => InternalDecorationHit::ResizeNorth,
+        FramePart::ResizeNorthEast => InternalDecorationHit::ResizeNorthEast,
+        FramePart::ResizeEast => InternalDecorationHit::ResizeEast,
+        FramePart::ResizeSouthEast => InternalDecorationHit::ResizeSouthEast,
+        FramePart::ResizeSouth => InternalDecorationHit::ResizeSouth,
+        FramePart::ResizeSouthWest => InternalDecorationHit::ResizeSouthWest,
+        FramePart::ResizeWest => InternalDecorationHit::ResizeWest,
+        FramePart::ResizeNorthWest => InternalDecorationHit::ResizeNorthWest,
     }
 }
 

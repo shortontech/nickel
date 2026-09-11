@@ -204,6 +204,26 @@ pub struct PointerHitTestDiagnostic {
     /// no actionable/semantic node at this point.
     pub semantic_tree_generation: Option<u64>,
     pub semantic_node: Option<u64>,
+    /// Nickel-owned hosted-window frame hit. Fixed roles expose no title,
+    /// geometry, cursor position, or client content.
+    pub decoration: Option<InternalDecorationHit>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalDecorationHit {
+    Titlebar,
+    Minimize,
+    Maximize,
+    Close,
+    ResizeNorth,
+    ResizeNorthEast,
+    ResizeEast,
+    ResizeSouthEast,
+    ResizeSouth,
+    ResizeSouthWest,
+    ResizeWest,
+    ResizeNorthWest,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
