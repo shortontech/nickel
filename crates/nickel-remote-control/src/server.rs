@@ -96,6 +96,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::diagnostics::OutputInventory, String> {
         Err("output enumeration is unavailable on this backend".into())
     }
+    fn read_display_layout(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::display_layout::Snapshot, String> {
+        Err("display layout observation is unavailable on this backend".into())
+    }
+    fn display_layout_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::display_layout::Transaction,
+    ) -> Result<crate::display_layout::Snapshot, String> {
+        Err("display layout transactions are unavailable on this backend".into())
+    }
     fn workspace_action(
         &self,
         _permit: crate::DesktopPermit,
@@ -948,6 +961,13 @@ struct WorkspaceActionRequest {
 struct ShellBehaviorRequest {
     lease_id: u64,
     transaction: nickel_session_protocol::ShellBehaviorTransaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DisplayLayoutRequest {
+    lease_id: u64,
+    transaction: crate::display_layout::Transaction,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2048,6 +2068,49 @@ impl McpHandler {
                 .await
                 .map(Json)
             })
+            .await
+    }
+
+    #[tool(
+        description = "Read the complete bounded production display layout with exact output IDs/generations, topology CAS generation, current requested state and last confirmed safe state. Requires a full-session Full Control & Debug Nickel lease. transaction_supported and its reason truthfully report platform mutation support."
+    )]
+    async fn read_display_layout(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::display_layout::Snapshot>, String> {
+        self.metrics
+            .measure(crate::operation_metrics::Method::ReadDisplayLayout, async {
+                let permit = self.permit(&context, request.lease_id)?;
+                desktop_call(self.desktop.clone(), move |desktop| {
+                    desktop.read_display_layout(permit)
+                })
+                .await
+                .map(Json)
+            })
+            .await
+    }
+
+    #[tool(
+        description = "Apply, Keep or Revert a complete display layout through the production owner. Requires a full-session Full Control & Debug Nickel lease, exact output incarnations, the current topology generation and idle shared input. Apply starts an owner-held 15-second recovery window; only the same live lease may Keep or Revert it, and timeout reverts independently of the client. Returned requested and confirmed layouts describe owner state, not presented pixels."
+    )]
+    async fn display_layout_transaction(
+        &self,
+        Parameters(request): Parameters<DisplayLayoutRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::display_layout::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::DisplayLayoutTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    desktop_call(self.desktop.clone(), move |desktop| {
+                        desktop.display_layout_transaction(permit, request.transaction)
+                    })
+                    .await
+                    .map(Json)
+                },
+            )
             .await
     }
 
@@ -3657,7 +3720,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            44,
+            46,
             "a newly published tool must be explicitly classified"
         );
 

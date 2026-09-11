@@ -24,6 +24,7 @@ pub use emergency::EmergencyStopHandle;
 pub mod default_associations;
 pub mod desktop_events;
 pub mod diagnostics;
+pub mod display_layout;
 mod event_subscriptions;
 pub mod file_icons;
 pub mod frame_trace;

@@ -58,6 +58,19 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::diagnostics::OutputInventory, String>,
         >,
     },
+    ReadDisplayLayout {
+        permit: nickel_remote_control::DesktopPermit,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::display_layout::Snapshot, String>,
+        >,
+    },
+    DisplayLayoutTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::display_layout::Transaction,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::display_layout::Snapshot, String>,
+        >,
+    },
     WorkspaceAction {
         permit: nickel_remote_control::DesktopPermit,
         action: nickel_remote_control::diagnostics::WorkspaceAction,
@@ -526,6 +539,35 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         response
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "desktop output observation timed out".to_owned())?
+    }
+    fn read_display_layout(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadDisplayLayout { permit, reply })
+            .map_err(|_| "display layout queue is busy or stopped".to_owned())?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "display layout observation timed out".to_owned())?
+    }
+    fn display_layout_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::display_layout::Transaction,
+    ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::DisplayLayoutTransaction {
+                permit,
+                transaction,
+                reply,
+            })
+            .map_err(|_| "display layout queue is busy or stopped".to_owned())?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "display layout result uncertain; read current layout before retrying".to_owned()
+        })?
     }
     fn workspace_action(
         &self,
@@ -1839,6 +1881,14 @@ struct RemoteOutputEventState {
     enabled: bool,
 }
 
+struct RemoteDisplayRecovery {
+    owner: nickel_remote_control::DesktopPermit,
+    generation: u64,
+    confirmed: nickel_remote_control::display_layout::Layout,
+    deadline: Option<Instant>,
+    revert_failed: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RemoteFocusEventState {
     Window(u64),
@@ -2193,6 +2243,8 @@ pub struct NickelSession {
     pub primary_output_name: Option<String>,
     output_topology_generation: u64,
     last_protocol_outputs: Vec<OutputSnapshot>,
+    remote_display_recovery_generation: u64,
+    remote_display_recovery: Option<RemoteDisplayRecovery>,
     output_scale_preferences: nickel_core::dpi::PersistedOutputScales,
     virtual_test_outputs: HashMap<String, (Output, Option<GlobalId>)>,
     pending_output_global_retirements: DeferredRetirements<GlobalId>,
@@ -2317,6 +2369,7 @@ mod remote_capture;
 mod remote_codex_preference;
 mod remote_controller;
 mod remote_diagnostics;
+mod remote_display_layout;
 mod remote_file_icons;
 mod remote_idle_preferences;
 mod remote_keyboard;
@@ -2577,7 +2630,11 @@ impl NickelSession {
 
     fn refresh_remote_output_identities(&mut self) {
         self.invalidate_departed_shell_outputs();
-        let outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        let mut outputs = self.space.outputs().cloned().collect::<Vec<_>>();
+        #[cfg(feature = "backend-udev")]
+        if let Some(native) = self.native.as_ref() {
+            outputs.extend(native.disabled_outputs().cloned());
+        }
         let before = self.remote_output_generations.len();
         self.remote_output_generations
             .retain(|_, (output, _)| outputs.contains(output));
@@ -2982,6 +3039,19 @@ impl NickelSession {
             }
             RemoteDesktopRequest::Outputs { permit, reply } => {
                 let result = self.remote_list_outputs(&permit);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadDisplayLayout { permit, reply } => {
+                let result = self.remote_read_display_layout(&permit);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::DisplayLayoutTransaction {
+                permit,
+                transaction,
+                reply,
+            } => {
+                let result = self.remote_display_layout_transaction(&permit, transaction);
+                self.record_remote_settings_transaction(&permit, &result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::WorkspaceAction {
@@ -6096,6 +6166,7 @@ impl NickelSession {
                     data.expire_remote_shell_origins();
                     data.reap_remote_launched_children();
                     data.resume_remote_launch_maps();
+                    data.expire_remote_display_recovery();
                     data.refresh_remote_output_identities();
                     data.refresh_remote_window_identities();
                     let control = data.remote_control.control();
@@ -6237,6 +6308,8 @@ impl NickelSession {
             primary_output_name: None,
             output_topology_generation: 0,
             last_protocol_outputs: Vec::new(),
+            remote_display_recovery_generation: 0,
+            remote_display_recovery: None,
             output_scale_preferences: nickel_core::dpi::PersistedOutputScales::load_default()
                 .unwrap_or_default(),
             virtual_test_outputs: HashMap::new(),

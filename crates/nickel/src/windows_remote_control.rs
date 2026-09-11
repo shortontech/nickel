@@ -2131,6 +2131,69 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             _ => Err("Windows observation mismatch".into()),
         }
     }
+    fn read_display_layout(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let inventory = self.list_outputs(permit.clone())?;
+        if inventory.truncated || inventory.outputs.is_empty() {
+            return Err("complete Windows display layout is unavailable".into());
+        }
+        let primary = inventory
+            .outputs
+            .iter()
+            .find(|output| output.primary && output.enabled)
+            .ok_or("Windows display layout has no enabled primary output")?;
+        let primary = nickel_remote_control::leases::ResourceId {
+            id: primary.name.clone(),
+            generation: primary.generation,
+        };
+        let mut outputs = inventory
+            .outputs
+            .iter()
+            .map(|output| nickel_remote_control::display_layout::Placement {
+                output: nickel_remote_control::leases::ResourceId {
+                    id: output.name.clone(),
+                    generation: output.generation,
+                },
+                x: output.geometry[0],
+                y: output.geometry[1],
+                enabled: output.enabled,
+                scale_120: output.scale_120,
+            })
+            .collect::<Vec<_>>();
+        outputs.sort_by(|left, right| left.output.id.cmp(&right.output.id));
+        let layout = nickel_remote_control::display_layout::Layout { primary, outputs };
+        if !layout.valid_representation() {
+            return Err("Windows display owner reported an invalid layout".into());
+        }
+        permit.check_live()?;
+        Ok(nickel_remote_control::display_layout::Snapshot {
+            observation_generation: inventory.observation_generation,
+            observed_at_us: inventory.observed_at_us,
+            topology_generation: inventory.topology_generation,
+            transaction_supported: false,
+            transaction_unavailable_reason: Some(
+                "Nickel has no production Windows display reconfiguration owner".into(),
+            ),
+            requested: layout.clone(),
+            confirmed: layout,
+            recovery: nickel_remote_control::display_layout::Recovery {
+                state: nickel_remote_control::display_layout::RecoveryState::Confirmed,
+                generation: 0,
+                deadline_uptime_us: None,
+            },
+        })
+    }
+    fn display_layout_transaction(
+        &self,
+        permit: DesktopPermit,
+        _transaction: nickel_remote_control::display_layout::Transaction,
+    ) -> Result<nickel_remote_control::display_layout::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        Err("Windows display layout transactions are unavailable: Nickel has no production Windows display reconfiguration owner".into())
+    }
     fn list_surfaces(
         &self,
         permit: DesktopPermit,
@@ -4576,6 +4639,7 @@ impl WindowsRemoteControl {
                     observation_generation: self.observation_generation,
                     observed_at_us: self.start_time.elapsed().as_micros().min(u64::MAX as u128)
                         as u64,
+                    topology_generation: self.resources.output_topology_generation(),
                     outputs,
                     truncated: false,
                 })

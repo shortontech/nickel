@@ -182,6 +182,7 @@ impl NickelSession {
         use nickel_remote_control::diagnostics::{
             MAX_DIAGNOSTIC_OUTPUTS, OutputDiagnostic, OutputInventory,
         };
+        self.refresh_output_topology_generation();
         permit.check_live()?;
         let mut outputs = Vec::new();
         let mut truncated = false;
@@ -226,6 +227,7 @@ impl NickelSession {
         Ok(OutputInventory {
             observation_generation: self.remote_observation_generation,
             observed_at_us: self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            topology_generation: self.output_topology_generation,
             outputs,
             truncated,
         })

@@ -138,6 +138,8 @@ pub const MAX_DIAGNOSTIC_WORKSPACES: usize = 32;
 pub struct OutputInventory {
     pub observation_generation: u64,
     pub observed_at_us: u64,
+    /// Production output topology version used by complete-layout transactions.
+    pub topology_generation: u64,
     /// Exact output identities, filtered by the supplied lease.
     pub outputs: Vec<OutputDiagnostic>,
     pub truncated: bool,

@@ -1351,6 +1351,9 @@ impl NickelSession {
                 if let Err(error) = self.apply_output_layout(layout) {
                     return protocol_error(ErrorCode::InvalidRequest, error);
                 }
+                // A local Settings apply supersedes any remote recovery owner.
+                // Its existing Settings process retains the 15-second Keep/Revert flow.
+                self.remote_display_recovery = None;
             }
             SessionCommand::CreateWorkspace => {
                 if let Err(error) = self.workspaces.create() {

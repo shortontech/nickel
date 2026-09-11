@@ -29,6 +29,8 @@ pub(crate) enum Method {
     SettingsTransaction,
     WorkspaceAction,
     ListOutputs,
+    ReadDisplayLayout,
+    DisplayLayoutTransaction,
     ListApplications,
     LaunchApplication,
     ReadDesktopEvents,
@@ -63,7 +65,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 49] = [
+    pub(crate) const ALL: [Self; 51] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -83,6 +85,8 @@ impl Method {
         Self::SettingsTransaction,
         Self::WorkspaceAction,
         Self::ListOutputs,
+        Self::ReadDisplayLayout,
+        Self::DisplayLayoutTransaction,
         Self::ListApplications,
         Self::LaunchApplication,
         Self::ReadDesktopEvents,
@@ -120,7 +124,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 49] = [
+const METHODS: [&str; 51] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -140,6 +144,8 @@ const METHODS: [&str; 49] = [
     "shell_behavior_transaction",
     "workspace_action",
     "list_outputs",
+    "read_display_layout",
+    "display_layout_transaction",
     "list_installed_applications",
     "launch_installed_application",
     "read_desktop_events",
