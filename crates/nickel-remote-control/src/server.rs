@@ -143,6 +143,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::device_settings::Outcome, String> {
         Err("device settings unavailable on this backend".into())
     }
+    fn read_peripheral_controls(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::peripheral_controls::Snapshot, String> {
+        Err("peripheral diagnostics unavailable on this backend".into())
+    }
+    fn control_peripherals(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::peripheral_controls::Transaction,
+    ) -> Result<crate::peripheral_controls::Outcome, String> {
+        Err("peripheral controls unavailable on this backend".into())
+    }
     fn read_appearance(
         &self,
         _permit: crate::DesktopPermit,
@@ -1019,6 +1032,13 @@ struct DeviceControlRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PeripheralControlRequest {
+    lease_id: u64,
+    transaction: crate::peripheral_controls::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct AppearanceRequest {
     lease_id: u64,
     transaction: crate::appearance::Transaction,
@@ -1610,6 +1630,63 @@ impl McpHandler {
                     )
                     .await
                     .map_err(|_| "device result uncertain; read current state before retrying")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read bounded printer and removable-volume diagnostics with observation-local opaque IDs. Requires full-session Full Control & Debug Nickel. Returns only fixed states, default/ejectable flags, byte counts and truncation counts; printer/job names, native identifiers, addresses, device paths, mount paths, filesystem inventories and provider errors are omitted. Control availability is explicit."
+    )]
+    async fn read_peripheral_controls(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::peripheral_controls::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadPeripheralControls,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_peripheral_controls(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "peripheral observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Apply one allowlisted printer control using an exact fresh generation, observation-local opaque IDs, and prior state from read_peripheral_controls. Supports only setting an already observed printer as default and cancelling an already observed print job. Requires full-session Full Control & Debug Nickel plus continuously live request, lease, watch, deadline and idle shared input. Backends without safely cancellable production control report unavailable. No addresses, credentials, names, paths, arbitrary commands, printer installation/removal/test pages, volume mount/unmount/eject, cleanup, or filesystem mutation."
+    )]
+    async fn control_peripherals(
+        &self,
+        Parameters(request): Parameters<PeripheralControlRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::peripheral_controls::Outcome>, String> {
+        if !request.transaction.valid() {
+            return Err("invalid peripheral transaction".into());
+        }
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ControlPeripherals,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.control_peripherals(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "peripheral result uncertain; read current state before retrying")?
                     .map(Json)
                 },
             )
@@ -3882,7 +3959,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            50,
+            52,
             "a newly published tool must be explicitly classified"
         );
 

@@ -43,6 +43,28 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::device_settings::Outcome, String>,
         >,
     },
+    ReadPeripheralControls {
+        permit: DesktopPermit,
+        observed: nickel_platform::PeripheralSnapshot,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::peripheral_controls::Snapshot, String>,
+        >,
+    },
+    BeginPeripheralControl {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::peripheral_controls::Transaction,
+        deadline: Instant,
+        reply: std::sync::mpsc::SyncSender<Result<remote_peripheral_controls::Prepared, String>>,
+    },
+    FinishPeripheralControl {
+        permit: DesktopPermit,
+        prepared: remote_peripheral_controls::Prepared,
+        outcome: nickel_platform::PeripheralOutcome,
+        refreshed: Option<nickel_platform::PeripheralSnapshot>,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::peripheral_controls::Outcome, String>,
+        >,
+    },
 
     ApplicationScale {
         permit: nickel_remote_control::DesktopPermit,
@@ -691,6 +713,88 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         response
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "device result uncertain")?
+    }
+    fn read_peripheral_controls(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::peripheral_controls::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_millis(1900);
+        permit.with_debug(false, || Ok(()))?;
+        let cancellation_permit = permit.clone();
+        let observed = nickel_platform::inspect_remote_peripherals(
+            deadline,
+            Arc::new(move || cancellation_permit.check_live().is_err()),
+        )
+        .map_err(|_| "bounded peripheral observation unavailable".to_owned())?;
+        permit.check_live()?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadPeripheralControls {
+                permit,
+                observed,
+                reply,
+            })
+            .map_err(|_| "peripheral owner queue unavailable")?;
+        response
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("peripheral observation expired")?,
+            )
+            .map_err(|_| "peripheral observation timed out")?
+    }
+    fn control_peripherals(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::peripheral_controls::Transaction,
+    ) -> Result<nickel_remote_control::peripheral_controls::Outcome, String> {
+        let deadline = Instant::now() + Duration::from_millis(1900);
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::BeginPeripheralControl {
+                permit: permit.clone(),
+                transaction,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "peripheral owner queue unavailable")?;
+        let prepared = response
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("peripheral control expired before admission")?,
+            )
+            .map_err(|_| "peripheral control admission timed out")??;
+        let guard = prepared.held.clone();
+        let (outcome, refreshed) = nickel_platform::control_remote_peripherals(
+            prepared.native.action.clone(),
+            deadline,
+            Arc::new(move || Instant::now() >= deadline || guard.check_live().is_err()),
+        )
+        .unwrap_or((
+            nickel_platform::PeripheralOutcome::Unsupported {
+                detail: "guarded peripheral provider unavailable".into(),
+            },
+            None,
+        ));
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::FinishPeripheralControl {
+                permit,
+                prepared,
+                outcome,
+                refreshed,
+                reply,
+            })
+            .map_err(|_| "peripheral result uncertain")?;
+        response
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("peripheral result uncertain")?,
+            )
+            .map_err(|_| "peripheral result uncertain")?
     }
     fn read_appearance(
         &self,
@@ -2417,6 +2521,7 @@ pub struct NickelSession {
     remote_external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
     remote_devices: remote_device_settings::DeviceState,
+    remote_peripherals: crate::remote_peripheral_controls::State,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -2518,6 +2623,7 @@ mod remote_keyboard;
 mod remote_keyboard_preference;
 pub(super) mod remote_launch;
 pub(super) mod remote_launcher_favorites;
+mod remote_peripheral_controls;
 mod remote_pointer;
 mod remote_settings;
 mod remote_shell_actions;
@@ -3239,6 +3345,34 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_finish_device_settings(&permit, registration, outcome);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadPeripheralControls {
+                permit,
+                observed,
+                reply,
+            } => {
+                let result = self.remote_read_peripheral_controls(&permit, observed);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::BeginPeripheralControl {
+                permit,
+                transaction,
+                deadline,
+                reply,
+            } => {
+                let result = self.remote_begin_peripheral_control(&permit, transaction, deadline);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::FinishPeripheralControl {
+                permit,
+                prepared,
+                outcome,
+                refreshed,
+                reply,
+            } => {
+                let result =
+                    self.remote_finish_peripheral_control(&permit, prepared, outcome, refreshed);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadAppearance {
@@ -5623,6 +5757,7 @@ impl NickelSession {
             if let Some(runtime_id) = self.internal_shell_surfaces.get(&surface.id).copied() {
                 if shell.remote_access_protected(surface.id) {
                     self.remote_devices.invalidate();
+                    self.remote_peripherals.invalidate();
                 }
                 if shell.remote_access_protected(surface.id)
                     || self
@@ -6531,6 +6666,7 @@ impl NickelSession {
             remote_platform_refreshes: Vec::new(),
             remote_external_accessibility: None,
             remote_devices: Default::default(),
+            remote_peripherals: Default::default(),
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),

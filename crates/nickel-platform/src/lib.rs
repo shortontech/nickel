@@ -43,8 +43,8 @@ pub use media::{DecodedPreview, PreviewDecodeError, decode_image_preview};
 pub use peripherals::{
     FilesystemUsage, PeripheralAction, PeripheralBackend, PeripheralError, PeripheralFailureClass,
     PeripheralOutcome, PeripheralProvider, PeripheralService, PeripheralSnapshot, PrintJob,
-    PrintJobState, Printer, PrinterState, RemovableVolume, VolumeState, peripheral_backend,
-    peripheral_service,
+    PrintJobState, Printer, PrinterState, RemotePeripheralControl, RemovableVolume, VolumeState,
+    control_remote_peripherals, inspect_remote_peripherals, peripheral_backend, peripheral_service,
 };
 pub use platform_contract::{
     AdapterCapability, ContractEvidence, PLATFORM_CONTRACTS, PlatformContract, PlatformFamily,

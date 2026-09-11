@@ -938,6 +938,7 @@ struct WindowsDesktopAuthority {
     started: Instant,
     desktop_session: Option<u32>,
     capture_generation: std::sync::atomic::AtomicU64,
+    peripheral_generation: std::sync::atomic::AtomicU64,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
 }
 impl WindowsDesktopAuthority {
@@ -1265,6 +1266,49 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .map_err(|_| "Windows workspace observation timed out".to_owned())?;
         completion.check_live()?;
         result
+    }
+    fn read_peripheral_controls(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::peripheral_controls::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let generation = self
+            .peripheral_generation
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |generation| generation.checked_add(1),
+            )
+            .map_err(|_| "Windows peripheral observation generation exhausted")?
+            .checked_add(1)
+            .ok_or("Windows peripheral observation generation exhausted")?;
+        permit.with_debug(false, || Ok(()))?;
+        Ok(nickel_remote_control::peripheral_controls::Snapshot {
+            generation,
+            observed_at_micros: self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            printers: nickel_remote_control::peripheral_controls::Availability::Unavailable,
+            removable_volumes:
+                nickel_remote_control::peripheral_controls::Availability::Unavailable,
+            printer_controls: nickel_remote_control::peripheral_controls::Availability::Unavailable,
+            printer_entries: Vec::new(),
+            removable_volume_entries: Vec::new(),
+            omitted_printers: 0,
+            omitted_print_jobs: 0,
+            omitted_removable_volumes: 0,
+        })
+    }
+    fn control_peripherals(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::peripheral_controls::Transaction,
+    ) -> Result<nickel_remote_control::peripheral_controls::Outcome, String> {
+        if !transaction.valid() {
+            return Err("invalid peripheral transaction".into());
+        }
+        permit.with_debug_input(false, || Ok(()))?;
+        Ok(nickel_remote_control::peripheral_controls::Outcome {
+            completion: nickel_remote_control::semantics::SurfaceSemanticCompletion::Unavailable,
+        })
     }
     fn read_application_scale(
         &self,
@@ -2835,6 +2879,7 @@ impl WindowsRemoteControl {
             started,
             desktop_session,
             capture_generation: std::sync::atomic::AtomicU64::new(0),
+            peripheral_generation: std::sync::atomic::AtomicU64::new(0),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
         let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
@@ -8300,6 +8345,7 @@ mod tests {
                 started: Instant::now(),
                 desktop_session: None,
                 capture_generation: std::sync::atomic::AtomicU64::new(0),
+                peripheral_generation: std::sync::atomic::AtomicU64::new(0),
                 platform_refresh_worker,
             }),
             desktop_session: None,

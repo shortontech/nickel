@@ -40,6 +40,7 @@ pub mod listener;
 pub mod local_cues;
 pub mod native_semantics;
 mod operation_metrics;
+pub mod peripheral_controls;
 pub mod pointer;
 pub mod semantics;
 mod server;
@@ -534,6 +535,31 @@ impl DesktopPermit {
         })
     }
 
+    /// Reserve shared input for a bounded full-session diagnostic mutation.
+    /// The production owner must supply its current protected-state evidence.
+    pub fn begin_debug_input(
+        &self,
+        protected: bool,
+        effect: impl FnOnce() -> Result<(), String>,
+    ) -> Result<HeldInput, String> {
+        self.with_authority(
+            &leases::ResourceEvidence {
+                surface: None,
+                window: None,
+                verified_application: None,
+                output: None,
+                authorized_surface_ancestors: &[],
+                protected,
+            },
+            true,
+            InputReservation::Begin,
+            effect,
+        )?;
+        Ok(HeldInput {
+            permit: self.clone(),
+        })
+    }
+
     /// Continue only the original client's unchanged lease and gesture. The
     /// resource is resolved afresh by the seat owner for every motion or key.
     pub fn continue_input<T>(
@@ -554,6 +580,39 @@ impl DesktopPermit {
         let mut continuation = self.clone();
         continuation.operation_id = original.operation_id;
         continuation.with_authority(resource, false, InputReservation::Continue, effect)
+    }
+
+    /// Complete a bounded full-session diagnostic mutation while preserving
+    /// the original request's shared-input reservation.
+    pub fn continue_debug_input<T>(
+        &self,
+        held: &HeldInput,
+        protected: bool,
+        effect: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let original = &held.permit;
+        if !std::sync::Arc::ptr_eq(&self.control, &original.control)
+            || self.client != original.client
+            || self.lease != original.lease
+            || self.operation_generation != original.operation_generation
+            || self.operation_id != original.operation_id
+        {
+            return Err("request does not own this diagnostic input transaction".into());
+        }
+        held.check_live()?;
+        self.with_authority(
+            &leases::ResourceEvidence {
+                surface: None,
+                window: None,
+                verified_application: None,
+                output: None,
+                authorized_surface_ancestors: &[],
+                protected,
+            },
+            true,
+            InputReservation::Continue,
+            effect,
+        )
     }
 
     /// Recheck cancellation at a staged effect's final commit boundary while

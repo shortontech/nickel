@@ -110,9 +110,26 @@ pub enum PeripheralAction {
     OpenCleanupLocation(PathBuf),
 }
 
+/// Private native targets and the exact prior state admitted by a remote
+/// desktop owner. This type is never serialized or returned to MCP clients.
+#[derive(Clone)]
+pub enum RemotePeripheralControl {
+    SetDefaultPrinter {
+        printer_id: String,
+        prior_is_default: bool,
+    },
+    CancelPrintJob {
+        printer_id: String,
+        job_id: String,
+        prior_state: PrintJobState,
+    },
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeripheralOutcome {
     Accepted,
+    Cancelled,
+    Uncertain,
     Busy { detail: String },
     AuthorizationRequired { detail: String },
     Unsupported { detail: String },
@@ -180,6 +197,55 @@ impl PeripheralService {
 pub fn peripheral_service() -> Arc<PeripheralService> {
     static SERVICE: OnceLock<Arc<PeripheralService>> = OnceLock::new();
     Arc::clone(SERVICE.get_or_init(|| Arc::new(PeripheralService::new(peripheral_backend()))))
+}
+
+/// Bounded observation for remote diagnostics. The caller must keep
+/// `cancelled` cheap and nonblocking; it is sampled before and during every
+/// owned provider process. Native identifiers remain in this crate's result
+/// and must be projected to opaque protocol identities by the desktop owner.
+pub fn inspect_remote_peripherals(
+    deadline: std::time::Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<PeripheralSnapshot, PeripheralError> {
+    #[cfg(target_os = "linux")]
+    {
+        inspect_linux_remote_peripherals(deadline, cancelled)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (deadline, cancelled);
+        Err(PeripheralError {
+            class: PeripheralFailureClass::ProviderUnavailable,
+            detail: "The native peripheral observer has no safe cancellation boundary".into(),
+        })
+    }
+}
+
+/// Execute the strictly allowlisted remote controls and return a fresh native
+/// observation when authority remains live. Backends without an interruptible
+/// production owner return `Unsupported`; they never fall back to an
+/// uncancellable API or shell.
+pub fn control_remote_peripherals(
+    action: RemotePeripheralControl,
+    deadline: std::time::Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<(PeripheralOutcome, Option<PeripheralSnapshot>), PeripheralError> {
+    validate_remote_control(&action)?;
+    #[cfg(target_os = "linux")]
+    {
+        control_linux_remote_peripherals(action, deadline, cancelled)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (deadline, cancelled);
+        Ok((
+            PeripheralOutcome::Unsupported {
+                detail: "The native peripheral control provider has no safe cancellation boundary"
+                    .into(),
+            },
+            None,
+        ))
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -267,11 +333,12 @@ impl PeripheralBackend for LinuxPeripherals {
 
 #[cfg(target_os = "linux")]
 fn command_output(program: &str, arguments: &[&str]) -> std::io::Result<std::process::Output> {
-    bounded_command_output(
+    bounded_command_output_guarded(
         program,
         arguments,
-        std::time::Duration::from_secs(2),
+        std::time::Instant::now() + std::time::Duration::from_secs(2),
         64 * 1024,
+        &|| false,
     )
 }
 
@@ -281,6 +348,23 @@ pub(crate) fn bounded_command_output(
     arguments: &[&str],
     timeout: std::time::Duration,
     output_limit: usize,
+) -> std::io::Result<std::process::Output> {
+    bounded_command_output_guarded(
+        program,
+        arguments,
+        std::time::Instant::now() + timeout,
+        output_limit,
+        &|| false,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_command_output_guarded(
+    program: &str,
+    arguments: &[&str],
+    deadline: std::time::Instant,
+    output_limit: usize,
+    cancelled: &dyn Fn() -> bool,
 ) -> std::io::Result<std::process::Output> {
     use std::{
         io::{Error, ErrorKind, Read},
@@ -303,6 +387,12 @@ pub(crate) fn bounded_command_output(
         }
     }
 
+    if cancelled() || std::time::Instant::now() >= deadline {
+        return Err(Error::new(
+            ErrorKind::Interrupted,
+            "peripheral command was cancelled before dispatch",
+        ));
+    }
     let mut command = std::process::Command::new(program);
     command
         .args(arguments)
@@ -321,12 +411,11 @@ pub(crate) fn bounded_command_output(
         .ok_or_else(|| Error::other("peripheral command stderr unavailable"))?;
     let stdout = std::thread::spawn(move || drain(stdout, output_limit));
     let stderr = std::thread::spawn(move || drain(stderr, output_limit));
-    let deadline = std::time::Instant::now() + timeout;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if std::time::Instant::now() >= deadline {
+        if cancelled() || std::time::Instant::now() >= deadline {
             // SAFETY: this child was placed in a fresh process group whose id is
             // its positive PID. A negative id signals only that owned group.
             unsafe {
@@ -336,8 +425,12 @@ pub(crate) fn bounded_command_output(
             let _ = stdout.join();
             let _ = stderr.join();
             return Err(Error::new(
-                ErrorKind::TimedOut,
-                "peripheral command timed out",
+                if cancelled() {
+                    ErrorKind::Interrupted
+                } else {
+                    ErrorKind::TimedOut
+                },
+                "peripheral command was cancelled or timed out",
             ));
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -348,6 +441,12 @@ pub(crate) fn bounded_command_output(
     let (stderr, stderr_truncated) = stderr
         .join()
         .map_err(|_| Error::other("peripheral stderr reader failed"))??;
+    if cancelled() || std::time::Instant::now() >= deadline {
+        return Err(Error::new(
+            ErrorKind::Interrupted,
+            "peripheral command completed after its authority ended",
+        ));
+    }
     if stdout_truncated || stderr_truncated {
         return Err(Error::new(
             ErrorKind::InvalidData,
@@ -359,6 +458,154 @@ pub(crate) fn bounded_command_output(
         stdout,
         stderr,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn guarded_output_text(
+    program: &str,
+    arguments: &[&str],
+    deadline: std::time::Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<String, String> {
+    let output = bounded_command_output_guarded(program, arguments, deadline, 64 * 1024, cancelled)
+        .map_err(|_| format!("{program} observation unavailable"))?;
+    if !output.status.success() {
+        return Err(format!("{program} observation unavailable"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(target_os = "linux")]
+fn inspect_linux_remote_peripherals(
+    deadline: std::time::Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<PeripheralSnapshot, PeripheralError> {
+    let printers = discover_linux_printers_guarded(deadline, cancelled.as_ref());
+    let volumes = discover_linux_volumes_guarded(deadline, cancelled.as_ref());
+    if cancelled() || std::time::Instant::now() >= deadline {
+        return Err(PeripheralError {
+            class: PeripheralFailureClass::ProviderUnavailable,
+            detail: "Peripheral observation was cancelled or expired".into(),
+        });
+    }
+    Ok(sanitize_snapshot(PeripheralSnapshot {
+        provider: PeripheralProvider::LinuxCupsAndUDisks2 {
+            cups_available: printers.is_ok(),
+            udisks2_available: volumes.is_ok(),
+        },
+        printers,
+        volumes,
+        filesystems: Err("Filesystem inventory is outside remote peripheral diagnostics".into()),
+        omitted_printers: 0,
+        omitted_jobs: 0,
+        omitted_volumes: 0,
+        omitted_filesystems: 0,
+    }))
+}
+
+#[cfg(target_os = "linux")]
+fn control_linux_remote_peripherals(
+    action: RemotePeripheralControl,
+    deadline: std::time::Instant,
+    cancelled: Arc<dyn Fn() -> bool + Send + Sync>,
+) -> Result<(PeripheralOutcome, Option<PeripheralSnapshot>), PeripheralError> {
+    let prior = inspect_linux_remote_peripherals(deadline, cancelled.clone())?;
+    let printers = prior.printers.as_ref().map_err(|_| PeripheralError {
+        class: PeripheralFailureClass::ProviderUnavailable,
+        detail: "Printer state is unavailable for prior-state revalidation".into(),
+    })?;
+    match &action {
+        RemotePeripheralControl::SetDefaultPrinter {
+            printer_id,
+            prior_is_default,
+        } => {
+            if !printers
+                .iter()
+                .any(|printer| printer.id == *printer_id && printer.is_default == *prior_is_default)
+            {
+                return Err(PeripheralError {
+                    class: PeripheralFailureClass::InvalidTarget,
+                    detail: "Printer identity or prior state changed".into(),
+                });
+            }
+        }
+        RemotePeripheralControl::CancelPrintJob {
+            printer_id,
+            job_id,
+            prior_state,
+        } => {
+            if !printers.iter().any(|printer| {
+                printer.id == *printer_id
+                    && printer
+                        .jobs
+                        .iter()
+                        .any(|job| job.id == *job_id && job.state == *prior_state)
+            }) {
+                return Err(PeripheralError {
+                    class: PeripheralFailureClass::InvalidTarget,
+                    detail: "Printer, print-job identity, or prior state changed".into(),
+                });
+            }
+        }
+    }
+    if cancelled() || std::time::Instant::now() >= deadline {
+        return Ok((PeripheralOutcome::Cancelled, None));
+    }
+    let (program, arguments) = match &action {
+        RemotePeripheralControl::SetDefaultPrinter { printer_id, .. } => {
+            ("lpoptions", vec!["-d", printer_id.as_str()])
+        }
+        RemotePeripheralControl::CancelPrintJob { job_id, .. } => ("cancel", vec![job_id.as_str()]),
+    };
+    let output = match bounded_command_output_guarded(
+        program,
+        &arguments,
+        deadline,
+        64 * 1024,
+        cancelled.as_ref(),
+    ) {
+        Ok(output) => output,
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted | std::io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok((PeripheralOutcome::Uncertain, None));
+        }
+        Err(error) => {
+            return Err(PeripheralError {
+                class: PeripheralFailureClass::ProviderUnavailable,
+                detail: format!("{program} is unavailable: {error}"),
+            });
+        }
+    };
+    let outcome = if output.status.success() {
+        PeripheralOutcome::Accepted
+    } else {
+        let detail = clean_text(String::from_utf8_lossy(&output.stderr).trim());
+        let lowercase = detail.to_lowercase();
+        if lowercase.contains("busy") || lowercase.contains("in use") {
+            PeripheralOutcome::Busy { detail }
+        } else if lowercase.contains("not authorized")
+            || lowercase.contains("permission")
+            || lowercase.contains("authentication")
+        {
+            PeripheralOutcome::AuthorizationRequired { detail }
+        } else {
+            PeripheralOutcome::Rejected { detail }
+        }
+    };
+    if !matches!(outcome, PeripheralOutcome::Accepted) {
+        return Ok((outcome, None));
+    }
+    if cancelled() || std::time::Instant::now() >= deadline {
+        return Ok((PeripheralOutcome::Uncertain, None));
+    }
+    match inspect_linux_remote_peripherals(deadline, cancelled) {
+        Ok(snapshot) => Ok((outcome, Some(snapshot))),
+        Err(_) => Ok((outcome, None)),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -428,6 +675,38 @@ fn discover_linux_printers() -> Result<Vec<Printer>, String> {
 }
 
 #[cfg(target_os = "linux")]
+fn discover_linux_printers_guarded(
+    deadline: std::time::Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<Printer>, String> {
+    let listing = guarded_output_text("lpstat", &["-p"], deadline, cancelled)?;
+    let default = guarded_output_text("lpstat", &["-d"], deadline, cancelled)
+        .ok()
+        .and_then(|line| line.split_once(':').map(|(_, id)| id.trim().to_owned()));
+    let jobs = guarded_output_text(
+        "lpstat",
+        &["-W", "not-completed", "-o"],
+        deadline,
+        cancelled,
+    )
+    .unwrap_or_default();
+    let mut printers = listing
+        .lines()
+        .filter_map(|line| parse_lpstat_printer(line, default.as_deref()))
+        .collect::<Vec<_>>();
+    for job in jobs.lines().filter_map(parse_lpstat_job) {
+        if let Some(printer) = printers.iter_mut().find(|printer| {
+            job.id
+                .strip_prefix(&printer.id)
+                .is_some_and(|suffix| suffix.starts_with('-'))
+        }) {
+            printer.jobs.push(job);
+        }
+    }
+    Ok(printers)
+}
+
+#[cfg(target_os = "linux")]
 fn parse_lpstat_printer(line: &str, default: Option<&str>) -> Option<Printer> {
     let remainder = line.strip_prefix("printer ")?;
     let id = remainder.split_whitespace().next()?.to_owned();
@@ -470,6 +749,25 @@ fn discover_linux_volumes() -> Result<Vec<RemovableVolume>, String> {
             "-o",
             "PATH,LABEL,SIZE,FSAVAIL,MOUNTPOINT,RM,HOTPLUG,TYPE",
         ],
+    )?;
+    Ok(listing.lines().filter_map(parse_lsblk_volume).collect())
+}
+
+#[cfg(target_os = "linux")]
+fn discover_linux_volumes_guarded(
+    deadline: std::time::Instant,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Vec<RemovableVolume>, String> {
+    let listing = guarded_output_text(
+        "lsblk",
+        &[
+            "-P",
+            "-b",
+            "-o",
+            "PATH,LABEL,SIZE,FSAVAIL,MOUNTPOINT,RM,HOTPLUG,TYPE",
+        ],
+        deadline,
+        cancelled,
     )?;
     Ok(listing.lines().filter_map(parse_lsblk_volume).collect())
 }
@@ -1222,6 +1520,26 @@ fn validate_action(action: &PeripheralAction) -> Result<(), PeripheralError> {
     })
 }
 
+fn validate_remote_control(action: &RemotePeripheralControl) -> Result<(), PeripheralError> {
+    let valid = match action {
+        RemotePeripheralControl::SetDefaultPrinter { printer_id, .. } => {
+            !printer_id.trim().is_empty() && printer_id.len() <= MAX_TEXT
+        }
+        RemotePeripheralControl::CancelPrintJob {
+            printer_id, job_id, ..
+        } => {
+            !printer_id.trim().is_empty()
+                && !job_id.trim().is_empty()
+                && printer_id.len() <= MAX_TEXT
+                && job_id.len() <= MAX_TEXT
+        }
+    };
+    valid.then_some(()).ok_or_else(|| PeripheralError {
+        class: PeripheralFailureClass::InvalidTarget,
+        detail: "Invalid or unbounded remote peripheral target".into(),
+    })
+}
+
 fn clean_text(value: &str) -> String {
     value
         .chars()
@@ -1280,6 +1598,42 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(flood.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guarded_native_command_kills_its_owned_group_after_cancellation() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let trigger = cancelled.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            trigger.store(true, Ordering::Release);
+        });
+        let started = std::time::Instant::now();
+        let result = super::bounded_command_output_guarded(
+            "sh",
+            &["-c", "sleep 5"],
+            started + std::time::Duration::from_secs(2),
+            4096,
+            &|| cancelled.load(Ordering::Acquire),
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[test]
+    fn remote_control_validation_rejects_unbounded_native_targets() {
+        let error = super::validate_remote_control(&RemotePeripheralControl::CancelPrintJob {
+            printer_id: "printer".into(),
+            job_id: "x".repeat(MAX_TEXT + 1),
+            prior_state: PrintJobState::Pending,
+        })
+        .unwrap_err();
+        assert_eq!(error.class, PeripheralFailureClass::InvalidTarget);
     }
 
     struct Fixture {
