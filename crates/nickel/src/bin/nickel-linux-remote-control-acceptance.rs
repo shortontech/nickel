@@ -58,6 +58,13 @@ const STRESS_INPUT_CANARY: &str = "native-stress-input-DO-NOT-RETAIN";
 const LONG_CHURN_CANARY: &str = "native-long-churn-private-DO-NOT-RETAIN";
 const DENIAL_CANARY: &str = "native-denial-client-DO-NOT-RETAIN";
 const EXPIRY_CANARY: &str = "native-expiry-client-DO-NOT-RETAIN";
+const RENEWAL_EFFECT: &str = "native lifecycle renewal applied";
+const DISCONNECT_REJECTED_EFFECT: &str = "native lifecycle disconnected effect";
+const RECONNECT_EFFECT: &str = "native lifecycle reconnect applied";
+const LOCK_REJECTED_EFFECT: &str = "native lifecycle locked effect";
+const UNLOCK_EFFECT: &str = "native lifecycle unlock applied";
+const RESTART_REJECTED_EFFECT: &str = "native lifecycle stopped-listener effect";
+const RESTART_EFFECT: &str = "native lifecycle listener restart applied";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn main() -> ExitCode {
@@ -153,7 +160,7 @@ fn run() -> Result<Outcome, String> {
         );
     } else {
         println!(
-            "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, denial/expiry/revocation, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
+            "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, renewal, disconnect/reconnect, expiry/revocation, nested lock/unlock, listener stop/restart, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, no authority/effect resurrection, and emergency revocation passed; logout was excluded because it destructively terminates this owned session; no physical keyboard or PAM authentication was exercised"
         );
     }
     Ok(Outcome::Passed)
@@ -557,7 +564,15 @@ fn exercise(
             &known_methods,
         )?;
     }
-    let expiry_identity = exercise_expiry_and_revocation(&environment, address, lease_id)?;
+    exercise_renewal(&environment, address, &identity, lease_id, &stress.surface)?;
+    exercise_disconnect_reconnect(&environment, address, &identity, lease_id, &stress.surface)?;
+    let expiry_identity = exercise_expiry_and_revocation(
+        &environment,
+        address,
+        &identity,
+        lease_id,
+        &stress.surface,
+    )?;
     let final_metrics = metrics(address)?;
     require_metric(&final_metrics, "nickel_mcp_active_leases 1")?;
     validate_fixed_metrics(&final_metrics, &known_methods)?;
@@ -578,6 +593,27 @@ fn exercise(
             &expiry_identity.token,
         ],
     )?;
+
+    let (identity, watch, lease_id, stress) = exercise_lock_unlock(
+        &environment,
+        address,
+        identity,
+        watch,
+        lease_id,
+        &stress.surface,
+    )?;
+    let (identity, watch, lease_id, _stress) = exercise_listener_restart(
+        session,
+        &environment,
+        address,
+        identity,
+        watch,
+        lease_id,
+        &stress.surface,
+    )?;
+    println!(
+        "EXCLUDED: logout is a destructive nested test-control action that terminates the compositor; dedicated nested-runtime acceptance owns that shutdown check"
+    );
 
     let before = mcp_call(
         address,
@@ -1384,6 +1420,7 @@ fn exercise_long_churn(
             address,
             &churn_identity,
             if expires { 1 } else { 30 },
+            false,
         )?;
         let active = metrics(address)?;
         require_metric(&active, "nickel_mcp_active_connections 2")?;
@@ -1675,14 +1712,232 @@ fn wait_for_metric(
     }
 }
 
+fn exercise_renewal(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    observer: &Identity,
+    observer_lease: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+) -> Result<(), String> {
+    let identity = connect_identity(address, "native lifecycle renewal")?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let lease_id = approve_additional_lease(environment, address, &identity, 30, false)?;
+    let listed = scope_call(address, &identity, "list_control_leases", json!({}))?;
+    let lease = listed
+        .as_array()
+        .and_then(|leases| leases.iter().find(|lease| lease["lease_id"] == lease_id))
+        .ok_or("renewal fixture could not observe its live production lease")?;
+    let generation = lease["renewal_generation"]
+        .as_u64()
+        .ok_or("renewal fixture lease omitted its renewal generation")?;
+    let response = mcp_call(
+        address,
+        &identity,
+        "request_control_lease",
+        json!({
+            "renewal": {"lease_id": lease_id, "generation": generation},
+            "scope": {"kind": "full_session"},
+            "duration_seconds": 2400,
+            "allow_resumption": false,
+            "full_debug": true
+        }),
+    )?;
+    require_tool_success("request_control_lease for native renewal", &response)?;
+    let pending = remote_snapshot(environment)?
+        .pending_leases
+        .into_iter()
+        .find(|request| {
+            request.client_id == identity.client_id
+                && request.request.renewal.as_ref().is_some_and(|renewal| {
+                    renewal.lease_id == lease_id && renewal.generation == generation
+                })
+        })
+        .ok_or("native renewal request did not reach trusted local approval")?;
+    let renewed = session_message(
+        environment,
+        Request::Command(Command::DecideRemoteLease {
+            pending_generation: pending.pending_generation,
+            client_id: pending.client_id,
+            request: pending.request,
+            allow: true,
+        }),
+    )?;
+    let ServerMessage::RemoteControl(renewed) = renewed else {
+        return Err("native renewal approval omitted its authoritative snapshot".into());
+    };
+    let renewed_lease = renewed
+        .active_leases
+        .iter()
+        .find(|lease| lease.lease_id == lease_id)
+        .ok_or("renewed native lease disappeared from the local snapshot")?;
+    if renewed_lease.scope != RemoteResourceScope::FullSession
+        || renewed_lease.suspended
+        || !renewed
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == observer_lease)
+        || !renewed.lease_audit.iter().any(|event| {
+            event.lease_id == lease_id && event.transition == RemoteLeaseTransition::Renewed
+        })
+    {
+        return Err(format!(
+            "native renewal replaced or changed existing authority: {renewed:?}"
+        ));
+    }
+    let listed = scope_call(address, &identity, "list_control_leases", json!({}))?;
+    let lease = listed
+        .as_array()
+        .and_then(|leases| leases.iter().find(|lease| lease["lease_id"] == lease_id))
+        .ok_or("renewed production lease disappeared from its client inventory")?;
+    if lease["renewal_generation"].as_u64() != Some(generation.saturating_add(1))
+        || lease["remaining_seconds"]
+            .as_u64()
+            .is_none_or(|remaining| remaining < 2300)
+    {
+        return Err(format!(
+            "native renewal did not advance its incarnation and deadline: {lease}"
+        ));
+    }
+    apply_launcher_search_text(address, &identity, lease_id, surface, RENEWAL_EFFECT)?;
+    session_message(
+        environment,
+        Request::Command(Command::ManageRemoteLease {
+            lease_id,
+            action: RemoteLeaseAction::Revoke,
+        }),
+    )?;
+    let snapshot = remote_snapshot(environment)?;
+    if snapshot
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == lease_id)
+        || !snapshot
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == observer_lease)
+        || launcher_search_text(address, observer, observer_lease, surface)? != RENEWAL_EFFECT
+    {
+        return Err("renewal cleanup changed its observed effect or retained authority".into());
+    }
+    watch.finish()?;
+    println!(
+        "PASS: native finite lease renewal retained its ID and scope, advanced its incarnation and deadline, and authorized an observed production Launcher edit"
+    );
+    Ok(())
+}
+
+fn exercise_disconnect_reconnect(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    observer: &Identity,
+    observer_lease: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+) -> Result<(), String> {
+    let identity = connect_identity(address, "native lifecycle disconnect/reconnect")?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let lease_id = approve_additional_lease(environment, address, &identity, 120, true)?;
+    apply_launcher_search_text(address, &identity, lease_id, surface, RENEWAL_EFFECT)?;
+    let rejected = launcher_search_action(
+        address,
+        &identity,
+        lease_id,
+        surface,
+        DISCONNECT_REJECTED_EFFECT,
+    )?;
+    let disconnected = mcp_call(
+        address,
+        &identity,
+        "client_connection",
+        json!({"action": "disconnect"}),
+    )?;
+    require_tool_success("explicit native client disconnect", &disconnected)?;
+    let snapshot = remote_snapshot(environment)?;
+    if !snapshot
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == lease_id)
+        || !snapshot.lease_audit.iter().any(|event| {
+            event.lease_id == lease_id && event.transition == RemoteLeaseTransition::Disconnected
+        })
+    {
+        return Err(format!(
+            "resumable native lease did not enter disconnected state: {snapshot:?}"
+        ));
+    }
+    require_mcp_denial(
+        "Launcher edit while the client was disconnected",
+        mcp_call(
+            address,
+            &identity,
+            "surface_semantic_action",
+            rejected.clone(),
+        ),
+    )?;
+    if launcher_search_text(address, observer, observer_lease, surface)?
+        == DISCONNECT_REJECTED_EFFECT
+    {
+        return Err("a disconnected native client changed the live Launcher".into());
+    }
+
+    let replacement = ConnectionWatch::start(address, &identity)?;
+    let reconnected = mcp_call(
+        address,
+        &identity,
+        "client_connection",
+        json!({"action": "reconnect"}),
+    )?;
+    require_tool_success("explicit native client reconnect", &reconnected)?;
+    let snapshot = remote_snapshot(environment)?;
+    if !snapshot.lease_audit.iter().any(|event| {
+        event.lease_id == lease_id && event.transition == RemoteLeaseTransition::Reconnected
+    }) {
+        return Err("native reconnect omitted its lease lifecycle event".into());
+    }
+    // Retiring the invalidated old transport after the replacement is ready
+    // must not disconnect the replacement incarnation.
+    watch.finish()?;
+    if launcher_search_text(address, &identity, lease_id, surface)? == DISCONNECT_REJECTED_EFFECT {
+        return Err("the rejected disconnected effect appeared after reconnect".into());
+    }
+    apply_launcher_search_text(address, &identity, lease_id, surface, RECONNECT_EFFECT)?;
+    session_message(
+        environment,
+        Request::Command(Command::ManageRemoteLease {
+            lease_id,
+            action: RemoteLeaseAction::Revoke,
+        }),
+    )?;
+    let snapshot = remote_snapshot(environment)?;
+    if snapshot
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == lease_id)
+        || !snapshot
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == observer_lease)
+    {
+        return Err("disconnect lifecycle cleanup changed retained authority".into());
+    }
+    replacement.finish()?;
+    println!(
+        "PASS: production client disconnect suspended resumable authority, rejected a real Launcher action, explicit reconnect restored only the lease, and stale transport cleanup neither revived the rejected effect nor disconnected the replacement"
+    );
+    Ok(())
+}
+
 fn exercise_expiry_and_revocation(
     environment: &SessionEnvironment,
     address: SocketAddr,
+    observer: &Identity,
     retained_lease: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
 ) -> Result<Identity, String> {
     let identity = connect_identity(address, EXPIRY_CANARY)?;
     let watch = ConnectionWatch::start(address, &identity)?;
-    let expired_lease = approve_additional_lease(environment, address, &identity, 1)?;
+    let expired_lease = approve_additional_lease(environment, address, &identity, 1, false)?;
+    let rejected =
+        launcher_search_action(address, &identity, expired_lease, surface, EXPIRY_CANARY)?;
     let deadline = Instant::now() + Duration::from_secs(5);
     let expired = loop {
         let _ = metrics(address)?;
@@ -1718,8 +1973,13 @@ fn exercise_expiry_and_revocation(
         json!({"lease_id": expired_lease}),
     )?;
     require_tool_error("diagnostic_snapshot after lease expiry", &response)?;
+    let response = mcp_call(address, &identity, "surface_semantic_action", rejected)?;
+    require_tool_error("Launcher edit after lease expiry", &response)?;
+    if launcher_search_text(address, observer, retained_lease, surface)? == EXPIRY_CANARY {
+        return Err("an expired native lease changed the live Launcher".into());
+    }
 
-    let revoked_lease = approve_additional_lease(environment, address, &identity, 30)?;
+    let revoked_lease = approve_additional_lease(environment, address, &identity, 30, false)?;
     session_message(
         environment,
         Request::Command(Command::ManageRemoteLease {
@@ -1760,6 +2020,7 @@ fn approve_additional_lease(
     address: SocketAddr,
     identity: &Identity,
     duration_seconds: u64,
+    allow_resumption: bool,
 ) -> Result<u64, String> {
     let before = remote_snapshot(environment)?;
     let prior = before
@@ -1774,7 +2035,7 @@ fn approve_additional_lease(
         json!({
             "scope": {"kind": "full_session"},
             "duration_seconds": duration_seconds,
-            "allow_resumption": false,
+            "allow_resumption": allow_resumption,
             "full_debug": true
         }),
     )?;
@@ -1802,6 +2063,321 @@ fn approve_additional_lease(
         .find(|lease| !prior.contains(&lease.lease_id))
         .map(|lease| lease.lease_id)
         .ok_or("lifecycle stress approval did not create a distinct lease".into())
+}
+
+fn exercise_lock_unlock(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: Identity,
+    watch: ConnectionWatch,
+    lease_id: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+) -> Result<(Identity, ConnectionWatch, u64, StressResources), String> {
+    let rejected =
+        launcher_search_action(address, &identity, lease_id, surface, LOCK_REJECTED_EFFECT)?;
+    session_message(
+        environment,
+        Request::Command(Command::SessionAction {
+            action: nickel_session_protocol::SessionAction::Lock,
+        }),
+    )?;
+    require_session_lock_state(environment, true)?;
+    let locked = remote_snapshot(environment)?;
+    if locked.effective != RemoteControlEffectiveState::Enabled
+        || !locked.active_leases.is_empty()
+        || !locked.pending_leases.is_empty()
+        || !locked.granted_clients.is_empty()
+        || !locked.lease_audit.iter().any(|event| {
+            event.lease_id == lease_id && event.transition == RemoteLeaseTransition::Revoked
+        })
+    {
+        return Err(format!(
+            "nested production lock did not revoke runtime authority: {locked:?}"
+        ));
+    }
+    require_mcp_denial(
+        "Launcher edit while the native session was locked",
+        mcp_call(
+            address,
+            &identity,
+            "surface_semantic_action",
+            rejected.clone(),
+        ),
+    )?;
+    watch.finish()?;
+
+    session_message(environment, Request::Command(Command::Unlock))?;
+    require_session_lock_state(environment, false)?;
+    let unlocked = remote_snapshot(environment)?;
+    if !unlocked.active_leases.is_empty()
+        || !unlocked.pending_leases.is_empty()
+        || !unlocked.granted_clients.is_empty()
+    {
+        return Err("unlock resurrected pre-lock identity or lease authority".into());
+    }
+    require_mcp_denial(
+        "old client reconnect after unlock",
+        mcp_call(
+            address,
+            &identity,
+            "client_connection",
+            json!({"action": "reconnect"}),
+        ),
+    )?;
+
+    let identity = connect_identity(address, "native lifecycle after unlock")?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let lease_id = approve_scope(
+        environment,
+        address,
+        &identity,
+        RemoteResourceScope::FullSession,
+        true,
+    )?;
+    session_message(
+        environment,
+        Request::Command(Command::SetLauncherVisible { visible: true }),
+    )?;
+    let stress = current_stress_resources(environment, address, &identity, lease_id)?;
+    if launcher_search_text(address, &identity, lease_id, &stress.surface)? == LOCK_REJECTED_EFFECT
+    {
+        return Err("the rejected locked-session effect appeared after unlock".into());
+    }
+    apply_launcher_search_text(address, &identity, lease_id, &stress.surface, UNLOCK_EFFECT)?;
+    println!(
+        "PASS: nested production lock revoked all identities and leases before denying a real Launcher action; test-control unlock restored the desktop without authority or effect resurrection, and fresh approval authorized a new observed edit"
+    );
+    Ok((identity, watch, lease_id, stress))
+}
+
+fn exercise_listener_restart(
+    session: &mut SessionProcess,
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: Identity,
+    watch: ConnectionWatch,
+    lease_id: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+) -> Result<(Identity, ConnectionWatch, u64, StressResources), String> {
+    let rejected = launcher_search_action(
+        address,
+        &identity,
+        lease_id,
+        surface,
+        RESTART_REJECTED_EFFECT,
+    )?;
+    let before = remote_snapshot(environment)?;
+    let stopped = session_message(
+        environment,
+        Request::Command(Command::ApplyRemoteControl {
+            requested_enabled: false,
+            generation: before.generation.saturating_add(1),
+        }),
+    )?;
+    let ServerMessage::RemoteControl(stopped) = stopped else {
+        return Err("listener stop omitted its authoritative snapshot".into());
+    };
+    if stopped.requested_enabled
+        || stopped.effective != RemoteControlEffectiveState::Disabled
+        || !stopped.active_leases.is_empty()
+        || !stopped.pending_leases.is_empty()
+        || !stopped.granted_clients.is_empty()
+        || !stopped.lease_audit.iter().any(|event| {
+            event.lease_id == lease_id && event.transition == RemoteLeaseTransition::Revoked
+        })
+    {
+        return Err(format!(
+            "production listener stop retained runtime authority: {stopped:?}"
+        ));
+    }
+    if TcpStream::connect_timeout(&address, Duration::from_millis(500)).is_ok() {
+        return Err("production listener remained reachable after local disable".into());
+    }
+    watch.finish()?;
+
+    let restarted = session_message(
+        environment,
+        Request::Command(Command::ApplyRemoteControl {
+            requested_enabled: true,
+            generation: stopped.generation.saturating_add(1),
+        }),
+    )?;
+    let ServerMessage::RemoteControl(restarted) = restarted else {
+        return Err("listener restart omitted its authoritative snapshot".into());
+    };
+    if restarted.effective != RemoteControlEffectiveState::Enabled
+        || !restarted.requested_enabled
+        || !restarted.active_leases.is_empty()
+        || !restarted.pending_leases.is_empty()
+        || !restarted.granted_clients.is_empty()
+    {
+        return Err(format!(
+            "production listener restart resurrected old runtime authority: {restarted:?}"
+        ));
+    }
+    wait_for_listener(session, environment, address, Instant::now() + DEADLINE)?;
+    require_mcp_denial(
+        "old client action after listener restart",
+        mcp_call(address, &identity, "surface_semantic_action", rejected),
+    )?;
+
+    let identity = connect_identity(address, "native lifecycle after listener restart")?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let lease_id = approve_scope(
+        environment,
+        address,
+        &identity,
+        RemoteResourceScope::FullSession,
+        true,
+    )?;
+    let stress = current_stress_resources(environment, address, &identity, lease_id)?;
+    if launcher_search_text(address, &identity, lease_id, &stress.surface)?
+        == RESTART_REJECTED_EFFECT
+    {
+        return Err("the stopped-listener effect appeared after restart".into());
+    }
+    apply_launcher_search_text(
+        address,
+        &identity,
+        lease_id,
+        &stress.surface,
+        RESTART_EFFECT,
+    )?;
+    println!(
+        "PASS: local production listener stop closed the socket and revoked all runtime authority; restart kept old credentials and effects dead, while a fresh watched client and approval authorized a new observed Launcher edit"
+    );
+    Ok((identity, watch, lease_id, stress))
+}
+
+fn wait_for_listener(
+    session: &mut SessionProcess,
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    deadline: Instant,
+) -> Result<(), String> {
+    loop {
+        let snapshot = remote_snapshot(environment)?;
+        if snapshot.effective == RemoteControlEffectiveState::Enabled
+            && TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok()
+        {
+            return Ok(());
+        }
+        if let Some(status) = session.try_wait()? {
+            return Err(format!(
+                "nested compositor exited while restarting the MCP listener: {status}"
+            ));
+        }
+        if Instant::now() >= deadline {
+            return Err("production MCP listener did not restart before its deadline".into());
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn require_session_lock_state(
+    environment: &SessionEnvironment,
+    expected: bool,
+) -> Result<(), String> {
+    let ServerMessage::Snapshot(snapshot) =
+        session_message(environment, Request::Query(Query::Snapshot))?
+    else {
+        return Err("session lock query omitted its authoritative snapshot".into());
+    };
+    if snapshot.locked != expected {
+        return Err(format!(
+            "nested session lock state was {}, expected {expected}",
+            snapshot.locked
+        ));
+    }
+    Ok(())
+}
+
+fn launcher_search_action(
+    address: SocketAddr,
+    identity: &Identity,
+    lease_id: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+    text: &str,
+) -> Result<Value, String> {
+    let tree = scope_call(
+        address,
+        identity,
+        "inspect_surface",
+        json!({
+            "lease_id": lease_id,
+            "surface_id": surface.id,
+            "generation": surface.generation
+        }),
+    )?;
+    let field = search_field(&tree)?;
+    Ok(json!({
+        "lease_id": lease_id,
+        "surface_id": surface.id,
+        "surface_generation": surface.generation,
+        "tree_generation": tree["tree_generation"],
+        "node": field["id"],
+        "action": {"kind": "set_text", "value": text}
+    }))
+}
+
+fn launcher_search_text(
+    address: SocketAddr,
+    identity: &Identity,
+    lease_id: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+) -> Result<String, String> {
+    let tree = scope_call(
+        address,
+        identity,
+        "inspect_surface",
+        json!({
+            "lease_id": lease_id,
+            "surface_id": surface.id,
+            "generation": surface.generation
+        }),
+    )?;
+    search_field(&tree)?["value"]["value"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or("live Launcher search field did not expose its text value".into())
+}
+
+fn apply_launcher_search_text(
+    address: SocketAddr,
+    identity: &Identity,
+    lease_id: u64,
+    surface: &nickel_session_protocol::RemoteResourceId,
+    text: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let action = launcher_search_action(address, identity, lease_id, surface, text)?;
+        let response = mcp_call(address, identity, "surface_semantic_action", action)?;
+        if response
+            .pointer("/result/isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            && response.to_string().contains("stale semantic tree")
+            && Instant::now() < deadline
+        {
+            continue;
+        }
+        require_tool_success("lifecycle Launcher semantic edit", &response)?;
+        if launcher_search_text(address, identity, lease_id, surface)? != text {
+            return Err("production Launcher did not apply the lifecycle semantic edit".into());
+        }
+        return Ok(());
+    }
+}
+
+fn require_mcp_denial(operation: &str, response: Result<Value, String>) -> Result<(), String> {
+    match response {
+        Ok(response) => require_tool_error(operation, &response),
+        Err(error) if error.starts_with("HTTP request failed:") => Ok(()),
+        Err(error) => Err(format!(
+            "{operation} failed at the transport instead of the production authority gate: {error}"
+        )),
+    }
 }
 
 #[derive(Debug)]
