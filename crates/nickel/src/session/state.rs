@@ -3743,7 +3743,6 @@ impl NickelSession {
                             unavailable_domains: [
                                 "shell_transients_without_host_owned_protection_and_codex_content",
                                 "external_accessibility_not_embedded_in_snapshot",
-                                "effects",
                                 "native_gpu_renderer_timing",
                                 "shell_gpu_resources_and_external_renderer_resources_and_shared_caches",
                                 "other_compositor_event_categories",

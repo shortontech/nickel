@@ -59,7 +59,7 @@ for one numbered item passes:
   collision with trusted indication pass owned native acceptance.
 - Snapshot `unavailable_domains` currently includes shell transients/content,
   complete internal hit testing, on-demand external accessibility,
-  effects, native GPU timing, GPU/shared cache resources, additional event/trace
+  native GPU timing, GPU/shared cache resources, additional event/trace
   categories and platform queries. Explicit unavailability is truthful reporting,
   not completion of the requested diagnostic authority.
 - Typed settings now cover shell behavior, appearance, application scale,

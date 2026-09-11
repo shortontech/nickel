@@ -1535,3 +1535,10 @@ installed-application launches now emit the previously missing confirmed launch
 effect. Native nested acceptance launched a real catalog entry and matched its
 effect to the successful server operation; the existing launcher persistence,
 semantic, stale-write, scope and revocation matrix then passed unchanged.
+
+The diagnostic snapshot now treats production effects as an implemented domain:
+it publishes a coherent payload-free count of pending owner work and an ordered,
+bounded stream of typed completions correlated to MCP operations. The stale
+whole-domain `effects` unavailability declaration has been removed. Individual
+effect kinds that Nickel does not yet implement remain absent rather than being
+reported as completed.

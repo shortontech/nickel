@@ -370,6 +370,19 @@ mod tests {
         assert!(json.contains("diagnostic_action"));
         assert!(json.contains("semantic_action"));
         assert!(json.contains("settings_transaction"));
+        for operation_id in 41..=46 {
+            assert!(json.contains(&format!("\"operation_id\":{operation_id}")));
+        }
+        for excluded in [
+            "command",
+            "target",
+            "client",
+            "path",
+            "application_id",
+            "lease_id",
+        ] {
+            assert!(!json.contains(excluded));
+        }
     }
 
     #[test]
