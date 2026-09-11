@@ -686,6 +686,16 @@ impl WindowIdentity {
             _ => None,
         }
     }
+
+    pub(super) fn can_inherit_application_from(&self, parent: &Self) -> bool {
+        let Some(child) = self.observation_process() else {
+            return false;
+        };
+        let Some(parent) = parent.observation_process() else {
+            return false;
+        };
+        child.same_current_process(&parent)
+    }
 }
 
 pub(super) struct IdentityResult {
@@ -831,18 +841,42 @@ mod tests {
     }
 
     #[test]
-    fn transient_inheritance_requires_the_exact_live_process_incarnation() {
+    fn transient_inheritance_rejects_stale_unrelated_and_protected_owners() {
         let current = ProcessIdentity::inspect(std::process::id()).unwrap();
-        let same = current.clone();
-        assert!(current.same_current_process(&same));
+        let mut helper = current.clone();
+        helper.application = None;
+        let child = WindowIdentity::Verified(helper.clone());
+        let parent = WindowIdentity::Verified(current.clone());
+        assert!(child.can_inherit_application_from(&parent));
 
-        let mut stale = same.clone();
+        let mut stale = helper.clone();
         stale.start_time = stale.start_time.saturating_add(1);
-        assert!(!current.same_current_process(&stale));
+        assert!(!WindowIdentity::Verified(stale).can_inherit_application_from(&parent));
 
-        let mut different = same;
-        different.pid = different.pid.saturating_add(1);
-        assert!(!current.same_current_process(&different));
+        let mut protected = helper;
+        protected.protected = true;
+        assert!(!WindowIdentity::Verified(protected).can_inherit_application_from(&parent));
+        let mut protected_parent = current;
+        protected_parent.protected = true;
+        assert!(protected_executable(std::path::Path::new(
+            "/usr/bin/polkit-kde-authentication-agent-1"
+        )));
+        assert!(protected_executable(std::path::Path::new(
+            "/usr/bin/pinentry-qt"
+        )));
+        assert!(!child.can_inherit_application_from(&WindowIdentity::Verified(protected_parent)));
+        assert!(!WindowIdentity::Pending.can_inherit_application_from(&parent));
+        assert!(!WindowIdentity::Unavailable.can_inherit_application_from(&parent));
+
+        let mut unrelated = std::process::Command::new("/usr/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let unrelated_identity =
+            WindowIdentity::Verified(ProcessIdentity::inspect(unrelated.id()).unwrap());
+        assert!(!unrelated_identity.can_inherit_application_from(&parent));
+        unrelated.kill().unwrap();
+        unrelated.wait().unwrap();
     }
 
     #[test]

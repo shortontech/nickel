@@ -2844,12 +2844,8 @@ impl NickelSession {
         }
         visited.push(id);
         let parent = self.remote_native_parent(id)?;
-        let child_process = identity.observation_process()?;
-        let parent_process = self
-            .remote_window_identities
-            .get(&parent)?
-            .observation_process()?;
-        if !child_process.same_current_process(&parent_process) {
+        let parent_identity = self.remote_window_identities.get(&parent)?;
+        if !identity.can_inherit_application_from(parent_identity) {
             return None;
         }
         self.remote_verified_application_inner(parent, visited)

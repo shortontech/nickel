@@ -503,4 +503,19 @@ mod tests {
         assert_eq!(registry.ordinary_entries, ordinary_limit);
         assert_eq!(registry.len(), nickel_session_protocol::MAX_WINDOWS);
     }
+
+    #[test]
+    fn retired_window_generation_is_never_reused() {
+        let mut registry = WindowRegistry::default();
+        let parent = registry.insert(WindowAdmission::Ordinary).unwrap();
+        let retired_child = registry.insert(WindowAdmission::Ordinary).unwrap();
+        registry.remove(retired_child);
+        let replacement = registry.insert(WindowAdmission::Ordinary).unwrap();
+
+        assert!(replacement.0 > retired_child.0);
+        assert_ne!(replacement, retired_child);
+        assert_eq!(registry.title(retired_child), None);
+        assert!(registry.title(parent).is_some());
+        assert!(registry.title(replacement).is_some());
+    }
 }
