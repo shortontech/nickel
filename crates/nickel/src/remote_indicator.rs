@@ -1,8 +1,8 @@
 //! Shared production UI for trusted, locally operated remote-control indication.
 //!
-//! The platform owner must protect placement, capture and input routing. The
-//! semantic tree here supports local host actions; it does not register a native
-//! Windows UI Automation provider or make an ordinary window trusted.
+//! The platform owner must protect placement, capture and input routing. This
+//! module supplies the semantic tree; the Windows owner projects it through a
+//! dedicated AccessKit UI Automation adapter on its trusted indicator window.
 use nickel_ui::{
     Application, Button, ButtonPresentation, Column, Insets, Row, SemanticTheme, Text,
     VerticalScroll, View, ViewContext,

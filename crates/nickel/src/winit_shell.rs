@@ -1044,9 +1044,10 @@ impl WinitShell {
 
     /// Create an owned, initially hidden trusted indicator on one output.
     ///
-    /// This does not establish native accessibility, persistence or a protected
-    /// capture pipeline. Only the production indicator owner can expose this
-    /// role after presentation; remote-control approval remains unavailable.
+    /// Native accessibility and final exposure remain owned by the production
+    /// indicator coordinator. It installs the dedicated AccessKit adapter,
+    /// presents the surface, verifies capture affinity, and only then activates
+    /// the suspended remote-control lease.
     #[cfg(target_os = "windows")]
     pub(crate) fn create_trusted_control_surface(
         &mut self,
