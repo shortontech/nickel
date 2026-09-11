@@ -916,6 +916,13 @@ impl SettingsApp {
                     nickel_platform::PeripheralOutcome::Accepted => {
                         "The operating system confirmed the request.".into()
                     }
+                    nickel_platform::PeripheralOutcome::Cancelled => {
+                        "The request was cancelled before it completed.".into()
+                    }
+                    nickel_platform::PeripheralOutcome::Uncertain => {
+                        "The operating system may have accepted the request; refresh before retrying."
+                            .into()
+                    }
                     nickel_platform::PeripheralOutcome::Busy { detail }
                     | nickel_platform::PeripheralOutcome::AuthorizationRequired { detail }
                     | nickel_platform::PeripheralOutcome::Unsupported { detail }
