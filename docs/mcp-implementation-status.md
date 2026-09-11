@@ -1484,6 +1484,12 @@ IDs, names, paths, scan roots or errors. The owned launcher fixture refreshed th
 real isolated catalog, correlated the retained record with the snapshot timestamp,
 and then passed its mutation, semantic, stale-write, scope and revocation matrix.
 
+Application-catalog and allowlisted platform refresh completions now enter the
+bounded event stream with only their fixed domain, retained generation and partial
+bit. The owned catalog and PipeWire fixtures correlated each event with the exact
+retained snapshot record. Application identities, device/provider labels, paths,
+errors and returned native state remain outside the event payload.
+
 Ordinary shell presentation insertions and retirements now enter the same
 bounded event stream with a generation-bearing surface identity, fixed role and
 visibility bit. Lock, trusted-control and unsupported Codex roles never enter

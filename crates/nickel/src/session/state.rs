@@ -3107,6 +3107,13 @@ impl NickelSession {
                                 );
                                 self.remote_application_inventory_refresh =
                                     application_inventory_refresh.clone();
+                                self.remote_desktop_events.record(
+                                    nickel_remote_control::desktop_events::DesktopEventKind::ApplicationInventoryRefreshCompleted {
+                                        generation,
+                                        partial,
+                                    },
+                                    self.start_time.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+                                );
                                 self.sync_internal_shell_changes(Some(&changed));
                             }
                             nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus { domain } => {
@@ -3282,6 +3289,14 @@ impl NickelSession {
                                     self.remote_platform_refreshes
                                         .retain(|entry| entry.domain != outcome.domain);
                                     self.remote_platform_refreshes.push(outcome.clone());
+                                    self.remote_desktop_events.record(
+                                        nickel_remote_control::desktop_events::DesktopEventKind::PlatformRefreshCompleted {
+                                            domain: outcome.domain,
+                                            generation: outcome.generation,
+                                            partial: outcome.partial,
+                                        },
+                                        self.start_time.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+                                    );
                                 }
                                 self.sync_internal_shell_changes(Some(&changed));
                             }

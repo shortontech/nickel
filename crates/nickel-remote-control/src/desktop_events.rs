@@ -81,6 +81,14 @@ pub enum DesktopEventKind {
         effect: ProductionEffectKind,
         outcome: ProductionEffectOutcome,
     },
+    /// A bounded installed-application discovery reached its production owner.
+    ApplicationInventoryRefreshCompleted { generation: u64, partial: bool },
+    /// An allowlisted platform query reached its production owner.
+    PlatformRefreshCompleted {
+        domain: crate::diagnostics::PlatformRefreshDomain,
+        generation: u64,
+        partial: bool,
+    },
     /// Production workspace owner state after create, remove, or selection.
     /// Window membership is available only through the protected snapshot.
     WorkspaceStateChanged {
@@ -491,5 +499,31 @@ mod tests {
         assert!(focused.contains_key("surface_generation"));
         let cleared = value["events"][1]["event"].as_object().unwrap();
         assert_eq!(cleared.len(), 1);
+    }
+
+    #[test]
+    fn refresh_events_correlate_without_inventory_or_provider_payloads() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::ApplicationInventoryRefreshCompleted {
+                generation: 4,
+                partial: true,
+            },
+            30,
+        );
+        events.record(
+            DesktopEventKind::PlatformRefreshCompleted {
+                domain: crate::diagnostics::PlatformRefreshDomain::Audio,
+                generation: 5,
+                partial: false,
+            },
+            31,
+        );
+        let value = serde_json::to_value(events.snapshot()).unwrap();
+        let inventory = value["events"][0]["event"].as_object().unwrap();
+        let platform = value["events"][1]["event"].as_object().unwrap();
+        assert_eq!(inventory.len(), 3);
+        assert_eq!(platform.len(), 4);
+        assert_eq!(platform["domain"], "audio");
     }
 }
