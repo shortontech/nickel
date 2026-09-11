@@ -78,6 +78,7 @@ struct Record<T> {
 #[derive(Default)]
 pub(crate) struct Owner {
     generation: u64,
+    output_topology_generation: u64,
     windows: BTreeMap<usize, Record<Window>>,
     outputs: BTreeMap<String, Record<Output>>,
 }
@@ -136,6 +137,18 @@ impl Owner {
                 self.clear(revoke);
                 return Err("Ambiguous output evidence".into());
             }
+        }
+        let output_topology_changed = self.outputs.len() != next_outputs.len()
+            || next_outputs.iter().any(|(name, output)| {
+                self.outputs
+                    .get(name)
+                    .is_none_or(|current| current.value != *output)
+            });
+        if output_topology_changed {
+            self.output_topology_generation = self
+                .output_topology_generation
+                .checked_add(1)
+                .ok_or("Windows output topology generations exhausted")?;
         }
         let retired: Vec<_> = self
             .outputs
@@ -212,6 +225,9 @@ impl Owner {
             }
         }
         Ok(())
+    }
+    pub(crate) fn output_topology_generation(&self) -> u64 {
+        self.output_topology_generation
     }
     fn output_for(&self, bounds: Rect) -> Option<&ResourceId> {
         let mut matches = self
@@ -701,6 +717,44 @@ mod tests {
                 .count(),
             0
         );
+    }
+    #[test]
+    fn topology_generation_tracks_outputs_but_not_windows() {
+        let mut owner = Owner::default();
+        assert_eq!(owner.output_topology_generation(), 0);
+        owner
+            .reconcile(
+                vec![window(1, 10)],
+                vec![output(1, "main", 0, 1000)],
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(owner.output_topology_generation(), 1);
+
+        let mut changed_window = window(1, 10);
+        changed_window.bounds.x = 20;
+        owner
+            .reconcile(
+                vec![changed_window],
+                vec![output(1, "main", 0, 1000)],
+                |_| {},
+            )
+            .unwrap();
+        assert_eq!(owner.output_topology_generation(), 1);
+
+        let mut changed_output = output(1, "main", 0, 1000);
+        changed_output.scale_120 = 180;
+        owner
+            .reconcile(vec![], vec![changed_output.clone()], |_| {})
+            .unwrap();
+        assert_eq!(owner.output_topology_generation(), 2);
+        owner
+            .reconcile(vec![], vec![changed_output], |_| {})
+            .unwrap();
+        assert_eq!(owner.output_topology_generation(), 2);
+
+        owner.reconcile(vec![], vec![], |_| {}).unwrap();
+        assert_eq!(owner.output_topology_generation(), 3);
     }
     #[test]
     fn mutation_lookup_requires_exact_generation_and_applicable_scope() {

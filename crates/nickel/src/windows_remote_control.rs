@@ -1348,6 +1348,24 @@ enum ShellFocusState {
     },
 }
 
+fn shell_behavior_diagnostic(
+    observation_generation: u64,
+    observed_at_us: u64,
+    topology_generation: u64,
+    bar_on_all_displays: bool,
+    state: (bool, u8, usize),
+) -> nickel_remote_control::diagnostics::ShellBehaviorDiagnostic {
+    nickel_remote_control::diagnostics::ShellBehaviorDiagnostic {
+        observation_generation,
+        observed_at_us,
+        topology_generation,
+        bar_on_all_displays,
+        all_windows_on_every_bar: state.0,
+        configured_desktop_count: state.1,
+        runtime_desktop_count: state.2,
+    }
+}
+
 impl WindowsRemoteControl {
     pub(crate) fn start(
         cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
@@ -2893,6 +2911,7 @@ impl WindowsRemoteControl {
             let focused_window = active.next().is_none().then_some(focused_window).flatten();
             let keyboard_held = self.keyboard_hold.is_some();
             let pointer_held = self.pointer_hold.is_some();
+            let shell_behavior_state = state.remote_shell_behavior_state();
             let shell_input_observations = shell.remote_shell_surface_observations(state);
             let (shell_surfaces, shell_surfaces_truncated) =
                 crate::windows_shell_diagnostics::project(
@@ -3091,15 +3110,13 @@ impl WindowsRemoteControl {
                 platform_refreshes: Vec::new(),
                 application_inventory_refresh: None,
                 codex_feature: None,
-                shell_behavior: ShellBehaviorDiagnostic {
-                    observation_generation: generation,
+                shell_behavior: shell_behavior_diagnostic(
+                    generation,
                     observed_at_us,
-                    topology_generation: 0,
-                    bar_on_all_displays: false,
-                    all_windows_on_every_bar: false,
-                    configured_desktop_count: 0,
-                    runtime_desktop_count: 0,
-                },
+                    self.resources.output_topology_generation(),
+                    shell.bar_on_all_displays(),
+                    shell_behavior_state,
+                ),
                 settings_worker: None,
                 diagnostic_worker: None,
                 application_launch: ApplicationLaunchDiagnostic {
@@ -3124,7 +3141,6 @@ impl WindowsRemoteControl {
                     "windows_shortcut_inventory".into(),
                     "windows_preview_state".into(),
                     "windows_platform_refreshes".into(),
-                    "windows_shell_behavior".into(),
                     "windows_settings_and_diagnostic_workers".into(),
                     "windows_application_launch_state".into(),
                     "windows_frame_trace".into(),
@@ -4340,6 +4356,18 @@ fn control_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_behavior_projection_preserves_production_generations_and_counts() {
+        let diagnostic = shell_behavior_diagnostic(31, 900, 17, true, (false, 6, 4));
+        assert_eq!(diagnostic.observation_generation, 31);
+        assert_eq!(diagnostic.observed_at_us, 900);
+        assert_eq!(diagnostic.topology_generation, 17);
+        assert!(diagnostic.bar_on_all_displays);
+        assert!(!diagnostic.all_windows_on_every_bar);
+        assert_eq!(diagnostic.configured_desktop_count, 6);
+        assert_eq!(diagnostic.runtime_desktop_count, 4);
+    }
 
     fn placement_test_window(
         native: usize,

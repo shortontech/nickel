@@ -485,6 +485,7 @@ pub struct LiveShell {
     task_switcher: TaskSwitcher<crate::model::WindowId>,
     task_switcher_group: Option<WindowGroup>,
     workspaces: Vec<platform::WorkspaceSummary>,
+    configured_desktop_count: u8,
     window_feed_status: FeedStatus,
     workspace_feed_status: FeedStatus,
     tray: Vec<TrayItem>,
@@ -935,6 +936,7 @@ impl LiveShell {
             task_switcher: TaskSwitcher::default(),
             task_switcher_group: None,
             workspaces,
+            configured_desktop_count: shell_settings.desktop_count,
             window_feed_status: FeedStatus::Loading,
             workspace_feed_status: FeedStatus::Loading,
             tray,
@@ -1400,6 +1402,10 @@ impl LiveShell {
             self.close_window_preview();
             changed = true;
         }
+        if self.configured_desktop_count != shell_settings.desktop_count {
+            self.configured_desktop_count = shell_settings.desktop_count;
+            changed = true;
+        }
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         if palette != self.palette {
@@ -1420,6 +1426,15 @@ impl LiveShell {
             changed = true;
         }
         changed
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_shell_behavior_state(&self) -> (bool, u8, usize) {
+        (
+            self.all_windows_on_every_bar,
+            self.configured_desktop_count,
+            self.workspaces.len(),
+        )
     }
 
     /// Apply a platform transition delivered by the compositor event loop.

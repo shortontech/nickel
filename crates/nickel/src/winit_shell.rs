@@ -827,6 +827,11 @@ impl WinitShell {
         Ok(true)
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn bar_on_all_displays(&self) -> bool {
+        self.options.bar_on_all_displays
+    }
+
     pub fn set_primary_output_name(&mut self, output: Option<String>) -> Result<bool, String> {
         if self.primary_output_name == output {
             return Ok(false);

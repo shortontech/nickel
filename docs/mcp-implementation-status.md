@@ -1746,3 +1746,17 @@ Pure projection and scope tests cover protected and stale shell surfaces, exact 
 and surface/output incarnation mismatch. Cross-compilation and Proton execution do
 not establish native Windows focus, capture or mixed-DPI hit-test behavior, which
 remains open for native acceptance.
+
+Windows full-debug snapshots now project shell behavior from the live production
+owners: bar display policy from `WinitShell`, bar window policy and configured and
+runtime desktop counts from `LiveShell`, and a monotonic topology generation from
+the protected-filtered native output owner. The topology generation advances once
+for each accepted output-set, incarnation, geometry, work-area, scale or primary
+designation change and does not advance for window-only reconciliation. The
+projection contains only bounded scalar state and no output identity. Pure owner
+tests, Windows cross-compilation, strict Windows Clippy and focused Wine execution
+cover generation stability and shell-state projection; native Windows topology
+change acceptance remains open. The shared shell-behavior schema has no separate
+configuration generation; Windows therefore reports the current owner values and
+does not relabel the whole-snapshot observation generation as a configuration
+version.
