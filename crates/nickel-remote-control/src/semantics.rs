@@ -179,10 +179,11 @@ impl std::fmt::Debug for SurfaceSemanticActionRequest {
 }
 impl SurfaceSemanticActionRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.surface_id.len() > 29
-            || self.surface_id.strip_prefix("internal:")
-                != Some(self.surface_generation.to_string().as_str())
-        {
+        let generation = self.surface_generation.to_string();
+        let valid_identity = ["internal:", "windows-shell:"]
+            .into_iter()
+            .any(|prefix| self.surface_id.strip_prefix(prefix) == Some(generation.as_str()));
+        if self.surface_id.len() > 34 || !valid_identity {
             return Err("invalid semantic surface identity");
         }
         if self.node as usize >= MAX_RESOLVED_NODES {
@@ -236,6 +237,8 @@ mod tests {
             "lease_id": 1, "surface_id":"internal:9", "surface_generation":9, "tree_generation":3, "node":0,
             "action":{"kind":"set_text","value":"private query"}
         })).unwrap();
+        assert!(value.validate().is_ok());
+        value.surface_id = "windows-shell:9".into();
         assert!(value.validate().is_ok());
         assert!(!format!("{value:?}").contains("private query"));
         value.surface_id = "internal:09".into();

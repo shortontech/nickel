@@ -540,6 +540,28 @@ enum OwnerRequest {
         request: PointerOwnerAction,
         reply: SyncSender<Result<(), String>>,
     },
+    ShellSurfaces {
+        permit: DesktopPermit,
+        reply: SyncSender<
+            Result<Vec<nickel_remote_control::diagnostics::ShellSurfaceDiagnostic>, String>,
+        >,
+    },
+    InspectShellSurface {
+        permit: DesktopPermit,
+        id: String,
+        generation: u64,
+        reply:
+            SyncSender<Result<nickel_remote_control::semantics::SurfaceSemanticSnapshot, String>>,
+    },
+    ShellSemanticAction {
+        permit: DesktopPermit,
+        request: nickel_remote_control::semantics::SurfaceSemanticActionRequest,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<
+            Result<nickel_remote_control::semantics::SurfaceSemanticActionOutcome, String>,
+        >,
+    },
     Diagnostic {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
@@ -1464,6 +1486,69 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             _ => Err("Windows observation mismatch".into()),
         }
     }
+    fn list_surfaces(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<Vec<nickel_remote_control::diagnostics::ShellSurfaceDiagnostic>, String> {
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ShellSurfaces { permit, reply })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn inspect_surface(
+        &self,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticSnapshot, String> {
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::InspectShellSurface {
+                permit,
+                id: id.to_owned(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn surface_semantic_action(
+        &self,
+        permit: DesktopPermit,
+        request: nickel_remote_control::semantics::SurfaceSemanticActionRequest,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticActionOutcome, String> {
+        request.validate().map_err(str::to_owned)?;
+        let completion = permit.clone();
+        let expected_local_input_epoch = local_input_epoch();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ShellSemanticAction {
+                permit,
+                request,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "semantic action result uncertain: Windows desktop owner timed out; do not retry"
+                .to_owned()
+        })?;
+        completion.check_live()?;
+        result
+    }
     fn inspect_window(
         &self,
         permit: DesktopPermit,
@@ -2073,6 +2158,49 @@ impl WindowsRemoteControl {
                 } => {
                     let result = self.perform_pointer_action(permit, *prepared, request);
                     self.sync_input_ownership_event();
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ShellSurfaces { permit, reply } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| self.list_shell_surfaces(shell, state, &permit),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::InspectShellSurface {
+                    permit,
+                    id,
+                    generation,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.inspect_shell_surface(shell, state, &permit, &id, generation)
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ShellSemanticAction {
+                    permit,
+                    request,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.perform_shell_semantic_action(
+                                shell,
+                                state,
+                                &permit,
+                                request,
+                                deadline,
+                                expected_local_input_epoch,
+                            )
+                        },
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Diagnostic {
@@ -3337,6 +3465,232 @@ impl WindowsRemoteControl {
         }
     }
 
+    fn list_shell_surfaces(
+        &self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+    ) -> Result<Vec<nickel_remote_control::diagnostics::ShellSurfaceDiagnostic>, String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceId};
+        let scope = permit.resource_scope()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let (surfaces, _) = crate::windows_shell_diagnostics::project(
+            protected,
+            shell.remote_shell_surface_observations(state),
+        );
+        let mut result = Vec::new();
+        for surface in surfaces {
+            let identity = ResourceId {
+                id: surface.id.clone(),
+                generation: surface.generation,
+            };
+            let output = surface.output.as_ref().and_then(|name| {
+                self.resources
+                    .output_generation(name)
+                    .map(|generation| ResourceId {
+                        id: name.clone(),
+                        generation,
+                    })
+            });
+            let evidence = ResourceEvidence {
+                surface: Some(&identity),
+                window: None,
+                verified_application: None,
+                output: output.as_ref(),
+                authorized_surface_ancestors: &[],
+                protected: output.is_none(),
+            };
+            if self
+                .resources
+                .shell_surface_authorized(&scope, &identity, surface.output.as_deref())
+            {
+                result.push(permit.with_resource(&evidence, || Ok(surface))?);
+            }
+        }
+        permit.check_live()?;
+        Ok(result)
+    }
+
+    fn current_shell_surface(
+        &self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        id: &str,
+        generation: u64,
+    ) -> Result<crate::windows_shell_diagnostics::SurfaceObservation, String> {
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let observation = shell
+            .remote_shell_surface_observations(state)
+            .into_iter()
+            .find(|surface| surface.generation == generation)
+            .ok_or("shell surface has retired")?;
+        let projected = crate::windows_shell_diagnostics::project(protected, [observation.clone()]);
+        projected
+            .0
+            .first()
+            .filter(|surface| surface.id == id && surface.generation == generation)
+            .map(|_| observation)
+            .ok_or_else(|| "shell surface is unavailable or protected".into())
+    }
+
+    fn inspect_shell_surface(
+        &self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticSnapshot, String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceId};
+        let observation = self.current_shell_surface(shell, state, id, generation)?;
+        let identity = ResourceId {
+            id: id.into(),
+            generation,
+        };
+        let output_name = observation
+            .output
+            .as_deref()
+            .ok_or("shell output is unavailable")?;
+        let output = ResourceId {
+            id: output_name.to_owned(),
+            generation: self
+                .resources
+                .output_generation(output_name)
+                .ok_or("shell output has retired")?,
+        };
+        let evidence = ResourceEvidence {
+            surface: Some(&identity),
+            window: None,
+            verified_application: None,
+            output: Some(&output),
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        permit.with_resource(&evidence, || {
+            let (tree_generation, nodes) =
+                state.bounded_shell_semantics(observation.role, observation.output.as_deref())?;
+            Ok(nickel_remote_control::semantics::SurfaceSemanticSnapshot {
+                surface: id.to_owned(),
+                surface_generation: generation,
+                tree_generation,
+                observed_at_us: self
+                    .start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                nodes: windows_semantic_projection(nodes)?,
+            })
+        })
+    }
+
+    fn perform_shell_semantic_action(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        request: nickel_remote_control::semantics::SurfaceSemanticActionRequest,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::semantics::SurfaceSemanticActionOutcome, String> {
+        use nickel_remote_control::{
+            leases::{ResourceEvidence, ResourceId},
+            semantics::{SurfaceSemanticActionOutcome, SurfaceSemanticCompletion},
+        };
+        request.validate().map_err(str::to_owned)?;
+        if Instant::now() >= deadline {
+            return Err("semantic action expired before dispatch".into());
+        }
+        let observation = self.current_shell_surface(
+            shell,
+            state,
+            &request.surface_id,
+            request.surface_generation,
+        )?;
+        // The volume OSD has no deferred platform effects. Other LiveShell roles
+        // require the Linux staged-effect dispatcher before they can be exposed
+        // safely on Windows.
+        if observation.role != crate::winit_shell::SurfaceRole::VolumeOsd {
+            return Err(
+                "semantic mutation effects are unavailable for this Windows shell role".into(),
+            );
+        }
+        if expected_local_input_epoch != local_input_epoch()
+            || self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle()
+        {
+            return Err("shared input is busy".into());
+        }
+        let identity = ResourceId {
+            id: request.surface_id.clone(),
+            generation: request.surface_generation,
+        };
+        let output_name = observation
+            .output
+            .as_deref()
+            .ok_or("shell output is unavailable")?;
+        let output = ResourceId {
+            id: output_name.to_owned(),
+            generation: self
+                .resources
+                .output_generation(output_name)
+                .ok_or("shell output has retired")?,
+        };
+        let evidence = ResourceEvidence {
+            surface: Some(&identity),
+            window: None,
+            verified_application: None,
+            output: Some(&output),
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        permit.with_input(&evidence, || {
+            if Instant::now() >= deadline {
+                return Err("semantic action expired before dispatch".into());
+            }
+            if expected_local_input_epoch != local_input_epoch() {
+                return Err("local input interrupted the semantic action".into());
+            }
+            if !crate::windows_remote_input::physical_input_idle() {
+                return Err("shared input is busy".into());
+            }
+            let outcome = state.perform_bounded_shell_action(
+                observation.role,
+                observation.output.as_deref(),
+                request.tree_generation,
+                request.node as usize,
+                windows_semantic_mutation(request.action),
+                nickel_remote_control::semantics::MAX_MUTATION_TEXT_BYTES,
+            )?;
+            if expected_local_input_epoch != local_input_epoch() {
+                return Err(
+                    "local input overlapped the semantic action; result uncertain, do not retry"
+                        .into(),
+                );
+            }
+            if !outcome.effects.is_empty() {
+                return Err("unexpected deferred semantic effect; result uncertain".into());
+            }
+            if !outcome.host.semantic_failures.is_empty()
+                || !outcome.host.failures.is_empty()
+                || !outcome.host.completion_failures.is_empty()
+            {
+                return Err("semantic action completed with a local failure; do not retry".into());
+            }
+            if outcome.host.clipboard_text.is_some() {
+                return Err("semantic clipboard effect is unavailable; do not retry".into());
+            }
+            Ok(SurfaceSemanticActionOutcome {
+                changed: outcome.host.changed,
+                completion: SurfaceSemanticCompletion::UiUpdated,
+                partial: false,
+            })
+        })
+    }
+
     fn perform_diagnostic_snapshot(
         &mut self,
         shell: &WinitShell,
@@ -3610,7 +3964,6 @@ impl WindowsRemoteControl {
                 unavailable_domains: vec![
                     "windows_virtual_workspaces".into(),
                     "windows_internal_applications".into(),
-                    "windows_shell_surfaces_without_production_scene_identity".into(),
                     "windows_shared_renderer_and_presenter_cache_accounting".into(),
                     "windows_preview_pixel_readback".into(),
                     "windows_settings_worker".into(),
@@ -5077,6 +5430,104 @@ fn control_capability(
         Source::PointerInput => Target::PointerInput,
         Source::KeyboardInput => Target::KeyboardInput,
         Source::ScreenCapture => Target::ScreenCapture,
+    }
+}
+
+fn windows_semantic_projection(
+    projection: Vec<nickel_ui::SemanticNodeSnapshot>,
+) -> Result<Vec<nickel_remote_control::semantics::SemanticNode>, String> {
+    use nickel_remote_control::semantics::{SemanticNode, SemanticValue};
+    projection
+        .into_iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let bounds = [
+                node.bounds.origin.x,
+                node.bounds.origin.y,
+                node.bounds.size.width,
+                node.bounds.size.height,
+            ];
+            if !bounds.iter().all(|value| value.is_finite()) {
+                return Err("semantic geometry unavailable".to_owned());
+            }
+            let value = match node.value {
+                Some(nickel_ui::SemanticValueSnapshot::Boolean(value)) => {
+                    Some(SemanticValue::Boolean(value))
+                }
+                Some(nickel_ui::SemanticValueSnapshot::Text(value)) => {
+                    Some(SemanticValue::Text(value))
+                }
+                Some(nickel_ui::SemanticValueSnapshot::Number {
+                    value,
+                    minimum,
+                    maximum,
+                    step,
+                }) => {
+                    if ![value, minimum, maximum, step]
+                        .iter()
+                        .all(|value| value.is_finite())
+                    {
+                        return Err("semantic value unavailable".to_owned());
+                    }
+                    Some(SemanticValue::Number {
+                        value,
+                        minimum,
+                        maximum,
+                        step,
+                    })
+                }
+                Some(nickel_ui::SemanticValueSnapshot::ProtectedText { .. }) => {
+                    return Err("protected surface".into());
+                }
+                None => None,
+            };
+            Ok(SemanticNode {
+                id: u32::try_from(index).map_err(|_| "semantic node exceeds limit")?,
+                role: node.role.map(|role| format!("{role:?}")),
+                bounds,
+                name: node.name,
+                description: node.description,
+                enabled: node.enabled,
+                focused: node.focused,
+                actions: node
+                    .actions
+                    .into_iter()
+                    .map(|action| format!("{action:?}"))
+                    .collect(),
+                value,
+            })
+        })
+        .collect()
+}
+
+fn windows_semantic_mutation(
+    action: nickel_remote_control::semantics::SemanticMutation,
+) -> nickel_ui::SemanticAction {
+    use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
+    match action {
+        SemanticMutation::SetBoolean(value) => {
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Boolean(value))
+        }
+        SemanticMutation::SetNumber(value) => {
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Number(value))
+        }
+        SemanticMutation::SetText(value) => {
+            nickel_ui::SemanticAction::SetValue(nickel_ui::SemanticValueInput::Text(value))
+        }
+        SemanticMutation::Invoke(value) => nickel_ui::SemanticAction::Invoke(match value {
+            SemanticInvocation::Activate => nickel_ui::ActionKind::Activate,
+            SemanticInvocation::Cancel => nickel_ui::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => nickel_ui::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => nickel_ui::ActionKind::Increment,
+            SemanticInvocation::Decrement => nickel_ui::ActionKind::Decrement,
+            SemanticInvocation::Expand => nickel_ui::ActionKind::Expand,
+            SemanticInvocation::Collapse => nickel_ui::ActionKind::Collapse,
+            SemanticInvocation::Select => nickel_ui::ActionKind::Select,
+            SemanticInvocation::Dismiss => nickel_ui::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => nickel_ui::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => nickel_ui::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => nickel_ui::ActionKind::ExitNavigation,
+        }),
     }
 }
 
