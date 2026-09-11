@@ -237,12 +237,17 @@ fn exercise(
         true,
     )?;
     let mut stress = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
-    let lease_id = if env::args().any(|argument| argument == "--ordinary-scopes") {
+    let ordinary_scopes = env::args().any(|argument| argument == "--ordinary-scopes");
+    let lease_id = if ordinary_scopes {
         ordinary_scopes::exercise(&environment, address, &identity, stress.lease_id)?
     } else {
         stress.lease_id
     };
-    stress.lease_id = lease_id;
+    stress = if ordinary_scopes {
+        current_stress_resources(&environment, address, &identity, lease_id)?
+    } else {
+        StressResources { lease_id, ..stress }
+    };
 
     let trace_started = mcp_call(
         address,
@@ -400,6 +405,63 @@ struct StressResources {
     output: nickel_session_protocol::RemoteResourceId,
 }
 
+fn current_stress_resources(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    lease_id: u64,
+) -> Result<StressResources, String> {
+    let response = session_message(
+        environment,
+        Request::Command(Command::SetLauncherVisible { visible: true }),
+    )?;
+    if response != ServerMessage::Ack {
+        return Err(format!(
+            "local launcher restoration failed before stress: {response:?}"
+        ));
+    }
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let surfaces = scope_call(
+            address,
+            identity,
+            "list_surfaces",
+            json!({"lease_id": lease_id}),
+        )?;
+        let launcher = surfaces.as_array().and_then(|surfaces| {
+            surfaces
+                .iter()
+                .find(|surface| surface["role"] == "launcher")
+        });
+        if let Some(launcher) = launcher {
+            let surface = native_resource(launcher, "id")?;
+            let outputs = scope_call(
+                address,
+                identity,
+                "list_outputs",
+                json!({"lease_id": lease_id}),
+            )?;
+            let output = outputs["outputs"]
+                .as_array()
+                .and_then(|outputs| {
+                    outputs
+                        .iter()
+                        .find(|output| output["name"] == launcher["output"])
+                })
+                .ok_or("restored launcher has no native output identity")?;
+            return Ok(StressResources {
+                lease_id,
+                surface,
+                output: native_resource(output, "name")?,
+            });
+        }
+        if Instant::now() >= deadline {
+            return Err("launcher did not regain a live generation before stress".into());
+        }
+        thread::sleep(POLL);
+    }
+}
+
 fn exercise_scope_matrix(
     environment: &SessionEnvironment,
     address: SocketAddr,
@@ -489,23 +551,38 @@ fn exercise_scope_matrix(
             if label == "surface" && (surfaces.len() != 1 || surfaces[0]["id"] != surface.id) {
                 return Err("exact surface lease exposed another shell surface".into());
             }
-            let inspect = json!({"lease_id": lease_id, "surface_id": surface.id, "generation": surface.generation});
-            let before = scope_call(address, identity, "inspect_surface", inspect.clone())?;
-            if before["surface"] != surface.id
-                || before["surface_generation"] != surface.generation
-                || before["tree_generation"].as_u64().is_none()
-            {
-                return Err("semantic observation returned a different native surface".into());
-            }
-            let field = search_field(&before)?;
             let text = format!("native scope {label} query {iteration}");
-            let action = json!({
-                "lease_id": lease_id, "surface_id": surface.id,
-                "surface_generation": surface.generation,
-                "tree_generation": before["tree_generation"], "node": field["id"],
-                "action": {"kind": "set_text", "value": text}
-            });
-            let outcome = scope_call(address, identity, "surface_semantic_action", action)?;
+            let inspect = json!({"lease_id": lease_id, "surface_id": surface.id, "generation": surface.generation});
+            let semantic_deadline = Instant::now() + DEADLINE;
+            let outcome = loop {
+                let before = scope_call(address, identity, "inspect_surface", inspect.clone())?;
+                if before["surface"] != surface.id
+                    || before["surface_generation"] != surface.generation
+                    || before["tree_generation"].as_u64().is_none()
+                {
+                    return Err("semantic observation returned a different native surface".into());
+                }
+                let field = search_field(&before)?;
+                let action = json!({
+                    "lease_id": lease_id, "surface_id": surface.id,
+                    "surface_generation": surface.generation,
+                    "tree_generation": before["tree_generation"], "node": field["id"],
+                    "action": {"kind": "set_text", "value": text.clone()}
+                });
+                thread::sleep(MATRIX_PACING);
+                let response = mcp_call(address, identity, "surface_semantic_action", action)?;
+                if response
+                    .pointer("/result/isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    && response.to_string().contains("stale semantic tree")
+                    && Instant::now() < semantic_deadline
+                {
+                    continue;
+                }
+                require_tool_success("surface_semantic_action", &response)?;
+                break structured_content("surface_semantic_action", &response)?;
+            };
             if outcome["changed"] != true
                 || outcome["partial"] != false
                 || !matches!(

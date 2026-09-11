@@ -4,6 +4,24 @@ Both specifications remain active. Their completion criteria include native
 Linux and Windows acceptance and cross-machine debugging. Linux unit and nested
 native checks alone do not establish completion.
 
+Full-debug now exposes typed preferred-terminal and preferred-file-manager
+settings through opaque IDs from the bounded installed-application catalog.
+Reads and writes are bound to the exact catalog generation and ShellSettings
+revision; `null` selects the system default. The production transaction stages
+and atomically replaces the complete settings record so protected and unrelated
+fields remain unchanged, with final permit, deadline and input-arbitration checks
+on both Linux and Windows owners. No executable path or command enters the wire
+schema. Portable tests, strict host Clippy and Windows GNU compilation passed;
+native Windows Settings execution remains open.
+
+The integrated native Wayland stress path now keeps a frame trace and event
+subscription active while two bounded concurrent lanes issue snapshots, events,
+capture, semantic input and repaint. It also proves local denial, one-second
+expiry with projected audit, explicit revocation, fixed metric labels and canary
+privacy. The 2026-09-11 run completed 27 measured requests in 2.923 seconds; its
+maximum response was 638 ms and RSS grew by 21,876 KiB. Longer runs and native
+Windows load acceptance remain required.
+
 On 2026-09-11, the current integrated Linux `backend-winit` MCP acceptance
 binary passed on both the host Wayland display and Xwayland. Mesa software EGL
 is pinned only for the acceptance child; on Wayland, `vblank_mode=0` prevents
