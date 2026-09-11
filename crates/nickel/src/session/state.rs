@@ -157,6 +157,21 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::launcher_favorites::Snapshot, String>,
         >,
     },
+    ReadPreferredApplications {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: crate::remote_preferred_applications::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::preferred_applications::Snapshot, String>,
+        >,
+    },
+    PreferredApplicationsTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: crate::remote_preferred_applications::PreparedChange,
+        deadline: Instant,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::preferred_applications::Snapshot, String>,
+        >,
+    },
     ReadWallpaper {
         permit: nickel_remote_control::DesktopPermit,
         prepared: remote_wallpaper::PreparedRead,
@@ -898,6 +913,58 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "launcher_favorites result uncertain; read current launcher_favorites before retrying"
         })?
+    }
+    fn read_preferred_applications(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::preferred_applications::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::remote_preferred_applications::PreparedRead::prepare(
+            crate::remote_preferred_applications::production_catalog()?,
+        )?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadPreferredApplications {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "preferred application queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "preferred application observation timed out".to_owned())?
+    }
+    fn preferred_applications_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::preferred_applications::Transaction,
+    ) -> Result<nickel_remote_control::preferred_applications::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::remote_preferred_applications::PreparedChange::prepare(
+            crate::remote_preferred_applications::production_catalog()?,
+            &transaction,
+        )?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::PreferredApplicationsTransaction {
+                permit,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "preferred application queue is busy or stopped")?;
+        response
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("preferred application result uncertain")?,
+            )
+            .map_err(|_| "preferred application result uncertain".to_owned())?
     }
     fn read_wallpaper(
         &self,
@@ -3422,6 +3489,79 @@ impl NickelSession {
                 let result = self.remote_change_launcher_favorites(&permit, transaction, prepared);
                 self.record_remote_settings_transaction(&permit, &result);
                 let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadPreferredApplications {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result =
+                    permit.with_debug(self.locked || self.shell_recovery_visible(), || {
+                        prepared.ensure_current(
+                            &crate::remote_preferred_applications::production_catalog()?,
+                        )?;
+                        Ok(prepared.snapshot(
+                            self.start_time
+                                .elapsed()
+                                .as_micros()
+                                .min(u128::from(u64::MAX)) as u64,
+                        ))
+                    });
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::PreferredApplicationsTransaction {
+                permit,
+                prepared,
+                deadline,
+                reply,
+            } => {
+                let protected = self.locked || self.shell_recovery_visible();
+                let mut observation = None;
+                let result = permit.with_debug_input_deadline(protected, |boundary| {
+                    let controller_busy = self.poll_remote_controller_ownership();
+                    if controller_busy
+                        || self.remote_held_keyboard.is_some()
+                        || self.remote_held_pointer.is_some()
+                        || !self.active_touch_slots.is_empty()
+                        || self.internal_ui.pointer_interaction_active()
+                        || self.internal_ui.desktop_keyboard_interaction_active()
+                        || self.seat.get_keyboard().is_some_and(|keyboard| {
+                            !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                        })
+                        || self
+                            .seat
+                            .get_pointer()
+                            .is_some_and(|pointer| pointer.is_grabbed())
+                        || self
+                            .internal_shell
+                            .as_ref()
+                            .is_some_and(|shell| shell.pointer_interaction_active())
+                    {
+                        return Err("shared input is busy or unavailable".into());
+                    }
+                    let catalog = crate::remote_preferred_applications::production_catalog()?;
+                    prepared.ensure_current(&catalog)?;
+                    observation =
+                        Some(prepared.commit(deadline, || permit.check_commit_boundary(boundary))?);
+                    Ok(())
+                });
+                if let Some(read) = observation {
+                    if let Some(shell) = self.internal_shell.as_mut() {
+                        let changed = shell.refresh_system();
+                        self.sync_internal_shell_changes(Some(&changed));
+                    }
+                    let snapshot = read.snapshot(
+                        self.start_time
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64,
+                    );
+                    let _ = reply.send(result.map(|()| snapshot));
+                } else {
+                    let _ = reply.send(
+                        result.and_then(|()| Err("preferred application result uncertain".into())),
+                    );
+                }
             }
             RemoteDesktopRequest::ReadWallpaper {
                 permit,

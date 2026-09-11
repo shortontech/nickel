@@ -813,6 +813,24 @@ enum OwnerRequest {
         expected_local_input_epoch: u64,
         reply: SyncSender<Result<nickel_remote_control::launcher_favorites::Snapshot, String>>,
     },
+    ReadPreferredApplications {
+        permit: DesktopPermit,
+        prepared: crate::remote_preferred_applications::PreparedRead,
+        deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::preferred_applications::Snapshot, String>>,
+    },
+    PreferredApplicationsCatalog {
+        permit: DesktopPermit,
+        deadline: Instant,
+        reply: SyncSender<Result<crate::remote_preferred_applications::Catalog, String>>,
+    },
+    PreferredApplicationsTransaction {
+        permit: DesktopPermit,
+        prepared: crate::remote_preferred_applications::PreparedChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::preferred_applications::Snapshot, String>>,
+    },
     Applications {
         permit: DesktopPermit,
         prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
@@ -1088,6 +1106,28 @@ struct WindowsDesktopAuthority {
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
 }
 impl WindowsDesktopAuthority {
+    fn preferred_applications_catalog(
+        &self,
+        permit: DesktopPermit,
+        deadline: Instant,
+    ) -> Result<crate::remote_preferred_applications::Catalog, String> {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::PreferredApplicationsCatalog {
+                permit,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("preferred application catalog expired")?,
+            )
+            .map_err(|_| "preferred application catalog timed out".to_owned())?
+    }
+
     fn prepare_accessibility_inventory(
         permit: &DesktopPermit,
         deadline: Instant,
@@ -2075,6 +2115,68 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             "Windows launcher favorites result uncertain; read current launcher favorites before retrying"
                 .to_owned()
         })?
+    }
+    fn read_preferred_applications(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::preferred_applications::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let catalog = self.preferred_applications_catalog(permit.clone(), deadline)?;
+        let prepared = crate::remote_preferred_applications::PreparedRead::prepare(catalog)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadPreferredApplications {
+                permit,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped")?;
+        receiver
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("preferred application observation expired")?,
+            )
+            .map_err(|_| "preferred application observation timed out".to_owned())?
+    }
+    fn preferred_applications_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::preferred_applications::Transaction,
+    ) -> Result<nickel_remote_control::preferred_applications::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_input = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let catalog = self.preferred_applications_catalog(permit.clone(), deadline)?;
+        let prepared =
+            crate::remote_preferred_applications::PreparedChange::prepare(catalog, &transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::PreferredApplicationsTransaction {
+                permit,
+                prepared,
+                deadline,
+                expected_local_input_epoch: expected_input,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped")?;
+        let result = receiver
+            .recv_timeout(
+                deadline
+                    .checked_duration_since(Instant::now())
+                    .ok_or("preferred application result uncertain")?,
+            )
+            .map_err(|_| "preferred application result uncertain".to_owned())?;
+        if local_input_epoch() != expected_input {
+            return Err("physical input interrupted preferred application change".into());
+        }
+        result
     }
     fn inspect_native_window(
         &self,
@@ -4047,6 +4149,128 @@ impl WindowsRemoteControl {
                                 deadline,
                                 expected_local_input_epoch,
                             )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadPreferredApplications {
+                    permit,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| {
+                            if Instant::now() >= deadline {
+                                return Err("preferred application observation expired".into());
+                            }
+                            permit.with_debug(
+                                !self.desktop_unlocked
+                                    || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
+                                || {
+                                    prepared
+                                        .ensure_current(&state.preferred_application_catalog()?)?;
+                                    Ok(prepared.snapshot(
+                                        self.start_time
+                                            .elapsed()
+                                            .as_micros()
+                                            .min(u128::from(u64::MAX))
+                                            as u64,
+                                    ))
+                                },
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::PreferredApplicationsCatalog {
+                    permit,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| {
+                            if Instant::now() >= deadline {
+                                return Err("preferred application catalog expired".into());
+                            }
+                            permit.with_debug(
+                                !self.desktop_unlocked
+                                    || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
+                                || state.preferred_application_catalog(),
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::PreferredApplicationsTransaction {
+                    permit,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            let protected = !self.desktop_unlocked
+                                || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+                                || shell
+                                    .remote_shell_surface_observations(state)
+                                    .iter()
+                                    .any(|surface| {
+                                        surface.keyboard_focused && surface.protected
+                                    });
+                            let input_busy = self.keyboard_hold.is_some()
+                                || self.pointer_hold.is_some()
+                                || state.pointer_interaction_active()
+                                || !crate::windows_remote_input::physical_input_idle();
+                            let mut observation = None;
+                            let authorized =
+                                permit.with_debug_input_deadline(protected, |boundary| {
+                                    if Instant::now() >= deadline {
+                                        return Err(
+                                            "preferred application transaction expired before commit"
+                                                .into(),
+                                        );
+                                    }
+                                    if input_busy
+                                        || local_input_epoch() != expected_local_input_epoch
+                                        || !crate::windows_remote_input::physical_input_idle()
+                                    {
+                                        return Err("shared input is busy".into());
+                                    }
+                                    let catalog = state.preferred_application_catalog()?;
+                                    prepared.ensure_current(&catalog)?;
+                                    observation = Some(prepared.commit(
+                                        boundary.deadline().min(deadline),
+                                        || {
+                                            if local_input_epoch() != expected_local_input_epoch
+                                                || !crate::windows_remote_input::physical_input_idle()
+                                            {
+                                                return Err("local input interrupted the settings transaction".into());
+                                            }
+                                            permit.check_commit_boundary(boundary)
+                                        },
+                                    )?);
+                                    Ok(())
+                                });
+                            let Some(read) = observation else {
+                                authorized?;
+                                return Err("preferred application result uncertain".into());
+                            };
+                            state.refresh_system();
+                            crate::sync_visibility(shell, state);
+                            shell.request_all_redraws();
+                            authorized?;
+                            Ok(read.snapshot(
+                                self.start_time
+                                    .elapsed()
+                                    .as_micros()
+                                    .min(u128::from(u64::MAX))
+                                    as u64,
+                            ))
                         },
                     );
                     let _ = reply.try_send(result);

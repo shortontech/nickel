@@ -5785,6 +5785,23 @@ impl LiveShell {
         )
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn preferred_application_catalog(
+        &self,
+    ) -> Result<crate::remote_preferred_applications::Catalog, String> {
+        crate::remote_preferred_applications::Catalog::new(
+            self.launcher_catalog_generation,
+            self.launcher
+                .discovered_applications()
+                .filter_map(|application| {
+                    Some((
+                        application.id().to_owned(),
+                        application.launch_command()?.first()?.clone(),
+                    ))
+                }),
+        )
+    }
+
     pub(crate) fn launcher_preferences_busy(&self) -> bool {
         self.launcher_preference_persistence.busy()
     }

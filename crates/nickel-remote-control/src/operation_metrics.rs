@@ -50,6 +50,8 @@ pub(crate) enum Method {
     ApplicationScaleTransaction,
     ReadLauncherFavorites,
     LauncherFavoritesTransaction,
+    ReadPreferredApplications,
+    PreferredApplicationsTransaction,
     NativeSemantics,
     NativeApplicationSemantics,
     NativeSemanticAction,
@@ -71,7 +73,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 57] = [
+    pub(crate) const ALL: [Self; 59] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -112,6 +114,8 @@ impl Method {
         Self::ApplicationScaleTransaction,
         Self::ReadLauncherFavorites,
         Self::LauncherFavoritesTransaction,
+        Self::ReadPreferredApplications,
+        Self::PreferredApplicationsTransaction,
         Self::NativeSemantics,
         Self::NativeApplicationSemantics,
         Self::NativeSemanticAction,
@@ -136,7 +140,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 57] = [
+const METHODS: [&str; 59] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -177,6 +181,8 @@ const METHODS: [&str; 57] = [
     "application_scale_transaction",
     "read_launcher_favorites",
     "launcher_favorites_transaction",
+    "read_preferred_applications",
+    "preferred_applications_transaction",
     "inspect_native_window",
     "inspect_native_application",
     "native_semantic_action",

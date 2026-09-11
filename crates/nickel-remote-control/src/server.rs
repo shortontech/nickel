@@ -207,6 +207,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::launcher_favorites::Snapshot, String> {
         Err("launcher_favorites transactions are unavailable on this backend".into())
     }
+    fn read_preferred_applications(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::preferred_applications::Snapshot, String> {
+        Err("preferred application observation is unavailable on this backend".into())
+    }
+    fn preferred_applications_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::preferred_applications::Transaction,
+    ) -> Result<crate::preferred_applications::Snapshot, String> {
+        Err("preferred application transactions are unavailable on this backend".into())
+    }
     fn read_wallpaper(
         &self,
         _permit: crate::DesktopPermit,
@@ -1196,6 +1209,13 @@ struct LauncherFavoritesRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct PreferredApplicationsRequest {
+    lease_id: u64,
+    transaction: crate::preferred_applications::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct WallpaperRequest {
     lease_id: u64,
     transaction: crate::wallpaper::Transaction,
@@ -1986,6 +2006,48 @@ impl McpHandler {
                 },
             )
             .await
+    }
+
+    #[tool(
+        description = "Read Nickel's preferred terminal and file manager as bounded installed-application IDs. Requires Full Control & Debug Nickel. Commands and paths are excluded."
+    )]
+    async fn read_preferred_applications(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::preferred_applications::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadPreferredApplications,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_preferred_applications(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "preferred application observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Select Nickel's preferred terminal and file manager from the exact bounded installed catalog, or use null for system default. Requires Full Control & Debug Nickel and fresh configuration/catalog generations. Commands and paths are excluded."
+    )]
+    async fn preferred_applications_transaction(
+        &self,
+        Parameters(request): Parameters<PreferredApplicationsRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::preferred_applications::Snapshot>, String> {
+        self.metrics.measure(crate::operation_metrics::Method::PreferredApplicationsTransaction, async {
+            let permit = self.permit(&context, request.lease_id)?;
+            tokio::time::timeout(std::time::Duration::from_secs(2), desktop_call(self.desktop.clone(), move |desktop| desktop.preferred_applications_transaction(permit, request.transaction)))
+                .await.map_err(|_| "preferred application result uncertain; read current state before retrying")?.map(Json)
+        }).await
     }
 
     #[tool(
@@ -4589,7 +4651,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            52,
+            54,
             "a newly published tool must be explicitly classified"
         );
 

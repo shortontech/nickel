@@ -44,6 +44,7 @@ pub mod operation_audit;
 mod operation_metrics;
 pub mod peripheral_controls;
 pub mod pointer;
+pub mod preferred_applications;
 pub mod semantics;
 mod server;
 pub mod terminal_launch_policy;
