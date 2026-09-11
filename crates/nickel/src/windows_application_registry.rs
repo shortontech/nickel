@@ -94,6 +94,13 @@ impl<P: ProcessEvidence> Default for Registry<P> {
     }
 }
 impl<P: ProcessEvidence> Registry<P> {
+    fn tracked_children(&self) -> usize {
+        self.receipts
+            .values()
+            .filter(|receipt| receipt.process.is_live())
+            .count()
+    }
+
     fn retire(&mut self, id: &str, revoke: &mut impl FnMut(u64)) {
         let leases: Vec<_> = self
             .leases
@@ -442,7 +449,9 @@ mod tests {
         assert_eq!(registry.membership(&process(2, 1, 7)), None);
         assert_eq!(registry.membership(&process(1, 2, 7)), None);
         assert_eq!(registry.membership(&process(1, 1, 8)), None);
+        assert_eq!(registry.tracked_children(), 1);
         owned.live.store(false, Ordering::SeqCst);
+        assert_eq!(registry.tracked_children(), 0);
         assert_eq!(registry.membership(&owned), None);
     }
 

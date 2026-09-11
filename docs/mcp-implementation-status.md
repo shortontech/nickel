@@ -1713,6 +1713,23 @@ fixture preparation. This compatibility-layer evidence does not verify native
 ShellExecute, handle inheritance, parent-death or revocation execution; no native
 Windows host is available here.
 
+Windows full-debug snapshots now project that launch path's existing bounded
+owner state. The single-flight preparation gate exposes a nonblocking optional
+worker snapshot with monotonic transition generation, collector-relative age and
+current busy state. Child totals count only live, exact process incarnations whose
+retained handles reached the owner-attested launch registry; the published capacity
+is the registry's existing 1,024-receipt bound. Pending requests, broker messages,
+paths, commands, shortcut or application identities, process identifiers and exit
+history are not retained or serialized. The owner consumes and prunes launch
+receipts before servicing a diagnostic request, while each count performs only the
+existing zero-timeout retained-handle liveness check. A contended preparation-state
+lock makes that optional field unavailable instead of waiting on the winit owner.
+Timed-out preparation can only release its busy admission when its worker exits;
+the existing cancellation checks prevent its result from reaching launch commit or
+creating a tracked receipt. The `windows_application_launch_state` unavailable-domain
+marker has therefore been removed. Native ShellExecute and process-exit acceptance
+remain open as described above.
+
 Windows external accessibility snapshots now advertise only enabled UIA Invoke
 patterns whose numeric runtime identity fits a 32-part bound. The action identity
 combines the exact inspected scope, anchor window generation, observation generation,

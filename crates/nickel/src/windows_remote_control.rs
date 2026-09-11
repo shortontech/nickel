@@ -20,8 +20,65 @@ static EMERGENCY: std::sync::OnceLock<nickel_remote_control::EmergencyStopHandle
     std::sync::OnceLock::new();
 static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
     crate::windows_emergency_chord::WindowsEmergencyChord::new();
-static LAUNCH_PREPARATION_BUSY: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+struct LaunchPreparationState {
+    started: Instant,
+    state: std::sync::Mutex<LaunchPreparationDiagnosticState>,
+}
+
+#[derive(Default)]
+struct LaunchPreparationDiagnosticState {
+    busy: bool,
+    generation: u64,
+    changed_us: u64,
+}
+
+fn launch_preparation_state() -> &'static LaunchPreparationState {
+    static STATE: std::sync::OnceLock<LaunchPreparationState> = std::sync::OnceLock::new();
+    STATE.get_or_init(|| LaunchPreparationState {
+        started: Instant::now(),
+        state: std::sync::Mutex::new(LaunchPreparationDiagnosticState::default()),
+    })
+}
+
+impl LaunchPreparationState {
+    fn uptime_us(&self) -> u64 {
+        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn snapshot(&self) -> Option<nickel_remote_control::diagnostics::BackgroundWorkerDiagnostic> {
+        let state = self.state.try_lock().ok()?;
+        Some(
+            nickel_remote_control::diagnostics::BackgroundWorkerDiagnostic {
+                generation: state.generation,
+                collector_uptime_us: self.uptime_us(),
+                last_changed_uptime_us: state.changed_us,
+                busy: state.busy,
+            },
+        )
+    }
+
+    fn begin(&self) -> Result<(), String> {
+        let mut diagnostic = self
+            .state
+            .try_lock()
+            .map_err(|_| "Windows application launch preparation is busy".to_owned())?;
+        if diagnostic.busy {
+            return Err("Windows application launch preparation is busy".into());
+        }
+        diagnostic.busy = true;
+        diagnostic.generation = diagnostic.generation.saturating_add(1);
+        diagnostic.changed_us = self.uptime_us();
+        Ok(())
+    }
+
+    fn end(&self) {
+        if let Ok(mut diagnostic) = self.state.lock() {
+            diagnostic.busy = false;
+            diagnostic.generation = diagnostic.generation.saturating_add(1);
+            diagnostic.changed_us = self.uptime_us();
+        }
+    }
+}
 const MAX_PENDING_OUTPUT_LAUNCHES: usize = 8;
 const OUTPUT_LAUNCH_PLACEMENT_TTL: Duration = Duration::from_secs(30);
 const OUTPUT_LAUNCH_ROOT_TTL: Duration = Duration::from_secs(2);
@@ -30,18 +87,15 @@ struct LaunchPreparationAdmission;
 
 impl LaunchPreparationAdmission {
     fn acquire() -> Result<Self, String> {
-        use std::sync::atomic::Ordering;
-
-        LAUNCH_PREPARATION_BUSY
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| "Windows application launch preparation is busy".to_owned())?;
+        let state = launch_preparation_state();
+        state.begin()?;
         Ok(Self)
     }
 }
 
 impl Drop for LaunchPreparationAdmission {
     fn drop(&mut self) {
-        LAUNCH_PREPARATION_BUSY.store(false, std::sync::atomic::Ordering::Release);
+        launch_preparation_state().end();
     }
 }
 
@@ -1531,6 +1585,17 @@ fn shell_behavior_diagnostic(
 }
 
 impl WindowsRemoteControl {
+    fn application_launch_diagnostic(
+        &self,
+    ) -> nickel_remote_control::diagnostics::ApplicationLaunchDiagnostic {
+        let (tracked_children, child_capacity) = self.applications.launch_process_diagnostic();
+        nickel_remote_control::diagnostics::ApplicationLaunchDiagnostic {
+            preparation: launch_preparation_state().snapshot(),
+            tracked_children,
+            child_capacity,
+        }
+    }
+
     pub(crate) fn start(
         cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     ) -> io::Result<Self> {
@@ -3287,11 +3352,7 @@ impl WindowsRemoteControl {
                 ),
                 settings_worker: None,
                 diagnostic_worker: self.platform_refresh_worker.snapshot(),
-                application_launch: ApplicationLaunchDiagnostic {
-                    preparation: None,
-                    tracked_children: 0,
-                    child_capacity: 0,
-                },
+                application_launch: self.application_launch_diagnostic(),
                 external_accessibility: self
                     .external_accessibility
                     .as_ref()
@@ -3309,7 +3370,6 @@ impl WindowsRemoteControl {
                     "windows_preview_state".into(),
                     "windows_maintenance_platform_refresh".into(),
                     "windows_settings_worker".into(),
-                    "windows_application_launch_state".into(),
                     "windows_frame_trace".into(),
                 ],
             })
@@ -4689,6 +4749,29 @@ fn control_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launch_preparation_diagnostic_tracks_bounded_worker_transitions() {
+        let state = LaunchPreparationState {
+            started: Instant::now(),
+            state: std::sync::Mutex::new(LaunchPreparationDiagnosticState::default()),
+        };
+        let idle = state.snapshot().unwrap();
+        assert!(!idle.busy);
+        assert_eq!(idle.generation, 0);
+
+        state.begin().unwrap();
+        let busy = state.snapshot().unwrap();
+        assert!(busy.busy);
+        assert_eq!(busy.generation, 1);
+        assert!(state.begin().is_err());
+
+        state.end();
+        let released = state.snapshot().unwrap();
+        assert!(!released.busy);
+        assert_eq!(released.generation, 2);
+        assert!(released.last_changed_uptime_us <= released.collector_uptime_us);
+    }
 
     #[test]
     fn shell_behavior_projection_preserves_production_generations_and_counts() {

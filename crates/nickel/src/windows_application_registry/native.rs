@@ -500,6 +500,12 @@ impl Default for OwnerRegistry {
 }
 
 impl OwnerRegistry {
+    /// Return only bounded lifecycle totals for owner-attested launch process
+    /// handles. Application, process, command, and file identities stay private.
+    pub(crate) fn launch_process_diagnostic(&self) -> (usize, usize) {
+        (self.registry.tracked_children(), MAX_RECEIPTS)
+    }
+
     /// Snapshot an exact generation-bearing entry without filesystem access.
     pub(crate) fn plan_launch(
         &self,
@@ -750,6 +756,12 @@ mod tests {
         }];
         registry.launch_applications = vec![application];
         (registry, application_id, identity)
+    }
+
+    #[test]
+    fn launch_process_diagnostic_is_payload_free_and_bounded() {
+        let registry = OwnerRegistry::default();
+        assert_eq!(registry.launch_process_diagnostic(), (0, MAX_RECEIPTS));
     }
 
     #[test]
