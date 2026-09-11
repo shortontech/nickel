@@ -1548,5 +1548,12 @@ one live session: connectivity, audio, peripherals, maintenance and default
 associations. Each refresh reached its production worker, retained its own
 generation and observation interval, and emitted the matching payload-free
 completion event. Linux therefore no longer advertises a generic unspecified
-platform-query gap. Windows continues to report the concrete default-association
-query limitation until its registry reads have enforced deadlines.
+platform-query gap.
+
+Windows default-association refresh now runs its existing production registry
+inspection behind a two-second, single-flight worker boundary. A timed-out read
+returns unavailable and retains the sole admission slot until its worker exits,
+so retries cannot accumulate threads or publish late results. The deadline and
+retained-admission path passes a focused behavioral test, and the actual Windows
+Nickel branch compiles with a disposable MinGW toolchain. Native Windows registry
+execution remains unverified on this Linux host.

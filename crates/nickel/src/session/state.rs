@@ -3741,7 +3741,7 @@ impl NickelSession {
                             trace_lifecycle: self.remote_trace_lifecycle(&permit),
                             truncated,
                             unavailable_domains: {
-                                let domains = [
+                                [
                                     "shell_transients_without_host_owned_protection_and_codex_content",
                                     "external_accessibility_not_embedded_in_snapshot",
                                     "native_gpu_renderer_timing",
@@ -3751,17 +3751,7 @@ impl NickelSession {
                                 ]
                                 .into_iter()
                                 .map(str::to_owned)
-                                .collect::<Vec<_>>();
-                                #[cfg(target_os = "windows")]
-                                let domains = {
-                                    let mut domains = domains;
-                                    domains.push(
-                                        "windows_default_associations_without_bounded_registry_deadline"
-                                            .to_owned(),
-                                    );
-                                    domains
-                                };
-                                domains
+                                .collect::<Vec<_>>()
                             },
                         })
                     });

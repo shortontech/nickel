@@ -205,10 +205,7 @@ fn summarize_default_associations(
 
 pub(crate) fn refresh_default_associations() -> Result<DefaultAssociationsRefresh, String> {
     #[cfg(target_os = "windows")]
-    return Err(
-        "bounded Windows association diagnostics are unavailable until registry query deadlines are enforced"
-            .into(),
-    );
+    return bounded_windows_association_refresh();
 
     #[cfg(not(target_os = "windows"))]
     {
@@ -222,6 +219,78 @@ pub(crate) fn refresh_default_associations() -> Result<DefaultAssociationsRefres
             nickel_platform::association_service().inspect_many(&targets),
         ))
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+static WINDOWS_ASSOCIATION_QUERY_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(any(target_os = "windows", test))]
+struct WindowsAssociationQueryAdmission;
+
+#[cfg(any(target_os = "windows", test))]
+impl WindowsAssociationQueryAdmission {
+    fn acquire() -> Result<Self, String> {
+        WINDOWS_ASSOCIATION_QUERY_BUSY
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| Self)
+            .map_err(|_| "Windows association query is already in progress".to_owned())
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl Drop for WindowsAssociationQueryAdmission {
+    fn drop(&mut self) {
+        WINDOWS_ASSOCIATION_QUERY_BUSY.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn bounded_windows_association_refresh() -> Result<DefaultAssociationsRefresh, String> {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+    bounded_windows_association_query(DEADLINE, || {
+        let targets = [
+            nickel_platform::AssociationTarget::scheme("https"),
+            nickel_platform::AssociationTarget::mime("text/plain"),
+            nickel_platform::AssociationTarget::mime("image/png"),
+            nickel_platform::AssociationTarget::mime("application/pdf"),
+        ];
+        summarize_default_associations(
+            nickel_platform::association_service().inspect_many(&targets),
+        )
+    })
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn bounded_windows_association_query<T: Send + 'static>(
+    deadline: std::time::Duration,
+    query: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let admission = WindowsAssociationQueryAdmission::acquire()?;
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("nickel-association-query".to_owned())
+        .spawn(move || {
+            let _admission = admission;
+            let _ = sender.try_send(query());
+        })
+        .map_err(|_| "Windows association query worker is unavailable".to_owned())?;
+    receiver
+        .recv_timeout(deadline)
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => {
+                "Windows association query exceeded its deadline".to_owned()
+            }
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                "Windows association query worker stopped".to_owned()
+            }
+        })
 }
 
 fn summarize_maintenance(snapshot: nickel_platform::MaintenanceSnapshot) -> MaintenanceRefresh {
@@ -719,6 +788,34 @@ pub enum ShellCommand {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_association_query_timeout_retains_admission_until_worker_release() {
+        let (release, wait) = std::sync::mpsc::sync_channel(1);
+        let result = super::bounded_windows_association_query(
+            std::time::Duration::from_millis(10),
+            move || wait.recv().unwrap(),
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Windows association query exceeded its deadline"
+        );
+        assert!(
+            super::bounded_windows_association_query(std::time::Duration::from_secs(1), || 2_u8,)
+                .is_err()
+        );
+        release.send(1_u8).unwrap();
+        for _ in 0..100 {
+            if let Ok(value) =
+                super::bounded_windows_association_query(std::time::Duration::from_secs(1), || 3_u8)
+            {
+                assert_eq!(value, 3);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("association worker did not release its admission");
+    }
+
     use crate::model::Application;
 
     #[test]
