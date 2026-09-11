@@ -2018,14 +2018,18 @@ observation point. The gauge has no client, peer, lease or resource labels and u
 the same bounded production projection as full-debug lease diagnostics.
 
 The fixed operation collector now has an exhaustive category inventory. A test
-executes all 57 categories through success, error and cancelled outcomes, requires
+executes all 59 categories through success, error and cancelled outcomes, requires
 unique lowercase fixed labels, verifies histogram cardinality, caps the complete
 exposition below 64 KiB, and passes result, resource, title, path, credential and
 keystroke canaries through operations without retaining them. A separate router
-test requires exact label coverage for all 56 published tools plus the bounded
+test requires exact label coverage for all 58 published tools plus the bounded
 event-subscription path, so a new tool cannot silently omit its metric category.
+Admission rejection counters use only five fixed categories: global concurrency,
+global rate, client concurrency, client rate and client capacity. They remain
+available before lease approval and carry no identity, peer, resource or payload
+labels.
 
-The current `nickel-remote-control` library suite has 147 tests and its host all-target/all-feature Clippy
+The current `nickel-remote-control` library suite has 152 tests and its host all-target/all-feature Clippy
 with warnings denied passed. The integrated primary checkout also passed strict
 Windows GNU cross-target Clippy using the available private MinGW toolchain. No
 native Windows result is claimed for this platform-neutral change.
