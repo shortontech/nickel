@@ -108,13 +108,14 @@ pub(super) fn exercise(
         approved: &approved,
     };
     scope_test.input(&first, &mut recipient, "abc")?;
+    scope_test.pointer_and_capture(&first, &mut recipient)?;
     if let Some(movement) = &movement {
         movement.follow(&scope_test, &first, &mut recipient)?;
     }
     deny_unrelated(environment, address, identity, lease, &other)?;
     require_unchanged_scope_approval(&approved, &remote_snapshot(environment)?, lease, &scope)?;
     println!(
-        "PASS: native ordinary window scope, one approval, repeated focus/key delivery confirmed by the real client, unrelated window denied"
+        "PASS: native ordinary window scope, one approval, client-confirmed key and pointer input, identity-bound PNG capture, unrelated window denied"
     );
     revoke_scope(environment, lease)?;
 
@@ -130,6 +131,7 @@ pub(super) fn exercise(
         approved: &approved,
     };
     scope_test.input(&first, &mut recipient, "def")?;
+    scope_test.pointer_and_capture(&first, &mut recipient)?;
     if let Some(movement) = &movement {
         movement.follow(&scope_test, &first, &mut recipient)?;
         movement.deny_counter_launch(&scope_test)?;
@@ -163,7 +165,7 @@ pub(super) fn exercise(
     }
     require_unchanged_scope_approval(&approved, &remote_snapshot(environment)?, lease, &scope)?;
     println!(
-        "PASS: native application scope, one approval, repeated client-confirmed input, later same-executable window inherited authority, unrelated executable denied"
+        "PASS: native application scope, one approval, client-confirmed key and pointer input, identity-bound PNG capture, later same-executable window inherited authority, unrelated executable denied"
     );
     revoke_scope(environment, lease)?;
     if let Some(movement) = &movement {
@@ -971,12 +973,88 @@ struct OrdinaryScope<'a> {
     approved: &'a RemoteControlSnapshot,
 }
 impl OrdinaryScope<'_> {
+    fn pointer_and_capture(
+        &self,
+        window: &Value,
+        client: &mut OrdinaryClient,
+    ) -> Result<(), String> {
+        scope_call(
+            self.address,
+            self.identity,
+            "focus_window",
+            window_arguments(self.lease, window),
+        )?;
+        let capture = mcp_call(
+            self.address,
+            self.identity,
+            "capture_window",
+            window_arguments(self.lease, window),
+        )?;
+        require_capture(
+            "capture_window",
+            &capture,
+            "window_id",
+            &native_resource(window, "id")?,
+            Some((
+                u32::try_from(window["width"].as_u64().ok_or("window width missing")?)
+                    .map_err(|_| "window width exceeds u32")?,
+                u32::try_from(window["height"].as_u64().ok_or("window height missing")?)
+                    .map_err(|_| "window height exceeds u32")?,
+            )),
+        )?;
+        let expected_actions = client.actions.saturating_add(1);
+        let clicked = scope_call(
+            self.address,
+            self.identity,
+            "pointer_action",
+            json!({
+                "lease_id": self.lease,
+                "target": {
+                    "kind": "window", "window_id": window["id"],
+                    "generation": window["generation"]
+                },
+                "x": 360, "y": 136,
+                "action": {"kind": "click", "button": "left"}
+            }),
+        )?;
+        if clicked != true {
+            return Err("ordinary pointer dispatch was not acknowledged".into());
+        }
+        client.wait_for_actions(expected_actions)?;
+        require_unchanged_scope_approval(
+            self.approved,
+            &remote_snapshot(self.environment)?,
+            self.lease,
+            self.scope,
+        )
+    }
+
     fn input(
         &self,
         window: &Value,
         client: &mut OrdinaryClient,
         characters: &str,
     ) -> Result<(), String> {
+        scope_call(
+            self.address,
+            self.identity,
+            "focus_window",
+            window_arguments(self.lease, window),
+        )?;
+        scope_call(
+            self.address,
+            self.identity,
+            "pointer_action",
+            json!({
+                "lease_id": self.lease,
+                "target": {
+                    "kind": "window", "window_id": window["id"],
+                    "generation": window["generation"]
+                },
+                "x": 360, "y": 76,
+                "action": {"kind": "click", "button": "left"}
+            }),
+        )?;
         for character in characters.chars() {
             let target = json!({"lease_id": self.lease, "window_id": window["id"], "generation": window["generation"]});
             scope_call(self.address, self.identity, "focus_window", target.clone())?;
@@ -1022,48 +1100,53 @@ fn deny_unrelated(
     lease: u64,
     window: &Value,
 ) -> Result<(), String> {
-    for operation in ["focus_window", "capture_window", "keyboard_action"] {
+    // Keep the unrelated client live, focused and topmost so pointer and keyboard
+    // denials cannot be explained by occlusion or focus preconditions.
+    let numeric = window["id"]
+        .as_str()
+        .ok_or("missing unrelated window")?
+        .parse::<u64>()
+        .map_err(|_| "invalid unrelated window")?;
+    session_message(
+        environment,
+        Request::Command(Command::WindowAction {
+            window: nickel_session_protocol::WindowId(numeric),
+            action: nickel_session_protocol::WindowAction::Activate,
+        }),
+    )?;
+    let ServerMessage::Windows(windows) =
+        session_message(environment, Request::Query(Query::Windows))?
+    else {
+        return Err("local window observation unavailable".into());
+    };
+    if !windows
+        .iter()
+        .any(|window| window.id.0 == numeric && window.active)
+    {
+        return Err("unrelated live client was not focused for the scope-denial test".into());
+    }
+    for operation in [
+        "focus_window",
+        "capture_window",
+        "pointer_action",
+        "keyboard_action",
+    ] {
         thread::sleep(MATRIX_PACING);
         let mut arguments = json!({"lease_id": lease, "window_id": window["id"], "generation": window["generation"]});
         if operation == "keyboard_action" {
-            // Remove the focus precondition as an alternative reason for denial.
-            let numeric = window["id"]
-                .as_str()
-                .ok_or("missing unrelated window")?
-                .parse::<u64>()
-                .map_err(|_| "invalid unrelated window")?;
-            session_message(
-                environment,
-                Request::Command(Command::WindowAction {
-                    window: nickel_session_protocol::WindowId(numeric),
-                    action: nickel_session_protocol::WindowAction::Activate,
-                }),
-            )?;
-            let ServerMessage::Windows(windows) =
-                session_message(environment, Request::Query(Query::Windows))?
-            else {
-                return Err("local window observation unavailable".into());
-            };
-            if !windows
-                .iter()
-                .any(|window| window.id.0 == numeric && window.active)
-            {
-                return Err(
-                    "unrelated live client was not focused for the scope-denial test".into(),
-                );
-            }
             arguments["action"] = json!({"kind": "key", "keysym": 120, "modifiers": []});
+        } else if operation == "pointer_action" {
+            arguments = json!({
+                "lease_id": lease,
+                "target": {
+                    "kind": "window", "window_id": window["id"],
+                    "generation": window["generation"]
+                },
+                "x": 1, "y": 1, "action": {"kind": "move"}
+            });
         }
         let response = mcp_call(address, identity, operation, arguments)?;
-        require_tool_error(operation, &response)?;
-        if !response
-            .to_string()
-            .contains("outside the resource boundary")
-        {
-            return Err(format!(
-                "{operation} failed for a reason other than scope: {response}"
-            ));
-        }
+        require_resource_boundary_error(operation, &response)?;
     }
     Ok(())
 }
@@ -1152,6 +1235,7 @@ struct OrdinaryClient {
     child: Child,
     log: PathBuf,
     expected_text: String,
+    actions: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -1228,6 +1312,7 @@ impl OrdinaryClient {
             child,
             log,
             expected_text: String::new(),
+            actions: 0,
         })
     }
     fn require_running(&mut self) -> Result<(), String> {
@@ -1257,6 +1342,35 @@ impl OrdinaryClient {
             if Instant::now() >= deadline {
                 return Err(format!(
                     "native key dispatch did not reach the recipient text field: {text}"
+                ));
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn wait_for_actions(&mut self, expected: usize) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            self.require_running()?;
+            let mut text = String::new();
+            fs::File::open(&self.log)
+                .map_err(|error| error.to_string())?
+                .take(65537)
+                .read_to_string(&mut text)
+                .map_err(|error| error.to_string())?;
+            if text.len() > 65536 {
+                return Err("owned fixture output exceeded 64 KiB".into());
+            }
+            if text
+                .lines()
+                .any(|line| line == format!("recipient-actions={expected}"))
+            {
+                self.actions = expected;
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "native pointer click did not activate the recipient button: {text}"
                 ));
             }
             thread::sleep(POLL);

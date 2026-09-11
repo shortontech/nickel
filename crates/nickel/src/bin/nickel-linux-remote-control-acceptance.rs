@@ -6,6 +6,7 @@
 //! input as either synthetic or physical-fixture input. The latter exercises
 //! production source classification but is not evidence from a physical keyboard.
 
+use base64::Engine;
 use nickel_session_protocol::{
     ClientEnvelope, Command, InputState, Query, RemoteControlEffectiveState, RemoteControlSnapshot,
     RemoteLeaseAction, RemoteLeaseTransition, RemoteOperationOutcome, RemoteResourceScope, Request,
@@ -732,6 +733,18 @@ fn exercise_scope_matrix(
         thread::sleep(POLL);
     };
     let surface = native_resource(&launcher, "id")?;
+    let surface_geometry = (
+        launcher["geometry"][2]
+            .as_u64()
+            .and_then(|width| u32::try_from(width).ok())
+            .filter(|width| *width != 0)
+            .ok_or("launcher width is invalid")?,
+        launcher["geometry"][3]
+            .as_u64()
+            .and_then(|height| u32::try_from(height).ok())
+            .filter(|height| *height != 0)
+            .ok_or("launcher height is invalid")?,
+    );
     let outputs = scope_call(
         address,
         identity,
@@ -747,6 +760,15 @@ fn exercise_scope_matrix(
         })
         .ok_or("launcher has no native output identity")?;
     let output = native_resource(output, "name")?;
+    let output_geometry = output_geometry(
+        &scope_call(
+            address,
+            identity,
+            "list_outputs",
+            json!({"lease_id": bootstrap}),
+        )?,
+        &output.id,
+    )?;
     revoke_scope(environment, bootstrap)?;
 
     let scopes = [
@@ -833,6 +855,103 @@ fn exercise_scope_matrix(
             if search_field(&after)?["value"] != json!({"kind": "text", "value": text}) {
                 return Err(format!("{label} search did not retain the delivered text"));
             }
+            if iteration == 0 {
+                let (local_x, local_y) = semantic_node_center(search_field(&after)?)?;
+                let surface_x = i32::try_from(
+                    launcher["geometry"][0]
+                        .as_i64()
+                        .ok_or("launcher omitted its global x coordinate")?,
+                )
+                .map_err(|_| "launcher x coordinate exceeds i32")?
+                    + local_x;
+                let surface_y = i32::try_from(
+                    launcher["geometry"][1]
+                        .as_i64()
+                        .ok_or("launcher omitted its global y coordinate")?,
+                )
+                .map_err(|_| "launcher y coordinate exceeds i32")?
+                    + local_y;
+                let (target, x, y) = match label {
+                    "surface" => (
+                        json!({
+                            "kind": "surface", "surface_id": surface.id,
+                            "generation": surface.generation
+                        }),
+                        local_x,
+                        local_y,
+                    ),
+                    "output" => (
+                        json!({
+                            "kind": "output", "output_id": output.id,
+                            "generation": output.generation
+                        }),
+                        surface_x,
+                        surface_y,
+                    ),
+                    "full_session" => (json!({"kind": "desktop"}), surface_x, surface_y),
+                    _ => return Err("unknown shell scope fixture".into()),
+                };
+                let clicked = scope_call(
+                    address,
+                    identity,
+                    "pointer_action",
+                    json!({
+                        "lease_id": lease_id, "target": target, "x": x, "y": y,
+                        "action": {"kind": "click", "button": "left"}
+                    }),
+                )?;
+                if clicked != true {
+                    return Err(format!("{label} pointer dispatch was not acknowledged"));
+                }
+                let focused = scope_call(
+                    address,
+                    identity,
+                    "inspect_surface",
+                    json!({
+                        "lease_id": lease_id, "surface_id": surface.id,
+                        "generation": surface.generation
+                    }),
+                )?;
+                if search_field(&focused)?["focused"] != true {
+                    return Err(format!(
+                        "{label} pointer click did not leave the real launcher field focused"
+                    ));
+                }
+                let (capture_operation, capture_arguments, identity_key, expected) =
+                    if label == "surface" {
+                        (
+                            "capture_surface",
+                            json!({
+                                "lease_id": lease_id, "surface_id": surface.id,
+                                "generation": surface.generation
+                            }),
+                            "surface_id",
+                            &surface,
+                        )
+                    } else {
+                        (
+                            "capture_output",
+                            json!({
+                                "lease_id": lease_id, "output_id": output.id,
+                                "generation": output.generation
+                            }),
+                            "output_id",
+                            &output,
+                        )
+                    };
+                let capture = mcp_call(address, identity, capture_operation, capture_arguments)?;
+                require_capture(
+                    capture_operation,
+                    &capture,
+                    identity_key,
+                    expected,
+                    Some(if label == "surface" {
+                        surface_geometry
+                    } else {
+                        output_geometry
+                    }),
+                )?;
+            }
             require_unchanged_scope_approval(
                 &approval,
                 &remote_snapshot(environment)?,
@@ -841,15 +960,39 @@ fn exercise_scope_matrix(
             )?;
         }
         if label == "surface" {
-            let denial = mcp_call(
-                address,
-                identity,
-                "inspect_surface",
-                json!({
-                    "lease_id": lease_id, "surface_id": panel["id"], "generation": panel["generation"]
-                }),
-            )?;
-            require_tool_error("surface lease observing unrelated panel", &denial)?;
+            for (operation, arguments) in [
+                (
+                    "inspect_surface",
+                    json!({
+                        "lease_id": lease_id, "surface_id": panel["id"],
+                        "generation": panel["generation"]
+                    }),
+                ),
+                (
+                    "capture_surface",
+                    json!({
+                        "lease_id": lease_id, "surface_id": panel["id"],
+                        "generation": panel["generation"]
+                    }),
+                ),
+                (
+                    "pointer_action",
+                    json!({
+                        "lease_id": lease_id,
+                        "target": {
+                            "kind": "surface", "surface_id": panel["id"],
+                            "generation": panel["generation"]
+                        },
+                        "x": 1, "y": 1, "action": {"kind": "move"}
+                    }),
+                ),
+            ] {
+                let denial = mcp_call(address, identity, operation, arguments)?;
+                require_resource_boundary_error(
+                    &format!("surface lease {operation} on unrelated panel"),
+                    &denial,
+                )?;
+            }
             require_unchanged_scope_approval(
                 &approval,
                 &remote_snapshot(environment)?,
@@ -858,7 +1001,7 @@ fn exercise_scope_matrix(
             )?;
         }
         println!(
-            "PASS: {label} scope, one local approval, three observed search edits, no new permission request or lease"
+            "PASS: {label} scope, one local approval, real pointer dispatch, identity-bound PNG capture, three observed search edits, and no new permission request or lease"
         );
         if label == "full_session" {
             last_lease = Some(lease_id);
@@ -1898,6 +2041,140 @@ fn search_field(tree: &Value) -> Result<&Value, String> {
         return Err("launcher search field is ambiguous".into());
     }
     Ok(field)
+}
+
+fn semantic_node_center(node: &Value) -> Result<(i32, i32), String> {
+    let bounds = node["bounds"]
+        .as_array()
+        .filter(|bounds| bounds.len() == 4)
+        .ok_or("semantic node omitted its four-part bounds")?;
+    let x = bounds[0].as_f64().ok_or("semantic node x is invalid")?;
+    let y = bounds[1].as_f64().ok_or("semantic node y is invalid")?;
+    let width = bounds[2]
+        .as_f64()
+        .filter(|width| *width > 2.0)
+        .ok_or("semantic node width is invalid")?;
+    let height = bounds[3]
+        .as_f64()
+        .filter(|height| *height > 2.0)
+        .ok_or("semantic node height is invalid")?;
+    let center = |origin: f64, extent: f64| -> Result<i32, String> {
+        let value = (origin + extent / 2.0).floor();
+        if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+            return Err("semantic node center exceeds i32".into());
+        }
+        Ok(value as i32)
+    };
+    Ok((center(x, width)?, center(y, height)?))
+}
+
+fn output_geometry(outputs: &Value, id: &str) -> Result<(u32, u32), String> {
+    let output = outputs["outputs"]
+        .as_array()
+        .and_then(|outputs| outputs.iter().find(|output| output["name"] == id))
+        .ok_or("authorized output disappeared")?;
+    let width = output["geometry"][2]
+        .as_u64()
+        .and_then(|width| u32::try_from(width).ok())
+        .filter(|width| *width != 0)
+        .ok_or("authorized output width is invalid")?;
+    let height = output["geometry"][3]
+        .as_u64()
+        .and_then(|height| u32::try_from(height).ok())
+        .filter(|height| *height != 0)
+        .ok_or("authorized output height is invalid")?;
+    Ok((width, height))
+}
+
+fn require_capture(
+    operation: &str,
+    response: &Value,
+    identity_key: &str,
+    expected: &nickel_session_protocol::RemoteResourceId,
+    expected_dimensions: Option<(u32, u32)>,
+) -> Result<Vec<u8>, String> {
+    require_tool_success(operation, response)?;
+    let metadata = response
+        .pointer("/result/structuredContent")
+        .ok_or_else(|| format!("{operation} omitted capture metadata"))?;
+    if metadata[identity_key] != expected.id
+        || metadata["generation"] != expected.generation
+        || metadata["capture_generation"]
+            .as_u64()
+            .is_none_or(|value| value == 0)
+        || metadata["submitted_at_us"]
+            .as_u64()
+            .is_none_or(|value| value == 0)
+        || metadata["completed_at_us"]
+            .as_u64()
+            .is_none_or(|completed| {
+                metadata["submitted_at_us"]
+                    .as_u64()
+                    .is_none_or(|submitted| completed < submitted)
+            })
+        || metadata["mime_type"] != "image/png"
+    {
+        return Err(format!(
+            "{operation} returned invalid capture evidence: {metadata}"
+        ));
+    }
+    let width = metadata["width"]
+        .as_u64()
+        .and_then(|width| u32::try_from(width).ok())
+        .filter(|width| *width != 0)
+        .ok_or_else(|| format!("{operation} returned an invalid width"))?;
+    let height = metadata["height"]
+        .as_u64()
+        .and_then(|height| u32::try_from(height).ok())
+        .filter(|height| *height != 0)
+        .ok_or_else(|| format!("{operation} returned an invalid height"))?;
+    if expected_dimensions.is_some_and(|expected| expected != (width, height)) {
+        return Err(format!(
+            "{operation} dimensions {:?} differ from owner geometry {expected_dimensions:?}",
+            (width, height)
+        ));
+    }
+    let mut images = response["result"]["content"]
+        .as_array()
+        .ok_or_else(|| format!("{operation} omitted MCP content"))?
+        .iter()
+        .filter(|content| content["type"] == "image");
+    let image = images
+        .next()
+        .ok_or_else(|| format!("{operation} omitted its PNG image"))?;
+    if images.next().is_some() || image["mimeType"] != "image/png" {
+        return Err(format!("{operation} returned ambiguous image content"));
+    }
+    let png = base64::engine::general_purpose::STANDARD
+        .decode(
+            image["data"]
+                .as_str()
+                .ok_or_else(|| format!("{operation} image omitted base64 data"))?,
+        )
+        .map_err(|error| format!("{operation} image is not base64: {error}"))?;
+    let decoded = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+        .map_err(|error| format!("{operation} returned an invalid PNG: {error}"))?
+        .into_rgba8();
+    if decoded.dimensions() != (width, height) {
+        return Err(format!(
+            "{operation} PNG dimensions differ from its metadata"
+        ));
+    }
+    Ok(decoded.into_raw())
+}
+
+fn require_resource_boundary_error(operation: &str, response: &Value) -> Result<(), String> {
+    require_tool_error(operation, response)?;
+    if response
+        .to_string()
+        .contains("outside the resource boundary")
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "{operation} failed for a reason other than scope: {response}"
+        ))
+    }
 }
 
 fn scope_call(

@@ -28,6 +28,7 @@ backend-udev = [
 ]
 
 [dependencies]
+base64.workspace = true
 image.workspace = true
 dirs.workspace = true
 jiff.workspace = true

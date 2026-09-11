@@ -1,17 +1,23 @@
 # Native scope matrix: first increment
 
-The checked-in Rust `nickel-linux-remote-control-acceptance` harness now exercises
-repeated semantic input under exact shell-surface, output and full-session leases.
-This is partial evidence for Spec 0230 verification items 3, 4 and 6; it does not
-complete the native scope acceptance gate.
+The checked-in Rust `nickel-linux-remote-control-acceptance` harness exercises
+semantic input, native pointer dispatch, and production capture under exact
+shell-surface, ordinary-window, application, output and full-session leases. This
+is Linux evidence for Spec 0230 verification items 3, 4 and 6; it does not complete
+the cross-platform native scope acceptance gate.
 
 The harness opens its own nested launcher's production UI through the trusted
 local session protocol. A bootstrap lease observes the real launcher surface and
 its generation-bearing output, then is revoked. Each scope receives one local
 approval, with exactly one active lease and no pending request. For each scope,
 three distinct search edits use fresh semantic tree generations, and subsequent
-observations verify the actual search text. The exact surface lease also denies
-inspection of the separate panel.
+observations verify the actual search text. The harness clicks the real search
+field through surface-local, output-global and desktop-global pointer targets and
+requires a fresh production semantic observation to retain field focus. Surface
+and output captures must return an identity-bound, generation-bearing, decodable
+PNG with dimensions matching the production owner. The exact surface lease also
+denies inspection, pointer input and capture of the separate panel with the
+resource-boundary error.
 
 After each edit, the local authoritative snapshot must retain the same lease,
 scope and debug level, no pending requests, and unchanged permission/lease audit
@@ -21,10 +27,11 @@ the existing lease is allowed. No broader fallback lease remains during the
 narrow-scope assertions.
 
 The native Wayland run passed on September 11, 2026, using the worktree based on
-`1c180ab` plus this change. All five focused harness tests and strict harness Clippy
-passed. The full native run also retained the existing preapproval tool-denial,
-privacy, renderer-diagnostic and emergency-revocation checks. Its compositor and
-temporary runtime were cleaned up afterward.
+`4854119` plus this change. All six focused harness tests and strict harness and
+fixture Clippy passed. The full `--ordinary-scopes` run also retained the existing
+preapproval tool-denial, privacy, renderer-diagnostic and emergency-revocation
+checks. Its compositor, client fixtures and temporary runtime were cleaned up
+afterward.
 
 Build and run from a reachable Wayland session:
 
@@ -40,7 +47,7 @@ produces `SKIP`, which must not be counted as native acceptance.
 
 Without `--ordinary-scopes`, ordinary window and application scopes remain
 uncovered: the default fixture owns shell resources. The shell matrix does not
-prove raw keyboard/pointer delivery, multiple-output confinement, workspace
+prove raw keyboard or external-client pointer delivery, multiple-output confinement, workspace
 movement, external application accessibility, a local assistive workflow,
 physical keyboard/DRM behavior, or native Windows acceptance. The Wayland run
 exercises nested presentation and compositor-owned shell semantics, not ordinary
@@ -64,22 +71,33 @@ establish authority. The bootstrap lease is revoked before narrow assertions.
 
 One window lease repeatedly focuses the keyboard recipient and sends three native
 keys. Fresh owner observations confirm focus, and the actual client's bounded
-stdout receipt confirms each resulting text change. One application lease then
-repeats the actions and admits a second keyboard-recipient process/window created
+stdout receipt confirms each resulting text change. The same lease captures the
+real client area as an identity-bound decodable PNG and clicks the fixture's real
+button; the client process confirms the application action. One application lease
+then repeats the key, capture and pointer actions and admits a second
+keyboard-recipient process/window created
 after approval, using the same native executable identity without another prompt.
 Its inventory contains exactly those two windows.
 
-The distinct counter executable remains excluded. Focus, capture and keyboard
-requests must fail with the resource-boundary denial. Before the keyboard negative
-control, the counter is focused locally and its live focus is verified through
+The distinct counter executable remains excluded. Focus, capture, pointer and
+keyboard requests must fail with the resource-boundary denial. Before the negative
+controls, the counter is focused locally and its live focus is verified through
 the trusted owner query, eliminating lack of focus as an alternative rejection
 reason. Every phase retains exactly one active lease and unchanged local approval
 history. All fixture processes are killed and reaped on both success and failure.
 
-Native Wayland acceptance passed September 11, 2026, on `2426214` plus this change,
-including the complete earlier shell/privacy/emergency checks. Five focused
-harness tests and strict harness Clippy passed. The commands above reproduce the
-acceptance path.
+The ordinary-window clicks have independent recipient-process confirmation. The
+compositor-hosted launcher is not a separate Wayland client, so its pointer check
+uses the production internal UI owner and a fresh semantic focus observation; it
+does not claim external-client receipt. Protected lock and trusted-indication
+content remains excluded by the existing privacy checks. This increment does not
+invent a protected resource identity merely to issue a targeted denial.
+
+Native Wayland acceptance passed September 11, 2026, on `4854119` plus this change,
+including the complete earlier shell/privacy/emergency checks. Six focused
+harness tests and strict harness and fixture Clippy passed. The combined stress
+check completed 27 requests in 3.019 seconds with a 706 ms maximum response and
+12,684 KiB RSS growth. The commands above reproduce the acceptance path.
 
 This proves ordinary native Wayland executable identity and later same-application
 window admission for these real examples. It does not prove Flatpak/shared-runtime

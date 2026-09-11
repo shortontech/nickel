@@ -2949,6 +2949,7 @@ dependencies = [
  "accesskit_windows",
  "arboard",
  "async-io",
+ "base64 0.22.1",
  "bitflags 2.13.1",
  "dirs",
  "evdev",
