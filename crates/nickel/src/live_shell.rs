@@ -508,6 +508,8 @@ pub struct LiveShell {
     /// routing cannot be inferred independently from the menu's current
     /// visibility without risking a half transaction reaching the file plane.
     desktop_overlay_pointer_capture: Option<nickel_input::PointerButton>,
+    #[cfg(target_os = "windows")]
+    output_identification: Option<(String, u64, usize)>,
     panel_icon: Arc<image::RgbaImage>,
     codex_icon: Arc<image::RgbaImage>,
     palette: ThemePalette,
@@ -605,6 +607,11 @@ struct DesktopSurfaceViewport {
     change_token: HostChangeToken,
     deadline: Option<Instant>,
     overlay_pointer_capture: Option<nickel_input::PointerButton>,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn output_identification_is_current(current: Option<u64>, requested: u64) -> bool {
+    current == Some(requested)
 }
 
 #[derive(Default)]
@@ -993,6 +1000,8 @@ impl LiveShell {
             desktop_deadline: None,
             desktop_application_dirty: false,
             desktop_overlay_pointer_capture: None,
+            #[cfg(target_os = "windows")]
+            output_identification: None,
             panel_icon,
             codex_icon,
             palette,
@@ -4971,7 +4980,60 @@ impl LiveShell {
         self.desktop_application_dirty = false;
         self.desktop_change_token = outcome.change_token;
         self.desktop_deadline = outcome.next_deadline;
-        self.desktop_host.commands().to_vec()
+        let commands = self.desktop_host.commands().to_vec();
+        #[cfg(target_os = "windows")]
+        let commands = {
+            let mut commands = commands;
+            if let Some((output, _, index)) = &self.output_identification
+                && output == &self.desktop_active_viewport
+            {
+            let size = 144.0_f32.min(width as f32).min(height as f32);
+            let rect = Rect::new(
+                (width as f32 - size) / 2.0,
+                (height as f32 - size) / 2.0,
+                size,
+                size,
+            );
+            commands.push(PaintCommand::RoundedFill {
+                rect,
+                color: 0xee202124,
+                radius: 24.0,
+            });
+                commands.push(PaintCommand::Text {
+                bounds: rect,
+                text: (index + 1).to_string(),
+                scale: 64.0,
+                color: 0xffffffff,
+                align: TextAlign::Center,
+                bold: true,
+                wrap: false,
+                });
+            }
+            commands
+        };
+        commands
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn identify_output(&mut self, output: String, generation: u64, index: usize) {
+        self.output_identification = Some((output, generation, index));
+        self.desktop_application_dirty = true;
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn clear_output_identification(&mut self, generation: u64) -> bool {
+        if output_identification_is_current(
+            self.output_identification
+                .as_ref()
+                .map(|(_, current, _)| *current),
+            generation,
+        ) {
+            self.output_identification = None;
+            self.desktop_application_dirty = true;
+            true
+        } else {
+            false
+        }
     }
 
     fn volume_osd_scene(&mut self, width: u32, height: u32) -> Vec<PaintCommand> {
@@ -5538,6 +5600,18 @@ impl LiveShell {
             self.apply_panel_action(action);
         }
         changed
+    }
+}
+
+#[cfg(test)]
+mod output_identification_generation_tests {
+    use super::output_identification_is_current;
+
+    #[test]
+    fn stale_expiry_cannot_clear_a_replacement_badge() {
+        assert!(output_identification_is_current(Some(8), 8));
+        assert!(!output_identification_is_current(Some(9), 8));
+        assert!(!output_identification_is_current(None, 8));
     }
 }
 

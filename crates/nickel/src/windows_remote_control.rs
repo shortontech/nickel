@@ -478,6 +478,11 @@ struct PointerOwnerAction {
     y: i32,
     action: nickel_remote_control::pointer::PointerAction,
 }
+#[derive(Clone, Copy)]
+struct DiagnosticCommit {
+    deadline: Instant,
+    expected_local_input_epoch: u64,
+}
 
 fn resolve_windows_pointer_point<'a>(
     resources: &'a crate::windows_resource_owner::Owner,
@@ -656,8 +661,13 @@ enum OwnerRequest {
         permit: DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
         platform_refresh: Option<PreparedWindowsPlatformRefresh>,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
         reply:
             SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>>,
+    },
+    ExpireOutputIdentification {
+        generation: u64,
     },
     Events {
         permit: DesktopPermit,
@@ -2473,6 +2483,8 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
         action.validate()?;
         permit.with_debug(false, || Ok(()))?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
         let platform_refresh = match &action {
             nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus {
                 domain,
@@ -2490,6 +2502,8 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 permit,
                 action,
                 platform_refresh,
+                deadline,
+                expected_local_input_epoch,
                 reply,
             })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
@@ -3062,6 +3076,7 @@ pub(crate) struct WindowsRemoteControl {
     settings_worker: Arc<WindowsSettingsWorker>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
+    output_identification_cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
     indicators: std::collections::HashMap<String, IndicatorSurface>,
     authority: Arc<WindowsDesktopAuthority>,
     desktop_session: Option<u32>,
@@ -3251,6 +3266,7 @@ impl WindowsRemoteControl {
             settings_worker,
             platform_refresh_worker,
             remote_frame_trace: None,
+            output_identification_cancel: None,
             indicators: Default::default(),
             authority,
             desktop_session,
@@ -3738,15 +3754,35 @@ impl WindowsRemoteControl {
                     permit,
                     action,
                     platform_refresh,
+                    deadline,
+                    expected_local_input_epoch,
                     reply,
                 } => {
                     let result = shell.as_mut().map_or_else(
                         || Err("Windows presentation owner is unavailable".into()),
-                        |(shell, _)| {
-                            self.perform_diagnostic_action(shell, permit, action, platform_refresh)
+                        |(shell, state)| {
+                            self.perform_diagnostic_action(
+                                shell,
+                                state,
+                                permit,
+                                action,
+                                platform_refresh,
+                                DiagnosticCommit {
+                                    deadline,
+                                    expected_local_input_epoch,
+                                },
+                            )
                         },
                     );
                     let _ = reply.try_send(result);
+                }
+                OwnerRequest::ExpireOutputIdentification { generation } => {
+                    if let Some((shell, state)) = shell.as_mut()
+                        && state.clear_output_identification(generation)
+                    {
+                        self.output_identification_cancel = None;
+                        shell.request_all_redraws();
+                    }
                 }
                 OwnerRequest::Events {
                     permit,
@@ -7003,9 +7039,11 @@ impl WindowsRemoteControl {
     fn perform_diagnostic_action(
         &mut self,
         shell: &mut WinitShell,
+        state: &mut crate::LiveShell,
         permit: DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
         platform_refresh: Option<PreparedWindowsPlatformRefresh>,
+        commit: DiagnosticCommit,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
         use nickel_remote_control::desktop_events::{
             DesktopEventKind, ProductionEffectKind, ProductionEffectOutcome,
@@ -7022,6 +7060,7 @@ impl WindowsRemoteControl {
                     | DiagnosticAction::RefreshPlatformStatus { .. }
                     | DiagnosticAction::StartFrameTrace { .. }
                     | DiagnosticAction::StopFrameTrace
+                    | DiagnosticAction::IdentifyOutput { .. }
             ) {
                 Ok(())
             } else {
@@ -7283,7 +7322,65 @@ impl WindowsRemoteControl {
                     Ok(())
                 })?;
             }
-            _ => unreachable!("unsupported diagnostic action rejected above"),
+            DiagnosticAction::IdentifyOutput { output } => {
+                if Instant::now() >= commit.deadline
+                    || local_input_epoch() != commit.expected_local_input_epoch
+                {
+                    return Err("physical input interrupted output identification".into());
+                }
+                let scope = permit.resource_scope()?;
+                let (native, evidence) = self
+                    .resources
+                    .output_capture_resource(&scope, &output.id, output.generation)
+                    .ok_or("Windows output is unavailable or outside its authority")?;
+                let names = shell.output_names();
+                let index = names
+                    .iter()
+                    .position(|name| name == &native.name)
+                    .ok_or("Windows output has no presentation surface")?;
+                let generation = self
+                    .observation_generation
+                    .checked_add(1)
+                    .ok_or("Windows observation generations exhausted")?;
+                permit.with_resource(&evidence, || {
+                    if Instant::now() >= commit.deadline
+                        || local_input_epoch() != commit.expected_local_input_epoch
+                    {
+                        return Err("physical input interrupted output identification".into());
+                    }
+                    state.identify_output(native.name.clone(), generation, index);
+                    shell.request_all_redraws();
+                    Ok(())
+                })?;
+                if let Some(previous) = self.output_identification_cancel.take() {
+                    previous.store(true, std::sync::atomic::Ordering::Release);
+                }
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                self.output_identification_cancel = Some(cancelled.clone());
+                let sender = self.authority.sender.clone();
+                let timer_permit = permit.clone();
+                if std::thread::Builder::new()
+                    .name("nickel-output-identification-expiry".into())
+                    .spawn(move || {
+                        let expires = Instant::now() + Duration::from_secs(3);
+                        while Instant::now() < expires
+                            && timer_permit.check_live().is_ok()
+                            && local_input_epoch() == commit.expected_local_input_epoch
+                            && !cancelled.load(std::sync::atomic::Ordering::Acquire)
+                        {
+                            std::thread::sleep(Duration::from_millis(25));
+                        }
+                        let _ = sender
+                            .try_send(OwnerRequest::ExpireOutputIdentification { generation });
+                    })
+                    .is_err()
+                {
+                    self.output_identification_cancel = None;
+                    state.clear_output_identification(generation);
+                    shell.request_all_redraws();
+                    return Err("Windows output identification timer is unavailable".into());
+                }
+            }
         }
         permit.with_debug(!self.desktop_unlocked, || {
             self.observation_generation = self
@@ -7310,12 +7407,22 @@ impl WindowsRemoteControl {
                     .cloned(),
                 _ => None,
             };
+            let output_identification = match &action {
+                DiagnosticAction::IdentifyOutput { output } => Some(
+                    nickel_remote_control::diagnostics::OutputIdentificationOutcome {
+                        output: output.clone(),
+                        generation: self.observation_generation,
+                        duration_ms: 3_000,
+                    },
+                ),
+                _ => None,
+            };
             Ok(DiagnosticActionOutcome {
                 action,
                 observation_generation: self.observation_generation,
                 submitted_at_us,
                 presentation_confirmed: false,
-                output_identification: None,
+                output_identification,
                 application_inventory_refresh: None,
                 platform_refresh,
             })
@@ -9016,6 +9123,7 @@ mod tests {
             settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
             remote_frame_trace: None,
+            output_identification_cancel: None,
             indicators: Default::default(),
             authority: Arc::new(WindowsDesktopAuthority {
                 sender,

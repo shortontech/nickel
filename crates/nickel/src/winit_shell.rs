@@ -1874,6 +1874,10 @@ impl WinitShell {
             .collect())
     }
 
+    pub(crate) fn output_names(&self) -> Vec<String> {
+        self.displays.iter().map(|(_, name)| name.clone()).collect()
+    }
+
     fn display_names(&self) -> Result<Vec<String>, String> {
         Ok(self.displays.iter().map(|(_, name)| name.clone()).collect())
     }
