@@ -267,7 +267,98 @@ impl PeripheralBackend for LinuxPeripherals {
 
 #[cfg(target_os = "linux")]
 fn command_output(program: &str, arguments: &[&str]) -> std::io::Result<std::process::Output> {
-    std::process::Command::new(program).args(arguments).output()
+    bounded_command_output(
+        program,
+        arguments,
+        std::time::Duration::from_secs(2),
+        64 * 1024,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn bounded_command_output(
+    program: &str,
+    arguments: &[&str],
+    timeout: std::time::Duration,
+    output_limit: usize,
+) -> std::io::Result<std::process::Output> {
+    use std::{
+        io::{Error, ErrorKind, Read},
+        os::unix::process::CommandExt,
+        process::Stdio,
+    };
+
+    fn drain(mut pipe: impl Read, limit: usize) -> std::io::Result<(Vec<u8>, bool)> {
+        let mut retained = Vec::with_capacity(limit.min(4096));
+        let mut truncated = false;
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = pipe.read(&mut buffer)?;
+            if count == 0 {
+                return Ok((retained, truncated));
+            }
+            let remaining = limit.saturating_sub(retained.len());
+            retained.extend_from_slice(&buffer[..count.min(remaining)]);
+            truncated |= count > remaining;
+        }
+    }
+
+    let mut command = std::process::Command::new(program);
+    command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| Error::other("peripheral command stdout unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| Error::other("peripheral command stderr unavailable"))?;
+    let stdout = std::thread::spawn(move || drain(stdout, output_limit));
+    let stderr = std::thread::spawn(move || drain(stderr, output_limit));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            // SAFETY: this child was placed in a fresh process group whose id is
+            // its positive PID. A negative id signals only that owned group.
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.wait();
+            let _ = stdout.join();
+            let _ = stderr.join();
+            return Err(Error::new(
+                ErrorKind::TimedOut,
+                "peripheral command timed out",
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    let (stdout, stdout_truncated) = stdout
+        .join()
+        .map_err(|_| Error::other("peripheral stdout reader failed"))??;
+    let (stderr, stderr_truncated) = stderr
+        .join()
+        .map_err(|_| Error::other("peripheral stderr reader failed"))??;
+    if stdout_truncated || stderr_truncated {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "peripheral command output exceeds limit",
+        ));
+    }
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1166,6 +1257,30 @@ fn sanitize_outcome(outcome: PeripheralOutcome) -> PeripheralOutcome {
 mod tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn native_command_boundary_times_out_and_rejects_output_floods() {
+        let started = std::time::Instant::now();
+        let timeout = super::bounded_command_output(
+            "sh",
+            &["-c", "sleep 5"],
+            std::time::Duration::from_millis(50),
+            4096,
+        )
+        .unwrap_err();
+        assert_eq!(timeout.kind(), std::io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+
+        let flood = super::bounded_command_output(
+            "sh",
+            &["-c", "head -c 8192 /dev/zero"],
+            std::time::Duration::from_secs(1),
+            4096,
+        )
+        .unwrap_err();
+        assert_eq!(flood.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     struct Fixture {
         snapshot: Mutex<PeripheralSnapshot>,

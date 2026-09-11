@@ -21,6 +21,7 @@ async-io = "2.6"
 async-lock = "3.4"
 async-trait = "0.1"
 futures-lite = "2.6"
+libc.workspace = true
 zvariant = { version = "5.15", features = ["gvariant"] }
 nickel-storage = { path = "../nickel-storage" }
 
