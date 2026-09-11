@@ -77,6 +77,14 @@ impl LaunchCapture {
         &self.target
     }
 
+    pub(crate) fn application_id(&self) -> &str {
+        &self.descriptor.id
+    }
+
+    pub(crate) fn application_identity(&self) -> &str {
+        &self.descriptor.identity
+    }
+
     /// Called only with the owned process handle returned by this exact
     /// ShellExecuteEx invocation. Missing/DDE/reused processes receive no receipt.
     pub(crate) fn complete(self, process: OwnedHandle) {
@@ -245,6 +253,7 @@ fn pin_launch_path(file: &File) -> Option<(String, Vec<File>)> {
 struct CatalogData {
     descriptors: Vec<Descriptor>,
     applications: Vec<nickel_remote_control::diagnostics::InstalledApplication>,
+    launch_applications: Vec<Application>,
     truncated: bool,
 }
 
@@ -268,6 +277,7 @@ fn catalog() -> CatalogData {
         return CatalogData {
             descriptors: Vec::new(),
             applications: Vec::new(),
+            launch_applications: Vec::new(),
             truncated: true,
         };
     }
@@ -278,6 +288,7 @@ fn catalog() -> CatalogData {
             .len()
             .min(nickel_remote_control::diagnostics::MAX_INSTALLED_APPLICATIONS),
     );
+    let mut launch_applications = Vec::with_capacity(discovery.applications().len());
     let mut truncated = false;
     for application in discovery.applications() {
         let descriptor = read_descriptor(
@@ -308,6 +319,9 @@ fn catalog() -> CatalogData {
                 verified_application: (descriptor.policy == RuntimePolicy::LaunchBound)
                     .then(|| descriptor.identity.clone()),
             });
+            if descriptor.policy == RuntimePolicy::LaunchBound {
+                launch_applications.push(application.clone());
+            }
         } else {
             truncated = true;
         }
@@ -317,6 +331,7 @@ fn catalog() -> CatalogData {
         descriptors,
         truncated,
         applications,
+        launch_applications,
     }
 }
 
@@ -348,6 +363,8 @@ pub(crate) struct OwnerRegistry {
     observed: Option<Instant>,
     catalog_generation: u64,
     applications: Vec<nickel_remote_control::diagnostics::InstalledApplication>,
+    catalog_descriptors: Vec<Descriptor>,
+    launch_applications: Vec<Application>,
     catalog_truncated: bool,
 }
 impl Default for OwnerRegistry {
@@ -415,8 +432,49 @@ impl Default for OwnerRegistry {
             observed: None,
             catalog_generation: 0,
             applications: Vec::new(),
+            catalog_descriptors: Vec::new(),
+            launch_applications: Vec::new(),
             catalog_truncated: false,
         }
+    }
+}
+
+impl OwnerRegistry {
+    /// Re-resolve an exact generation-bearing catalog entry and pin its shortcut.
+    /// The returned capture is deliberately not executable by this registry: the
+    /// remote owner must transfer it to a launch broker with a bounded authority
+    /// commit before any ShellExecuteEx call can begin.
+    pub(crate) fn prepare_launch(
+        &self,
+        catalog_generation: u64,
+        application_id: &str,
+    ) -> Result<LaunchCapture, String> {
+        if catalog_generation == 0 || catalog_generation != self.catalog_generation {
+            return Err("application catalog changed; enumerate it again".into());
+        }
+        let listed = self
+            .applications
+            .iter()
+            .find(|application| application.id == application_id)
+            .ok_or("installed application is unavailable")?;
+        let expected_identity = listed
+            .verified_application
+            .as_deref()
+            .ok_or("installed application has no launch-bound identity")?;
+        let application = self
+            .launch_applications
+            .iter()
+            .find(|application| application.id() == application_id)
+            .cloned()
+            .ok_or("installed application changed; enumerate it again")?;
+        let capture = LaunchCapture::prepare(&application)
+            .ok_or("installed application launch target could not be pinned")?;
+        if capture.application_id() != application_id
+            || capture.application_identity() != expected_identity
+        {
+            return Err("installed application changed; enumerate it again".into());
+        }
+        Ok(capture)
     }
 }
 impl OwnerRegistry {
@@ -435,20 +493,26 @@ impl OwnerRegistry {
         }
         if let Ok(snapshot) = self.snapshots.try_recv() {
             if fresh_catalog(snapshot.started, snapshot.completed, Instant::now()) {
-                self.registry.reconcile(snapshot.catalog.descriptors, |id| {
-                    control.leases_mut().revoke(id);
-                });
+                self.registry
+                    .reconcile(snapshot.catalog.descriptors.clone(), |id| {
+                        control.leases_mut().revoke(id);
+                    });
                 let changed = self.catalog_truncated != snapshot.catalog.truncated
-                    || !same_catalog(&self.applications, &snapshot.catalog.applications);
+                    || !same_catalog(&self.applications, &snapshot.catalog.applications)
+                    || self.catalog_descriptors != snapshot.catalog.descriptors;
                 if !changed || self.catalog_generation < u64::MAX {
                     if changed {
                         self.catalog_generation += 1;
                     }
                     self.applications = snapshot.catalog.applications;
+                    self.catalog_descriptors = snapshot.catalog.descriptors;
+                    self.launch_applications = snapshot.catalog.launch_applications;
                     self.catalog_truncated = snapshot.catalog.truncated;
                     self.observed = Some(snapshot.completed);
                 } else {
                     self.applications.clear();
+                    self.catalog_descriptors.clear();
+                    self.launch_applications.clear();
                     self.catalog_truncated = false;
                     self.observed = None;
                 }
@@ -458,6 +522,8 @@ impl OwnerRegistry {
                 });
                 self.observed = None;
                 self.applications.clear();
+                self.catalog_descriptors.clear();
+                self.launch_applications.clear();
                 self.catalog_truncated = false;
             }
         }
@@ -473,6 +539,8 @@ impl OwnerRegistry {
                 control.leases_mut().revoke(id);
             });
             self.applications.clear();
+            self.catalog_descriptors.clear();
+            self.launch_applications.clear();
             self.catalog_truncated = false;
         }
         for _ in 0..16 {

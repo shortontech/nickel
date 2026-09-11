@@ -251,6 +251,13 @@ enum OwnerRequest {
         permit: DesktopPermit,
         reply: SyncSender<Result<nickel_remote_control::diagnostics::ApplicationInventory, String>>,
     },
+    LaunchApplication {
+        permit: DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+        reply: SyncSender<
+            Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String>,
+        >,
+    },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
         action: nickel_remote_control::ClientConnectionAction,
@@ -341,6 +348,26 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::Applications { permit, reply })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn launch_installed_application(
+        &self,
+        permit: DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::LaunchApplication {
+                permit,
+                request,
+                reply,
+            })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
@@ -846,6 +873,14 @@ impl WindowsRemoteControl {
                 }
                 OwnerRequest::Applications { permit, reply } => {
                     let result = self.application_inventory(permit);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::LaunchApplication {
+                    permit,
+                    request,
+                    reply,
+                } => {
+                    let result = self.prepare_application_launch(permit, request);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -1722,6 +1757,54 @@ impl WindowsRemoteControl {
             protected: false,
         };
         permit.with_resource(&evidence, || Ok(inventory))
+    }
+
+    fn prepare_application_launch(
+        &mut self,
+        permit: DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
+
+        if !self.desktop_unlocked {
+            return Err("Windows input desktop is protected".into());
+        }
+        if request.application_id.is_empty() || request.application_id.len() > 512 {
+            return Err("invalid application launch target".into());
+        }
+        let capture = self
+            .applications
+            .prepare_launch(request.catalog_generation, &request.application_id)?;
+        let scope = permit.resource_scope()?;
+        let expected = match &scope {
+            ResourceScope::FullSession => None,
+            ResourceScope::Application(identity) => Some(identity.as_str()),
+            ResourceScope::Output(_) => {
+                return Err(
+                    "Windows output-scoped launch awaits verified placement support".into(),
+                );
+            }
+            ResourceScope::Surface(_) | ResourceScope::Window(_) => {
+                return Err("this Windows lease cannot launch applications".into());
+            }
+        };
+        if expected.is_some_and(|expected| expected != capture.application_identity()) {
+            return Err("installed launch target is outside the application lease".into());
+        }
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: Some(capture.application_identity()),
+            output: None,
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        permit.with_input(&evidence, || Ok(()))?;
+        // Keep the pinned capture alive through every authority check. Execution
+        // remains denied until a one-shot broker provides a linearizable resume
+        // boundary; calling ShellExecuteEx here would hold the ControlPlane mutex.
+        drop(capture);
+        Err("Windows launch broker is unavailable".into())
     }
 
     fn perform_window_action(
