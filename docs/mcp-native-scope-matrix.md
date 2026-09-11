@@ -129,8 +129,8 @@ compositor/runtime cleaned afterward.
 The extra output is virtual: it exercises live Wayland clients and production
 compositor resource/geometry/workspace authority, but has no independent physical
 display presenter. This is not physical multi-monitor, DRM, mixed-DPI presentation,
-Xwayland, or Windows acceptance. Continuous held-input movement and transient/broker
-identity remain separate cases. The real negative launch test does not prove an
+Xwayland, or Windows acceptance. Transient/broker identity remains a separate case; held-input coverage is
+described below. The real negative launch test does not prove an
 authorized application launch or output-placement workflow.
 ## Ordinary Xwayland clients
 
@@ -162,3 +162,39 @@ This remains bounded synthetic-input acceptance with two repository clients. It
 does not cover PID reuse, sandbox brokers, shared runtimes, transient ownership,
 physical input, assistive workflows, multiple outputs/workspaces, or native
 Windows behavior.
+
+## Held-input output movement and arbitration
+
+The `--movement` path also runs two-client held ShiftLeft and left-button drag
+cases against the real Wayland keyboard-recipient example. The example enables
+fixed down/up receipt markers only for this acceptance mode; arbitrary keys,
+text, and coordinates are not added to its receipt log.
+
+An output-scoped owner starts each hold while a window-scoped contender can
+observe the same target. The contender's key, drag, and focus requests must fail
+specifically because shared input or the native opposite input primitive is
+busy (the pointer adapter currently labels any pressed keyboard input local). A trusted local move takes the target
+to the virtual output. The client must receive the native release, and the old
+output lease must lose both continuation and inventory access. The window-scoped
+contender then acquires the hold on the moved target. The previous owner's cancel
+must fail without releasing the new owner's input; the new owner continues and
+ends it with a matching native release. Returning the target does not resurrect
+the old hold. Both leases remain unchanged, with no additional approval.
+
+The drag case exposed missing output evidence for window-targeted pointer
+requests. The resolver now uses the same current-window output helper as keyboard
+authorization. Before this fix the real output-scoped drag was denied before
+press; the native case retains that positive authorization regression alongside
+the negative boundary checks.
+
+This covers output-boundary cancellation, cross-client arbitration, and native
+release delivery. It does not cover physical multi-monitor presentation,
+workspace changes during a hold, application-scoped hold continuation, physical
+local-input takeover, or held-input movement on Xwayland or Windows.
+
+Native Wayland acceptance passed September 11, 2026, on `7f5aea9` plus this
+increment: both hold cases and the complete preceding movement/scope suite passed.
+Five harness tests, the production pointer-target resolution test, and strict
+harness/example Clippy passed. The combined stress check completed 27 requests in
+2.95 seconds with a 679 ms maximum response and 6.3 MiB RSS growth. The virtual
+output remains a compositor authority/geometry fixture, not a physical presenter.

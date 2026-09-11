@@ -168,6 +168,7 @@ pub(super) fn exercise(
     revoke_scope(environment, lease)?;
     if let Some(movement) = &movement {
         movement.output_boundary(environment, address, identity, &first, &mut recipient)?;
+        movement.held_input(environment, address, identity, &first, &mut recipient)?;
         movement.cleanup(environment)?;
     }
     drop(second);
@@ -472,6 +473,316 @@ impl Movement {
             },
         )
     }
+
+    fn held_input(
+        &self,
+        environment: &SessionEnvironment,
+        address: SocketAddr,
+        identity: &Identity,
+        window: &Value,
+        client: &mut OrdinaryClient,
+    ) -> Result<(), String> {
+        let contender = connect_identity(address, "native-held-contender")?;
+        let watch = ConnectionWatch::start(address, &contender)?;
+        let result = (|| {
+            for kind in [HeldKind::Key, HeldKind::Drag] {
+                let owner_lease = approve_scope(
+                    environment,
+                    address,
+                    identity,
+                    RemoteResourceScope::Output(self.primary.clone()),
+                    false,
+                )?;
+                let contender_lease = approve_overlapping_window(
+                    environment,
+                    address,
+                    &contender,
+                    owner_lease,
+                    native_resource(window, "id")?,
+                )?;
+                let approved = remote_snapshot(environment)?;
+                scope_call(
+                    address,
+                    identity,
+                    "focus_window",
+                    window_arguments(owner_lease, window),
+                )?;
+                let baseline = client.hold_receipts(kind)?;
+                if baseline.0 != baseline.1 {
+                    return Err("native fixture already has unbalanced held input".into());
+                }
+                let (method, start) = kind.request(owner_lease, window, HoldStep::Start)?;
+                scope_call(address, identity, method, start)?;
+                client.wait_hold_receipts(kind, (baseline.0 + 1, baseline.1))?;
+
+                // Both leases cover the current window. Observation succeeds;
+                // only shared input arbitration can explain these denials.
+                let inventory = scope_call(
+                    address,
+                    &contender,
+                    "list_windows",
+                    json!({"lease_id": contender_lease}),
+                )?;
+                if !inventory.as_array().is_some_and(|windows| {
+                    windows
+                        .iter()
+                        .any(|candidate| candidate["id"] == window["id"])
+                }) {
+                    return Err("contender cannot observe its authorized held target".into());
+                }
+                for candidate in [HeldKind::Key, HeldKind::Drag] {
+                    let (method, arguments) =
+                        candidate.request(contender_lease, window, HoldStep::Start)?;
+                    let response = mcp_call(address, &contender, method, arguments)?;
+                    require_tool_error("contending native input", &response)?;
+                    // The pointer adapter checks native pressed keys before
+                    // lease arbitration and currently labels any such key local.
+                    let diagnostic = response.to_string();
+                    let native_key_busy =
+                        matches!((kind, candidate), (HeldKind::Key, HeldKind::Drag))
+                            && diagnostic.contains("local keyboard input is held");
+                    let native_pointer_busy =
+                        matches!((kind, candidate), (HeldKind::Drag, HeldKind::Key))
+                            && diagnostic.contains("pointer input is held or grabbed");
+                    if !diagnostic.contains("shared input")
+                        && !native_key_busy
+                        && !native_pointer_busy
+                    {
+                        return Err(format!(
+                            "input contention rejected for the wrong reason: {response}"
+                        ));
+                    }
+                }
+                let focus = mcp_call(
+                    address,
+                    &contender,
+                    "focus_window",
+                    window_arguments(contender_lease, window),
+                )?;
+                require_tool_error("contending focus", &focus)?;
+                if !focus.to_string().contains("shared input") {
+                    return Err(format!(
+                        "focus contention rejected for the wrong reason: {focus}"
+                    ));
+                }
+                client.wait_hold_receipts(kind, (baseline.0 + 1, baseline.1))?;
+
+                local_command(
+                    environment,
+                    Command::MoveWindowToOutput {
+                        window: protocol_window_id(window)?,
+                        output: MOVEMENT_OUTPUT.into(),
+                    },
+                )?;
+                verify_placement(
+                    environment,
+                    protocol_window_id(window)?,
+                    MOVEMENT_OUTPUT,
+                    self.original_workspace,
+                )?;
+                // Require the client's actual non-synthetic key/button release,
+                // not just an owner bookkeeping transition or a failed RPC.
+                client.wait_hold_receipts(kind, (baseline.0 + 1, baseline.1 + 1))?;
+                let (method, continuation) =
+                    kind.request(owner_lease, window, HoldStep::Continue)?;
+                require_tool_error(
+                    "old output owner continuation",
+                    &mcp_call(address, identity, method, continuation)?,
+                )?;
+                let inventory = scope_call(
+                    address,
+                    identity,
+                    "list_windows",
+                    json!({"lease_id": owner_lease}),
+                )?;
+                if inventory.as_array().is_none_or(|windows| {
+                    windows
+                        .iter()
+                        .any(|candidate| candidate["id"] == window["id"])
+                }) {
+                    return Err("held target escaped its output lease through inventory".into());
+                }
+
+                scope_call(
+                    address,
+                    &contender,
+                    "focus_window",
+                    window_arguments(contender_lease, window),
+                )?;
+                let (method, start) = kind.request(contender_lease, window, HoldStep::Start)?;
+                scope_call(address, &contender, method, start)?;
+                client.wait_hold_receipts(kind, (baseline.0 + 2, baseline.1 + 1))?;
+                let (method, cancel) = kind.request(owner_lease, window, HoldStep::Cancel)?;
+                require_tool_error(
+                    "old owner cancelling new owner",
+                    &mcp_call(address, identity, method, cancel)?,
+                )?;
+                let (method, continuation) =
+                    kind.request(contender_lease, window, HoldStep::Continue)?;
+                scope_call(address, &contender, method, continuation)?;
+                client.wait_hold_receipts(kind, (baseline.0 + 2, baseline.1 + 1))?;
+                let (method, end) = kind.request(contender_lease, window, HoldStep::End)?;
+                scope_call(address, &contender, method, end)?;
+                client.wait_hold_receipts(kind, (baseline.0 + 2, baseline.1 + 2))?;
+
+                local_command(
+                    environment,
+                    Command::MoveWindowToOutput {
+                        window: protocol_window_id(window)?,
+                        output: self.primary.id.clone(),
+                    },
+                )?;
+                let (method, stale) = kind.request(owner_lease, window, HoldStep::Continue)?;
+                require_tool_error(
+                    "cancelled hold after window return",
+                    &mcp_call(address, identity, method, stale)?,
+                )?;
+                client.wait_hold_receipts(kind, (baseline.0 + 2, baseline.1 + 2))?;
+                let current = remote_snapshot(environment)?;
+                if !current.pending_leases.is_empty()
+                    || current.active_leases.len() != 2
+                    || current.permission_audit != approved.permission_audit
+                    || current.lease_audit != approved.lease_audit
+                {
+                    return Err(
+                        "held input required another approval or changed lease authority".into(),
+                    );
+                }
+                session_message(
+                    environment,
+                    Request::Command(Command::ManageRemoteLease {
+                        lease_id: owner_lease,
+                        action: RemoteLeaseAction::Revoke,
+                    }),
+                )?;
+                revoke_scope(environment, contender_lease)?;
+                println!(
+                    "PASS: native {} hold excludes competing key/drag/focus, releases on output exit, rejects stale continuation/cancel and preserves the next owner's hold",
+                    kind.marker()
+                );
+            }
+            Ok(())
+        })();
+        let watch_result = watch.finish();
+        result.and(watch_result)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum HeldKind {
+    Key,
+    Drag,
+}
+#[derive(Clone, Copy)]
+enum HoldStep {
+    Start,
+    Continue,
+    End,
+    Cancel,
+}
+impl HeldKind {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Key => "key",
+            Self::Drag => "button",
+        }
+    }
+    fn request(
+        self,
+        lease: u64,
+        window: &Value,
+        step: HoldStep,
+    ) -> Result<(&'static str, Value), String> {
+        let mut request = window_arguments(lease, window);
+        let method = match self {
+            Self::Key => {
+                request["action"] = match step {
+                    HoldStep::Start => {
+                        json!({"kind": "hold_start", "keysym": 65505, "modifiers": []})
+                    }
+                    HoldStep::Continue => json!({"kind": "hold_keep_alive"}),
+                    HoldStep::End => json!({"kind": "hold_end"}),
+                    HoldStep::Cancel => json!({"kind": "hold_cancel"}),
+                };
+                "keyboard_action"
+            }
+            Self::Drag => {
+                request["x"] = json!(
+                    window["width"]
+                        .as_u64()
+                        .ok_or("held target width missing")?
+                        / 2
+                );
+                request["y"] = json!(
+                    window["height"]
+                        .as_u64()
+                        .ok_or("held target height missing")?
+                        / 2
+                );
+                request["action"] = match step {
+                    HoldStep::Start => json!({"kind": "drag_start", "button": "left"}),
+                    HoldStep::Continue => json!({"kind": "drag_move"}),
+                    HoldStep::End => json!({"kind": "drag_end"}),
+                    HoldStep::Cancel => json!({"kind": "drag_cancel"}),
+                };
+                "pointer_action"
+            }
+        };
+        Ok((method, request))
+    }
+}
+fn window_arguments(lease: u64, window: &Value) -> Value {
+    json!({"lease_id": lease, "window_id": window["id"], "generation": window["generation"]})
+}
+fn approve_overlapping_window(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    existing: u64,
+    resource: nickel_session_protocol::RemoteResourceId,
+) -> Result<u64, String> {
+    let scope = RemoteResourceScope::Window(resource);
+    let requested = mcp_call(
+        address,
+        identity,
+        "request_control_lease",
+        json!({
+            "scope": scope, "duration_seconds": 1200, "allow_resumption": false, "full_debug": false
+        }),
+    )?;
+    require_tool_success("overlapping client lease request", &requested)?;
+    let pending = remote_snapshot(environment)?;
+    if pending.active_leases.len() != 1
+        || pending.active_leases[0].lease_id != existing
+        || pending.pending_leases.len() != 1
+    {
+        return Err("overlap approval has unexpected authority".into());
+    }
+    let pending = &pending.pending_leases[0];
+    if pending.client_id != identity.client_id || pending.request.scope != scope {
+        return Err("overlap approval target changed".into());
+    }
+    let response = session_message(
+        environment,
+        Request::Command(Command::DecideRemoteLease {
+            client_id: pending.client_id.clone(),
+            pending_generation: pending.pending_generation,
+            request: pending.request.clone(),
+            allow: true,
+        }),
+    )?;
+    let ServerMessage::RemoteControl(approved) = response else {
+        return Err("overlap approval missing snapshot".into());
+    };
+    if approved.active_leases.len() != 2 || !approved.pending_leases.is_empty() {
+        return Err("overlap approval did not create exactly two leases".into());
+    }
+    approved
+        .active_leases
+        .iter()
+        .find(|lease| lease.lease_id != existing && lease.scope == scope)
+        .map(|lease| lease.lease_id)
+        .ok_or_else(|| "new overlap lease missing".into())
 }
 
 fn protocol_window_id(window: &Value) -> Result<nickel_session_protocol::WindowId, String> {
@@ -742,6 +1053,10 @@ impl OrdinaryClient {
             }
         }
         let child = command
+            .env(
+                "NICKEL_NATIVE_HOLD_RECEIPTS",
+                if movement_enabled() { "1" } else { "0" },
+            )
             .env("XDG_RUNTIME_DIR", &environment.runtime)
             .env("XDG_CONFIG_HOME", environment.runtime.join("config"))
             .env("XDG_STATE_HOME", environment.runtime.join("state"))
@@ -785,6 +1100,46 @@ impl OrdinaryClient {
             if Instant::now() >= deadline {
                 return Err(format!(
                     "native key dispatch did not reach the recipient text field: {text}"
+                ));
+            }
+            thread::sleep(POLL);
+        }
+    }
+
+    fn hold_receipts(&mut self, kind: HeldKind) -> Result<(usize, usize), String> {
+        self.require_running()?;
+        let mut text = String::new();
+        fs::File::open(&self.log)
+            .map_err(|error| error.to_string())?
+            .take(65537)
+            .read_to_string(&mut text)
+            .map_err(|error| error.to_string())?;
+        if text.len() > 65536 {
+            return Err("native hold receipt exceeded 64 KiB".into());
+        }
+        let pressed = format!("recipient-hold-{}=pressed", kind.marker());
+        let released = format!("recipient-hold-{}=released", kind.marker());
+        Ok((
+            text.lines().filter(|line| *line == pressed).count(),
+            text.lines().filter(|line| *line == released).count(),
+        ))
+    }
+
+    fn wait_hold_receipts(
+        &mut self,
+        kind: HeldKind,
+        expected: (usize, usize),
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let observed = self.hold_receipts(kind)?;
+            if observed == expected {
+                return Ok(());
+            }
+            if observed.0 > expected.0 || observed.1 > expected.1 || Instant::now() >= deadline {
+                return Err(format!(
+                    "native {} receipts {observed:?}, expected {expected:?}",
+                    kind.marker()
                 ));
             }
             thread::sleep(POLL);

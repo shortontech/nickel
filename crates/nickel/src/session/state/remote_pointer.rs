@@ -162,7 +162,7 @@ impl NickelSession {
                         generation: *generation,
                     }),
                     surface: None,
-                    output: None,
+                    output: self.remote_window_output(id),
                     application: self.remote_verified_application(id),
                     surface_ancestors: Vec::new(),
                     native_window: Some(id),

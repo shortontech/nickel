@@ -16,9 +16,53 @@ struct Recipient {
 }
 
 #[derive(Default)]
-struct SessionAdapter;
+struct SessionAdapter {
+    hold_receipts: bool,
+}
 
 impl HostAdapter<Recipient> for SessionAdapter {
+    fn event(
+        &mut self,
+        _host: &mut nickel_ui::UiHost<Recipient>,
+        event: &winit::event::WindowEvent,
+        _services: HostServices<'_>,
+    ) -> Result<nickel_ui::AdapterOutcome, Box<dyn std::error::Error>> {
+        if self.hold_receipts {
+            use winit::{
+                event::{ElementState, MouseButton, WindowEvent},
+                keyboard::{KeyCode, PhysicalKey},
+            };
+            let receipt = match event {
+                WindowEvent::KeyboardInput {
+                    event,
+                    is_synthetic: false,
+                    ..
+                } if event.physical_key == PhysicalKey::Code(KeyCode::ShiftLeft)
+                    && !event.repeat =>
+                {
+                    Some(("key", event.state))
+                }
+                WindowEvent::MouseInput {
+                    state,
+                    button: MouseButton::Left,
+                    ..
+                } => Some(("button", *state)),
+                _ => None,
+            };
+            if let Some((kind, edge)) = receipt {
+                // Fixed markers for this explicit acceptance probe only. Do not
+                // log arbitrary keys, text, coordinates, or synthetic key edges.
+                let edge = if edge == ElementState::Pressed {
+                    "pressed"
+                } else {
+                    "released"
+                };
+                println!("recipient-hold-{kind}={edge}");
+            }
+        }
+        Ok(nickel_ui::AdapterOutcome::default())
+    }
+
     fn controller_fence(&mut self, _services: HostServices<'_>) -> ControllerFence {
         #[cfg(target_os = "linux")]
         {
@@ -125,5 +169,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Preserve the PID expected by the compositor's shell authentication.
         return Err(std::process::Command::new(shell).exec().into());
     }
-    nickel_ui::run_with_adapter(Recipient::default(), SessionAdapter)
+    nickel_ui::run_with_adapter(
+        Recipient::default(),
+        SessionAdapter {
+            hold_receipts: std::env::var("NICKEL_NATIVE_HOLD_RECEIPTS").as_deref() == Ok("1"),
+        },
+    )
 }
