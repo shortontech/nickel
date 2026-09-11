@@ -420,6 +420,13 @@ impl Default for OwnerRegistry {
     }
 }
 impl OwnerRegistry {
+    /// Request an early bounded refresh from the existing production worker.
+    /// A full queue already contains an equivalent request, so coalescing is a
+    /// successful request rather than a reason to block the compositor owner.
+    pub(crate) fn request_refresh(&self) {
+        let _ = self.refresh.try_send(());
+    }
+
     pub(crate) fn poll(&mut self, control: &mut nickel_remote_control::ControlPlane) {
         let now = Instant::now();
         if now >= self.next_refresh {

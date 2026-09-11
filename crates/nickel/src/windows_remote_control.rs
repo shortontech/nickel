@@ -1615,12 +1615,32 @@ impl WindowsRemoteControl {
         use nickel_remote_control::diagnostics::{DiagnosticAction, DiagnosticActionOutcome};
 
         action.validate()?;
-        permit.with_debug(!self.desktop_unlocked, || match &action {
-            DiagnosticAction::Repaint => Ok(()),
-            _ => Err("diagnostic action is unavailable on the Windows backend".into()),
+        permit.with_debug(!self.desktop_unlocked, || {
+            if matches!(
+                &action,
+                DiagnosticAction::Repaint
+                    | DiagnosticAction::RefreshScene
+                    | DiagnosticAction::RefreshApplicationInventory
+            ) {
+                Ok(())
+            } else {
+                Err("diagnostic action is unavailable on the Windows backend".into())
+            }
         })?;
         permit.check_live()?;
-        shell.request_all_redraws();
+        match &action {
+            DiagnosticAction::Repaint => shell.request_all_redraws(),
+            DiagnosticAction::RefreshScene => {
+                let mut prepared = crate::platform::remote_observation::Prepared::prepare(&permit)?;
+                self.reconcile_native_resources(&mut prepared)?;
+                permit.check_live()?;
+                shell.request_all_redraws();
+            }
+            DiagnosticAction::RefreshApplicationInventory => {
+                self.applications.request_refresh();
+            }
+            _ => unreachable!("unsupported diagnostic action rejected above"),
+        }
         permit.check_live()?;
         self.observation_generation = self
             .observation_generation
