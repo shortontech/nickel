@@ -45,6 +45,12 @@ binding; this checklist does not replace them.
 | 11 Delayed subsystem snapshots | Renderer/worker snapshots expose own observations; all five typed Linux platform refreshes and application-catalog refreshes retain their own generation, observation interval, five-second freshness and shared worker state. All five bounded Windows platform providers use a tested single-flight timeout and expose their worker state; maintenance adds cancellable job containment for its production PowerShell processes. Launch preparation and live child totals are bounded; per-surface presentation and DWM preview updates retain separate native generations/failures. Unavailable domains remain explicit. | Controlled delayed GPU work and native Windows provider execution, proving timestamp/staleness semantics and unaffected input/presentation. |
 | 12 Public metrics and input privacy | `trace-input-privacy-results.txt` shows real Gtk canary input absent from retained Linux trace logs; metrics admission tests. | All collection paths, credential entry and temporary trace categories, including Windows; current prelease metrics/diagnostic denial. |
 
+Windows shared software-raster cache accounting is now read synchronously from the production
+`WinitShell` owner with its own mutation generation and the coherent snapshot timestamp. It is a
+process aggregate of bounded counts, retained byte estimates, durable peak bytes, and activity
+counters, with no content or per-surface attribution. The remaining resource gaps are shared-cache
+attribution to individual surfaces, GPU timing/allocation accounting, and DWM pixel readback.
+
 ## Feature requirements outside the numbered gates
 
 The following implementation gaps also prevent completion, even if a narrow test

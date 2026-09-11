@@ -30,6 +30,14 @@ unavailable, so these paths do not open approval.
 | Physical DRM trace acceptance | Production DRM render dispatch is instrumented. The active seat is shared with the user's compositor. | Test on an isolated seat or machine; primary-GPU selection does not isolate the current udev backend's device enumeration. |
 | Full native acceptance | Recent native work uses a separate Xvfb-backed compositor with its own Xwayland and Wayland clients. | Complete the specifications' physical emergency-stop, assistive workflow, mixed-DPI/multi-output, Windows, and cross-machine gates. |
 
+The Windows full-debug snapshot now includes synchronous, generation-correlated aggregate
+accounting from the production `WinitShell` shared software-raster cache owner. The bounded record
+contains only owner/entry counts, retained and durable peak byte estimates, and cumulative activity
+counters. It excludes cache keys, text, pixels, native handles, allocator RSS, GPU allocation
+estimates, and per-surface attribution. The older broad unavailable label is narrowed to
+`windows_per_surface_renderer_cache_attribution`; GPU timing, GPU allocations, and DWM pixel
+readback remain unavailable.
+
 The Windows UIA geometry-clipping, application-coordinate, exact-root-set and
 generation-bound action-selection regressions passed under Proton. No live UIA
 provider traversal or Invoke was claimed from that compatibility-layer run; native

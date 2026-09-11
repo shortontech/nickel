@@ -3939,6 +3939,12 @@ impl WindowsRemoteControl {
                             .is_some_and(|native| projected_native_windows.contains(&native))
                     }),
                 );
+            let shared_presenter_cache =
+                Some(crate::windows_shell_diagnostics::project_presenter_cache(
+                    generation,
+                    observed_at_us,
+                    shell.memory_diagnostics(),
+                ));
             projected_resources.renderer_surfaces = shell_renderers.len() as u64;
             projected_resources.software_frame_bytes =
                 shell_renderers.iter().fold(0_u64, |total, renderer| {
@@ -4073,6 +4079,7 @@ impl WindowsRemoteControl {
                 internal_renderers: Vec::new(),
                 shell_renderers,
                 shell_image_cache: Some(shell_image_cache),
+                shared_presenter_cache,
                 projected_resources,
                 pending_effects: PendingEffectsDiagnostic {
                     observation_generation: generation,
@@ -5577,7 +5584,7 @@ impl WindowsRemoteControl {
 fn windows_unavailable_diagnostic_domains() -> Vec<String> {
     vec![
         "windows_virtual_workspaces".into(),
-        "windows_shared_renderer_and_presenter_cache_accounting".into(),
+        "windows_per_surface_renderer_cache_attribution".into(),
         "windows_preview_pixel_readback".into(),
         "windows_settings_worker".into(),
     ]

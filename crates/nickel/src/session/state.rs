@@ -3762,6 +3762,7 @@ impl NickelSession {
                             internal_renderers,
                             shell_renderers,
                             shell_image_cache,
+                            shared_presenter_cache: None,
                             projected_resources,
                             pending_effects: self.remote_pending_effects_diagnostic(
                                 self.remote_observation_generation,

@@ -27,6 +27,13 @@ without exposing native handles or retaining duplicate semantic state. These byt
 exclude allocator, hash-map, key, queue, `Arc`, font-system, and dependency-owned cache overhead, so
 they are cache-owned payload estimates rather than exact process-memory claims.
 
+On Windows, a full-debug snapshot reads the same production `WinitShell` owner synchronously. It
+reports one generation-bearing process aggregate for the shared software-raster cache: owner and
+entry counts, live and durable peak estimated bytes, and cumulative cache activity. The record
+excludes keys, text, pixels, native handles, allocator RSS, and external or GPU allocations. Because
+the rasterizer is shared across shell windows, Nickel does not assign entries or bytes to an
+individual surface; per-surface cache attribution remains explicitly unavailable.
+
 Visible grouped-window previews refresh at most twice per second. Preview frames are fetched by
 correlated request ID over the session socket; stale timed-out replies are discarded instead of
 being mistaken for the next query. The compositor does not broadcast RGBA frames to subscribers,

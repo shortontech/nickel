@@ -265,6 +265,8 @@ impl WinitWindowCompat for Window {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShellMemoryDiagnostics {
+    /// Advances whenever shared presentation may mutate retained cache state.
+    pub presenter_cache_generation: u64,
     /// Cache-owned bytes reported by every currently instantiated surface presenter.
     pub presenter_caches: AggregatePresenterCacheDiagnostics,
     /// Allocator/process-visible resident bytes from the operating system.
@@ -491,6 +493,7 @@ pub struct WinitShell {
     input_to_present_us: VecDeque<u64>,
     warm_present_allocations: VecDeque<u64>,
     presenter_cache_peak_bytes: Cell<usize>,
+    presenter_cache_generation: u64,
     output_retirements: OutputRetirementTracker,
     output_creation_retry: OutputCreationRetry,
     pending_input_started: Option<Instant>,
@@ -542,6 +545,7 @@ impl WinitShell {
             input_to_present_us: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             warm_present_allocations: VecDeque::with_capacity(RUNTIME_SAMPLE_CAPACITY),
             presenter_cache_peak_bytes: Cell::new(0),
+            presenter_cache_generation: 0,
             output_retirements: OutputRetirementTracker::default(),
             output_creation_retry: OutputCreationRetry::default(),
             pending_input_started: None,
@@ -1371,6 +1375,7 @@ impl WinitShell {
         self.presenter_cache_peak_bytes.set(process_peak);
         presenter_caches.peak_cache_bytes = process_peak;
         ShellMemoryDiagnostics {
+            presenter_cache_generation: self.presenter_cache_generation,
             presenter_caches,
             process_rss_bytes: process_rss_bytes(),
         }
@@ -1465,6 +1470,7 @@ impl WinitShell {
             .as_mut()
             .expect("shell presenter initialized")
             .present(geometry, graphics, commands);
+        self.presenter_cache_generation = self.presenter_cache_generation.saturating_add(1);
         #[cfg(target_os = "windows")]
         if result.is_err() {
             entry.presentation_failures = entry.presentation_failures.saturating_add(1);

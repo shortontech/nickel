@@ -2,8 +2,8 @@ use crate::winit_shell::SurfaceRole;
 use nickel_remote_control::desktop_events::ShellEventRole;
 use nickel_remote_control::diagnostics::{
     InternalRendererDiagnostic, MAX_DIAGNOSTIC_SHELL_SURFACES, ProjectedResourceDiagnostic,
-    RendererFallbackReason, RendererPolicy, ShellDiagnosticRole, ShellImageCacheDiagnostic,
-    ShellSurfaceDiagnostic,
+    RendererFallbackReason, RendererPolicy, SharedPresenterCacheDiagnostic, ShellDiagnosticRole,
+    ShellImageCacheDiagnostic, ShellSurfaceDiagnostic,
 };
 
 #[derive(Clone, Debug)]
@@ -258,6 +258,32 @@ fn bounded_u64(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
+/// Project only process-level cache-owner aggregates. The shared rasterizer
+/// cannot truthfully assign an entry or byte to one surface, so this record is
+/// deliberately separate from protected-filtered renderer records.
+pub(crate) fn project_presenter_cache(
+    observation_generation: u64,
+    observed_at_us: u64,
+    memory: crate::winit_shell::ShellMemoryDiagnostics,
+) -> SharedPresenterCacheDiagnostic {
+    let cache = memory.presenter_caches;
+    SharedPresenterCacheDiagnostic {
+        observation_generation,
+        observed_at_us,
+        cache_generation: memory.presenter_cache_generation,
+        cache_owners: bounded_u64(cache.presenters),
+        live_entries: bounded_u64(cache.live_entries),
+        live_bytes: bounded_u64(cache.live_bytes),
+        peak_cache_bytes: bounded_u64(cache.peak_cache_bytes),
+        hits: cache.hits,
+        misses: cache.misses,
+        insertions: cache.insertions,
+        evictions: cache.evictions,
+        invalidations: cache.invalidations,
+        recomputation_nanos: cache.recomputation_nanos,
+    }
+}
+
 /// Project count and retained-byte accounting only. No cache keys, image
 /// dimensions, source paths, pixels, titles, or application identities cross
 /// this boundary. Preview accounting must already be filtered to the ordinary
@@ -487,6 +513,37 @@ mod tests {
         assert_eq!(projected.renderer_surfaces, 0);
         assert_eq!(projected.software_frame_bytes, 0);
         assert_eq!(projected.fallback_raster_bytes, 0);
+    }
+
+    #[test]
+    fn shared_presenter_projection_is_generation_correlated_and_aggregate_only() {
+        let record = project_presenter_cache(
+            17,
+            23,
+            crate::winit_shell::ShellMemoryDiagnostics {
+                presenter_cache_generation: 11,
+                presenter_caches: nickel_ui::AggregatePresenterCacheDiagnostics {
+                    presenters: 1,
+                    live_entries: 7,
+                    live_bytes: 80,
+                    peak_cache_bytes: 120,
+                    hits: 9,
+                    misses: 2,
+                    insertions: 3,
+                    evictions: 1,
+                    invalidations: 4,
+                    recomputation_nanos: 50,
+                },
+                process_rss_bytes: Some(9_999),
+            },
+        );
+        assert_eq!(record.observation_generation, 17);
+        assert_eq!(record.observed_at_us, 23);
+        assert_eq!(record.cache_generation, 11);
+        assert_eq!(record.cache_owners, 1);
+        assert_eq!(record.live_entries, 7);
+        assert_eq!(record.live_bytes, 80);
+        assert_eq!(record.peak_cache_bytes, 120);
     }
 
     #[test]

@@ -641,6 +641,28 @@ pub struct ShellImageCacheDiagnostic {
     pub preview_bytes: u64,
 }
 
+/// Process-level accounting from the production shell's shared presenter cache.
+/// These aggregates contain no cache keys, pixels, text, native handles, or
+/// per-surface attribution. Byte values are cache-owned retained estimates,
+/// not allocator or GPU memory measurements.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct SharedPresenterCacheDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Advances whenever the shared presenter may have changed its cache state.
+    pub cache_generation: u64,
+    pub cache_owners: u64,
+    pub live_entries: u64,
+    pub live_bytes: u64,
+    pub peak_cache_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub insertions: u64,
+    pub evictions: u64,
+    pub invalidations: u64,
+    pub recomputation_nanos: u64,
+}
+
 /// Aggregate retained storage derived only from the protected-filtered
 /// renderers and shell caches published in this same snapshot. Shared GPU
 /// caches and external client renderer allocations remain unavailable.
@@ -687,6 +709,10 @@ pub struct DiagnosticSnapshot {
     pub shell_renderers: Vec<InternalRendererDiagnostic>,
     /// None means the in-process shell is unavailable.
     pub shell_image_cache: Option<ShellImageCacheDiagnostic>,
+    /// None means the production shell owner cannot safely account for its
+    /// shared presenter caches. This process aggregate is never attributed to
+    /// the protected-filtered per-surface renderer records.
+    pub shared_presenter_cache: Option<SharedPresenterCacheDiagnostic>,
     /// Current protected-filtered resource totals from the fields above.
     pub projected_resources: ProjectedResourceDiagnostic,
     /// Pending production effects without their targets or payloads.
@@ -1210,6 +1236,39 @@ mod output_identification_tests {
             "path",
             "client_id",
             "lease_id",
+            "gpu_allocation",
+        ] {
+            assert!(value.get(excluded).is_none());
+        }
+    }
+
+    #[test]
+    fn shared_presenter_cache_contains_only_aggregate_accounting() {
+        let cache = SharedPresenterCacheDiagnostic {
+            observation_generation: 7,
+            observed_at_us: 11,
+            cache_generation: 5,
+            cache_owners: 1,
+            live_entries: 3,
+            live_bytes: 100,
+            peak_cache_bytes: 200,
+            hits: 9,
+            misses: 2,
+            insertions: 3,
+            evictions: 1,
+            invalidations: 4,
+            recomputation_nanos: 50,
+        };
+        let value = serde_json::to_value(cache).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 13);
+        for excluded in [
+            "surface",
+            "role",
+            "window",
+            "text",
+            "pixels",
+            "native_handle",
+            "process_rss_bytes",
             "gpu_allocation",
         ] {
             assert!(value.get(excluded).is_none());
