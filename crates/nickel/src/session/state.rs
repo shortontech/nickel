@@ -3398,6 +3398,16 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_semantic_action(&permit, request);
+                if let Ok(changed) = &result {
+                    self.record_remote_production_effect_outcome(
+                        nickel_remote_control::desktop_events::ProductionEffectKind::SemanticAction,
+                        if *changed {
+                            nickel_remote_control::desktop_events::ProductionEffectOutcome::UiUpdated
+                        } else {
+                            nickel_remote_control::desktop_events::ProductionEffectOutcome::Confirmed
+                        },
+                    );
+                }
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ShellSemanticStep {
@@ -3423,6 +3433,12 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_surface_semantic_action(&permit, request);
+                if result.as_ref().is_ok_and(|plan| plan.changed) {
+                    self.record_remote_production_effect_outcome(
+                        nickel_remote_control::desktop_events::ProductionEffectKind::SemanticAction,
+                        nickel_remote_control::desktop_events::ProductionEffectOutcome::UiUpdated,
+                    );
+                }
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::Semantics {
