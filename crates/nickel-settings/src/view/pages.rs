@@ -5,6 +5,8 @@ use nickel_ui::{
     TextField, Track,
 };
 
+const REMOTE_ACCESS_ACTION_HEIGHT: f32 = 48.0;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RemoteExposurePresentation {
     pub(crate) kind: SettingsStatusKind,
@@ -930,7 +932,7 @@ impl SettingsApp {
                             },
                             "Deny",
                             ButtonPresentation::Destructive,
-                        ).width(88.0)}
+                        ).width(88.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                         {Button::semantic(
                             theme,
                             SettingsMessage::DecideRemoteClient {
@@ -939,7 +941,7 @@ impl SettingsApp {
                             },
                             "Allow client",
                             ButtonPresentation::Primary,
-                        ).width(180.0)}
+                        ).width(180.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                     </Row> }),
                 )
             },
@@ -969,7 +971,9 @@ impl SettingsApp {
                 let duration_button = |label: String, duration_seconds| Button::semantic(theme,
                     SettingsMessage::ApproveRemoteLeaseDuration {
                         pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), duration_seconds,
-                    }, label, ButtonPresentation::Secondary).width(160.0);
+                    }, label, ButtonPresentation::Secondary)
+                        .width(160.0)
+                        .height(REMOTE_ACCESS_ACTION_HEIGHT);
                 let mut changes = Column::new().fill_width().gap(4.0);
                 if pending.changes.access_changed {
                     changes = changes.child(SettingsStatus::new(theme, SettingsStatusKind::Validation,
@@ -1048,13 +1052,16 @@ impl SettingsApp {
                     .child(ui! { <Row gap={8.0}>
                         {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
                             pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), allow: false,
-                        }, "Deny", ButtonPresentation::Destructive).width(88.0)}
+                        }, "Deny", ButtonPresentation::Destructive)
+                            .width(88.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                         {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
                             pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), allow: true,
-                        }, if pending.request.full_debug { "Allow full debug" } else { "Allow control" }, ButtonPresentation::Primary).width(150.0)}
+                        }, if pending.request.full_debug { "Allow full debug" } else { "Allow control" }, ButtonPresentation::Primary)
+                            .width(150.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                         {Button::semantic(theme, SettingsMessage::BlockRemoteClient {
                             client_id: pending.client_id.clone(), blocked: true,
-                        }, "Block client", ButtonPresentation::Destructive).width(130.0)}
+                        }, "Block client", ButtonPresentation::Destructive)
+                            .width(130.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                     </Row> }))
             },
         );
@@ -1079,10 +1086,12 @@ impl SettingsApp {
                         {Button::semantic(theme, SettingsMessage::ManageRemoteLease {
                             lease_id: lease.lease_id,
                             action: if lease.suspended { RemoteLeaseAction::Resume } else { RemoteLeaseAction::Pause },
-                        }, if lease.suspended { "Resume" } else { "Pause" }, ButtonPresentation::Secondary).width(100.0)}
+                        }, if lease.suspended { "Resume" } else { "Pause" }, ButtonPresentation::Secondary)
+                            .width(100.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                         {Button::semantic(theme, SettingsMessage::ManageRemoteLease {
                             lease_id: lease.lease_id, action: RemoteLeaseAction::Revoke,
-                        }, "Revoke", ButtonPresentation::Destructive).width(100.0)}
+                        }, "Revoke", ButtonPresentation::Destructive)
+                            .width(100.0).height(REMOTE_ACCESS_ACTION_HEIGHT)}
                     </Row> }))
             },
         );

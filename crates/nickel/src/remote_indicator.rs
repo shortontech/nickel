@@ -147,7 +147,8 @@ impl Application for RemoteIndicator {
                             ButtonPresentation::Destructive,
                         )
                         .id("remote-control-stop")
-                        .width(80.0),
+                        .width(88.0)
+                        .height(48.0),
                     ),
             )
             .child(
@@ -268,6 +269,7 @@ mod host_tests {
             .unwrap()
             .clone();
         assert!(stop.actions.contains(&ActionKind::Activate));
+        assert!(stop.rect.size.width >= 44.0 && stop.rect.size.height >= 44.0);
         assert!(!host.application().stop_requested);
         let outcome = host.step(HostBatch {
             events: vec![HostEvent::Accessibility {

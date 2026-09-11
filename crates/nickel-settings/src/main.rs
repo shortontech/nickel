@@ -5596,6 +5596,141 @@ mod tests {
     }
 
     #[test]
+    fn remote_access_lifecycle_actions_are_large_and_keyboard_reachable() {
+        use nickel_session_protocol::{
+            RemoteActiveLease, RemoteLeaseAction, RemoteLeaseRenewal, RemoteLeaseRequest,
+            RemotePendingClientSnapshot, RemotePendingLease, RemoteResourceScope,
+        };
+
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        app.remote_control_runtime.pending_clients = vec![RemotePendingClientSnapshot {
+            id: "new-assistive-client".into(),
+            label: "New assistive client".into(),
+            requested: vec![],
+            connected_at: 1,
+        }];
+        let initial_request = RemoteLeaseRequest {
+            renewal: None,
+            scope: RemoteResourceScope::FullSession,
+            duration_seconds: Some(1200),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        let renewal_request = RemoteLeaseRequest {
+            renewal: Some(RemoteLeaseRenewal {
+                lease_id: 41,
+                generation: 3,
+            }),
+            scope: RemoteResourceScope::FullSession,
+            duration_seconds: Some(7200),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        app.remote_control_runtime.pending_leases = vec![
+            RemotePendingLease {
+                pending_generation: 7,
+                client_id: "initial-client".into(),
+                client_label: "Initial client".into(),
+                request: initial_request.clone(),
+                resource_label: None,
+                changes: Default::default(),
+            },
+            RemotePendingLease {
+                pending_generation: 8,
+                client_id: "renewing-client".into(),
+                client_label: "Renewing client".into(),
+                request: renewal_request.clone(),
+                resource_label: None,
+                changes: Default::default(),
+            },
+        ];
+        app.remote_control_runtime.active_leases = vec![
+            RemoteActiveLease {
+                lease_id: 41,
+                client_label: "Active client".into(),
+                scope: RemoteResourceScope::FullSession,
+                resource_label: None,
+                remaining_seconds: Some(120),
+                suspended: false,
+                full_debug: false,
+            },
+            RemoteActiveLease {
+                lease_id: 42,
+                client_label: "Paused client".into(),
+                scope: RemoteResourceScope::FullSession,
+                resource_label: None,
+                remaining_seconds: Some(120),
+                suspended: true,
+                full_debug: false,
+            },
+        ];
+
+        let messages = vec![
+            SettingsMessage::DecideRemoteClient {
+                client_id: "new-assistive-client".into(),
+                decision: nickel_session_protocol::RemoteClientDecision::AllowOnce,
+            },
+            SettingsMessage::ApproveRemoteLeaseDuration {
+                pending_generation: 7,
+                client_id: "initial-client".into(),
+                request: initial_request,
+                duration_seconds: Some(7200),
+            },
+            SettingsMessage::ApproveRemoteLeaseDuration {
+                pending_generation: 8,
+                client_id: "renewing-client".into(),
+                request: renewal_request,
+                duration_seconds: Some(7200),
+            },
+            SettingsMessage::ManageRemoteLease {
+                lease_id: 41,
+                action: RemoteLeaseAction::Pause,
+            },
+            SettingsMessage::ManageRemoteLease {
+                lease_id: 42,
+                action: RemoteLeaseAction::Resume,
+            },
+            SettingsMessage::ManageRemoteLease {
+                lease_id: 41,
+                action: RemoteLeaseAction::Revoke,
+            },
+        ];
+        let mut host = UiHost::new(app, 1100, 720);
+        let mut remaining = messages
+            .iter()
+            .map(|message| {
+                let target = host
+                    .unique_semantic_target_for_message(message)
+                    .expect("each remote access action has one production semantic target");
+                assert!(
+                    target.bounds.size.width >= 44.0 && target.bounds.size.height >= 44.0,
+                    "remote access target is too small: {:?}",
+                    target.bounds
+                );
+                target.id
+            })
+            .collect::<Vec<_>>();
+
+        // Tab traversal is driven by input events rather than a response timer. It may
+        // take as long as the local user needs and scrolls each action into view.
+        for _ in 0..512 {
+            host.handle_event(nickel_ui::UiEvent::FocusNext);
+            if let Some(focused) = host.inspect().keyboard_focus.as_ref() {
+                remaining.retain(|target| target != focused);
+            }
+            if remaining.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            remaining.is_empty(),
+            "keyboard traversal did not reach remote access actions: {remaining:?}"
+        );
+    }
+
+    #[test]
     fn audible_preference_changes_locally_without_changing_listener_authority() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.persistence_enabled = false;
