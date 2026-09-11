@@ -5,6 +5,7 @@ use nickel_remote_control::{
     WindowSummary,
     diagnostics::{MAX_DIAGNOSTIC_OUTPUTS, MAX_DIAGNOSTIC_WINDOWS, OutputDiagnostic},
     leases::{ResourceEvidence, ResourceId, ResourceScope, ResourceScopeAuthority},
+    window_actions::WindowAction,
 };
 use std::collections::BTreeMap;
 
@@ -70,6 +71,19 @@ pub(crate) struct Window {
     pub fullscreen: bool,
     pub protected: bool,
     pub application: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WindowMutationInputState {
+    pub keyboard_held: bool,
+    pub pointer_held: bool,
+    pub physical_input_idle: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WindowMutationPlan {
+    output_topology_generation: u64,
+    destination: Option<(ResourceId, Rect)>,
 }
 struct Record<T> {
     identity: ResourceId,
@@ -244,6 +258,66 @@ impl Owner {
             .values()
             .find(|record| record.identity == *identity)
             .map(|record| &record.value)
+    }
+
+    /// Validate the owner-side policy for one focus or window mutation before
+    /// reserving shared input. Output-scoped moves and resizes must keep the
+    /// entire requested rectangle on exactly one live output incarnation.
+    pub(crate) fn prepare_window_mutation(
+        &self,
+        scope: &ResourceScope,
+        action: WindowAction,
+        input: WindowMutationInputState,
+    ) -> Result<WindowMutationPlan, String> {
+        action.validate()?;
+        if input.keyboard_held || input.pointer_held || !input.physical_input_idle {
+            return Err("local or remote input is already active".into());
+        }
+        let destination = match (scope, action) {
+            (
+                ResourceScope::Output(output),
+                WindowAction::SetBounds {
+                    x,
+                    y,
+                    width,
+                    height,
+                },
+            ) => {
+                let bounds = Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                };
+                if self.output_for(bounds) != Some(output) {
+                    return Err("requested Windows bounds leave the authorized output".into());
+                }
+                Some((output.clone(), bounds))
+            }
+            _ => None,
+        };
+        Ok(WindowMutationPlan {
+            output_topology_generation: self.output_topology_generation,
+            destination,
+        })
+    }
+
+    /// Recheck owner generations immediately before native dispatch. The
+    /// request-local native preparation performs the corresponding live
+    /// monitor revalidation at the same commit boundary.
+    pub(crate) fn revalidate_window_mutation(
+        &self,
+        plan: &WindowMutationPlan,
+    ) -> Result<(), String> {
+        if self.output_topology_generation != plan.output_topology_generation {
+            return Err("Windows output topology changed before window mutation".into());
+        }
+        if let Some((output, bounds)) = &plan.destination
+            && self.output_for(*bounds) != Some(output)
+        {
+            return Err("requested Windows bounds leave the authorized output".into());
+        }
+        Ok(())
     }
     pub(crate) fn window(&self, id: &str, generation: u64) -> Option<&Window> {
         self.windows
@@ -771,6 +845,223 @@ mod tests {
 
         owner.reconcile(vec![], vec![], |_| {}).unwrap();
         assert_eq!(owner.output_topology_generation(), 3);
+    }
+    #[test]
+    fn output_scoped_bounds_require_unique_whole_destination_membership() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(1, -500)],
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let left = owner
+            .outputs(&ResourceScope::FullSession)
+            .find(|(output, _)| output.name == "left")
+            .unwrap()
+            .0;
+        let scope = ResourceScope::Output(ResourceId {
+            id: left.name,
+            generation: left.generation,
+        });
+        let idle = WindowMutationInputState {
+            keyboard_held: false,
+            pointer_held: false,
+            physical_input_idle: true,
+        };
+        let contained = WindowAction::SetBounds {
+            x: -1000,
+            y: 0,
+            width: 1000,
+            height: 1000,
+        };
+        let plan = owner
+            .prepare_window_mutation(&scope, contained, idle)
+            .unwrap();
+        owner.revalidate_window_mutation(&plan).unwrap();
+
+        for action in [
+            WindowAction::SetBounds {
+                x: -1001,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            WindowAction::SetBounds {
+                x: -50,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            WindowAction::SetBounds {
+                x: 50,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        ] {
+            assert!(owner.prepare_window_mutation(&scope, action, idle).is_err());
+        }
+
+        owner
+            .reconcile(
+                vec![window(1, -500)],
+                vec![
+                    output(1, "left", -1000, 1000),
+                    output(2, "left-clone", -1000, 1000),
+                    output(3, "right", 0, 1500),
+                ],
+                |_| {},
+            )
+            .unwrap();
+        assert!(
+            owner
+                .prepare_window_mutation(&scope, contained, idle)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn output_scoped_bounds_plan_rejects_a_changed_topology() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(1, -500)],
+                vec![output(1, "left", -1000, 1000)],
+                |_| {},
+            )
+            .unwrap();
+        let live_output = owner.outputs(&ResourceScope::FullSession).next().unwrap().0;
+        let scope = ResourceScope::Output(ResourceId {
+            id: live_output.name,
+            generation: live_output.generation,
+        });
+        let plan = owner
+            .prepare_window_mutation(
+                &scope,
+                WindowAction::SetBounds {
+                    x: -900,
+                    y: 10,
+                    width: 200,
+                    height: 200,
+                },
+                WindowMutationInputState {
+                    keyboard_held: false,
+                    pointer_held: false,
+                    physical_input_idle: true,
+                },
+            )
+            .unwrap();
+        let mut changed = output(1, "left", -1000, 1000);
+        changed.scale_120 = 180;
+        owner
+            .reconcile(vec![window(1, -500)], vec![changed], |_| {})
+            .unwrap();
+        assert!(owner.revalidate_window_mutation(&plan).is_err());
+    }
+
+    #[test]
+    fn non_output_scopes_keep_their_existing_bounds_authority() {
+        let mut owned = window(1, -500);
+        owned.application = Some("verified.app".into());
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![owned],
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let summary = owner.windows(&ResourceScope::FullSession).next().unwrap().0;
+        let action = WindowAction::SetBounds {
+            x: 100,
+            y: 10,
+            width: 200,
+            height: 200,
+        };
+        let idle = WindowMutationInputState {
+            keyboard_held: false,
+            pointer_held: false,
+            physical_input_idle: true,
+        };
+        for scope in [
+            ResourceScope::FullSession,
+            ResourceScope::Window(ResourceId {
+                id: summary.id,
+                generation: summary.generation,
+            }),
+            ResourceScope::Application("verified.app".into()),
+        ] {
+            let plan = owner.prepare_window_mutation(&scope, action, idle).unwrap();
+            owner.revalidate_window_mutation(&plan).unwrap();
+        }
+    }
+
+    #[test]
+    fn every_window_mutation_rejects_held_or_physical_input() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(1, 10)],
+                vec![output(1, "main", 0, 1000)],
+                |_| {},
+            )
+            .unwrap();
+        let actions = [
+            WindowAction::Activate,
+            WindowAction::Minimize,
+            WindowAction::Maximize,
+            WindowAction::Restore,
+            WindowAction::Fullscreen,
+            WindowAction::ExitFullscreen,
+            WindowAction::Close,
+            WindowAction::MoveToWorkspace { workspace: 2 },
+            WindowAction::SetBounds {
+                x: 20,
+                y: 20,
+                width: 200,
+                height: 200,
+            },
+        ];
+        let busy = [
+            WindowMutationInputState {
+                keyboard_held: true,
+                pointer_held: false,
+                physical_input_idle: true,
+            },
+            WindowMutationInputState {
+                keyboard_held: false,
+                pointer_held: true,
+                physical_input_idle: true,
+            },
+            WindowMutationInputState {
+                keyboard_held: false,
+                pointer_held: false,
+                physical_input_idle: false,
+            },
+        ];
+        for action in actions {
+            owner
+                .prepare_window_mutation(
+                    &ResourceScope::FullSession,
+                    action,
+                    WindowMutationInputState {
+                        keyboard_held: false,
+                        pointer_held: false,
+                        physical_input_idle: true,
+                    },
+                )
+                .unwrap();
+            for input in busy {
+                assert!(
+                    owner
+                        .prepare_window_mutation(&ResourceScope::FullSession, action, input)
+                        .is_err(),
+                    "{action:?} accepted {input:?}"
+                );
+            }
+        }
     }
     #[test]
     fn mutation_lookup_requires_exact_generation_and_applicable_scope() {

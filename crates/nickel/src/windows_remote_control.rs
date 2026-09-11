@@ -6594,15 +6594,20 @@ impl WindowsRemoteControl {
             .resources
             .window_resource(&scope, id, generation)
             .ok_or("Windows resource is unavailable")?;
+        let mutation = self.resources.prepare_window_mutation(
+            &scope,
+            action,
+            crate::windows_resource_owner::WindowMutationInputState {
+                keyboard_held: self.keyboard_hold.is_some(),
+                pointer_held: self.pointer_hold.is_some(),
+                physical_input_idle: crate::windows_remote_input::physical_input_idle(),
+            },
+        )?;
+        self.resources.revalidate_window_mutation(&mutation)?;
+        let expected_input_epoch = local_input_epoch();
         if let nickel_remote_control::window_actions::WindowAction::MoveToWorkspace { workspace } =
             action
         {
-            if self.keyboard_hold.is_some()
-                || self.pointer_hold.is_some()
-                || !crate::windows_remote_input::physical_input_idle()
-            {
-                return Err("local or remote input is already active".into());
-            }
             let native = window.native;
             let native_windows = self.resources.native_windows(&scope).collect::<Vec<_>>();
             self.workspaces
@@ -6613,13 +6618,13 @@ impl WindowsRemoteControl {
                 .workspaces
                 .native_id(workspace)
                 .ok_or("Windows workspace is unavailable")?;
-            let expected_input_epoch = local_input_epoch();
             permit.with_input(&evidence, || {
                 if expected_input_epoch != local_input_epoch()
                     || !crate::windows_remote_input::physical_input_idle()
                 {
                     return Err("local input cancelled the workspace move".into());
                 }
+                prepared.revalidate()?;
                 crate::windows_virtual_workspaces::native::move_window(native, target)
             })?;
 
@@ -6642,8 +6647,21 @@ impl WindowsRemoteControl {
                 nickel_remote_control::window_actions::WindowOutcome::observed(action, window),
             );
         }
-        permit.with_resource(&evidence, || {
-            crate::platform::remote_observation::request_window_action(window, session, action)
+        permit.with_input(&evidence, || {
+            if expected_input_epoch != local_input_epoch()
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("local input cancelled the window mutation".into());
+            }
+            prepared.revalidate()?;
+            let result =
+                crate::platform::remote_observation::request_window_action(window, session, action);
+            if expected_input_epoch != local_input_epoch()
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("local input interrupted the window mutation".into());
+            }
+            result
         })?;
         permit.check_live()?;
 
