@@ -1832,6 +1832,19 @@ and unreachable. Pure transaction tests and Windows cross-compilation cover the
 slice; native Windows persistence, focus arbitration and visual reconciliation
 remain open.
 
+Windows also implements typed file-icon reads and transactions against the same
+production settings authority. The owner publishes at most 256 platform theme
+identifiers, retains a configured but unavailable identifier without exposing
+path-like legacy values, and pins both the settings-file and platform catalog
+revisions. Commit repeats the appearance transaction's protected-focus,
+shared-input, physical-input epoch, deadline and permit checks before replacement,
+then advances the production launcher icon generation and requests a live cache
+refresh. The response claims that refresh request, not decoded or presented pixels.
+Application scale, launcher favorites, wallpaper, Codex, idle, terminal,
+on-screen-keyboard and shell-behavior trait methods remain unavailable on the
+Windows authority; `windows_settings_worker` therefore remains an explicit
+diagnostic gap. Native Windows cache and presented-icon acceptance remain open.
+
 The Windows desktop authority now enumerates and inspects ordinary Nickel shell
 surfaces through their production winit incarnation and `LiveShell` semantic
 tree. Each observation is filtered against the current protected state and exact

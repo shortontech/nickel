@@ -593,6 +593,18 @@ enum OwnerRequest {
         deadline: Instant,
         reply: SyncSender<Result<nickel_remote_control::appearance::Snapshot, String>>,
     },
+    ReadFileIcons {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedFileIconsRead,
+        reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
+    },
+    FileIconsTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::file_icons::Transaction,
+        prepared: crate::windows_remote_settings::PreparedFileIconsChange,
+        deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
+    },
     Applications {
         permit: DesktopPermit,
         prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
@@ -1151,6 +1163,58 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 .to_owned()
         })?
     }
+    fn read_file_icons(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedFileIconsRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadFileIcons {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows file icon observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn file_icons_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::file_icons::Transaction,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_settings::PreparedFileIconsChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        if Instant::now() >= deadline {
+            return Err("Windows file icon preparation timed out".into());
+        }
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::FileIconsTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows file icon transaction expired before dispatch")?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows file icon result uncertain; read current state before retrying".to_owned()
+        })?
+    }
     fn inspect_native_window(
         &self,
         permit: DesktopPermit,
@@ -1679,6 +1743,7 @@ pub(crate) struct WindowsRemoteControl {
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     appearance: crate::windows_remote_settings::AppearanceState,
+    file_icons: crate::windows_remote_settings::FileIconState,
     shell_focus: Option<ShellFocusState>,
     external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
@@ -1826,6 +1891,7 @@ impl WindowsRemoteControl {
             pointer_hold: None,
             desktop_events: Default::default(),
             appearance: Default::default(),
+            file_icons: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),
@@ -2271,6 +2337,39 @@ impl WindowsRemoteControl {
                     );
                     let _ = reply.try_send(result);
                 }
+                OwnerRequest::ReadFileIcons {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_file_icons(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::FileIconsTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_file_icons(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
                 OwnerRequest::Applications {
                     permit,
                     prepared,
@@ -2448,6 +2547,93 @@ impl WindowsRemoteControl {
                 .elapsed()
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
+        )
+    }
+
+    fn read_file_icons(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedFileIconsRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            self.file_icons.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                false,
+            )
+        })
+    }
+
+    fn change_file_icons(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::file_icons::Transaction,
+        prepared: crate::windows_remote_settings::PreparedFileIconsChange,
+        request_deadline: Instant,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let expected_input_epoch = local_input_epoch();
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("file icon transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            self.file_icons.validate(&prepared, &transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_input_epoch {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            self.file_icons.invalidate();
+            Ok(())
+        });
+        let (requested, revision) = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err(
+                    "file icon settings unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        state.apply_file_icon_settings(requested);
+        authorization?;
+        let read = crate::windows_remote_settings::PreparedFileIconsRead::prepare()?;
+        if read.revision != revision {
+            return Err("file icon settings changed; read current state before retrying".into());
+        }
+        self.file_icons.observe(
+            &read,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            true,
         )
     }
 
@@ -5781,6 +5967,7 @@ mod tests {
             pointer_hold: None,
             desktop_events: Default::default(),
             appearance: Default::default(),
+            file_icons: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),

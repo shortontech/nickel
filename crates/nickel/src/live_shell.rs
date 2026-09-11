@@ -1429,6 +1429,21 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "windows")]
+    pub(crate) fn apply_file_icon_settings(&mut self, shell_settings: ShellSettings) {
+        self.launcher_icons.begin_visual_generation();
+        self.launcher_icons.invalidate_application_inventory();
+        self.apply_shell_settings(shell_settings);
+        let status = self.launcher_status_text();
+        self.launcher_host
+            .application_mut()
+            .sync(&self.launcher, self.palette, status);
+        self.launcher_host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+    }
+
+    #[cfg(target_os = "windows")]
     pub(crate) fn remote_shell_behavior_state(&self) -> (bool, u8, usize) {
         (
             self.all_windows_on_every_bar,

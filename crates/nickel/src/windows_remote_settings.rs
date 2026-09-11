@@ -33,6 +33,277 @@ fn preferences(settings: &ShellSettings) -> Preferences {
     }
 }
 
+const FILE_ICONS_STALE: &str = "file icon settings changed; read current state before retrying";
+const FILE_ICONS_UNAVAILABLE: &str =
+    "file icon settings unavailable; read current state before retrying";
+const MAX_THEME_ID_BYTES: usize = 128;
+const MAX_THEMES: usize = 256;
+
+fn valid_theme_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_THEME_ID_BYTES
+        && !value.contains(['/', '\\', '\0'])
+        && value != "."
+        && value != ".."
+}
+
+fn file_icon_preferences(
+    settings: &ShellSettings,
+) -> nickel_remote_control::file_icons::Preferences {
+    use nickel_core::shell_settings::FileIconPreference;
+    use nickel_remote_control::file_icons::{Preferences, Provider};
+    Preferences {
+        provider: match settings.file_icon_provider {
+            FileIconPreference::Nickel => Provider::Nickel,
+            FileIconPreference::System => Provider::System,
+        },
+        theme: settings
+            .file_icon_theme
+            .as_deref()
+            .filter(|theme| valid_theme_id(theme))
+            .map(str::to_owned),
+    }
+}
+
+fn file_icon_themes(configured: Option<&str>) -> Vec<nickel_remote_control::file_icons::Theme> {
+    use nickel_remote_control::file_icons::Theme;
+    let mut installed = nickel_platform::installed_icon_themes();
+    installed.retain(|theme| valid_theme_id(theme));
+    installed.sort_by_key(|theme| theme.to_ascii_lowercase());
+    installed.dedup();
+    let configured_available =
+        configured.is_some_and(|selected| installed.iter().any(|theme| theme == selected));
+    let reserve_missing =
+        usize::from(configured.is_some_and(valid_theme_id) && !configured_available);
+    installed.truncate(MAX_THEMES - reserve_missing);
+    let mut themes = installed
+        .into_iter()
+        .map(|id| Theme {
+            configured: configured == Some(id.as_str()),
+            id,
+            available: true,
+        })
+        .collect::<Vec<_>>();
+    if let Some(id) = configured.filter(|id| valid_theme_id(id) && !configured_available) {
+        themes.push(Theme {
+            id: id.to_owned(),
+            configured: true,
+            available: false,
+        });
+    }
+    themes
+}
+
+pub(crate) struct PreparedFileIconsRead {
+    path: PathBuf,
+    pub(crate) revision: Option<RegularFileRevision>,
+    settings: ShellSettings,
+    themes: Vec<nickel_remote_control::file_icons::Theme>,
+    provider_revision: u64,
+}
+
+impl PreparedFileIconsRead {
+    pub(crate) fn prepare() -> Result<Self, String> {
+        Self::at(nickel_core::shell_settings::settings_path().map_err(|_| FILE_ICONS_UNAVAILABLE)?)
+    }
+
+    fn at(path: PathBuf) -> Result<Self, String> {
+        let revision = regular_file_revision(&path).map_err(|_| FILE_ICONS_UNAVAILABLE)?;
+        let settings = ShellSettings::load_for_update(&path).map_err(|_| FILE_ICONS_UNAVAILABLE)?;
+        let themes = file_icon_themes(settings.file_icon_theme.as_deref());
+        let provider_revision =
+            nickel_platform::path_icon_theme_revision(settings.file_icon_theme.as_deref());
+        if regular_file_revision(&path).map_err(|_| FILE_ICONS_UNAVAILABLE)? != revision {
+            return Err(FILE_ICONS_STALE.into());
+        }
+        Ok(Self {
+            path,
+            revision,
+            settings,
+            themes,
+            provider_revision,
+        })
+    }
+
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        if regular_file_revision(&self.path).map_err(|_| FILE_ICONS_UNAVAILABLE)? != self.revision
+            || nickel_platform::path_icon_theme_revision(self.settings.file_icon_theme.as_deref())
+                != self.provider_revision
+        {
+            return Err(FILE_ICONS_STALE.into());
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct PreparedFileIconsChange {
+    prior: PreparedFileIconsRead,
+    requested: ShellSettings,
+    staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
+}
+
+impl PreparedFileIconsChange {
+    pub(crate) fn prepare(
+        transaction: &nickel_remote_control::file_icons::Transaction,
+    ) -> Result<Self, String> {
+        Self::prepare_at(
+            nickel_core::shell_settings::settings_path().map_err(|_| FILE_ICONS_UNAVAILABLE)?,
+            transaction,
+        )
+    }
+
+    fn prepare_at(
+        path: PathBuf,
+        transaction: &nickel_remote_control::file_icons::Transaction,
+    ) -> Result<Self, String> {
+        use nickel_core::shell_settings::FileIconPreference;
+        use nickel_remote_control::file_icons::Change;
+        let prior = PreparedFileIconsRead::at(path)?;
+        let lock = nickel_storage::TransactionLock::try_acquire(&prior.path)
+            .map_err(|_| FILE_ICONS_UNAVAILABLE)?;
+        prior.ensure_current()?;
+        if transaction.generation == 0
+            || transaction.prior != file_icon_preferences(&prior.settings)
+        {
+            return Err(FILE_ICONS_STALE.into());
+        }
+        let mut requested = prior.settings.clone();
+        match &transaction.change {
+            Change::SetNickelProvider {} => {
+                requested.file_icon_provider = FileIconPreference::Nickel
+            }
+            Change::UseSystemDefault {} => {
+                requested.file_icon_provider = FileIconPreference::System;
+                requested.file_icon_theme = None;
+            }
+            Change::SetInstalledSystemTheme { theme_id } => {
+                if !valid_theme_id(theme_id)
+                    || !prior
+                        .themes
+                        .iter()
+                        .any(|theme| theme.available && theme.id == *theme_id)
+                {
+                    return Err("file icon theme is not in the bounded installed catalog".into());
+                }
+                requested.file_icon_provider = FileIconPreference::System;
+                requested.file_icon_theme = Some(theme_id.clone());
+            }
+        }
+        let staged = requested
+            .stage(&prior.path)
+            .map_err(|_| FILE_ICONS_UNAVAILABLE)?;
+        Ok(Self {
+            prior,
+            requested,
+            staged,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn commit(
+        self,
+        deadline: Instant,
+        check_boundary: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(ShellSettings, Option<RegularFileRevision>), String> {
+        self.staged
+            .commit(|| {
+                if regular_file_revision(&self.prior.path)? != self.prior.revision
+                    || nickel_platform::path_icon_theme_revision(
+                        self.prior.settings.file_icon_theme.as_deref(),
+                    ) != self.prior.provider_revision
+                {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, FILE_ICONS_STALE));
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "file icon commit expired",
+                    ));
+                }
+                check_boundary().map_err(io::Error::other)
+            })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    FILE_ICONS_STALE
+                } else {
+                    FILE_ICONS_UNAVAILABLE
+                }
+                .to_owned()
+            })?;
+        let revision =
+            regular_file_revision(&self.prior.path).map_err(|_| FILE_ICONS_UNAVAILABLE)?;
+        Ok((self.requested, revision))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct FileIconState {
+    generation: u64,
+    observed: Option<(
+        Option<RegularFileRevision>,
+        nickel_remote_control::file_icons::Preferences,
+        Vec<nickel_remote_control::file_icons::Theme>,
+        u64,
+    )>,
+}
+
+impl FileIconState {
+    pub(crate) fn observe(
+        &mut self,
+        read: &PreparedFileIconsRead,
+        observed_at_us: u64,
+        cache_refresh_requested: bool,
+    ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let configured = file_icon_preferences(&read.settings);
+        let observed = (
+            read.revision.clone(),
+            configured.clone(),
+            read.themes.clone(),
+            read.provider_revision,
+        );
+        if self.observed.as_ref() != Some(&observed) {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or("file icon generation exhausted")?;
+            self.observed = Some(observed);
+        }
+        Ok(nickel_remote_control::file_icons::Snapshot {
+            generation: self.generation,
+            observed_at_us,
+            configured,
+            themes: read.themes.clone(),
+            cache_refresh_requested,
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        prepared: &PreparedFileIconsChange,
+        transaction: &nickel_remote_control::file_icons::Transaction,
+    ) -> Result<(), String> {
+        if self.generation == u64::MAX
+            || self.generation != transaction.generation
+            || self.observed.as_ref().is_none_or(
+                |(revision, configured, themes, provider_revision)| {
+                    revision != &prepared.prior.revision
+                        || configured != &transaction.prior
+                        || themes != &prepared.prior.themes
+                        || *provider_revision != prepared.prior.provider_revision
+                },
+            )
+        {
+            return Err(FILE_ICONS_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.observed = None;
+    }
+}
+
 fn apply(settings: &mut ShellSettings, requested: &Preferences) -> Result<(), String> {
     use nickel_core::shell_settings::{AnimationLevel as A, ThemePreference as T};
     if !requested.valid() {
@@ -259,6 +530,54 @@ mod tests {
                 requested,
             },
         )
+    }
+
+    #[test]
+    fn file_icon_commit_preserves_unrelated_settings_and_checks_boundary() {
+        use nickel_core::shell_settings::FileIconPreference;
+        use nickel_remote_control::file_icons::{Change, Transaction as FileIconTransaction};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shell.conf");
+        let settings = ShellSettings {
+            file_icon_provider: FileIconPreference::System,
+            file_icon_theme: Some("temporarily-missing-theme".into()),
+            idle_lock_seconds: Some(731),
+            preferred_terminal: Some("private-terminal".into()),
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let read = PreparedFileIconsRead::at(path.clone()).unwrap();
+        let mut state = FileIconState::default();
+        let snapshot = state.observe(&read, 10, false).unwrap();
+        let transaction = FileIconTransaction {
+            generation: snapshot.generation,
+            prior: snapshot.configured,
+            change: Change::UseSystemDefault {},
+        };
+
+        let denied = PreparedFileIconsChange::prepare_at(path.clone(), &transaction).unwrap();
+        assert!(
+            denied
+                .commit(Instant::now() + Duration::from_secs(1), || Err(
+                    "revoked".into()
+                ))
+                .is_err()
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+
+        let staged = PreparedFileIconsChange::prepare_at(path.clone(), &transaction).unwrap();
+        staged
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        let actual = ShellSettings::load(&path).unwrap();
+        assert_eq!(actual.file_icon_provider, FileIconPreference::System);
+        assert_eq!(actual.file_icon_theme, None);
+        assert_eq!(actual.idle_lock_seconds, Some(731));
+        assert_eq!(
+            actual.preferred_terminal.as_deref(),
+            Some("private-terminal")
+        );
     }
 
     #[test]
