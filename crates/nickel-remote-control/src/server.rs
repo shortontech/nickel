@@ -838,8 +838,9 @@ async fn operational_metrics(
     let counts = control.lease_metrics(now, 0);
     let leases = counts.active_total;
     let pending = counts.pending_requests;
+    let connections = counts.active_connections;
     let mut body = format!(
-        "# TYPE nickel_mcp_active_leases gauge\nnickel_mcp_active_leases {leases}\n# TYPE nickel_mcp_permission_requests_pending gauge\nnickel_mcp_permission_requests_pending {pending}\n"
+        "# TYPE nickel_mcp_active_connections gauge\nnickel_mcp_active_connections {connections}\n# TYPE nickel_mcp_active_leases gauge\nnickel_mcp_active_leases {leases}\n# TYPE nickel_mcp_permission_requests_pending gauge\nnickel_mcp_permission_requests_pending {pending}\n"
     );
     body.push_str("# TYPE nickel_mcp_active_leases_by_scope gauge\n");
     for (scope, count) in ["surface", "window", "application", "output", "full_session"]
@@ -2788,6 +2789,38 @@ mod tests {
     }
 
     #[test]
+    fn published_tools_match_fixed_operation_metric_labels() {
+        let control = Arc::new(Mutex::new(ControlPlane::default()));
+        let handler = McpHandler::new(control, Arc::new(EmptyDesktop));
+        let mut tools: Vec<_> = handler
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect();
+        tools.sort();
+
+        let labels = crate::operation_metrics::method_labels();
+        let mut tool_labels: Vec<_> = labels
+            .iter()
+            .copied()
+            .filter(|label| *label != "event_subscription")
+            .map(str::to_owned)
+            .collect();
+        tool_labels.sort();
+        assert_eq!(tool_labels, tools);
+        assert_eq!(labels.len(), tools.len() + 1);
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|label| **label == "event_subscription")
+                .count(),
+            1,
+            "the non-tool MCP subscription path has one fixed metric label"
+        );
+    }
+
+    #[test]
     fn listener_is_absent_until_enabled_and_releases_the_fixed_port_on_stop() {
         let _port = PORT_TEST.lock().unwrap_or_else(|error| error.into_inner());
         let control = Arc::new(Mutex::new(ControlPlane::default()));
@@ -3151,6 +3184,7 @@ mod tests {
         };
         let inactive =
             http("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(inactive.contains("nickel_mcp_active_connections 0"));
         assert!(inactive.contains("nickel_mcp_active_leases_by_scope{scope=\"full_session\"} 0"));
         assert!(
             crate::DesktopPermit::new(control.clone(), client.into(), token.into(), lease)
@@ -3166,6 +3200,7 @@ mod tests {
                 .unwrap();
         }
         let active = http("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(active.contains("nickel_mcp_active_connections 1"));
         assert!(active.contains("nickel_mcp_active_leases_by_scope{scope=\"full_session\"} 1"));
         control.lock().unwrap().leases_mut().disconnect(client);
         assert!(
@@ -3179,6 +3214,7 @@ mod tests {
 
         let metrics = http("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
         assert!(metrics.starts_with("HTTP/1.1 200"));
+        assert!(metrics.contains("nickel_mcp_active_connections 1"));
         assert!(metrics.contains("nickel_mcp_active_leases 0"));
         assert!(metrics.contains("nickel_mcp_active_leases_by_scope{scope=\"full_session\"} 0"));
         assert!(metrics.contains(

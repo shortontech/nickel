@@ -1550,6 +1550,11 @@ impl ControlPlane {
         now: std::time::Instant,
         observed_at_us: u64,
     ) -> diagnostics::LeaseMetricsDiagnostic {
+        let active_connections = self
+            .granted
+            .keys()
+            .filter(|client| self.has_ready_connection(client, now))
+            .count() as u64;
         let mut active_by_scope = [0; 5];
         for lease in self.leases.iter().filter(|lease| {
             self.has_ready_connection(&lease.client_identity, now)
@@ -1569,6 +1574,7 @@ impl ControlPlane {
         }
         diagnostics::LeaseMetricsDiagnostic {
             observed_at_us,
+            active_connections,
             active_total: active_by_scope.iter().sum(),
             active_by_scope,
             pending_requests: self.lease_requests.pending().count() as u64,
@@ -2098,6 +2104,7 @@ mod tests {
             .unwrap();
         let active = plane.lease_metrics(now, 42);
         assert_eq!(active.observed_at_us, 42);
+        assert_eq!(active.active_connections, 1);
         assert_eq!(active.pending_requests, 0);
         assert_eq!(active.active_by_scope, [0, 0, 0, 0, 1]);
         plane.leases.suspend_local(lease).unwrap();
@@ -2122,6 +2129,72 @@ mod tests {
         assert_eq!(plane.lease_metrics(now, 0).active_total, 0);
         let encoded = serde_json::to_string(&active).unwrap();
         assert!(!encoded.contains(&client.client_id) && !encoded.contains("private metric label"));
+    }
+
+    #[test]
+    fn connection_metrics_count_ready_identities_once_and_expire_at_observation() {
+        let now = std::time::Instant::now();
+        let mut plane = ControlPlane::default();
+        plane.set_enabled(true);
+        let first = plane.connect_identity("private first connection").unwrap();
+        let second = plane.connect_identity("private second connection").unwrap();
+
+        let activate =
+            |plane: &mut ControlPlane, client: &IssuedCapability, now: std::time::Instant| {
+                let id = plane
+                    .reserve_connection_watch(&client.client_id, &client.token, now)
+                    .unwrap();
+                plane
+                    .activate_connection_watch(&client.client_id, &client.token, id, false, now)
+                    .unwrap();
+                id
+            };
+
+        let first_watch = activate(&mut plane, &first, now);
+        let overlap = activate(&mut plane, &first, now);
+        assert_eq!(plane.lease_metrics(now, 0).active_connections, 1);
+
+        let second_reservation = plane
+            .reserve_connection_watch(&second.client_id, &second.token, now)
+            .unwrap();
+        assert_eq!(plane.lease_metrics(now, 0).active_connections, 1);
+        plane
+            .activate_connection_watch(
+                &second.client_id,
+                &second.token,
+                second_reservation,
+                false,
+                now,
+            )
+            .unwrap();
+        let active = plane.lease_metrics(now, 0);
+        assert_eq!(active.active_connections, 2);
+
+        plane.close_connection_watch(first_watch, now);
+        assert_eq!(plane.lease_metrics(now, 0).active_connections, 2);
+        plane.close_connection_watch(overlap, now);
+        assert_eq!(plane.lease_metrics(now, 0).active_connections, 1);
+        assert_eq!(
+            plane
+                .lease_metrics(
+                    now + Duration::from_secs(connection_watch::WATCH_SECONDS),
+                    0,
+                )
+                .active_connections,
+            0
+        );
+
+        let encoded = serde_json::to_string(&active).unwrap();
+        for secret in [
+            first.client_id,
+            first.token,
+            second.client_id,
+            second.token,
+            "private first connection".into(),
+            "private second connection".into(),
+        ] {
+            assert!(!encoded.contains(&secret));
+        }
     }
 
     #[test]

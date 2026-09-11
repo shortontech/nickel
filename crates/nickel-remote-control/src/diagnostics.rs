@@ -619,6 +619,8 @@ pub struct AdmissionDiagnostic {
 pub struct LeaseMetricsDiagnostic {
     /// Monotonic microseconds since compositor start, supplied at collection.
     pub observed_at_us: u64,
+    /// Distinct authenticated identities with at least one ready, live watch.
+    pub active_connections: u64,
     /// Scope order is surface, window, application, output, full_session.
     pub active_by_scope: [u64; 5],
     pub active_total: u64,

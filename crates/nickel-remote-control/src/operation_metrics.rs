@@ -7,7 +7,7 @@ use std::{
     time::Instant,
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(usize)]
 pub(crate) enum Method {
     RequestLease,
@@ -56,6 +56,62 @@ pub(crate) enum Method {
     CodexPreferenceTransaction,
     ReadIdlePreferences,
     IdlePreferencesTransaction,
+}
+
+impl Method {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 46] = [
+        Self::RequestLease,
+        Self::ListLeases,
+        Self::Snapshot,
+        Self::DiagnosticAction,
+        Self::Status,
+        Self::ListWindows,
+        Self::FocusWindow,
+        Self::Capture,
+        Self::CaptureSurface,
+        Self::ListSurfaces,
+        Self::WindowAction,
+        Self::Pointer,
+        Self::Keyboard,
+        Self::Semantics,
+        Self::SemanticAction,
+        Self::SettingsTransaction,
+        Self::WorkspaceAction,
+        Self::ListOutputs,
+        Self::ListApplications,
+        Self::LaunchApplication,
+        Self::ReadDesktopEvents,
+        Self::EventSubscription,
+        Self::ClientConnection,
+        Self::SurfaceSemantics,
+        Self::SurfaceSemanticAction,
+        Self::ReadAppearance,
+        Self::AppearanceTransaction,
+        Self::ReadApplicationScale,
+        Self::ApplicationScaleTransaction,
+        Self::ReadLauncherFavorites,
+        Self::LauncherFavoritesTransaction,
+        Self::NativeSemantics,
+        Self::NativeApplicationSemantics,
+        Self::NativeSemanticAction,
+        Self::ReadWallpaper,
+        Self::WallpaperTransaction,
+        Self::ReadTerminalPresentation,
+        Self::TerminalPresentationTransaction,
+        Self::ReadKeyboardPreference,
+        Self::KeyboardPreferenceTransaction,
+        Self::ReadFileIcons,
+        Self::FileIconsTransaction,
+        Self::ReadCodexPreference,
+        Self::CodexPreferenceTransaction,
+        Self::ReadIdlePreferences,
+        Self::IdlePreferencesTransaction,
+    ];
+
+    fn label(self) -> &'static str {
+        METHODS[self as usize]
+    }
 }
 
 const METHODS: [&str; 46] = [
@@ -107,6 +163,11 @@ const METHODS: [&str; 46] = [
     "idle_preferences_transaction",
 ];
 const BOUNDS: [f64; 5] = [0.001, 0.01, 0.1, 1.0, 5.0];
+
+#[cfg(test)]
+pub(crate) fn method_labels() -> &'static [&'static str] {
+    &METHODS
+}
 
 #[derive(Default)]
 struct Sample {
@@ -269,7 +330,7 @@ impl OperationMetrics {
                 .map(|completion| crate::diagnostics::OperationCompletion {
                     generation: completion.generation,
                     collector_uptime_us: completion.collector_uptime_us,
-                    method: METHODS[completion.method as usize].to_owned(),
+                    method: completion.method.label().to_owned(),
                     outcome: completion.outcome,
                     duration_us: completion.duration_us,
                     authorization: completion.authorization,
@@ -409,6 +470,95 @@ mod tests {
             lease_id: id,
             operation_id: id,
             lease_operation_generation: id,
+        }
+    }
+
+    #[test]
+    fn every_fixed_method_and_outcome_is_bounded_and_payload_free() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let metrics = Arc::new(OperationMetrics::default());
+        runtime.block_on(async {
+            for method in Method::ALL {
+                metrics
+                    .measure(method, async {
+                        Ok::<_, &'static str>("private-result-canary")
+                    })
+                    .await
+                    .unwrap();
+                assert!(
+                    metrics
+                        .measure(method, async {
+                            Err::<(), _>("private-resource-title-path-credential-keystroke-canary")
+                        })
+                        .await
+                        .is_err()
+                );
+
+                let cancelled_metrics = metrics.clone();
+                let task = tokio::spawn(async move {
+                    cancelled_metrics
+                        .measure(method, std::future::pending::<Result<(), ()>>())
+                        .await
+                });
+                while metrics.snapshot().unwrap().methods[method as usize].in_flight == 0 {
+                    tokio::task::yield_now().await;
+                }
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+        });
+
+        let text = metrics.exposition();
+        assert!(
+            text.len() < 64 * 1024,
+            "metrics response grew to {} bytes",
+            text.len()
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("nickel_mcp_requests_total{"))
+                .count(),
+            METHODS.len() * 3
+        );
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.starts_with("nickel_mcp_request_duration_seconds_bucket{"))
+                .count(),
+            METHODS.len() * (BOUNDS.len() + 1)
+        );
+        for method in Method::ALL {
+            let label = method.label();
+            assert!(
+                label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+            );
+            for outcome in ["success", "error", "cancelled"] {
+                assert!(text.contains(&format!(
+                    "nickel_mcp_requests_total{{method=\"{label}\",outcome=\"{outcome}\"}} 1"
+                )));
+            }
+        }
+        assert_eq!(
+            METHODS
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            METHODS.len()
+        );
+        for secret in [
+            "private-result-canary",
+            "private-resource-title-path-credential-keystroke-canary",
+            "resource",
+            "title",
+            "path",
+            "credential",
+            "keystroke",
+        ] {
+            assert!(!text.contains(secret), "metrics retained {secret}");
         }
     }
 

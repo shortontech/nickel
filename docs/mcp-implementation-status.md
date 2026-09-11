@@ -522,8 +522,8 @@ the isolated session cleaned up. Evidence: `debug-duration-native-results.txt`,
 directory. The existing custom, two-hour and until-logout choices remain available.
 
 Lease metrics now use one production aggregate projection for the public endpoint
-and the full-debug snapshot. It reports five fixed scope counts, active total and
-pending approvals. Active counts use the actual lease authority's current-time
+and the full-debug snapshot. It reports five fixed scope counts, active total,
+distinct ready client identities and pending approvals. Active counts use the actual lease authority's current-time
 eligibility check, so paused, disconnected, revoked and expired leases do not count.
 The diagnostic read uses `try_lock` outside the final authorization transaction,
 returns `null` if busy, and carries its own compositor-relative observation time.
@@ -1870,3 +1870,26 @@ editing because those operations produce no deferred platform effects; other rol
 be staged and delivered without escaping revocation. Windows cross-compilation
 and Wine cover protocol and projection behavior; live native HWND/MCP acceptance
 remains open.
+
+## Prometheus connection and method coverage
+
+The public metrics endpoint now exposes `nickel_mcp_active_connections` as the
+number of distinct authenticated identities with at least one ready, live
+connection watch. Overlapping replacement watches count once, unready reservations
+do not count, and transport loss or the watch deadline removes the identity at the
+observation point. The gauge has no client, peer, lease or resource labels and uses
+the same bounded production projection as full-debug lease diagnostics.
+
+The fixed operation collector now has an exhaustive category inventory. A test
+executes all 46 categories through success, error and cancelled outcomes, requires
+unique lowercase fixed labels, verifies histogram cardinality, caps the complete
+exposition below 64 KiB, and passes result, resource, title, path, credential and
+keystroke canaries through operations without retaining them. A separate router
+test requires exact label coverage for all 45 published tools plus the bounded
+event-subscription path, so a new tool cannot silently omit its metric category.
+
+All 130 `nickel-remote-control` tests and its host all-target/all-feature Clippy
+with warnings denied passed. Windows cross-target validation could not run on this
+host because the installed Rust target lacks the required MinGW `gcc` and
+`dlltool`; the available `llvm-dlltool` alone cannot compile `ring`. No native or
+cross-target Windows result is claimed for this platform-neutral change.
