@@ -106,14 +106,64 @@ impl NickelSession {
             }
             None => None,
         };
-        if let Some(id) = id.filter(|id| !self.remote_window_is_protected(*id)) {
-            self.remote_desktop_events.record(
-                nickel_remote_control::desktop_events::DesktopEventKind::KeyboardFocusChanged {
-                    window_id: id.0,
-                },
-                self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
-            );
+        let state = id
+            .filter(|id| !self.remote_window_is_protected(*id))
+            .map_or(super::RemoteFocusEventState::Cleared, |id| {
+                super::RemoteFocusEventState::Window(id.0)
+            });
+        self.record_remote_focus_state(state);
+    }
+
+    pub(crate) fn record_remote_internal_focus_event(
+        &mut self,
+        runtime: nickel_ui::InternalSurfaceId,
+    ) {
+        let state = self
+            .internal_shell_surfaces
+            .iter()
+            .find_map(|(owner, current)| (*current == runtime).then_some(*owner))
+            .and_then(|owner| {
+                let role = self
+                    .internal_shell
+                    .as_ref()?
+                    .surfaces()
+                    .iter()
+                    .find(|surface| surface.id == owner)
+                    .and_then(|surface| super::remote_shell_event_role(surface.role))?;
+                (!self.internal_ui.remote_access_protected(runtime)).then_some(
+                    super::RemoteFocusEventState::Shell(runtime.snapshot_token(), role),
+                )
+            })
+            .unwrap_or(super::RemoteFocusEventState::Cleared);
+        self.record_remote_focus_state(state);
+    }
+
+    pub(crate) fn record_remote_focus_cleared(&mut self) {
+        self.record_remote_focus_state(super::RemoteFocusEventState::Cleared);
+    }
+
+    fn record_remote_focus_state(&mut self, state: super::RemoteFocusEventState) {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        if self.remote_focus_event_state == Some(state) {
+            return;
         }
+        self.remote_focus_event_state = Some(state);
+        let event = match state {
+            super::RemoteFocusEventState::Window(window_id) => {
+                DesktopEventKind::KeyboardFocusChanged { window_id }
+            }
+            super::RemoteFocusEventState::Shell(surface_generation, role) => {
+                DesktopEventKind::ShellKeyboardFocusChanged {
+                    surface_generation,
+                    role,
+                }
+            }
+            super::RemoteFocusEventState::Cleared => DesktopEventKind::KeyboardFocusCleared,
+        };
+        self.remote_desktop_events.record(
+            event,
+            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        );
     }
 
     pub(super) fn remote_list_outputs(

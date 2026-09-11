@@ -54,6 +54,13 @@ pub enum DesktopEventKind {
     /// Compositor focus assignment to a verified ordinary window, not a native
     /// client acknowledgement. Window IDs match inventory generation values.
     KeyboardFocusChanged { window_id: u64 },
+    /// Keyboard focus moved to an ordinary compositor-hosted shell surface.
+    ShellKeyboardFocusChanged {
+        surface_generation: u64,
+        role: ShellEventRole,
+    },
+    /// No remotely observable ordinary recipient owns keyboard focus.
+    KeyboardFocusCleared,
     OutputMembershipChanged {
         latest_output_identity_generation: u64,
         outputs: usize,
@@ -464,5 +471,25 @@ mod tests {
         ] {
             assert!(fields.contains_key(included));
         }
+    }
+
+    #[test]
+    fn shell_focus_event_has_only_generation_and_fixed_role() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::ShellKeyboardFocusChanged {
+                surface_generation: 17,
+                role: ShellEventRole::Launcher,
+            },
+            21,
+        );
+        events.record(DesktopEventKind::KeyboardFocusCleared, 22);
+        let value = serde_json::to_value(events.snapshot()).unwrap();
+        let focused = value["events"][0]["event"].as_object().unwrap();
+        assert_eq!(focused.len(), 3);
+        assert_eq!(focused["role"], "launcher");
+        assert!(focused.contains_key("surface_generation"));
+        let cleared = value["events"][1]["event"].as_object().unwrap();
+        assert_eq!(cleared.len(), 1);
     }
 }

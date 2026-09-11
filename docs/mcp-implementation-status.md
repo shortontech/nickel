@@ -1505,3 +1505,11 @@ Native nested acceptance used real GTK titlebar double-clicks and verified both
 the maximized and restored events through MCP before continuing the existing
 transient, protection, timeout, revocation and lock matrix. All owned fixture
 processes were stopped afterward.
+
+Keyboard-focus events now cover ordinary windows, ordinary compositor-hosted
+shell surfaces and the absence of a remotely observable recipient. Shell records
+carry only the current surface generation and a fixed role; protected, unknown or
+cleared focus produces the same payload-free cleared state. Unchanged focus is
+coalesced. An owned nested X11 fixture opened the launcher and correlated its
+native keyboard focus with the exact launcher surface generation in the event
+stream before passing the existing persistence, scope and revocation matrix.

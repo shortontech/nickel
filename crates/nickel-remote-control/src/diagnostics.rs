@@ -599,7 +599,8 @@ pub struct DiagnosticSnapshot {
     /// Shared bounded worker for application and platform diagnostic refreshes.
     pub diagnostic_worker: Option<SettingsWorkerDiagnostic>,
     pub application_launch: ApplicationLaunchDiagnostic,
-    /// Currently ordinary native-window identity, retirement, focus assignments and output membership only.
+    /// Bounded protected-safe window, output, workspace, shell, focus, input and
+    /// production-effect transitions.
     pub recent_events: crate::desktop_events::DesktopEventSnapshot,
     /// None means the collector is unavailable or busy; never reads log files.
     pub diagnostic_logs: Option<DiagnosticLogSnapshot>,

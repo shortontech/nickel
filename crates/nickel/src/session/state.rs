@@ -1775,6 +1775,13 @@ struct RemoteOutputEventState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteFocusEventState {
+    Window(u64),
+    Shell(u64, nickel_remote_control::desktop_events::ShellEventRole),
+    Cleared,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingLaunchWindowDisposition {
     AwaitExpiry,
     Unrelated,
@@ -2162,6 +2169,7 @@ pub struct NickelSession {
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_window_event_states: HashMap<u64, RemoteWindowEventState>,
     remote_output_event_states: HashMap<u64, RemoteOutputEventState>,
+    remote_focus_event_state: Option<RemoteFocusEventState>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     remote_event_windows: HashSet<WindowId>,
     remote_launched_children: Vec<std::process::Child>,
@@ -5978,6 +5986,7 @@ impl NickelSession {
             remote_desktop_events: Default::default(),
             remote_window_event_states: HashMap::new(),
             remote_output_event_states: HashMap::new(),
+            remote_focus_event_state: None,
             remote_frame_trace: None,
             remote_event_windows: HashSet::new(),
             remote_launched_children: Vec::new(),
@@ -8870,6 +8879,7 @@ impl NickelSession {
         if !self.internal_ui.focus_surface(surface) {
             return false;
         }
+        self.record_remote_internal_focus_event(surface);
         self.reconcile_keyboard_internal_recipient();
         self.wake_internal_shell();
         self.schedule_internal_ui_frame();
@@ -8879,6 +8889,7 @@ impl NickelSession {
     /// Blur a compositor-hosted owner before assigning a native seat target.
     pub(crate) fn surrender_internal_focus(&mut self) {
         if self.internal_ui.clear_focus().is_some() {
+            self.record_remote_focus_cleared();
             self.reconcile_keyboard_internal_recipient();
             self.wake_internal_shell();
             self.schedule_internal_ui_frame();
