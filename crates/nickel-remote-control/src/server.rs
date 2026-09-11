@@ -2901,6 +2901,195 @@ mod tests {
         );
     }
 
+    #[test]
+    fn integrated_remote_churn_retains_only_bounded_payload_free_diagnostics() {
+        use crate::{
+            desktop_events::{DesktopEventKind, DesktopEvents, MAX_DESKTOP_EVENTS},
+            diagnostics::MAX_RECENT_OPERATION_COMPLETIONS,
+            event_subscriptions::{MAX_SUBSCRIPTIONS, SubscriptionAdmission},
+            frame_trace::{FrameTrace, FrameTraceCategory, MAX_FRAME_TRACE_RECORDS},
+            lease_requests::LeaseRequest,
+            leases::ResourceScope,
+            operation_metrics::Method,
+            trace_audit::{MAX_TRACE_AUDIT_EVENTS, TraceAuditHandle, Transition},
+        };
+
+        const TYPED_CANARY: &str = "typed-password-DO-NOT-RETAIN";
+        const CREDENTIAL_CANARY: &str = "credential-token-DO-NOT-RETAIN";
+        let now = std::time::Instant::now();
+        let mut plane = ControlPlane::default();
+        plane.set_enabled(true);
+        let client = plane.connect_identity(CREDENTIAL_CANARY).unwrap();
+        crate::ready_connection(&mut plane, &client, now);
+
+        let denied = LeaseRequest {
+            renewal: None,
+            scope: ResourceScope::Application("org.nickel.ChurnFixture".into()),
+            duration: Some(std::time::Duration::from_secs(30)),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        plane
+            .request_lease(&client.client_id, &client.token, denied.clone(), now)
+            .unwrap();
+        plane
+            .lease_requests_mut()
+            .deny_local(&client.client_id, now);
+
+        let approved = LeaseRequest {
+            scope: ResourceScope::FullSession,
+            duration: Some(std::time::Duration::from_secs(1)),
+            full_debug: true,
+            ..denied
+        };
+        plane
+            .request_lease(
+                &client.client_id,
+                &client.token,
+                approved.clone(),
+                now + std::time::Duration::from_secs(6),
+            )
+            .unwrap();
+        let lease = plane
+            .approve_lease_local(
+                &client.client_id,
+                &approved,
+                plane
+                    .lease_requests()
+                    .pending_generation(&client.client_id)
+                    .unwrap(),
+                now + std::time::Duration::from_secs(6),
+            )
+            .unwrap();
+        let metrics = plane.operation_metrics.clone();
+        let trace_audit = plane.trace_audit.clone();
+        let control = Arc::new(Mutex::new(plane));
+        let permit = crate::DesktopPermit::new(
+            control.clone(),
+            client.client_id.clone(),
+            client.token.clone(),
+            lease,
+        );
+        let mut trace =
+            FrameTrace::new_authorized(permit.clone(), 60, FrameTraceCategory::NestedFrameDispatch)
+                .unwrap();
+        for generation in 1..=(MAX_FRAME_TRACE_RECORDS as u64 * 3) {
+            assert!(trace.record(
+                false,
+                generation,
+                std::time::Duration::from_micros(generation),
+            ));
+        }
+        let trace_snapshot = trace.snapshot();
+        assert_eq!(trace_snapshot.records.len(), MAX_FRAME_TRACE_RECORDS);
+        assert_eq!(trace_snapshot.evicted, (MAX_FRAME_TRACE_RECORDS * 2) as u64);
+
+        let mut events = DesktopEvents::default();
+        for generation in 0..MAX_DESKTOP_EVENTS * 3 {
+            events.record(
+                DesktopEventKind::KeyboardFocusChanged {
+                    window_id: generation as u64,
+                },
+                generation as u64,
+            );
+        }
+        let event_snapshot = events.snapshot();
+        assert_eq!(event_snapshot.events.len(), MAX_DESKTOP_EVENTS);
+        assert_eq!(event_snapshot.evicted, (MAX_DESKTOP_EVENTS * 2) as u64);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for _ in 0..MAX_RECENT_OPERATION_COMPLETIONS * 3 {
+                let action = crate::keyboard::KeyboardAction::Text {
+                    text: TYPED_CANARY.into(),
+                };
+                assert!(
+                    metrics
+                        .measure(Method::Keyboard, async move {
+                            Err::<(), _>(format!("rejected {action:?} {CREDENTIAL_CANARY}"))
+                        })
+                        .await
+                        .is_err()
+                );
+            }
+            let capture = CAPTURE_GATE.clone().try_acquire_owned().unwrap();
+            assert!(CAPTURE_GATE.clone().try_acquire_owned().is_err());
+            drop(capture);
+            assert_eq!(CAPTURE_GATE.available_permits(), 1);
+        });
+        let metric_snapshot = metrics.snapshot().unwrap();
+        assert_eq!(
+            metric_snapshot.recent_completions.len(),
+            MAX_RECENT_OPERATION_COMPLETIONS
+        );
+        assert_eq!(
+            metric_snapshot.evicted_completions,
+            (MAX_RECENT_OPERATION_COMPLETIONS * 2) as u64
+        );
+
+        let subscriptions = (0..MAX_SUBSCRIPTIONS)
+            .map(|id| SubscriptionAdmission::acquire(&format!("churn-{id}")))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(SubscriptionAdmission::acquire("churn-overflow").is_err());
+        drop(subscriptions);
+        assert!(SubscriptionAdmission::acquire("churn-released").is_ok());
+
+        for id in 0..MAX_TRACE_AUDIT_EVENTS {
+            let mut audit = TraceAuditHandle::start(
+                trace_audit.clone(),
+                id as u64,
+                lease,
+                id as u64 + 10,
+                1,
+                now,
+                nickel_session_protocol::RemoteTraceCategory::NestedFrameDispatch,
+            );
+            audit.finish(Transition::Stopped, now);
+        }
+        let (trace_events, trace_evicted) = trace_audit.snapshot().unwrap();
+        assert_eq!(trace_events.len(), MAX_TRACE_AUDIT_EVENTS);
+        assert!(trace_evicted > 0);
+
+        control
+            .lock()
+            .unwrap()
+            .leases_mut()
+            .expire(now + std::time::Duration::from_secs(8));
+        assert!(!trace.record(false, 999, std::time::Duration::ZERO));
+        assert!(permit.check_live().is_err());
+
+        let observable = format!(
+            "{} {} {} {}",
+            serde_json::to_string(&metric_snapshot).unwrap(),
+            metrics.exposition(),
+            serde_json::to_string(&event_snapshot).unwrap(),
+            format_args!("{:?}", trace_events.len()),
+        );
+        assert!(observable.len() < 128 * 1024);
+        for canary in [TYPED_CANARY, CREDENTIAL_CANARY, &client.token] {
+            assert!(!observable.contains(canary));
+        }
+
+        let responsive = control.clone();
+        let (done, answer) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let snapshot = responsive
+                .lock()
+                .unwrap()
+                .lease_metrics(std::time::Instant::now(), 0);
+            let _ = done.send(snapshot.active_total);
+        });
+        assert_eq!(
+            answer.recv_timeout(std::time::Duration::from_secs(2)),
+            Ok(0),
+            "owner failed to answer after bounded churn"
+        );
+    }
+
     fn schema_fixture(schema: &serde_json::Value, root: &serde_json::Value) -> serde_json::Value {
         if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
             return schema_fixture(
@@ -3360,12 +3549,17 @@ mod tests {
         let control = Arc::new(Mutex::new(ControlPlane::default()));
         control.lock().unwrap().set_enabled(true);
         let handler = McpHandler::new(control.clone(), Arc::new(EmptyDesktop));
-        let fixtures = handler
+        let mut fixtures = handler
             .tool_router
             .list_all()
             .into_iter()
             .map(|tool| (tool.name.to_string(), tool_fixture(&tool)))
             .collect::<std::collections::BTreeMap<_, _>>();
+        fixtures
+            .get_mut("pointer_action")
+            .and_then(serde_json::Value::as_object_mut)
+            .expect("pointer fixture is an object")
+            .insert("target".into(), serde_json::json!({"kind":"desktop"}));
         let capability_free = [
             "client_connection",
             "request_control_lease",
