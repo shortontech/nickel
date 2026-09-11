@@ -204,3 +204,48 @@ Five harness tests, the production pointer-target resolution test, and strict
 harness/example Clippy passed. The combined stress check completed 27 requests in
 2.95 seconds with a 679 ms maximum response and 6.3 MiB RSS growth. The virtual
 output remains a compositor authority/geometry fixture, not a physical presenter.
+
+## Bounded long connection and lease churn
+
+`--long-churn` extends the default native Linux suite with 24 fresh authenticated
+connection watches and 24 locally approved full-session leases. Even rounds let a
+one-second lease expire; odd rounds revoke a 30-second lease through the trusted
+local owner. Each retirement must leave the original lease and connection active,
+reject the retired lease, record the expected audit transition, and return the
+active connection and lease gauges to one.
+
+While those connections and leases turn over, the original client repeatedly
+uses production diagnostic snapshots, renderer repaint, alternating surface and
+output capture, semantic inspection, and text input. The harness applies a
+10-second ceiling to each measured response and a 120-second ceiling to the churn
+phase. It samples the production compositor's Linux `/proc` `VmRSS` after every
+round, with a 2 GiB absolute ceiling and a 128 MiB peak-growth ceiling. These are
+acceptance bounds on sampled process RSS, not allocator accounting or a proof that
+memory cannot grow in a longer session.
+
+The public metrics response must remain below 128 KiB and 768 series. Every label
+is checked against the published fixed method, outcome, scope, histogram, and
+rate-limit sets; the complete series identity must be unchanged before and after
+churn. Private connection labels, client IDs, tokens, and semantic-input canaries
+must remain absent from diagnostics, metrics, error responses, and action results.
+
+Build and run the matching optimized production executable and harness with the
+shared native-build lock:
+
+```sh
+flock -x /tmp/nickel-mcp-build.lock -c 'cargo build --release -p nickel --features backend-winit --bin nickel --bin nickel-linux-remote-control-acceptance'
+flock -x /tmp/nickel-mcp-build.lock -c 'target/release/nickel-linux-remote-control-acceptance --long-churn'
+```
+
+Native nested Wayland acceptance passed September 11, 2026, on `4854119` plus
+this change. The long phase completed 24 fresh connections, 12 expiries, 12
+explicit revocations, and 144 timed requests in 23.995 seconds. Its maximum
+response was 183.6 ms; the fixed metrics inventory remained 677 series; sampled
+RSS changed from 220,656 KiB to a 233,736 KiB final and peak value. The preceding
+short stress completed 27 requests in 1.022 seconds with a 184.5 ms maximum
+response and 15,360 KiB RSS growth. Six focused harness tests and strict focused
+Clippy also passed.
+
+This run used synthetic semantic input and a nested software-rendered Wayland
+compositor. It provides no physical input, physical display/DRM, installed-session,
+Xwayland, native Windows, allocator, or multi-hour soak evidence.

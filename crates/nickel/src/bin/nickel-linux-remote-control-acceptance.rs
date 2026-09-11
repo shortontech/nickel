@@ -44,12 +44,17 @@ const MAX_STRESS_RESPONSE_LATENCY: Duration = Duration::from_secs(10);
 const MAX_STRESS_WALL_TIME: Duration = Duration::from_secs(45);
 const MAX_STRESS_RSS_KIB: u64 = 2 * 1024 * 1024;
 const MAX_STRESS_RSS_GROWTH_KIB: u64 = 512 * 1024;
+const LONG_CHURN_ROUNDS: usize = 24;
+const MAX_LONG_CHURN_WALL_TIME: Duration = Duration::from_secs(120);
+const MAX_LONG_CHURN_RSS_GROWTH_KIB: u64 = 128 * 1024;
+const MAX_METRIC_SERIES: usize = 768;
 const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
 const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
 const MESA_VBLANK_MODE: &str = "vblank_mode";
 const TYPED_CANARY: &str = "native-typed-password-DO-NOT-RETAIN";
 const CREDENTIAL_CANARY: &str = "native-credential-DO-NOT-RETAIN";
 const STRESS_INPUT_CANARY: &str = "native-stress-input-DO-NOT-RETAIN";
+const LONG_CHURN_CANARY: &str = "native-long-churn-private-DO-NOT-RETAIN";
 const DENIAL_CANARY: &str = "native-denial-client-DO-NOT-RETAIN";
 const EXPIRY_CANARY: &str = "native-expiry-client-DO-NOT-RETAIN";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -79,6 +84,7 @@ fn run() -> Result<Outcome, String> {
     }
     let xwayland_ordinary_scopes =
         env::args().any(|argument| argument == "--xwayland-ordinary-scopes");
+    let long_churn = env::args().any(|argument| argument == "--long-churn");
     let Some(display) = host_display() else {
         return Ok(Outcome::Skipped(
             "no reachable host Wayland or X11 display for a nested compositor".into(),
@@ -129,7 +135,7 @@ fn run() -> Result<Outcome, String> {
         .map_err(|error| format!("could not start nested compositor: {error}"))?;
     let mut session = SessionProcess::new(compositor, runtime.path().to_path_buf());
 
-    let result = exercise(&mut session, &capability_file, address);
+    let result = exercise(&mut session, &capability_file, address, long_churn);
     let unavailable = if !capability_file.exists() {
         session.unavailable_environment_reason()
     } else {
@@ -140,9 +146,15 @@ fn run() -> Result<Outcome, String> {
         return Ok(Outcome::Skipped(reason));
     }
     result?;
-    println!(
-        "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, denial/expiry/revocation, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
-    );
+    if long_churn {
+        println!(
+            "PASS: production native Linux MCP suite plus bounded long connection/lease churn passed; no physical keyboard was exercised"
+        );
+    } else {
+        println!(
+            "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, denial/expiry/revocation, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
+        );
+    }
     Ok(Outcome::Passed)
 }
 
@@ -368,6 +380,7 @@ fn exercise(
     session: &mut SessionProcess,
     capability_file: &Path,
     address: SocketAddr,
+    long_churn: bool,
 ) -> Result<(), String> {
     let environment = wait_for_environment(session, capability_file, Instant::now() + DEADLINE)?;
     wait_for_readiness(session, &environment, Instant::now() + READINESS_DEADLINE)?;
@@ -533,6 +546,16 @@ fn exercise(
         &known_methods,
         &[&denied_identity.client_id, &denied_identity.token],
     )?;
+    if long_churn {
+        exercise_long_churn(
+            session,
+            &environment,
+            address,
+            &identity,
+            &stress,
+            &known_methods,
+        )?;
+    }
     let expiry_identity = exercise_expiry_and_revocation(&environment, address, lease_id)?;
     let final_metrics = metrics(address)?;
     require_metric(&final_metrics, "nickel_mcp_active_leases 1")?;
@@ -1171,6 +1194,344 @@ fn exercise_native_stress(
     Ok(())
 }
 
+fn exercise_long_churn(
+    session: &SessionProcess,
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    retained_identity: &Identity,
+    resources: &StressResources,
+    known_methods: &BTreeSet<String>,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let baseline = metrics(address)?;
+    validate_fixed_metrics(&baseline, known_methods)?;
+    let baseline_series = metric_series(&baseline)?;
+    let rss_before = session.rss_kib()?;
+    if rss_before > MAX_STRESS_RSS_KIB {
+        return Err(format!(
+            "nested compositor RSS exceeded the long-churn correctness ceiling before load: {rss_before} KiB"
+        ));
+    }
+
+    let mut diagnostic_timing = StressTiming::new("long-churn diagnostic snapshots");
+    let mut capture_timing = StressTiming::new("long-churn capture");
+    let mut input_timing = StressTiming::new("long-churn semantic input");
+    let mut lifecycle_timing = StressTiming::new("long-churn retired-lease rejection");
+    let mut private_values = Vec::with_capacity(LONG_CHURN_ROUNDS * 3);
+    let mut rss_peak = rss_before;
+
+    for round in 0..LONG_CHURN_ROUNDS {
+        let label = format!("{LONG_CHURN_CANARY}-{round}");
+        let churn_identity = connect_identity(address, &label)?;
+        private_values.extend([
+            label,
+            churn_identity.client_id.clone(),
+            churn_identity.token.clone(),
+        ]);
+        let watch = ConnectionWatch::start(address, &churn_identity)?;
+        wait_for_metric(
+            address,
+            "nickel_mcp_active_connections 2",
+            Instant::now() + Duration::from_secs(5),
+        )?;
+
+        let expires = round.is_multiple_of(2);
+        let churn_lease = approve_additional_lease(
+            environment,
+            address,
+            &churn_identity,
+            if expires { 1 } else { 30 },
+        )?;
+        let active = metrics(address)?;
+        require_metric(&active, "nickel_mcp_active_connections 2")?;
+        require_metric(&active, "nickel_mcp_active_leases 2")?;
+
+        let (diagnostics, elapsed) = timed_tool_call(
+            address,
+            retained_identity,
+            "diagnostic_snapshot",
+            json!({"lease_id": resources.lease_id}),
+        )?;
+        require_tool_success("diagnostic_snapshot under long churn", &diagnostics)?;
+        require_diagnostic_privacy(&diagnostics, retained_identity)?;
+        require_no_canaries(
+            "diagnostic_snapshot under long churn",
+            &diagnostics.to_string(),
+            &[
+                LONG_CHURN_CANARY,
+                &churn_identity.client_id,
+                &churn_identity.token,
+            ],
+        )?;
+        diagnostic_timing.observe(elapsed)?;
+
+        let (capture, elapsed) = if round.is_multiple_of(2) {
+            timed_tool_call(
+                address,
+                retained_identity,
+                "capture_surface",
+                json!({
+                    "lease_id": resources.lease_id,
+                    "surface_id": resources.surface.id,
+                    "generation": resources.surface.generation
+                }),
+            )?
+        } else {
+            timed_tool_call(
+                address,
+                retained_identity,
+                "capture_output",
+                json!({
+                    "lease_id": resources.lease_id,
+                    "output_id": resources.output.id,
+                    "generation": resources.output.generation
+                }),
+            )?
+        };
+        require_tool_success("capture under long churn", &capture)?;
+        capture_timing.observe(elapsed)?;
+
+        let (tree, elapsed) = timed_tool_call(
+            address,
+            retained_identity,
+            "inspect_surface",
+            json!({
+                "lease_id": resources.lease_id,
+                "surface_id": resources.surface.id,
+                "generation": resources.surface.generation
+            }),
+        )?;
+        require_tool_success("inspect_surface under long churn", &tree)?;
+        input_timing.observe(elapsed)?;
+        let tree = structured_content("inspect_surface under long churn", &tree)?;
+        let field = search_field(&tree)?;
+        let (input, elapsed) = timed_tool_call(
+            address,
+            retained_identity,
+            "surface_semantic_action",
+            json!({
+                "lease_id": resources.lease_id,
+                "surface_id": resources.surface.id,
+                "surface_generation": resources.surface.generation,
+                "tree_generation": tree["tree_generation"],
+                "node": field["id"],
+                "action": {
+                    "kind": "set_text",
+                    "value": format!("{LONG_CHURN_CANARY}-input-{round}")
+                }
+            }),
+        )?;
+        require_tool_success("surface_semantic_action under long churn", &input)?;
+        require_no_canaries(
+            "semantic input response under long churn",
+            &input.to_string(),
+            &[LONG_CHURN_CANARY],
+        )?;
+        input_timing.observe(elapsed)?;
+        let (repaint, elapsed) = timed_tool_call(
+            address,
+            retained_identity,
+            "diagnostic_action",
+            json!({"lease_id": resources.lease_id, "action": "repaint"}),
+        )?;
+        require_tool_success("repaint under long churn", &repaint)?;
+        diagnostic_timing.observe(elapsed)?;
+
+        let expected_transition = if expires {
+            RemoteLeaseTransition::Expired
+        } else {
+            session_message(
+                environment,
+                Request::Command(Command::ManageRemoteLease {
+                    lease_id: churn_lease,
+                    action: RemoteLeaseAction::Revoke,
+                }),
+            )?;
+            RemoteLeaseTransition::Revoked
+        };
+        let retired = wait_for_lease_retirement(
+            environment,
+            address,
+            churn_lease,
+            expected_transition,
+            resources.lease_id,
+            Instant::now() + Duration::from_secs(5),
+        )?;
+        if retired.active_leases.len() != 1 {
+            return Err("long churn retained unexpected lease authority".into());
+        }
+        let (denied, elapsed) = timed_tool_call(
+            address,
+            &churn_identity,
+            "diagnostic_snapshot",
+            json!({"lease_id": churn_lease}),
+        )?;
+        require_tool_error("diagnostic_snapshot after long-churn retirement", &denied)?;
+        require_no_canaries(
+            "retired-lease response under long churn",
+            &denied.to_string(),
+            &[
+                LONG_CHURN_CANARY,
+                &churn_identity.client_id,
+                &churn_identity.token,
+            ],
+        )?;
+        lifecycle_timing.observe(elapsed)?;
+        watch.finish()?;
+        wait_for_metric(
+            address,
+            "nickel_mcp_active_connections 1",
+            Instant::now() + Duration::from_secs(5),
+        )?;
+
+        let rss = session.rss_kib()?;
+        rss_peak = rss_peak.max(rss);
+        if rss > MAX_STRESS_RSS_KIB
+            || rss_peak.saturating_sub(rss_before) > MAX_LONG_CHURN_RSS_GROWTH_KIB
+        {
+            return Err(format!(
+                "nested compositor RSS exceeded the long-churn stability ceiling: baseline={rss_before} KiB current={rss} KiB peak={rss_peak} KiB"
+            ));
+        }
+        if started.elapsed() > MAX_LONG_CHURN_WALL_TIME {
+            return Err(format!(
+                "native long churn exceeded its correctness deadline of {MAX_LONG_CHURN_WALL_TIME:?}"
+            ));
+        }
+    }
+
+    let expected_increments = [
+        ("client_connection", LONG_CHURN_ROUNDS as u64),
+        ("request_control_lease", LONG_CHURN_ROUNDS as u64),
+        ("diagnostic_snapshot", (LONG_CHURN_ROUNDS * 2) as u64),
+        ("capture_surface", LONG_CHURN_ROUNDS.div_ceil(2) as u64),
+        ("capture_output", (LONG_CHURN_ROUNDS / 2) as u64),
+        ("inspect_surface", LONG_CHURN_ROUNDS as u64),
+        ("surface_semantic_action", LONG_CHURN_ROUNDS as u64),
+        ("diagnostic_action", LONG_CHURN_ROUNDS as u64),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let final_metrics = loop {
+        let exposed = metrics(address)?;
+        if expected_increments.iter().all(|(method, expected)| {
+            request_total(&exposed, method)
+                >= request_total(&baseline, method).saturating_add(*expected)
+        }) {
+            break exposed;
+        }
+        if Instant::now() >= deadline {
+            return Err("long-churn metrics did not observe every completed operation".into());
+        }
+        thread::sleep(POLL);
+    };
+    validate_fixed_metrics(&final_metrics, known_methods)?;
+    if metric_series(&final_metrics)? != baseline_series {
+        return Err("public metric series cardinality changed during long churn".into());
+    }
+    let mut canaries = vec![
+        TYPED_CANARY,
+        CREDENTIAL_CANARY,
+        STRESS_INPUT_CANARY,
+        LONG_CHURN_CANARY,
+        &retained_identity.client_id,
+        &retained_identity.token,
+    ];
+    canaries.extend(private_values.iter().map(String::as_str));
+    require_no_canaries("metrics after long churn", &final_metrics, &canaries)?;
+
+    thread::sleep(Duration::from_millis(250));
+    let rss_after = session.rss_kib()?;
+    rss_peak = rss_peak.max(rss_after);
+    if rss_after > MAX_STRESS_RSS_KIB
+        || rss_peak.saturating_sub(rss_before) > MAX_LONG_CHURN_RSS_GROWTH_KIB
+    {
+        return Err(format!(
+            "nested compositor RSS failed the final long-churn stability ceiling: baseline={rss_before} KiB final={rss_after} KiB peak={rss_peak} KiB"
+        ));
+    }
+    let max_latency = [
+        diagnostic_timing.max_latency,
+        capture_timing.max_latency,
+        input_timing.max_latency,
+        lifecycle_timing.max_latency,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default();
+    println!(
+        "PASS: native MCP long churn: {LONG_CHURN_ROUNDS} fresh connections, {} expiries, {} explicit revocations, {} timed requests in {:?}, max response {:?}, metric series {}, RSS {} -> {} KiB (peak {} KiB)",
+        LONG_CHURN_ROUNDS / 2,
+        LONG_CHURN_ROUNDS / 2,
+        diagnostic_timing.calls
+            + capture_timing.calls
+            + input_timing.calls
+            + lifecycle_timing.calls,
+        started.elapsed(),
+        max_latency,
+        baseline_series.len(),
+        rss_before,
+        rss_after,
+        rss_peak,
+    );
+    Ok(())
+}
+
+fn wait_for_lease_retirement(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    lease_id: u64,
+    transition: RemoteLeaseTransition,
+    retained_lease: u64,
+    deadline: Instant,
+) -> Result<RemoteControlSnapshot, String> {
+    loop {
+        // The metrics endpoint performs the same production expiry housekeeping
+        // used by ordinary monitoring clients.
+        let _ = metrics(address)?;
+        let snapshot = remote_snapshot(environment)?;
+        let retired = !snapshot
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == lease_id);
+        let retained = snapshot
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == retained_lease);
+        let audited = snapshot
+            .lease_audit
+            .iter()
+            .any(|event| event.lease_id == lease_id && event.transition == transition);
+        if retired && retained && audited {
+            return Ok(snapshot);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "long-churn lease retirement did not converge: lease={lease_id} transition={transition:?} retired={retired} retained={retained} audited={audited}"
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_metric(
+    address: SocketAddr,
+    expected: &str,
+    deadline: Instant,
+) -> Result<String, String> {
+    loop {
+        let exposed = metrics(address)?;
+        if exposed.lines().any(|line| line == expected) {
+            return Ok(exposed);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "metrics omitted expected converged series {expected}"
+            ));
+        }
+        thread::sleep(POLL);
+    }
+}
+
 fn exercise_expiry_and_revocation(
     environment: &SessionEnvironment,
     address: SocketAddr,
@@ -1369,10 +1730,35 @@ fn request_total(metrics: &str, method: &str) -> u64 {
         .fold(0, u64::saturating_add)
 }
 
+fn metric_series(metrics: &str) -> Result<BTreeSet<String>, String> {
+    let mut series = BTreeSet::new();
+    for line in metrics
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let (identity, value) = line
+            .rsplit_once(' ')
+            .ok_or("public metrics contained a malformed series")?;
+        value
+            .parse::<f64>()
+            .map_err(|_| "public metrics contained a non-numeric sample")?;
+        if !series.insert(identity.to_owned()) {
+            return Err("public metrics contained a duplicate series".into());
+        }
+    }
+    if series.len() > MAX_METRIC_SERIES {
+        return Err(format!(
+            "public metrics exceeded the {MAX_METRIC_SERIES}-series cardinality bound"
+        ));
+    }
+    Ok(series)
+}
+
 fn validate_fixed_metrics(metrics: &str, known_methods: &BTreeSet<String>) -> Result<(), String> {
     if metrics.len() > 128 * 1024 {
         return Err("public metrics exceeded the native acceptance bound".into());
     }
+    metric_series(metrics)?;
     let mut observed_methods = BTreeSet::new();
     let scopes = ["surface", "window", "application", "output", "full_session"];
     let outcomes = ["success", "error", "cancelled"];
