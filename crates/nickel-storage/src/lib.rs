@@ -386,7 +386,8 @@ impl DirectorySyncReceipt {
 
 /// Prepare bounded durable content on a worker, including directory handles needed
 /// to persist newly created parent directories after replacement. Unix directory
-/// fsync is required; platforms without an implemented persistence boundary reject
+/// fsync is required on Unix. Windows uses the write-through replacement already
+/// provided by `StagedWrite`; platforms without either persistence boundary reject
 /// preparation before creating anything. Existing `stage_write` semantics are unchanged.
 ///
 /// Cooperative writers must hold `TransactionLock` throughout the transaction.
@@ -402,7 +403,17 @@ pub fn stage_durable_write(
             "durable write exceeds content limit",
         ));
     }
-    #[cfg(not(unix))]
+    #[cfg(target_os = "windows")]
+    {
+        // `replace_file` commits with MOVEFILE_WRITE_THROUGH. There is no
+        // separately transferable directory-sync operation after acceptance.
+        let staged = stage_write(path, contents)?;
+        Ok(StagedDurableWrite {
+            staged,
+            directories: Vec::new(),
+        })
+    }
+    #[cfg(not(any(unix, target_os = "windows")))]
     {
         let _ = path;
         Err(io::Error::new(
@@ -604,6 +615,24 @@ mod tests {
         assert_eq!(first_revision.modified, second_revision.modified);
         assert_ne!(first_revision.identity, second_revision.identity);
         assert!(first_revision != second_revision);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_durable_replacement_uses_checked_write_through_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings");
+        atomic_write(&path, "original").unwrap();
+        let denied = super::stage_durable_write(&path, "denied").unwrap();
+        assert!(
+            denied
+                .commit(|| Err(std::io::Error::other("revoked")))
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "original");
+        let accepted = super::stage_durable_write(&path, "accepted").unwrap();
+        accepted.commit(|| Ok(())).unwrap().sync().unwrap();
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "accepted");
     }
 
     #[test]

@@ -7,6 +7,8 @@ mod windows_application_registry;
 mod windows_emergency_chord;
 #[cfg(target_os = "windows")]
 mod windows_external_accessibility;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_remote_application_scale;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
 #[cfg(target_os = "windows")]

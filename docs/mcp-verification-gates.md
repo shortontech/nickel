@@ -51,6 +51,14 @@ process aggregate of bounded counts, retained byte estimates, durable peak bytes
 counters, with no content or per-surface attribution. The remaining resource gaps are shared-cache
 attribution to individual surfaces, GPU timing/allocation accounting, and DWM pixel readback.
 
+Windows application-scale policy read/change now uses the production bounded journal
+and shared toolkit transaction engine. Preparation holds the stable lock and stages
+the whole journal; the owner checks generation, journal revision, protected focus,
+physical/shared input, local-input and emergency epochs, permit expiry and one
+request deadline at write-through replacement. Existing GTK/Qt ownership and
+pending-intent records remain intact while both unavailable native adapters are
+reported explicitly. Native Windows policy/UI/physical-input execution remains open.
+
 ## Feature requirements outside the numbered gates
 
 The following implementation gaps also prevent completion, even if a narrow test

@@ -587,6 +587,20 @@ enum OwnerRequest {
             Result<nickel_remote_control::desktop_events::DesktopEventObservation, String>,
         >,
     },
+    ReadApplicationScale {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_application_scale::PreparedRead,
+        reply: SyncSender<Result<nickel_remote_control::application_scale::Snapshot, String>>,
+    },
+    ApplicationScaleTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::application_scale::Transaction,
+        prepared: Box<crate::windows_remote_application_scale::PreparedChange>,
+        deadline: Instant,
+        reply: SyncSender<
+            Result<nickel_remote_control::application_scale::TransactionOutcome, String>,
+        >,
+    },
     ReadAppearance {
         permit: DesktopPermit,
         prepared: crate::windows_remote_settings::PreparedAppearanceRead,
@@ -1159,6 +1173,59 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .map_err(|_| "Windows workspace observation timed out".to_owned())?;
         completion.check_live()?;
         result
+    }
+    fn read_application_scale(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::application_scale::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_application_scale::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadApplicationScale {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows application scale observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn application_scale_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::application_scale::Transaction,
+    ) -> Result<nickel_remote_control::application_scale::TransactionOutcome, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_application_scale::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        if Instant::now() >= deadline {
+            return Err("Windows application scale preparation timed out".into());
+        }
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ApplicationScaleTransaction {
+                permit,
+                transaction,
+                prepared: Box::new(prepared),
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows application scale transaction expired before dispatch")?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows application scale result uncertain; read current state before retrying"
+                .to_owned()
+        })?
     }
     fn read_appearance(
         &self,
@@ -1887,6 +1954,7 @@ pub(crate) struct WindowsRemoteControl {
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     appearance: crate::windows_remote_settings::AppearanceState,
+    application_scale: crate::windows_remote_application_scale::State,
     file_icons: crate::windows_remote_settings::FileIconState,
     launcher_favorites: crate::windows_remote_launcher_favorites::FavoritesState,
     shell_focus: Option<ShellFocusState>,
@@ -2037,6 +2105,7 @@ impl WindowsRemoteControl {
             pointer_hold: None,
             desktop_events: Default::default(),
             appearance: Default::default(),
+            application_scale: Default::default(),
             file_icons: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,
@@ -2460,6 +2529,39 @@ impl WindowsRemoteControl {
                     let result = self.read_desktop_events(permit, after);
                     let _ = reply.try_send(result);
                 }
+                OwnerRequest::ReadApplicationScale {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_application_scale(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ApplicationScaleTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_application_scale(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                *prepared,
+                                deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
                 OwnerRequest::ReadAppearance {
                     permit,
                     prepared,
@@ -2671,6 +2773,92 @@ impl WindowsRemoteControl {
             self.local_cues.update(control.leases(), Instant::now());
         }
         self.sync_input_ownership_event();
+    }
+
+    fn read_application_scale(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_application_scale::PreparedRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::application_scale::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            self.application_scale
+                .observe(&prepared, self.start_time, Instant::now())
+        })
+    }
+
+    fn change_application_scale(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::application_scale::Transaction,
+        prepared: crate::windows_remote_application_scale::PreparedChange,
+        request_deadline: Instant,
+    ) -> Result<nickel_remote_control::application_scale::TransactionOutcome, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let expected_input_epoch = local_input_epoch();
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("application scale transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            self.application_scale
+                .validate(&prepared, &transaction, Instant::now())?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_input_epoch {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    if !crate::windows_remote_input::physical_input_idle() {
+                        return Err("shared input is busy".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            Ok(())
+        });
+        let committed = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err(
+                    "application scale unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        // Once write-through replacement is accepted, a later revocation must
+        // not turn the result into a denial that invites an unsafe retry.
+        authorization?;
+        let observed_at_us = self
+            .start_time
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        let snapshot = self
+            .application_scale
+            .observe_committed(&committed, observed_at_us)?;
+        Ok(
+            nickel_remote_control::application_scale::TransactionOutcome {
+                snapshot,
+                outcomes: committed.outcomes,
+            },
+        )
     }
 
     fn read_appearance(
@@ -6424,6 +6612,7 @@ mod tests {
             pointer_hold: None,
             desktop_events: Default::default(),
             appearance: Default::default(),
+            application_scale: Default::default(),
             file_icons: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,

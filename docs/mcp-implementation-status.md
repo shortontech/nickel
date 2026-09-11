@@ -1854,7 +1854,7 @@ revisions. Commit repeats the appearance transaction's protected-focus,
 shared-input, physical-input epoch, deadline and permit checks before replacement,
 then advances the production launcher icon generation and requests a live cache
 refresh. The response claims that refresh request, not decoded or presented pixels.
-Application scale, wallpaper, Codex, idle, terminal, on-screen-keyboard and
+Wallpaper, Codex, idle, terminal, on-screen-keyboard and
 shell-behavior trait methods remain unavailable on the Windows authority;
 `windows_settings_worker` therefore remains an explicit diagnostic gap. Native
 Windows cache and presented-icon acceptance remain open.
@@ -1907,7 +1907,19 @@ test requires exact label coverage for all 45 published tools plus the bounded
 event-subscription path, so a new tool cannot silently omit its metric category.
 
 All 130 `nickel-remote-control` tests and its host all-target/all-feature Clippy
-with warnings denied passed. Windows cross-target validation could not run on this
-host because the installed Rust target lacks the required MinGW `gcc` and
-`dlltool`; the available `llvm-dlltool` alone cannot compile `ring`. No native or
-cross-target Windows result is claimed for this platform-neutral change.
+with warnings denied passed. The integrated primary checkout also passed strict
+Windows GNU cross-target Clippy using the available private MinGW toolchain. No
+native Windows result is claimed for this platform-neutral change.
+
+Windows now implements `read_application_scale` and
+`application_scale_transaction` through the production `ApplicationScaleSettings`
+journal and shared toolkit transaction engine. Bounded preparation holds the stable
+transaction lock, stages the complete policy replacement, and preserves all
+prior/applied/pending GTK and Qt ownership fields. The presentation owner checks
+the fresh observation/generation, protected focus, shared and physical input,
+local-input epoch, full-debug lease/emergency epoch, expiry and one request deadline
+at write-through replacement. Nickel has no native Windows GTK/Qt global-setting
+owner, so both fixed capabilities and transaction outcomes remain explicitly
+unavailable; no environment, registry, file-path or command endpoint was added.
+Focused portable, Windows cross-compiled and Wine results accompany the integration
+patch. Native Windows UI and physical-input execution remain open.
