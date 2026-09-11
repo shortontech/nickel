@@ -1573,8 +1573,9 @@ impl NickelSession {
                     active: window.active,
                     minimized: self.minimized_windows.contains_key(&window.id)
                         || self.internal_minimized_windows.contains(&window.id),
-                    maximized: surface
-                        .is_some_and(|surface| self.maximized_restore.contains_key(surface))
+                    maximized: self.internal_maximized_restore.contains_key(&window.id)
+                        || surface
+                            .is_some_and(|surface| self.maximized_restore.contains_key(surface))
                         || native
                             .as_ref()
                             .and_then(Window::x11_surface)

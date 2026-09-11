@@ -1746,6 +1746,16 @@ struct PendingLaunchObservation {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RemoteWindowEventState {
+    geometry: Option<[i32; 4]>,
+    workspace: u64,
+    active: bool,
+    minimized: bool,
+    maximized: bool,
+    fullscreen: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingLaunchWindowDisposition {
     AwaitExpiry,
     Unrelated,
@@ -2127,6 +2137,7 @@ pub struct NickelSession {
     remote_codex_runtime_generation: u64,
     remote_terminal_presentation: remote_terminal_presentation::TerminalPresentationState,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    remote_window_event_states: HashMap<u64, RemoteWindowEventState>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     remote_event_windows: HashSet<WindowId>,
     remote_launched_children: Vec<std::process::Child>,
@@ -5829,6 +5840,7 @@ impl NickelSession {
             remote_codex_runtime_generation: 0,
             remote_terminal_presentation: Default::default(),
             remote_desktop_events: Default::default(),
+            remote_window_event_states: HashMap::new(),
             remote_frame_trace: None,
             remote_event_windows: HashSet::new(),
             remote_launched_children: Vec::new(),
@@ -7165,6 +7177,7 @@ impl NickelSession {
         if self.refresh_output_topology_generation() {
             self.notify_shell_behavior_snapshot(self.protocol_shell_behavior());
         }
+        self.record_remote_window_state_events();
         let event = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot())),
@@ -7178,6 +7191,50 @@ impl NickelSession {
         };
         self.launcher_subscribers
             .retain(|path| socket.send_to(&event, path).is_ok());
+    }
+
+    fn record_remote_window_state_events(&mut self) {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        let current = self
+            .remote_protocol_windows()
+            .into_iter()
+            .map(|window| {
+                let geometry = window
+                    .geometry
+                    .map(|value| [value.x, value.y, value.width, value.height]);
+                let state = RemoteWindowEventState {
+                    geometry,
+                    workspace: window.workspace.0,
+                    active: window.active,
+                    minimized: window.minimized,
+                    maximized: window.maximized,
+                    fullscreen: window.fullscreen,
+                };
+                (window.id.0, state)
+            })
+            .collect::<HashMap<_, _>>();
+        let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        for (&window_id, &state) in &current {
+            if self
+                .remote_window_event_states
+                .get(&window_id)
+                .is_some_and(|previous| previous != &state)
+            {
+                self.remote_desktop_events.record(
+                    DesktopEventKind::WindowStateChanged {
+                        window_id,
+                        geometry: state.geometry,
+                        workspace: state.workspace,
+                        active: state.active,
+                        minimized: state.minimized,
+                        maximized: state.maximized,
+                        fullscreen: state.fullscreen,
+                    },
+                    observed_at_us,
+                );
+            }
+        }
+        self.remote_window_event_states = current;
     }
 
     fn apply_launcher_visibility(&mut self, visible: bool) {
@@ -10658,6 +10715,49 @@ mod protocol_tests {
                 workspaces: initial_count + 1,
             }
         );
+    }
+
+    #[test]
+    fn protocol_publication_records_ordinary_window_state_changes() {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let window = session.register_internal_application(surface).unwrap();
+        session.notify_protocol_snapshot();
+
+        session.maximize_window(window);
+        let event = session
+            .remote_desktop_events
+            .snapshot()
+            .events
+            .into_iter()
+            .rev()
+            .find(|event| {
+                matches!(
+                    event.event,
+                    DesktopEventKind::WindowStateChanged { window_id, .. }
+                        if window_id == window.0
+                )
+            })
+            .expect("window state event");
+        assert!(matches!(
+            event.event,
+            DesktopEventKind::WindowStateChanged {
+                maximized: true,
+                minimized: false,
+                fullscreen: false,
+                ..
+            }
+        ));
     }
 
     #[test]

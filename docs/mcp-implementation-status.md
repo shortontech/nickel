@@ -1469,3 +1469,13 @@ insertion event through the MCP diagnostic snapshot, and then used physical
 Escape to verify a retirement event for the same surface generation. The
 fixture's existing protection, timeout, revocation and lock matrix also passed,
 and all owned compositor, Xvfb and D-Bus processes were stopped.
+
+The snapshot publication boundary now diffs the bounded protected-filtered
+ordinary-window inventory and records changes to geometry, workspace, active,
+minimized, maximized and fullscreen state. The retained baseline is bounded by
+the production window inventory, and events use only the generation-bearing
+window ID and typed state; titles and application identities are excluded.
+Native nested acceptance used real GTK titlebar double-clicks and verified both
+the maximized and restored events through MCP before continuing the existing
+transient, protection, timeout, revocation and lock matrix. All owned fixture
+processes were stopped afterward.

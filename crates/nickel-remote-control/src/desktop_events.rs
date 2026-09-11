@@ -72,6 +72,17 @@ pub enum DesktopEventKind {
         role: ShellEventRole,
         visible: bool,
     },
+    /// Changed production state for a still-observable ordinary window.
+    /// Titles and application identities remain outside the event stream.
+    WindowStateChanged {
+        window_id: u64,
+        geometry: Option<[i32; 4]>,
+        workspace: u64,
+        active: bool,
+        minimized: bool,
+        maximized: bool,
+        fullscreen: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -287,6 +298,28 @@ mod tests {
         let json = serde_json::to_string(&events.snapshot()).unwrap();
         assert!(json.contains("screenshot"));
         for excluded in ["title", "text", "path", "output", "client"] {
+            assert!(!json.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn window_state_event_schema_excludes_title_and_application_identity() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::WindowStateChanged {
+                window_id: 9,
+                geometry: Some([-20, 30, 800, 600]),
+                workspace: 2,
+                active: true,
+                minimized: false,
+                maximized: true,
+                fullscreen: false,
+            },
+            15,
+        );
+        let json = serde_json::to_string(&events.snapshot()).unwrap();
+        assert!(json.contains("window_state_changed"));
+        for excluded in ["title", "application_id", "client", "text"] {
             assert!(!json.contains(excluded));
         }
     }
