@@ -8,7 +8,7 @@ native checks alone do not establish completion.
 
 | Requirement | Current state | Remaining work |
 | --- | --- | --- |
-| Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. Lease approval and resumption remain denied. | Complete trusted indication, synchronous cancellation, secure-desktop observation, native operations and local accessibility; validate on Windows and across machines. |
+| Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. The owner continuously samples the current input desktop and WTS session state, revokes runtime authority on a protected-desktop transition, and rechecks that state when activating a connection watch. Lease approval and resumption remain denied. | Complete native operations and their input ownership, then validate trusted indication, secure-desktop transitions, local accessibility and control on Windows and across machines. |
 | Logical client disconnect/resumption | Lease requests, local approvals, reconnects and desktop permits now require an unexpired owner-ready watch. Last-watch loss invalidates authority and triggers native cleanup; overlapping watches preserve connection continuity. | The stdio client adapter and saturation/cancellation fixes are integrated; complete broader native lifecycle acceptance. See `mcp-connection-watch.md`. |
 | Launch under an output lease | Verified Wayland/X11 launch ancestry now drives output placement before scene insertion, under the original lease and output incarnation. Nested native success/cancellation/replacement tests passed. | Complete broker/daemon attribution and broader physical, overload, deadline and cancellation acceptance. |
 | Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary shell transients use production visibility and protection evidence; typed shell actions, effect ordering, every typed platform refresh, and bounded external accessibility are integrated. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation/node ordinal or a fixed Nickel frame role. | Complete GPU timing, shared renderer resources/caches, remaining event and trace categories, and the protected-safe portion of unsupported Codex transient diagnostics. |
@@ -87,9 +87,11 @@ Settings uses a private named pipe whose peers must match the pinned original
 process image and user/session/integrity. Windows-target Clippy passed for platform
 and Settings with warnings denied, and for Nickel with existing dead-code warnings
 (`/tmp/nickel-windows-transport-clippy.txt`, `/tmp/nickel-windows-owner-clippy.txt`).
-No native Windows execution is claimed. Trusted indication, native operations and
-secure-desktop observation remain unfinished, so lease approval/resumption are
-denied. The physical-key hook now latches an atomic cancellation epoch immediately.
+No native Windows execution is claimed. The owner now uses its fail-closed input
+desktop and WTS session observation to deny protected-desktop watch activation and
+to revoke runtime authority before queued work after a lock transition. Native
+operations and their input ownership remain unfinished, so lease approval and
+resumption are denied. The physical-key hook now latches an atomic cancellation epoch immediately.
 Permits reject stopped epochs before waiting for the authority mutex, at commit
 and at result delivery; re-enable requires cleanup of the exact stopped epoch.
 Native input release and listener cleanup still run on the owner. Chord

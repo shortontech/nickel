@@ -16,7 +16,7 @@ binding; this checklist does not replace them.
 | Gate | Current evidence or implementation | Remaining proof or implementation |
 | --- | --- | --- |
 | 1 Default listener, zero authority | `settings.rs`, `listener.rs`, server admission; mandatory-watch native fixture rejects requests without ready presence. | Current native default-start and every preapproval observation/action denial on Windows as well as Linux. |
-| 2 Scope, clock, renewal, resumption, generation, outcomes | Shared `leases.rs`, `connection_watch.rs`, `lease_requests.rs`; pending-generation and watch-gap regressions; Windows owner projections compile and pass portable policy tests. | Native Windows lifecycle and requested/confirmed outcomes, including HWND reuse and secure-desktop transitions. |
+| 2 Scope, clock, renewal, resumption, generation, outcomes | Shared `leases.rs`, `connection_watch.rs`, `lease_requests.rs`; pending-generation and watch-gap regressions; Windows owner projections compile and pass portable policy tests. The Windows owner now samples its input desktop and WTS session before watch activation and revokes runtime authority before queued work on an unlocked-to-protected transition. | Native Windows lifecycle and requested/confirmed outcomes, including HWND reuse and secure-desktop transition execution. |
 | 3 Sustained actions in each scope | Linux owner adapters implement window/application/output/full-session operations. | Complete live multi-action matrix for every scope on both platforms. |
 | 4 No scope widening | Generation-bearing owner checks, continuous input permits, bounded launch placement and capture workers. | Full transforms/transients/grabs/delayed-effect matrix; ambiguous and broker identities; Windows owners. |
 | 5 Native application identity | Linux Wayland process and XRes evidence; Windows retained process/image evidence, catalog receipts, package and executable membership policy. | Flatpak/shared-runtime and verified parent relationships; native Windows packaged and unpackaged execution. |
@@ -50,8 +50,11 @@ binding; this checklist does not replace them.
 The following implementation gaps also prevent completion, even if a narrow test
 for one numbered item passes:
 
-- Windows native control, secure-desktop authority, stable application identity,
-  trusted local UIA and persistent per-output indication remain incomplete.
+- Windows native control, native validation of secure-desktop transitions, stable
+  application identity, trusted local UIA and persistent per-output indication
+  remain incomplete. The production owner now wires its existing fail-closed
+  input-desktop/WTS observation into connection activation and synchronous
+  runtime-authority revocation.
 - Ordinary shell surface capture, semantic observation and typed semantic
   mutations are integrated, with owned nested Linux tests recorded in the
   implementation log. Bounded external AT-SPI observation is integrated;

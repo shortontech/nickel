@@ -252,7 +252,8 @@ mod tests {
         fs::write(nested.join("Calculator.lnk"), []).expect("nested shortcut");
         fs::write(nested.join("Readme.txt"), []).expect("non-shortcut");
 
-        let applications = load_from_roots(&[directory.path().to_owned()]);
+        let (applications, truncated) = load_from_roots(&[directory.path().to_owned()]);
+        assert!(!truncated);
         assert_eq!(
             applications
                 .iter()
@@ -270,7 +271,9 @@ mod tests {
         fs::write(user.path().join("Editor.lnk"), []).expect("user shortcut");
         fs::write(machine.path().join("Editor.lnk"), []).expect("machine shortcut");
 
-        let applications = load_from_roots(&[user.path().to_owned(), machine.path().to_owned()]);
+        let (applications, truncated) =
+            load_from_roots(&[user.path().to_owned(), machine.path().to_owned()]);
+        assert!(!truncated);
         assert_eq!(applications.len(), 1);
         assert!(
             applications[0]
@@ -286,8 +289,9 @@ mod tests {
         fs::write(start_menu.path().join("Fortnite.lnk"), []).expect("menu shortcut");
         fs::write(desktop.path().join("FORTNITE.url"), []).expect("desktop shortcut");
 
-        let applications =
+        let (applications, truncated) =
             load_from_roots(&[start_menu.path().to_owned(), desktop.path().to_owned()]);
+        assert!(!truncated);
         assert_eq!(applications.len(), 1);
         assert_eq!(applications[0].name(), "Fortnite");
     }

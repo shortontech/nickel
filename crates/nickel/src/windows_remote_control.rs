@@ -236,6 +236,8 @@ pub(crate) struct WindowsRemoteControl {
     observation_generation: u64,
     indicators: std::collections::HashMap<String, IndicatorSurface>,
     authority: Arc<WindowsDesktopAuthority>,
+    desktop_session: Option<u32>,
+    desktop_unlocked: bool,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
@@ -287,6 +289,12 @@ impl WindowsRemoteControl {
             })
             .map_err(io::Error::other)
         })?;
+        let desktop_session =
+            nickel_platform::process_identity::WindowsProcessIdentity::probe(std::process::id())
+                .ok()
+                .map(|identity| identity.session_id());
+        let desktop_unlocked =
+            desktop_session.is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
         let mut owner = Self {
             _transport: Some(transport),
             receiver,
@@ -298,6 +306,8 @@ impl WindowsRemoteControl {
             observation_generation: 0,
             indicators: Default::default(),
             authority,
+            desktop_session,
+            desktop_unlocked,
             start_time: Instant::now(),
             last_stop: None,
         };
@@ -334,6 +344,7 @@ impl WindowsRemoteControl {
         }
     }
     pub(crate) fn poll(&mut self) {
+        self.reconcile_desktop_authority();
         // Service transport loss before ordinary requests, even if their queue is full.
         if self.authority.cleanup_wake.take_wake_failure() {
             tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
@@ -381,9 +392,13 @@ impl WindowsRemoteControl {
                     action,
                     reply,
                 } => {
-                    // There is no Windows lock/secure-desktop observation yet.
-                    // Reconnection must not assume the desktop is unlocked.
-                    let _ = reply.try_send(permit.apply(action, true));
+                    // Recheck at the commit boundary. A stale unlocked sample may
+                    // only deny a connection; it must never restore authority on a
+                    // protected input desktop.
+                    let locked = !self
+                        .desktop_session
+                        .is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
+                    let _ = reply.try_send(permit.apply(action, locked));
                 }
             }
         }
@@ -392,6 +407,25 @@ impl WindowsRemoteControl {
             self.applications.poll(&mut control);
             self.local_cues.update(control.leases(), Instant::now());
         }
+    }
+    fn reconcile_desktop_authority(&mut self) {
+        let unlocked = self
+            .desktop_session
+            .is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
+        self.reconcile_desktop_authority_observation(unlocked);
+    }
+    fn reconcile_desktop_authority_observation(&mut self, unlocked: bool) {
+        if self.desktop_unlocked && !unlocked {
+            // Revoke before any queued owner work can run. ControlPlane::lock
+            // cancels pending requests, leases, watches, traces, streams, held
+            // input ownership and every outstanding operation permit.
+            self.last_stop = Some(Instant::now());
+            self.remote_control.lock();
+            let control = self.remote_control.control();
+            self.resources
+                .clear(|id| revoke_native_resource(&control, id));
+        }
+        self.desktop_unlocked = unlocked;
     }
     fn drain_resource_lifecycle(&mut self) {
         let control = self.remote_control.control();
@@ -1198,6 +1232,8 @@ mod tests {
                 sender,
                 cleanup_wake: nickel_remote_control::ConnectionCleanupWake::new(|| true),
             }),
+            desktop_session: None,
+            desktop_unlocked: false,
             start_time: Instant::now(),
             last_stop: None,
         }
@@ -1270,6 +1306,44 @@ mod tests {
         assert!(snapshot.pending_leases.is_empty());
         drop(owner);
         assert!(!control.lock().unwrap().enabled());
+    }
+    #[test]
+    fn protected_desktop_transition_revokes_runtime_authority_before_owner_work() {
+        let mut owner = owner();
+        let control = owner.remote_control.control();
+        let client = {
+            let mut control = control.lock().unwrap();
+            control.set_enabled(true);
+            let client = control.connect_identity("Windows lock transition").unwrap();
+            let now = Instant::now();
+            let watch = control
+                .reserve_connection_watch(&client.client_id, &client.token, now)
+                .unwrap();
+            control
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
+                .unwrap();
+            control
+                .request_lease(
+                    &client.client_id,
+                    &client.token,
+                    nickel_remote_control::lease_requests::LeaseRequest {
+                        renewal: None,
+                        scope: nickel_remote_control::leases::ResourceScope::FullSession,
+                        duration: Some(Duration::from_secs(1200)),
+                        allow_resumption: false,
+                        full_debug: false,
+                    },
+                    now,
+                )
+                .unwrap();
+            client
+        };
+        owner.desktop_unlocked = true;
+        owner.reconcile_desktop_authority_observation(false);
+        let control = control.lock().unwrap();
+        assert!(control.lease_requests().pending().next().is_none());
+        assert!(!control.has_ready_connection(&client.client_id, Instant::now()));
+        assert!(control.leases().iter().next().is_none());
     }
     #[test]
     fn expired_settings_request_cannot_change_owner_generation() {
