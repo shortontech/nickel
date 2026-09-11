@@ -21,6 +21,7 @@ pub mod launcher_favorites;
 pub use connection_watch::ConnectionCleanupWake;
 mod emergency;
 pub use emergency::EmergencyStopHandle;
+pub mod default_associations;
 pub mod desktop_events;
 pub mod diagnostics;
 mod event_subscriptions;

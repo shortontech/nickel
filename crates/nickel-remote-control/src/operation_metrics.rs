@@ -38,6 +38,8 @@ pub(crate) enum Method {
     SurfaceSemanticAction,
     ReadAppearance,
     AppearanceTransaction,
+    ReadDefaultAssociation,
+    DefaultAssociationTransaction,
     ReadApplicationScale,
     ApplicationScaleTransaction,
     ReadLauncherFavorites,
@@ -61,7 +63,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 47] = [
+    pub(crate) const ALL: [Self; 49] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -90,6 +92,8 @@ impl Method {
         Self::SurfaceSemanticAction,
         Self::ReadAppearance,
         Self::AppearanceTransaction,
+        Self::ReadDefaultAssociation,
+        Self::DefaultAssociationTransaction,
         Self::ReadApplicationScale,
         Self::ApplicationScaleTransaction,
         Self::ReadLauncherFavorites,
@@ -116,7 +120,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 47] = [
+const METHODS: [&str; 49] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -145,6 +149,8 @@ const METHODS: [&str; 47] = [
     "surface_semantic_action",
     "read_appearance",
     "appearance_transaction",
+    "read_default_association",
+    "default_association_transaction",
     "read_application_scale",
     "application_scale_transaction",
     "read_launcher_favorites",

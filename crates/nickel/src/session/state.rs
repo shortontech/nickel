@@ -597,6 +597,20 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "appearance result uncertain; read current appearance before retrying")?
     }
+    fn read_default_association(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        target: nickel_remote_control::default_associations::Target,
+    ) -> Result<nickel_remote_control::default_associations::Snapshot, String> {
+        crate::remote_default_associations::read(permit, target)
+    }
+    fn default_association_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::default_associations::Transaction,
+    ) -> Result<nickel_remote_control::default_associations::TransactionOutcome, String> {
+        crate::remote_default_associations::transact(permit, transaction)
+    }
     fn read_launcher_favorites(
         &self,
         permit: nickel_remote_control::DesktopPermit,

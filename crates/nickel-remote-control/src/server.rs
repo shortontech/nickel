@@ -129,6 +129,20 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::appearance::Snapshot, String> {
         Err("appearance transactions are unavailable on this backend".into())
     }
+    fn read_default_association(
+        &self,
+        _permit: crate::DesktopPermit,
+        _target: crate::default_associations::Target,
+    ) -> Result<crate::default_associations::Snapshot, String> {
+        Err("default-application association observation is unavailable on this backend".into())
+    }
+    fn default_association_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::default_associations::Transaction,
+    ) -> Result<crate::default_associations::TransactionOutcome, String> {
+        Err("default-application association changes are unavailable on this backend".into())
+    }
     fn read_launcher_favorites(
         &self,
         _permit: crate::DesktopPermit,
@@ -952,6 +966,20 @@ struct AppearanceRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+struct ReadDefaultAssociationRequest {
+    lease_id: u64,
+    target: crate::default_associations::Target,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct DefaultAssociationRequest {
+    lease_id: u64,
+    transaction: crate::default_associations::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct LauncherFavoritesRequest {
     lease_id: u64,
     transaction: crate::launcher_favorites::Transaction,
@@ -1511,6 +1539,60 @@ impl McpHandler {
                     .map_err(
                         |_| "appearance result uncertain; read current appearance before retrying",
                     )?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read one typed default-application association from the operating-system authority. Requires Full Control & Debug Nickel. The target is a bounded extension, MIME type, or URI scheme. Returns a bounded compatible-handler catalog with opaque catalog IDs; executable commands, source paths, icon paths, and protected Nickel handlers are excluded."
+    )]
+    async fn read_default_association(
+        &self,
+        Parameters(request): Parameters<ReadDefaultAssociationRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::default_associations::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadDefaultAssociation,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_default_association(permit, request.target)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "default-application association observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Request a typed default-application change with exact generation and prior-handler compare-and-set. Requires Full Control & Debug Nickel and idle shared input. The requested handler must be an opaque ID from the bounded catalog returned by read_default_association; arbitrary executables, commands, paths, and protected Nickel handlers are rejected. Linux confirms by re-querying the OS. Windows reports native_consent_required after opening the protected Default Apps UI."
+    )]
+    async fn default_association_transaction(
+        &self,
+        Parameters(request): Parameters<DefaultAssociationRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::default_associations::TransactionOutcome>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::DefaultAssociationTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.default_association_transaction(permit, request.transaction)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "default-application result uncertain; read current association before retrying")?
                     .map(Json)
                 },
             )
@@ -3158,7 +3240,11 @@ mod tests {
 
     fn tool_fixture(tool: &rmcp::model::Tool) -> serde_json::Value {
         let root = serde_json::Value::Object(tool.input_schema.as_ref().clone());
-        schema_fixture(&root, &root)
+        let mut fixture = schema_fixture(&root, &root);
+        if tool.name == "pointer_action" {
+            fixture["target"] = serde_json::json!({"kind": "desktop"});
+        }
+        fixture
     }
 
     #[test]
@@ -3571,7 +3657,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            42,
+            44,
             "a newly published tool must be explicitly classified"
         );
 

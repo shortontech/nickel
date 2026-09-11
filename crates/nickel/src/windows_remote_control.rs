@@ -1357,6 +1357,20 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 .to_owned()
         })?
     }
+    fn read_default_association(
+        &self,
+        permit: DesktopPermit,
+        target: nickel_remote_control::default_associations::Target,
+    ) -> Result<nickel_remote_control::default_associations::Snapshot, String> {
+        crate::remote_default_associations::read(permit, target)
+    }
+    fn default_association_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::default_associations::Transaction,
+    ) -> Result<nickel_remote_control::default_associations::TransactionOutcome, String> {
+        crate::remote_default_associations::transact(permit, transaction)
+    }
     fn read_file_icons(
         &self,
         permit: DesktopPermit,

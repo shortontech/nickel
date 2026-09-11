@@ -199,6 +199,19 @@ pub enum ChangeOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VersionedAssociationSnapshot {
+    pub generation: u64,
+    pub snapshot: AssociationSnapshot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VersionedChangeOutcome {
+    Confirmed(VersionedAssociationSnapshot),
+    NativeConsentRequired { generation: u64, detail: String },
+    Rejected { generation: u64, detail: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssociationError(pub String);
 
 impl fmt::Display for AssociationError {
@@ -286,6 +299,91 @@ impl AssociationService {
         Ok(snapshot)
     }
 
+    /// Resolves the target through the operating system and publishes the exact
+    /// service generation that a later compare-and-set request must present.
+    pub fn inspect_versioned(
+        &self,
+        target: &AssociationTarget,
+    ) -> Result<VersionedAssociationSnapshot, AssociationError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let snapshot = self.backend.inspect(target)?;
+        observe_snapshot(&mut state, target, &snapshot)?;
+        Ok(VersionedAssociationSnapshot {
+            generation: state.generation,
+            snapshot,
+        })
+    }
+
+    /// Changes only a target and handler selected from the fresh native catalog.
+    /// The state lock keeps service-local observations and mutations in one exact
+    /// generation order. The backend still re-queries after a reported success.
+    pub fn request_change_if_current(
+        &self,
+        target: &AssociationTarget,
+        generation: u64,
+        prior_handler_id: Option<&str>,
+        requested_handler_id: &str,
+    ) -> Result<VersionedChangeOutcome, AssociationError> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let targets = self.backend.available_targets()?;
+        if !targets.iter().any(|candidate| candidate == target) {
+            return Ok(VersionedChangeOutcome::Rejected {
+                generation: state.generation,
+                detail: "the association target is not in the current platform catalog".into(),
+            });
+        }
+        let current = self.backend.inspect(target)?;
+        observe_snapshot(&mut state, target, &current)?;
+        let current_id = current
+            .effective
+            .as_ref()
+            .map(|handler| handler.id.as_str());
+        if generation == 0 || generation != state.generation || prior_handler_id != current_id {
+            return Ok(VersionedChangeOutcome::Rejected {
+                generation: state.generation,
+                detail: "the association changed; read current state before retrying".into(),
+            });
+        }
+        if current_id.is_some_and(is_protected_association_handler) {
+            return Ok(VersionedChangeOutcome::Rejected {
+                generation: state.generation,
+                detail: "the current default is protected from remote association changes".into(),
+            });
+        }
+        if is_protected_association_handler(requested_handler_id)
+            || !current
+                .handlers
+                .iter()
+                .any(|handler| handler.id == requested_handler_id)
+        {
+            return Ok(VersionedChangeOutcome::Rejected {
+                generation: state.generation,
+                detail: "the requested handler is unavailable or protected".into(),
+            });
+        }
+        match change_and_verify(self.backend.as_ref(), target, requested_handler_id)? {
+            ChangeOutcome::Confirmed(confirmed) => {
+                observe_snapshot(&mut state, target, &confirmed)?;
+                Ok(VersionedChangeOutcome::Confirmed(
+                    VersionedAssociationSnapshot {
+                        generation: state.generation,
+                        snapshot: confirmed,
+                    },
+                ))
+            }
+            ChangeOutcome::NativeConsentRequired { detail } => {
+                Ok(VersionedChangeOutcome::NativeConsentRequired {
+                    generation: state.generation,
+                    detail,
+                })
+            }
+            ChangeOutcome::Rejected { detail } => Ok(VersionedChangeOutcome::Rejected {
+                generation: state.generation,
+                detail,
+            }),
+        }
+    }
+
     pub fn inspect_many(
         &self,
         targets: &[AssociationTarget],
@@ -344,6 +442,47 @@ impl AssociationService {
             .unwrap_or_else(|error| error.into_inner())
             .generation
     }
+}
+
+fn observe_snapshot(
+    state: &mut AssociationServiceState,
+    target: &AssociationTarget,
+    snapshot: &AssociationSnapshot,
+) -> Result<(), AssociationError> {
+    let changed = state
+        .projections
+        .iter()
+        .find(|(cached, _)| cached == target)
+        .is_none_or(|(_, cached)| cached != snapshot);
+    if changed {
+        state.generation = state
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| AssociationError("association generation exhausted".into()))?;
+        state.projections.retain(|(cached, _)| cached != target);
+        state
+            .projections
+            .push_back((target.clone(), snapshot.clone()));
+        while state.projections.len() > ASSOCIATION_CACHE_CAPACITY {
+            state.projections.pop_front();
+        }
+    }
+    Ok(())
+}
+
+/// Nickel's own shell and settings registrations are never remote-selectable.
+pub fn is_protected_association_handler(id: &str) -> bool {
+    let normalized = id.trim().replace('\\', "/").to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "nickel.desktop"
+            | "nickel-settings.desktop"
+            | "nickel-shell.desktop"
+            | "nickel-session.desktop"
+            | "applications/nickel.exe"
+            | "applications/nickel-settings.exe"
+            | "applications/nickel-shell.exe"
+    )
 }
 
 pub fn association_service() -> Arc<AssociationService> {
@@ -1801,6 +1940,13 @@ mod tests {
     }
 
     impl AssociationBackend for Fixture {
+        fn available_targets(&self) -> Result<Vec<AssociationTarget>, AssociationError> {
+            Ok(vec![
+                AssociationTarget::mime("text/plain"),
+                AssociationTarget::scheme("https"),
+            ])
+        }
+
         fn inspect(
             &self,
             target: &AssociationTarget,
@@ -1814,7 +1960,15 @@ mod tests {
                     icon: None,
                     source: "fixture".into(),
                 }),
-                handlers: Vec::new(),
+                handlers: ["old.desktop", "new.desktop", "nickel-settings.desktop"]
+                    .into_iter()
+                    .map(|id| ApplicationHandler {
+                        name: id.into(),
+                        id: id.into(),
+                        icon: None,
+                        source: "fixture".into(),
+                    })
+                    .collect(),
                 capability: AssociationCapability::DirectUserChange,
                 scope: AssociationScope::User,
                 detail: String::new(),
@@ -1847,6 +2001,75 @@ mod tests {
         assert!(
             matches!(result, ChangeOutcome::Confirmed(snapshot) if snapshot.effective.as_ref().unwrap().id == "new.desktop")
         );
+    }
+
+    #[test]
+    fn versioned_change_requires_exact_generation_prior_and_catalog_handler() {
+        let service = AssociationService::new(Box::new(Fixture {
+            current: Arc::new(Mutex::new("old.desktop".into())),
+            confirm: true,
+        }));
+        let target = AssociationTarget::mime("text/plain");
+        let observed = service.inspect_versioned(&target).unwrap();
+
+        assert!(matches!(
+            service
+                .request_change_if_current(
+                    &target,
+                    observed.generation + 1,
+                    Some("old.desktop"),
+                    "new.desktop",
+                )
+                .unwrap(),
+            VersionedChangeOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            service
+                .request_change_if_current(
+                    &target,
+                    observed.generation,
+                    Some("wrong.desktop"),
+                    "new.desktop",
+                )
+                .unwrap(),
+            VersionedChangeOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            service
+                .request_change_if_current(
+                    &target,
+                    observed.generation,
+                    Some("old.desktop"),
+                    "/tmp/arbitrary-executable",
+                )
+                .unwrap(),
+            VersionedChangeOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            service
+                .request_change_if_current(
+                    &target,
+                    observed.generation,
+                    Some("old.desktop"),
+                    "nickel-settings.desktop",
+                )
+                .unwrap(),
+            VersionedChangeOutcome::Rejected { .. }
+        ));
+        assert!(matches!(
+            service
+                .request_change_if_current(
+                    &target,
+                    observed.generation,
+                    Some("old.desktop"),
+                    "new.desktop",
+                )
+                .unwrap(),
+            VersionedChangeOutcome::Confirmed(VersionedAssociationSnapshot {
+                generation: 2,
+                snapshot: AssociationSnapshot { effective: Some(ApplicationHandler { id, .. }), .. },
+            }) if id == "new.desktop"
+        ));
     }
 
     #[test]

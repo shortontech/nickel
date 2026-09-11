@@ -24,8 +24,9 @@ pub use toolkit_transaction::{
 pub use default_apps::{
     ApplicationHandler, AssociationBackend, AssociationCapability, AssociationError,
     AssociationFamily, AssociationScope, AssociationService, AssociationSnapshot,
-    AssociationTarget, ChangeOutcome, DefaultLaunchError, association_backend, association_service,
-    association_target_for_file, change_and_verify, open_default_application_settings,
+    AssociationTarget, ChangeOutcome, DefaultLaunchError, VersionedAssociationSnapshot,
+    VersionedChangeOutcome, association_backend, association_service, association_target_for_file,
+    change_and_verify, is_protected_association_handler, open_default_application_settings,
     open_once_supported, open_once_with, open_with_default,
 };
 
