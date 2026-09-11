@@ -3572,7 +3572,7 @@ impl NickelSession {
                             truncated,
                             unavailable_domains: [
                                 "shell_transients_without_host_owned_protection_and_codex_content",
-                                "internal_hit_testing",
+                                "internal_decoration_hit_testing",
                                 "external_accessibility_not_embedded_in_snapshot",
                                 "effects",
                                 "native_gpu_renderer_timing",
@@ -4758,6 +4758,20 @@ impl NickelSession {
             },
         );
         let entries = shell.surfaces().to_vec();
+        let current_shell_ids = entries.iter().map(|entry| entry.id).collect::<HashSet<_>>();
+        let retired = self
+            .internal_shell_surfaces
+            .keys()
+            .filter(|id| !current_shell_ids.contains(id))
+            .copied()
+            .collect::<Vec<_>>();
+        for id in retired {
+            if let Some(runtime_id) = self.internal_shell_surfaces.remove(&id) {
+                self.invalidate_remote_shell_surface(runtime_id);
+                self.internal_ui.remove(runtime_id);
+            }
+            self.pending_desktop_scenes.remove(&id);
+        }
         let outputs = self.internal_outputs();
         let mut focus_on_show = None;
         for mut surface in entries {
@@ -10442,6 +10456,7 @@ mod protocol_tests {
     };
 
     struct InternalWindowTestApp;
+    struct InternalHitTestApp;
 
     fn internal_shell_test_session() -> (
         EventLoop<'static, super::NickelSession>,
@@ -10552,6 +10567,27 @@ mod protocol_tests {
             .id;
         let runtime = session.internal_shell_surfaces[&menu];
         assert_eq!(session.internal_ui.focused(), Some(runtime));
+    }
+
+    #[test]
+    fn removed_shell_output_retires_every_old_surface_presentation() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let old = session
+            .internal_shell_surfaces
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        assert!(!old.is_empty());
+
+        session.internal_shell.as_mut().unwrap().set_outputs(&[]);
+        session.sync_internal_shell();
+
+        assert!(session.internal_shell_surfaces.is_empty());
+        assert!(
+            old.into_iter()
+                .all(|id| !session.internal_ui.is_visible(id))
+        );
     }
 
     #[test]
@@ -11649,6 +11685,20 @@ mod protocol_tests {
         }
     }
 
+    impl nickel_ui::Application for InternalHitTestApp {
+        type Message = ();
+
+        fn update(&mut self, (): ()) {}
+
+        fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<Self::Message> {
+            nickel_ui::Button::new((), "internal action")
+        }
+
+        fn title(&self) -> &str {
+            "Internal hit test"
+        }
+    }
+
     #[test]
     fn asynchronous_native_paste_rejects_field_transfer_and_return() {
         use image::ImageEncoder;
@@ -12195,7 +12245,7 @@ mod protocol_tests {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();
         let surface = session.internal_ui.insert(
-            InternalWindowTestApp,
+            InternalHitTestApp,
             crate::session::InternalSurfacePlacement {
                 role: crate::session::InternalSurfaceRole::Application,
                 geometry: (-80, 90, 640, 480),
@@ -12219,13 +12269,42 @@ mod protocol_tests {
         assert_eq!(record.output.as_deref(), Some("file-test"));
         assert_eq!(record.scale_factor, 1.25);
         assert!(record.keyboard_focused);
+        let (_, semantic_nodes) = session
+            .internal_ui
+            .bounded_application_semantics(surface)
+            .unwrap();
+        let semantic_bounds = semantic_nodes.first().unwrap().bounds;
         session
-            .inject_test_input(nickel_session_protocol::TestInput::PointerMove { x: 100, y: 120 })
+            .inject_test_input(nickel_session_protocol::TestInput::PointerMove {
+                x: -80
+                    + (semantic_bounds.origin.x + semantic_bounds.size.width / 2.0).round() as i32,
+                y: 90
+                    + (semantic_bounds.origin.y + semantic_bounds.size.height / 2.0).round() as i32,
+            })
             .unwrap();
         let input = session.remote_input_diagnostic(&windows, &records, 7, 11);
         assert_eq!(
             input.pointer_hit_test.as_ref().unwrap().window.as_deref(),
             Some(record.window.as_str())
+        );
+        assert!(
+            input
+                .pointer_hit_test
+                .as_ref()
+                .unwrap()
+                .semantic_tree_generation
+                .is_some(),
+            "bounds={semantic_bounds:?} pointer={:?} hit={:?}",
+            session.seat.get_pointer().unwrap().current_location(),
+            input.pointer_hit_test
+        );
+        assert!(
+            input
+                .pointer_hit_test
+                .as_ref()
+                .unwrap()
+                .semantic_node
+                .is_some()
         );
         assert!(
             session

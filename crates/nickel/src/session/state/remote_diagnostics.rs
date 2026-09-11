@@ -1275,11 +1275,47 @@ impl NickelSession {
                 if self.internal_ui.remote_access_protected(surface) {
                     return None;
                 }
+                let placement = self.internal_ui.placement(surface)?;
+                let hit_x = point.x as f32 - placement.geometry.0 as f32;
+                let hit_y = point.y as f32 - placement.geometry.1 as f32;
+                let semantic_hit =
+                    if let Some(shell) = self.internal_shell.as_ref() {
+                        if let Some(entry) = shell.surfaces().iter().find(|entry| {
+                            self.internal_shell_surfaces.get(&entry.id) == Some(&surface)
+                        }) {
+                            shell.bounded_shell_semantics(entry.id).ok()
+                        } else {
+                            self.internal_ui.bounded_application_semantics(surface).ok()
+                        }
+                    } else {
+                        self.internal_ui.bounded_application_semantics(surface).ok()
+                    }
+                    .and_then(|(generation, nodes)| {
+                        nodes
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, node)| {
+                                let left = node.bounds.origin.x;
+                                let top = node.bounds.origin.y;
+                                hit_x >= left
+                                    && hit_y >= top
+                                    && hit_x < left + node.bounds.size.width
+                                    && hit_y < top + node.bounds.size.height
+                            })
+                            .min_by(|(_, left), (_, right)| {
+                                let left_area = left.bounds.size.width * left.bounds.size.height;
+                                let right_area = right.bounds.size.width * right.bounds.size.height;
+                                left_area.total_cmp(&right_area)
+                            })
+                            .map(|(ordinal, _)| (generation, ordinal as u64))
+                    });
                 if let Some(identity) = ordinary_shell(surface) {
                     return Some(
                         nickel_remote_control::diagnostics::PointerHitTestDiagnostic {
                             window: None,
                             surface: Some(identity),
+                            semantic_tree_generation: semantic_hit.map(|hit| hit.0),
+                            semantic_node: semantic_hit.map(|hit| hit.1),
                         },
                     );
                 }
@@ -1290,6 +1326,8 @@ impl NickelSession {
                     nickel_remote_control::diagnostics::PointerHitTestDiagnostic {
                         window: Some(application.window.clone()),
                         surface: None,
+                        semantic_tree_generation: semantic_hit.map(|hit| hit.0),
+                        semantic_node: semantic_hit.map(|hit| hit.1),
                     },
                 );
             }
@@ -1301,6 +1339,8 @@ impl NickelSession {
                 nickel_remote_control::diagnostics::PointerHitTestDiagnostic {
                     window,
                     surface: None,
+                    semantic_tree_generation: None,
+                    semantic_node: None,
                 },
             )
         });

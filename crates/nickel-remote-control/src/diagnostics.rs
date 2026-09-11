@@ -199,6 +199,11 @@ pub struct PointerHitTestDiagnostic {
     pub window: Option<String>,
     /// Current ordinary shell hit; this is not a captured-pointer recipient.
     pub surface: Option<crate::leases::ResourceId>,
+    /// Live bounded semantic tree and ordinal under the pointer for hosted UI.
+    /// Both are absent for native clients, decoration-only hits, or a tree with
+    /// no actionable/semantic node at this point.
+    pub semantic_tree_generation: Option<u64>,
+    pub semantic_node: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
