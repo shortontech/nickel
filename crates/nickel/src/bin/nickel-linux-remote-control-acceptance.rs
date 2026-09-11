@@ -36,6 +36,7 @@ const SESSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_VERSION: &str = "2025-06-18";
 const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
 const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+const MESA_VBLANK_MODE: &str = "vblank_mode";
 const TYPED_CANARY: &str = "native-typed-password-DO-NOT-RETAIN";
 const CREDENTIAL_CANARY: &str = "native-credential-DO-NOT-RETAIN";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
@@ -87,7 +88,7 @@ fn run() -> Result<Outcome, String> {
         .env("NICKEL_DISABLE_XWAYLAND", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::piped());
-    configure_software_renderer(&mut command);
+    configure_software_renderer(&mut command, matches!(&display, HostDisplay::Wayland(_)));
     match display {
         HostDisplay::Wayland(path) => {
             command
@@ -122,15 +123,28 @@ fn run() -> Result<Outcome, String> {
     Ok(Outcome::Passed)
 }
 
-fn configure_software_renderer(command: &mut ProcessCommand) {
+fn configure_software_renderer(command: &mut ProcessCommand, wayland: bool) {
     let mesa_manifest = Path::new(MESA_EGL_VENDOR_MANIFEST);
     if mesa_manifest.is_file() {
         // GLVND can select an installed hardware vendor that cannot initialize
         // against an isolated Xvfb or nested Wayland display. Pin the acceptance
         // child to Mesa so LIBGL_ALWAYS_SOFTWARE reliably selects llvmpipe.
-        command
-            .env(EGL_VENDOR_FILENAMES, mesa_manifest)
-            .env("LIBGL_ALWAYS_SOFTWARE", "1");
+        configure_mesa_software_renderer(command, mesa_manifest, wayland);
+    }
+}
+
+fn configure_mesa_software_renderer(command: &mut ProcessCommand, manifest: &Path, wayland: bool) {
+    command
+        .env(EGL_VENDOR_FILENAMES, manifest)
+        .env("LIBGL_ALWAYS_SOFTWARE", "1");
+    if wayland {
+        // Mesa's Wayland software EGL path otherwise retains its default vblank
+        // throttle despite Smithay requesting a non-vsynced config. On a host
+        // exposing only wl_shm, its second swap can then wait inside Mesa's
+        // private Wayland queue and prevent the compositor loop from servicing
+        // test control. The X11 acceptance path already presents without this
+        // override and deliberately keeps its existing environment.
+        command.env(MESA_VBLANK_MODE, "0");
     }
 }
 
@@ -1266,12 +1280,47 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionMessageError, classify_receive_error, poll_readiness};
+    use super::{
+        EGL_VENDOR_FILENAMES, MESA_VBLANK_MODE, SessionMessageError, classify_receive_error,
+        configure_mesa_software_renderer, poll_readiness,
+    };
     use nickel_session_protocol::{ServerMessage, ShellReadinessSnapshot};
     use std::{
+        ffi::OsStr,
         io,
+        path::Path,
+        process::Command,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn wayland_software_renderer_disables_mesa_vblank_without_changing_x11() {
+        let manifest = Path::new("/test/mesa-egl.json");
+        let mut wayland = Command::new("nickel");
+        configure_mesa_software_renderer(&mut wayland, manifest, true);
+        assert_eq!(
+            command_environment(&wayland, MESA_VBLANK_MODE),
+            Some(OsStr::new("0"))
+        );
+        assert_eq!(
+            command_environment(&wayland, EGL_VENDOR_FILENAMES),
+            Some(manifest.as_os_str())
+        );
+
+        let mut x11 = Command::new("nickel");
+        configure_mesa_software_renderer(&mut x11, manifest, false);
+        assert_eq!(command_environment(&x11, MESA_VBLANK_MODE), None);
+        assert_eq!(
+            command_environment(&x11, EGL_VENDOR_FILENAMES),
+            Some(manifest.as_os_str())
+        );
+    }
+
+    fn command_environment<'a>(command: &'a Command, name: &str) -> Option<&'a OsStr> {
+        command
+            .get_envs()
+            .find_map(|(key, value)| (key == name).then_some(value).flatten())
+    }
 
     #[test]
     fn readiness_retries_would_block_before_deadline() {
