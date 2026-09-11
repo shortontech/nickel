@@ -316,6 +316,7 @@ fn exercise(
     )?;
     require_tool_success("diagnostic_snapshot privacy probe", &diagnostics)?;
     require_diagnostic_privacy(&diagnostics, &identity)?;
+    require_native_renderer_diagnostics(&diagnostics)?;
     require_typed_probe_audit(&remote_snapshot(&environment)?, &identity)?;
 
     let live_metrics = metrics(address)?;
@@ -562,6 +563,94 @@ fn require_diagnostic_privacy(response: &Value, identity: &Identity) -> Result<(
             &identity.token,
         ],
     )
+}
+
+fn require_native_renderer_diagnostics(response: &Value) -> Result<(), String> {
+    let snapshot = response
+        .pointer("/result/structuredContent")
+        .and_then(Value::as_object)
+        .ok_or("diagnostic_snapshot omitted structured content")?;
+    let observed_at = snapshot
+        .get("observed_at_us")
+        .and_then(Value::as_u64)
+        .ok_or("diagnostic_snapshot omitted its observation timestamp")?;
+
+    let cache = snapshot
+        .get("shared_presenter_cache")
+        .and_then(Value::as_object)
+        .ok_or("native diagnostic_snapshot omitted shared presenter cache accounting")?;
+    if cache.get("observed_at_us").and_then(Value::as_u64) != Some(observed_at) {
+        return Err("shared presenter cache was not correlated to the snapshot observation".into());
+    }
+    for field in [
+        "observation_generation",
+        "cache_generation",
+        "cache_owners",
+        "live_entries",
+        "live_bytes",
+        "peak_cache_bytes",
+        "hits",
+        "misses",
+        "insertions",
+        "evictions",
+        "invalidations",
+        "recomputation_nanos",
+    ] {
+        if !cache.get(field).is_some_and(Value::is_u64) {
+            return Err(format!(
+                "shared presenter cache omitted bounded counter {field}"
+            ));
+        }
+    }
+
+    // The nested acceptance child has no DRM/native presentation owner. If a
+    // backend supplies this optional collector, require live, correlated data;
+    // physical DRM acceptance remains a separate gate when it is absent.
+    if let Some(dispatch) = snapshot
+        .get("native_presentation_dispatch")
+        .and_then(Value::as_object)
+    {
+        if dispatch.get("observed_at_us").and_then(Value::as_u64) != Some(observed_at) {
+            return Err(
+                "native presentation dispatch was not correlated to the snapshot observation"
+                    .into(),
+            );
+        }
+        if dispatch.get("dispatches").and_then(Value::as_u64) == Some(0)
+            || dispatch.get("dispatch_generation").and_then(Value::as_u64) == Some(0)
+            || !dispatch.get("dispatch_cpu_us").is_some_and(Value::is_u64)
+            || !dispatch
+                .get("max_dispatch_cpu_us")
+                .is_some_and(Value::is_u64)
+            || !dispatch
+                .get("last_dispatch_at_us")
+                .is_some_and(Value::is_u64)
+        {
+            return Err(
+                "native presentation dispatch did not record completed render activity".into(),
+            );
+        }
+    }
+
+    let unavailable = snapshot
+        .get("unavailable_domains")
+        .and_then(Value::as_array)
+        .ok_or("diagnostic_snapshot omitted unavailable domains")?;
+    for domain in [
+        "native_gpu_completion_timing",
+        "gpu_driver_and_external_renderer_resources",
+        "shared_renderer_cache_per_surface_attribution",
+    ] {
+        if !unavailable
+            .iter()
+            .any(|value| value.as_str() == Some(domain))
+        {
+            return Err(format!(
+                "diagnostic_snapshot did not report {domain} unavailable"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn require_no_trusted_indicator_data(response: &Value) -> Result<(), String> {

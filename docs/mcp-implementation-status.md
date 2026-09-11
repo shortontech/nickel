@@ -4,6 +4,22 @@ Both specifications remain active. Their completion criteria include native
 Linux and Windows acceptance and cross-machine debugging. Linux unit and nested
 native checks alone do not establish completion.
 
+On 2026-09-11, the current integrated Linux `backend-winit` MCP acceptance
+binary passed on both the host Wayland display and Xwayland. Mesa software EGL
+is pinned only for the acceptance child; on Wayland, `vblank_mode=0` prevents
+the software swap path from blocking the compositor's control loop. Both runs
+proved pre-lease metrics and complete tool denial, bounded payload-free
+diagnostics, trusted-indicator exclusion, typed/credential canary privacy, and
+emergency revocation. They also verified coherent aggregate shared-presenter
+cache accounting and explicit unavailable renderer domains. The nested backend
+does not own physical DRM dispatch, and the fixture does not press real keys.
+
+All typed Windows settings reads and writes now share a bounded single-flight
+worker through preparation and owner response. Its diagnostic projection
+contains only a generation, relative timestamps, and busy state; contention
+fails closed. Contract and Windows cross-compilation checks passed. Native
+Windows delayed-provider, cancellation, and UI execution remain open.
+
 ## Current gaps confirmed in source
 
 | Requirement | Current state | Remaining work |
