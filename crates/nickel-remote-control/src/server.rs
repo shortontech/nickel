@@ -361,8 +361,7 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     fn pointer_action(
         &self,
         permit: crate::DesktopPermit,
-        id: &str,
-        generation: u64,
+        target: crate::pointer::PointerTarget,
         x: i32,
         y: i32,
         action: crate::pointer::PointerAction,
@@ -1009,13 +1008,39 @@ struct WindowActionRequest {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct PointerRequest {
     lease_id: u64,
-    window_id: String,
-    generation: u64,
+    #[serde(default)]
+    target: Option<crate::pointer::PointerTarget>,
+    #[serde(default)]
+    window_id: Option<String>,
+    #[serde(default)]
+    generation: Option<u64>,
     x: i32,
     y: i32,
     action: crate::pointer::PointerAction,
+}
+
+impl PointerRequest {
+    fn resolved_target(&self) -> Result<crate::pointer::PointerTarget, String> {
+        let legacy = match (&self.window_id, self.generation) {
+            (Some(window_id), Some(generation)) => Some(crate::pointer::PointerTarget::Window {
+                window_id: window_id.clone(),
+                generation,
+            }),
+            (None, None) => None,
+            _ => return Err("legacy window pointer target is incomplete".into()),
+        };
+        let target = match (&self.target, legacy) {
+            (Some(_), Some(_)) => return Err("pointer target is ambiguous".into()),
+            (Some(target), None) => target.clone(),
+            (None, Some(target)) => target,
+            (None, None) => return Err("pointer target is required".into()),
+        };
+        target.validate()?;
+        Ok(target)
+    }
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2439,7 +2464,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Move, click, scroll, or drag at a leased window's client-relative coordinates. DragStart holds one button; DragMove continues and DragEnd releases. DragCancel releases without moving. Continue within 30 seconds; local input or lost authority cancels the gesture."
+        description = "Move, click, scroll, or drag in a leased target coordinate space. Window and Nickel-surface coordinates are local; output and desktop coordinates are global. Output points are confined to the exact output generation. DragStart holds one button; DragMove continues and DragEnd releases. DragCancel releases without moving. Continue within 30 seconds; target changes, local input, or lost authority cancels the gesture. Legacy window_id plus generation remains accepted."
     )]
     async fn pointer_action(
         &self,
@@ -2449,19 +2474,10 @@ impl McpHandler {
         self.metrics
             .measure(crate::operation_metrics::Method::Pointer, async {
                 request.action.validate()?;
-                if request.window_id.len() > 128 {
-                    return Err("window identity exceeds limit".into());
-                }
+                let target = request.resolved_target()?;
                 let permit = self.permit(&context, request.lease_id)?;
                 desktop_call(self.desktop.clone(), move |desktop| {
-                    desktop.pointer_action(
-                        permit,
-                        &request.window_id,
-                        request.generation,
-                        request.x,
-                        request.y,
-                        request.action,
-                    )
+                    desktop.pointer_action(permit, target, request.x, request.y, request.action)
                 })
                 .await?;
                 Ok(Json(true))
@@ -2822,8 +2838,7 @@ mod tests {
         fn pointer_action(
             &self,
             _permit: crate::DesktopPermit,
-            _id: &str,
-            _generation: u64,
+            _target: crate::pointer::PointerTarget,
             _x: i32,
             _y: i32,
             _action: crate::pointer::PointerAction,
@@ -2975,6 +2990,41 @@ mod tests {
                 "output_id": "DP-1",
                 "generation": 11,
                 "cached": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pointer_target_contract_is_typed_and_preserves_legacy_windows() {
+        let parse = |value| serde_json::from_value::<PointerRequest>(value).unwrap();
+        let surface = parse(serde_json::json!({
+            "lease_id": 1,
+            "target": {"kind":"surface","surface_id":"internal:7","generation":7},
+            "x": 4,"y": 5,"action":{"kind":"move"}
+        }));
+        assert!(matches!(
+            surface.resolved_target().unwrap(),
+            crate::pointer::PointerTarget::Surface { generation: 7, .. }
+        ));
+        let legacy = parse(serde_json::json!({
+            "lease_id": 1,"window_id":"9","generation":9,
+            "x": 4,"y": 5,"action":{"kind":"move"}
+        }));
+        assert!(matches!(
+            legacy.resolved_target().unwrap(),
+            crate::pointer::PointerTarget::Window { generation: 9, .. }
+        ));
+        let ambiguous = parse(serde_json::json!({
+            "lease_id": 1,"window_id":"9","generation":9,
+            "target":{"kind":"desktop"},
+            "x": 4,"y": 5,"action":{"kind":"move"}
+        }));
+        assert!(ambiguous.resolved_target().is_err());
+        assert!(
+            serde_json::from_value::<PointerRequest>(serde_json::json!({
+                "lease_id":1,"target":{"kind":"output","output_id":"DP-1","generation":1,"extra":true},
+                "x":0,"y":0,"action":{"kind":"move"}
             }))
             .is_err()
         );

@@ -2004,12 +2004,18 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     fn pointer_action(
         &self,
         permit: DesktopPermit,
-        id: &str,
-        generation: u64,
+        target: nickel_remote_control::pointer::PointerTarget,
         x: i32,
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,
     ) -> Result<(), String> {
+        let nickel_remote_control::pointer::PointerTarget::Window {
+            window_id: id,
+            generation,
+        } = target
+        else {
+            return Err("non-window pointer targets are unavailable on Windows".into());
+        };
         let _admission = crate::platform::remote_observation::Admission::acquire()?;
         let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
             &permit,
@@ -2021,7 +2027,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 permit,
                 prepared,
                 request: PointerOwnerAction {
-                    id: id.to_owned(),
+                    id,
                     generation,
                     x,
                     y,
@@ -7593,6 +7599,7 @@ fn windows_unavailable_diagnostic_domains() -> Vec<String> {
         "windows_per_surface_renderer_cache_attribution".into(),
         "windows_preview_pixel_readback".into(),
         "windows_output_pixel_capture".into(),
+        "windows_non_window_pointer_targets".into(),
         "windows_settings_worker".into(),
     ]
 }

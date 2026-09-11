@@ -485,7 +485,7 @@ impl NickelSession {
     /// Caller owns remote authorization and validates the final hit target before each action.
     pub(crate) fn inject_controlled_pointer(
         &mut self,
-        target: super::window_registry::WindowId,
+        target: &nickel_remote_control::pointer::PointerTarget,
         x: i32,
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,

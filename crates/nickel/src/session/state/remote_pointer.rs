@@ -2,17 +2,45 @@ use super::{NickelSession, WindowId};
 use nickel_remote_control::{
     DesktopPermit, HeldInput,
     leases::{ResourceEvidence, ResourceId},
-    pointer::{PointerAction, PointerButton},
+    pointer::{PointerAction, PointerButton, PointerTarget},
 };
+use smithay::reexports::wayland_server::Resource;
+use smithay::wayland::seat::WaylandFocus;
 use std::time::{Duration, Instant};
 
 pub(crate) struct RemoteHeldPointer {
     owner: HeldInput,
-    window: WindowId,
+    target: PointerTarget,
     button: PointerButton,
+    requested_x: i32,
+    requested_y: i32,
     x: i32,
     y: i32,
     idle_deadline: Instant,
+}
+
+pub(super) struct ResolvedPointerTarget {
+    pub(super) global_x: i32,
+    pub(super) global_y: i32,
+    pub(super) window: Option<ResourceId>,
+    pub(super) surface: Option<ResourceId>,
+    pub(super) output: Option<ResourceId>,
+    pub(super) application: Option<String>,
+    pub(super) surface_ancestors: Vec<ResourceId>,
+    pub(super) native_window: Option<WindowId>,
+}
+
+impl ResolvedPointerTarget {
+    fn evidence(&self) -> ResourceEvidence<'_> {
+        ResourceEvidence {
+            window: self.window.as_ref(),
+            surface: self.surface.as_ref(),
+            verified_application: self.application.as_deref(),
+            output: self.output.as_ref(),
+            authorized_surface_ancestors: &self.surface_ancestors,
+            protected: false,
+        }
+    }
 }
 
 impl NickelSession {
@@ -72,14 +100,15 @@ impl NickelSession {
         let Some(held) = self.remote_held_pointer.as_ref() else {
             return;
         };
+        let resolved =
+            self.resolve_remote_pointer_target(&held.target, held.requested_x, held.requested_y);
         let valid = Instant::now() < held.idle_deadline
-            && self.remote_pointer_target_matches(held.window, held.x, held.y)
             && self.remote_pointer_has_click_grab()
-            && self
-                .with_remote_pointer_evidence(held.window, held.x, held.y, |evidence| {
-                    held.owner.check_resource(evidence)
-                })
-                .is_ok();
+            && resolved.is_ok_and(|resolved| {
+                resolved.global_x == held.x
+                    && resolved.global_y == held.y
+                    && held.owner.check_resource(&resolved.evidence()).is_ok()
+            });
         if !valid {
             self.cancel_remote_pointer();
         }
@@ -93,36 +122,163 @@ impl NickelSession {
         })
     }
 
-    fn with_remote_pointer_evidence<T>(
+    pub(super) fn resolve_remote_pointer_target(
         &self,
-        id: WindowId,
+        target: &PointerTarget,
         x: i32,
         y: i32,
-        effect: impl FnOnce(&ResourceEvidence<'_>) -> Result<T, String>,
-    ) -> Result<T, String> {
-        let identity = ResourceId {
-            id: id.0.to_string(),
-            generation: id.0,
+    ) -> Result<ResolvedPointerTarget, String> {
+        target.validate()?;
+        if self.locked || self.shell_recovery_visible() {
+            return Err("pointer target is protected".into());
+        }
+        let mut resolved = match target {
+            PointerTarget::Window {
+                window_id,
+                generation,
+            } => {
+                let numeric = window_id
+                    .parse::<u64>()
+                    .map_err(|_| "invalid window identity")?;
+                if numeric != *generation {
+                    return Err("stale window generation".into());
+                }
+                let id = WindowId(numeric);
+                let window = self
+                    .window_for_registry_id(id)
+                    .ok_or("window is not mapped")?;
+                let geometry = self
+                    .space
+                    .element_geometry(&window)
+                    .ok_or("window geometry unavailable")?;
+                if x < 0 || y < 0 || x >= geometry.size.w || y >= geometry.size.h {
+                    return Err("pointer coordinates are outside the client area".into());
+                }
+                ResolvedPointerTarget {
+                    global_x: geometry.loc.x.checked_add(x).ok_or("coordinate overflow")?,
+                    global_y: geometry.loc.y.checked_add(y).ok_or("coordinate overflow")?,
+                    window: Some(ResourceId {
+                        id: window_id.clone(),
+                        generation: *generation,
+                    }),
+                    surface: None,
+                    output: None,
+                    application: self.remote_verified_application(id),
+                    surface_ancestors: Vec::new(),
+                    native_window: Some(id),
+                }
+            }
+            PointerTarget::Surface {
+                surface_id,
+                generation,
+            } => {
+                let identity = ResourceId {
+                    id: surface_id.clone(),
+                    generation: *generation,
+                };
+                let (runtime, output) = self.surface_capture_evidence(&identity)?;
+                let placement = self
+                    .internal_ui
+                    .placement(runtime)
+                    .ok_or("shell surface is unavailable")?;
+                if x < 0
+                    || y < 0
+                    || i64::from(x) >= i64::from(placement.geometry.2)
+                    || i64::from(y) >= i64::from(placement.geometry.3)
+                {
+                    return Err("pointer coordinates are outside the surface".into());
+                }
+                let surface_ancestors = self.remote_surface_ancestors(&identity);
+                ResolvedPointerTarget {
+                    global_x: placement
+                        .geometry
+                        .0
+                        .checked_add(x)
+                        .ok_or("coordinate overflow")?,
+                    global_y: placement
+                        .geometry
+                        .1
+                        .checked_add(y)
+                        .ok_or("coordinate overflow")?,
+                    window: None,
+                    surface: Some(identity),
+                    output,
+                    application: None,
+                    surface_ancestors,
+                    native_window: None,
+                }
+            }
+            PointerTarget::Output {
+                output_id,
+                generation,
+            } => {
+                let (output, current_generation) = self
+                    .remote_output_generations
+                    .get(output_id)
+                    .ok_or("output generation has retired")?;
+                if current_generation != generation
+                    || !self.space.outputs().any(|current| current == output)
+                {
+                    return Err("output generation has retired".into());
+                }
+                let geometry = self
+                    .space
+                    .output_geometry(output)
+                    .ok_or("output geometry is unavailable")?;
+                if !geometry.contains((x, y)) {
+                    return Err("global pointer coordinates are outside the output".into());
+                }
+                ResolvedPointerTarget {
+                    global_x: x,
+                    global_y: y,
+                    window: None,
+                    surface: None,
+                    output: Some(ResourceId {
+                        id: output_id.clone(),
+                        generation: *generation,
+                    }),
+                    application: None,
+                    surface_ancestors: Vec::new(),
+                    native_window: None,
+                }
+            }
+            PointerTarget::Desktop => {
+                if self
+                    .output_name_at((f64::from(x), f64::from(y)).into())
+                    .is_none()
+                {
+                    return Err("global pointer coordinates are outside the desktop".into());
+                }
+                ResolvedPointerTarget {
+                    global_x: x,
+                    global_y: y,
+                    window: None,
+                    surface: None,
+                    output: None,
+                    application: None,
+                    surface_ancestors: Vec::new(),
+                    native_window: None,
+                }
+            }
         };
-        let output = self
-            .output_name_at((f64::from(x), f64::from(y)).into())
-            .and_then(|name| self.remote_output_identity(name));
-        let application = self.remote_verified_application(id);
-        effect(&ResourceEvidence {
-            window: Some(&identity),
-            surface: None,
-            verified_application: application.as_deref(),
-            output: output.as_ref(),
-            authorized_surface_ancestors: &[],
-            protected: self.remote_window_is_protected(id),
-        })
+        if !self.remote_pointer_target_matches(target, resolved.global_x, resolved.global_y) {
+            return Err("pointer target is occluded, protected, or outside its boundary".into());
+        }
+        if resolved.native_window.is_none() {
+            resolved.native_window = self
+                .space
+                .element_under((f64::from(resolved.global_x), f64::from(resolved.global_y)))
+                .and_then(|(window, _)| window.wl_surface())
+                .and_then(|surface| self.surface_windows.get(&surface.id()))
+                .copied();
+        }
+        Ok(resolved)
     }
 
     pub(crate) fn dispatch_remote_pointer(
         &mut self,
         permit: DesktopPermit,
-        id: String,
-        generation: u64,
+        target: PointerTarget,
         x: i32,
         y: i32,
         action: PointerAction,
@@ -159,70 +315,46 @@ impl NickelSession {
             {
                 return Err("local keyboard input is held".into());
             }
-            let numeric = id.parse::<u64>().map_err(|_| "invalid window identity")?;
-            if numeric != generation {
-                return Err("stale window generation".into());
-            }
-            let id = WindowId(numeric);
             if self
                 .remote_held_pointer
                 .as_ref()
-                .is_some_and(|held| held.window != id)
+                .is_some_and(|held| held.target != target)
             {
                 return Err("pointer gesture cannot change its recipient".into());
             }
-            let window = self
-                .window_for_registry_id(id)
-                .ok_or("window is not mapped")?;
-            let geometry = self
-                .space
-                .element_geometry(&window)
-                .ok_or("window geometry unavailable")?;
-            if x < 0 || y < 0 || x >= geometry.size.w || y >= geometry.size.h {
-                return Err("pointer coordinates are outside the client area".into());
-            }
-            let x = geometry.loc.x.checked_add(x).ok_or("coordinate overflow")?;
-            let y = geometry.loc.y.checked_add(y).ok_or("coordinate overflow")?;
+            let resolved = self.resolve_remote_pointer_target(&target, x, y)?;
+            let global_x = resolved.global_x;
+            let global_y = resolved.global_y;
             let pointer = self.seat.get_pointer().ok_or("pointer unavailable")?;
-            if (!continuing && pointer.is_grabbed())
-                || !self.remote_pointer_target_matches(id, x, y)
-            {
+            if !continuing && pointer.is_grabbed() {
                 return Err("pointer target is occluded, protected, or grabbed".into());
             }
-            // Own these evidence values before mutating the compositor in the
-            // authorization closure. Every continuation resolves them anew.
-            let identity = ResourceId {
-                id: numeric.to_string(),
-                generation,
-            };
-            let output = self
-                .output_name_at((f64::from(x), f64::from(y)).into())
-                .and_then(|name| self.remote_output_identity(name));
-            let application = self.remote_verified_application(id);
-            let evidence = ResourceEvidence {
-                window: Some(&identity),
-                surface: None,
-                verified_application: application.as_deref(),
-                output: output.as_ref(),
-                authorized_surface_ancestors: &[],
-                protected: false,
-            };
-            self.remote_native_press = Some((permit.clone(), id));
+            let evidence = resolved.evidence();
+            self.remote_native_press = resolved
+                .native_window
+                .map(|window| (permit.clone(), window));
             self.remote_input_dispatching = true;
             let delivered = if let PointerAction::DragStart { button } = action {
                 let mut pressed = false;
                 match permit.begin_input(&evidence, || {
-                    self.inject_controlled_pointer(id, x, y, PointerAction::Move)?;
+                    self.inject_controlled_pointer(
+                        &target,
+                        global_x,
+                        global_y,
+                        PointerAction::Move,
+                    )?;
                     pressed = true;
                     self.press_controlled_pointer(button)
                 }) {
                     Ok(owner) => {
                         self.remote_held_pointer = Some(RemoteHeldPointer {
                             owner,
-                            window: id,
+                            target: target.clone(),
                             button,
-                            x,
-                            y,
+                            requested_x: x,
+                            requested_y: y,
+                            x: global_x,
+                            y: global_y,
                             idle_deadline: Instant::now() + Duration::from_secs(30),
                         });
                         self.record_remote_input_ownership();
@@ -238,14 +370,16 @@ impl NickelSession {
             } else if continuing {
                 let mut held = self.remote_held_pointer.take().unwrap();
                 let delivered = permit.continue_input(&held.owner, &evidence, || {
-                    self.inject_controlled_pointer(id, x, y, PointerAction::Move)
+                    self.inject_controlled_pointer(&target, global_x, global_y, PointerAction::Move)
                 });
                 if delivered.is_err() || matches!(action, PointerAction::DragEnd) {
                     self.release_controlled_pointer(held.button);
                     drop(held);
                 } else {
-                    held.x = x;
-                    held.y = y;
+                    held.requested_x = x;
+                    held.requested_y = y;
+                    held.x = global_x;
+                    held.y = global_y;
                     held.idle_deadline = Instant::now() + Duration::from_secs(30);
                     self.remote_held_pointer = Some(held);
                 }
@@ -253,7 +387,7 @@ impl NickelSession {
                 delivered
             } else {
                 permit.with_input(&evidence, || {
-                    self.inject_controlled_pointer(id, x, y, action)
+                    self.inject_controlled_pointer(&target, global_x, global_y, action)
                 })
             };
             self.remote_input_dispatching = false;

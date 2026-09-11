@@ -282,8 +282,7 @@ enum RemoteDesktopRequest {
     },
     Pointer {
         permit: nickel_remote_control::DesktopPermit,
-        id: String,
-        generation: u64,
+        target: nickel_remote_control::pointer::PointerTarget,
         x: i32,
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,
@@ -1221,8 +1220,7 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
     fn pointer_action(
         &self,
         permit: nickel_remote_control::DesktopPermit,
-        id: &str,
-        generation: u64,
+        target: nickel_remote_control::pointer::PointerTarget,
         x: i32,
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,
@@ -1231,8 +1229,7 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         self.sender
             .try_send(RemoteDesktopRequest::Pointer {
                 permit,
-                id: id.to_owned(),
-                generation,
+                target,
                 x,
                 y,
                 action,
@@ -2732,28 +2729,94 @@ impl NickelSession {
         }
     }
 
-    pub(crate) fn remote_pointer_target_matches(&self, id: WindowId, x: i32, y: i32) -> bool {
+    pub(crate) fn remote_pointer_target_matches(
+        &self,
+        target: &nickel_remote_control::pointer::PointerTarget,
+        x: i32,
+        y: i32,
+    ) -> bool {
+        use nickel_remote_control::pointer::PointerTarget;
         let point = (f64::from(x), f64::from(y)).into();
-        if self.remote_window_is_protected(id) {
+        if self.locked || self.shell_recovery_visible() {
             return false;
         }
-        if self
-            .internal_ui
-            .surface_at(
-                (f64::from(x), f64::from(y)),
-                self.client_scene_under(point) && !self.internal_applications_are_foremost(),
-            )
-            .is_some()
-        {
-            return false;
+        let internal = self.internal_ui.surface_at(
+            (f64::from(x), f64::from(y)),
+            self.client_scene_under(point) && !self.internal_applications_are_foremost(),
+        );
+        match target {
+            PointerTarget::Window {
+                window_id,
+                generation,
+            } => {
+                let Some(id) = window_id.parse::<u64>().ok().map(WindowId) else {
+                    return false;
+                };
+                if id.0 != *generation || self.remote_window_is_protected(id) || internal.is_some()
+                {
+                    return false;
+                }
+                let Some(window) = self.window_for_registry_id(id) else {
+                    return false;
+                };
+                self.space
+                    .element_under(point)
+                    .is_some_and(|(hit, _)| hit == &window)
+                    && self.surface_under(point).is_some()
+            }
+            PointerTarget::Surface {
+                surface_id,
+                generation,
+            } => {
+                let Some(runtime) = self
+                    .internal_ui
+                    .resolve_surface_identity(surface_id, *generation)
+                else {
+                    return false;
+                };
+                !self.internal_ui.remote_access_protected(runtime)
+                    && internal.is_some_and(|(hit, _)| hit == runtime)
+            }
+            PointerTarget::Output {
+                output_id,
+                generation,
+            } => {
+                let Some((output, current)) = self.remote_output_generations.get(output_id) else {
+                    return false;
+                };
+                if current != generation
+                    || !self.space.outputs().any(|candidate| candidate == output)
+                    || self
+                        .space
+                        .output_geometry(output)
+                        .is_none_or(|geometry| !geometry.contains((x, y)))
+                {
+                    return false;
+                }
+                self.remote_global_pointer_hit_allowed(point, internal)
+            }
+            PointerTarget::Desktop => {
+                self.output_name_at(point).is_some()
+                    && self.remote_global_pointer_hit_allowed(point, internal)
+            }
         }
-        let Some(window) = self.window_for_registry_id(id) else {
-            return false;
+    }
+
+    fn remote_global_pointer_hit_allowed(
+        &self,
+        point: Point<f64, Logical>,
+        internal: Option<(nickel_ui::InternalSurfaceId, nickel_ui::Point)>,
+    ) -> bool {
+        if let Some((surface, _)) = internal {
+            return !self.internal_ui.remote_access_protected(surface);
+        }
+        let Some((window, _)) = self.space.element_under(point) else {
+            return true;
         };
-        self.space
-            .element_under(point)
-            .is_some_and(|(hit, _)| hit == &window)
-            && self.surface_under(point).is_some()
+        window
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()))
+            .is_some_and(|id| !self.remote_window_is_protected(*id))
     }
 
     fn remote_window_summary(
@@ -3622,14 +3685,13 @@ impl NickelSession {
             }
             RemoteDesktopRequest::Pointer {
                 permit,
-                id,
-                generation,
+                target,
                 x,
                 y,
                 action,
                 reply,
             } => {
-                let result = self.dispatch_remote_pointer(permit, id, generation, x, y, action);
+                let result = self.dispatch_remote_pointer(permit, target, x, y, action);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::SemanticAction {
@@ -11348,6 +11410,108 @@ mod protocol_tests {
         assert!(session.surface_capture_evidence(&trusted_identity).is_err());
         assert!(session.internal_ui.remove(runtime));
         assert!(session.surface_capture_evidence(&identity).is_err());
+    }
+
+    #[test]
+    #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+    fn pointer_targets_resolve_exact_generations_coordinates_and_protected_hits() {
+        use nickel_remote_control::pointer::PointerTarget;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.refresh_remote_output_identities();
+        let desktop = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
+            .unwrap()
+            .id;
+        let runtime = session.internal_shell_surfaces[&desktop];
+        let placement = session.internal_ui.placement(runtime).unwrap().clone();
+        let surface = PointerTarget::Surface {
+            surface_id: format!("internal:{}", runtime.snapshot_token()),
+            generation: runtime.snapshot_token(),
+        };
+        let local = (
+            placement.geometry.2 as i32 / 2,
+            placement.geometry.3 as i32 / 2,
+        );
+        let resolved = session
+            .resolve_remote_pointer_target(&surface, local.0, local.1)
+            .unwrap();
+        assert_eq!(
+            (resolved.global_x, resolved.global_y),
+            (
+                placement.geometry.0 + local.0,
+                placement.geometry.1 + local.1
+            )
+        );
+        assert!(resolved.surface.is_some());
+        assert!(
+            session
+                .resolve_remote_pointer_target(&surface, -1, local.1)
+                .is_err()
+        );
+
+        let generation = session.remote_output_generations["file-test"].1;
+        let output = PointerTarget::Output {
+            output_id: "file-test".into(),
+            generation,
+        };
+        assert!(
+            session
+                .resolve_remote_pointer_target(&output, resolved.global_x, resolved.global_y)
+                .unwrap()
+                .output
+                .is_some()
+        );
+        assert!(
+            session
+                .resolve_remote_pointer_target(&output, -1, resolved.global_y)
+                .is_err()
+        );
+        assert!(
+            session
+                .resolve_remote_pointer_target(
+                    &PointerTarget::Output {
+                        output_id: "file-test".into(),
+                        generation: generation + 1,
+                    },
+                    resolved.global_x,
+                    resolved.global_y,
+                )
+                .is_err()
+        );
+        let desktop_target = session
+            .resolve_remote_pointer_target(
+                &PointerTarget::Desktop,
+                resolved.global_x,
+                resolved.global_y,
+            )
+            .unwrap();
+        assert!(desktop_target.output.is_none() && desktop_target.surface.is_none());
+        assert!(
+            session
+                .resolve_remote_pointer_target(&PointerTarget::Desktop, -1, -1)
+                .is_err()
+        );
+
+        session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::TrustedControl,
+                geometry: (resolved.global_x - 5, resolved.global_y - 5, 10, 10),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        assert!(
+            session
+                .resolve_remote_pointer_target(&output, resolved.global_x, resolved.global_y)
+                .is_err()
+        );
     }
 
     #[test]

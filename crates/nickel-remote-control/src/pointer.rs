@@ -1,6 +1,35 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+/// A pointer coordinate space whose membership is resolved by the desktop owner
+/// immediately before every event. Window and surface coordinates are local;
+/// output and desktop coordinates are compositor-global.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PointerTarget {
+    Window { window_id: String, generation: u64 },
+    Surface { surface_id: String, generation: u64 },
+    Output { output_id: String, generation: u64 },
+    Desktop,
+}
+
+impl PointerTarget {
+    pub fn validate(&self) -> Result<(), String> {
+        let identity = match self {
+            Self::Window { window_id: id, .. }
+            | Self::Surface { surface_id: id, .. }
+            | Self::Output { output_id: id, .. } => Some(id),
+            Self::Desktop => None,
+        };
+        if identity
+            .is_some_and(|id| id.is_empty() || id.len() > 128 || id.chars().any(char::is_control))
+        {
+            return Err("pointer target identity is invalid or exceeds limit".into());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PointerButton {
