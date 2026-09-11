@@ -56,6 +56,12 @@ impl WorkerStaging {
             },
         )
     }
+
+    #[cfg(test)]
+    pub(super) fn with_snapshot_state_held<T>(&self, effect: impl FnOnce() -> T) -> T {
+        let _state = self.state.lock().unwrap();
+        effect()
+    }
 }
 
 impl Drop for StagingAdmission<'_> {

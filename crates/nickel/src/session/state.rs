@@ -12783,6 +12783,276 @@ mod protocol_tests {
     }
 
     #[test]
+    fn spec_0231_delayed_collectors_do_not_stall_or_commit_after_cancellation() {
+        use nickel_remote_control::{
+            DesktopPermit,
+            diagnostics::{
+                DiagnosticAction, PlatformRefreshDomain, PlatformRefreshOutcome,
+                UnavailableDiagnosticDomain,
+            },
+            leases::ResourceScope,
+        };
+
+        fn permit(
+            control: &std::sync::Arc<std::sync::Mutex<nickel_remote_control::ControlPlane>>,
+            identity: &nickel_remote_control::IssuedCapability,
+            lease: u64,
+        ) -> DesktopPermit {
+            DesktopPermit::from_active_lease(
+                control.clone(),
+                identity.client_id.clone(),
+                identity.token.clone(),
+                lease,
+            )
+            .unwrap()
+        }
+
+        fn owner_snapshot(
+            event_loop: &mut EventLoop<'static, super::NickelSession>,
+            session: &mut super::NickelSession,
+            permit: DesktopPermit,
+        ) -> nickel_remote_control::diagnostics::DiagnosticSnapshot {
+            let authority = session.remote_desktop_authority.clone();
+            let (sent, received) = std::sync::mpsc::sync_channel(1);
+            let worker = std::thread::spawn(move || {
+                sent.send(authority.diagnostic_snapshot(permit)).unwrap();
+            });
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let snapshot = loop {
+                event_loop
+                    .dispatch(Duration::from_millis(20), session)
+                    .unwrap();
+                match received.try_recv() {
+                    Ok(snapshot) => break snapshot,
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        assert!(Instant::now() < deadline, "owner snapshot did not complete");
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("owner snapshot worker stopped")
+                    }
+                }
+            };
+            worker.join().unwrap();
+            snapshot.unwrap()
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        // Give the retained platform result a deterministic age beyond the
+        // protocol's five-second freshness bound without sleeping.
+        session.start_time = Instant::now() - Duration::from_secs(6);
+        session.remote_platform_refresh_generation = 41;
+        session
+            .remote_platform_refreshes
+            .push(PlatformRefreshOutcome {
+                domain: PlatformRefreshDomain::Audio,
+                generation: 41,
+                observation_started_at_us: 10,
+                observed_at_us: 20,
+                preparation_duration_us: 10,
+                stale: false,
+                network_available: false,
+                bluetooth_available: false,
+                audio_available: true,
+                printers_available: false,
+                volumes_available: false,
+                filesystems_available: false,
+                printer_count: 0,
+                volume_count: 0,
+                filesystem_count: 0,
+                maintenance_available: false,
+                updates_available: None,
+                restart_required: None,
+                firewall_healthy: None,
+                malware_protection_healthy: None,
+                known_permission_states: 0,
+                secure_storage_status_available: false,
+                associations_available: false,
+                association_targets_queried: 0,
+                effective_associations: 0,
+                directly_writable_associations: 0,
+                partial: false,
+                reconciliation_confirmed: true,
+            });
+
+        let control = session.remote_control.control();
+        let now = Instant::now();
+        let (identity, lease) = {
+            let mut owner = control.lock().unwrap();
+            owner.set_enabled(true);
+            let identity = owner
+                .connect_identity("delayed collector scenario")
+                .unwrap();
+            let watch = owner
+                .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                .unwrap();
+            owner
+                .activate_connection_watch(&identity.client_id, &identity.token, watch, false, now)
+                .unwrap();
+            let lease = owner
+                .leases_mut()
+                .approve_local(
+                    identity.client_id.clone(),
+                    ResourceScope::FullSession,
+                    now,
+                    Some(now + Duration::from_secs(1200)),
+                    false,
+                    true,
+                )
+                .unwrap();
+            (identity, lease)
+        };
+
+        // Hold the exact single-flight admission owned by production platform
+        // preparation. Owner input, renderer preparation, and snapshots must
+        // all complete before this delayed collector is released.
+        let delayed_staging = session.remote_diagnostic_staging.clone();
+        let delayed = delayed_staging.acquire().unwrap();
+        let pointer_before = session.seat.get_pointer().unwrap().current_location();
+        session
+            .inject_test_input(nickel_session_protocol::TestInput::PointerMove { x: 320, y: 240 })
+            .unwrap();
+        assert_ne!(
+            session.seat.get_pointer().unwrap().current_location(),
+            pointer_before
+        );
+
+        let renderer = session.internal_ui.insert(
+            InternalWindowTestApp,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (80, 90, 640, 480),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        session.register_internal_application(renderer).unwrap();
+        let frames_before = session
+            .internal_ui
+            .renderer_diagnostics(renderer)
+            .unwrap()
+            .gpu_frames;
+        session.internal_ui.mark_dirty(renderer);
+        let _ = session.internal_ui.render_buffer(renderer);
+        let frames_after = session
+            .internal_ui
+            .renderer_diagnostics(renderer)
+            .unwrap()
+            .gpu_frames;
+        assert!(frames_after > frames_before);
+
+        let pending = owner_snapshot(
+            &mut event_loop,
+            &mut session,
+            permit(&control, &identity, lease),
+        );
+        let worker = pending.diagnostic_worker.as_ref().unwrap();
+        assert!(worker.busy);
+        assert_eq!(worker.generation, 1);
+        assert!(worker.last_changed_uptime_us <= worker.collector_uptime_us);
+        let retained = pending
+            .platform_refreshes
+            .iter()
+            .find(|refresh| refresh.domain == PlatformRefreshDomain::Audio)
+            .unwrap();
+        assert_eq!(retained.generation, 41);
+        assert_eq!(retained.observation_started_at_us, 10);
+        assert_eq!(retained.observed_at_us, 20);
+        assert!(retained.stale);
+        let rendered = pending
+            .internal_renderers
+            .iter()
+            .find(|entry| entry.surface_generation == renderer.snapshot_token())
+            .unwrap();
+        assert_eq!(rendered.observed_at_us, pending.observed_at_us);
+        assert!(rendered.gpu_frames >= frames_after);
+        assert_eq!(
+            pending.input.observation_generation,
+            pending.observation_generation
+        );
+        assert_eq!(pending.input.observed_at_us, pending.observed_at_us);
+        let application = pending
+            .internal_applications
+            .iter()
+            .find(|entry| entry.generation == renderer.snapshot_token())
+            .unwrap();
+        assert_eq!(
+            pending
+                .input
+                .pointer_hit_test
+                .as_ref()
+                .and_then(|hit| hit.window.as_deref()),
+            Some(application.window.as_str())
+        );
+        assert!(
+            pending
+                .unavailable_domains
+                .contains(&UnavailableDiagnosticDomain::NativeGpuRendererTiming)
+        );
+
+        // Lock contention is represented as unavailable instead of waiting on
+        // a collector. The snapshot still returns through the production owner.
+        drop(delayed);
+        let staging = session.remote_diagnostic_staging.clone();
+        let (held, held_ready) = std::sync::mpsc::sync_channel(1);
+        let (release, released) = std::sync::mpsc::sync_channel(1);
+        let contention = std::thread::spawn(move || {
+            staging.with_snapshot_state_held(|| {
+                held.send(()).unwrap();
+                released.recv().unwrap();
+            });
+        });
+        held_ready.recv_timeout(Duration::from_secs(1)).unwrap();
+        let unavailable = owner_snapshot(
+            &mut event_loop,
+            &mut session,
+            permit(&control, &identity, lease),
+        );
+        assert!(unavailable.diagnostic_worker.is_none());
+        assert!(unavailable.observation_generation > pending.observation_generation);
+        release.send(()).unwrap();
+        contention.join().unwrap();
+
+        // Model the worker's delayed result at the production commit seam.
+        // Revoking its lease first must reject the result without advancing or
+        // replacing the retained platform generation.
+        let late_permit = permit(&control, &identity, lease);
+        control.lock().unwrap().leases_mut().revoke(lease);
+        assert!(late_permit.check_live().is_err());
+        let (reply, result) = std::sync::mpsc::sync_channel(1);
+        session.handle_remote_desktop_request(super::RemoteDesktopRequest::DiagnosticAction {
+            permit: late_permit,
+            action: DiagnosticAction::RefreshPlatformStatus {
+                domain: PlatformRefreshDomain::Audio,
+            },
+            application_discovery: None,
+            platform_refresh: Some(super::PreparedPlatformRefresh {
+                domain: PlatformRefreshDomain::Audio,
+                data: super::PreparedPlatformRefreshData::Audio(crate::platform::AudioRefresh {
+                    audio: crate::platform::AudioStatus {
+                        available: true,
+                        ..Default::default()
+                    },
+                    partial: false,
+                }),
+                observation_started: Instant::now() - Duration::from_millis(5),
+                observed: Instant::now(),
+                preparation_duration_us: 5_000,
+            }),
+            reply,
+        });
+        assert!(
+            result
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(session.remote_platform_refresh_generation, 41);
+        assert_eq!(session.remote_platform_refreshes.len(), 1);
+        assert_eq!(session.remote_platform_refreshes[0].generation, 41);
+    }
+
+    #[test]
     fn active_remote_lease_owns_one_overlay_per_output_and_revoke_removes_it() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = internal_shell_test_session();

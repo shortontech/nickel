@@ -294,6 +294,25 @@ enum InputReservation {
 }
 
 impl DesktopPermit {
+    /// Construct and validate a permit for an already authenticated, active lease.
+    ///
+    /// This is the production-owner injection boundary used by non-HTTP adapters
+    /// and deterministic owner scenarios. Possessing the client credential and
+    /// lease number grants no authority by itself: the returned permit captures
+    /// the current operation generation and is rejected unless the connection,
+    /// lease, emergency generation, and delivery deadline remain live. Owners
+    /// still apply the requested operation's scope and debug checks at execution.
+    pub fn from_active_lease(
+        control: std::sync::Arc<std::sync::Mutex<ControlPlane>>,
+        client: String,
+        token: String,
+        lease: u64,
+    ) -> Result<Self, String> {
+        let permit = Self::new(control, client, token, lease);
+        permit.check_live()?;
+        Ok(permit)
+    }
+
     /// Stable request correlation for bounded diagnostic records. This carries
     /// no client, lease, resource, or payload identity.
     pub fn operation_id(&self) -> Option<u64> {
