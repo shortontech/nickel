@@ -117,21 +117,27 @@ The resulting tests prove:
 - The application lease cannot enumerate or launch the unrelated real catalog
   executable after movement. Launch must fail specifically because the target is
   outside the application lease, not because its catalog entry is absent/stale.
+- A separate output lease enumerates and launches that real catalog executable.
+  The immediate outcome confirms the requested spawn and output while truthfully
+  leaving placement unconfirmed; the harness then observes the resulting native
+  window inside that output and uses the same lease for focus and capture.
 - No movement requests another approval or changes the existing authority audit.
 
-Native Wayland acceptance passed September 11, 2026, on `d2ca964` plus this change.
+Native Wayland acceptance passed September 11, 2026, on `d0d5fbb` plus this change.
 All preceding ordinary/shell cases and the combined diagnostic/capture/input stress,
-privacy and emergency checks also passed. Five focused harness tests and strict
-harness Clippy passed. The commands above reproduce the acceptance path. The added
-workspace/output were removed, all example processes reaped, and the owned
-compositor/runtime cleaned afterward.
+privacy and emergency checks also passed. Six focused harness tests and strict
+harness/example Clippy passed. The combined stress check completed 27 requests in
+2.973 seconds with a 703 ms maximum response and 4,124 KiB RSS growth. The commands
+above reproduce the acceptance path. The added workspace/output were removed, all
+example processes reaped, and the owned compositor/runtime cleaned afterward.
 
 The extra output is virtual: it exercises live Wayland clients and production
 compositor resource/geometry/workspace authority, but has no independent physical
 display presenter. This is not physical multi-monitor, DRM, mixed-DPI presentation,
-Xwayland, or Windows acceptance. Transient/broker identity remains a separate case; held-input coverage is
-described below. The real negative launch test does not prove an
-authorized application launch or output-placement workflow.
+Xwayland, or Windows acceptance. The positive launch uses a directly executed
+repository fixture; broker/daemon and Flatpak launch attribution remain separate
+cases. Transient identity remains separate, and held-input coverage is described
+below.
 ## Ordinary Xwayland clients
 
 The parallel Xwayland increment uses the same repository examples and assertions.

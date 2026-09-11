@@ -168,6 +168,7 @@ pub(super) fn exercise(
     revoke_scope(environment, lease)?;
     if let Some(movement) = &movement {
         movement.output_boundary(environment, address, identity, &first, &mut recipient)?;
+        movement.authorized_output_launch(environment, address, identity)?;
         movement.held_input(environment, address, identity, &first, &mut recipient)?;
         movement.cleanup(environment)?;
     }
@@ -185,8 +186,10 @@ pub(super) fn exercise(
 
 struct Movement {
     primary: nickel_session_protocol::RemoteResourceId,
+    secondary: nickel_session_protocol::RemoteResourceId,
     original_workspace: nickel_session_protocol::WorkspaceId,
     second_workspace: nickel_session_protocol::WorkspaceId,
+    counter_application: String,
 }
 
 impl Movement {
@@ -227,13 +230,15 @@ impl Movement {
             "list_outputs",
             json!({"lease_id": lease}),
         )?;
-        if !outputs["outputs"].as_array().is_some_and(|outputs| {
-            outputs
-                .iter()
-                .any(|output| output["name"] == MOVEMENT_OUTPUT)
-        }) {
-            return Err("nested output was not published through the production owner".into());
-        }
+        let secondary = outputs["outputs"]
+            .as_array()
+            .and_then(|outputs| {
+                outputs
+                    .iter()
+                    .find(|output| output["name"] == MOVEMENT_OUTPUT)
+            })
+            .ok_or("nested output was not published through the production owner")?;
+        let secondary = native_resource(secondary, "name")?;
         let ServerMessage::Workspaces(before) =
             session_message(environment, Request::Query(Query::Workspaces))?
         else {
@@ -276,8 +281,13 @@ impl Movement {
         }
         Ok(Self {
             primary,
+            secondary,
             original_workspace,
             second_workspace,
+            counter_application: counter["verified_application"]
+                .as_str()
+                .ok_or("catalog counter identity is unavailable")?
+                .to_owned(),
         })
     }
 
@@ -453,6 +463,114 @@ impl Movement {
         revoke_scope(environment, lease)?;
         println!(
             "PASS: same output lease loses inventory/focus/capture/key authority after movement and regains native input on return without reapproval"
+        );
+        Ok(())
+    }
+
+    fn authorized_output_launch(
+        &self,
+        environment: &SessionEnvironment,
+        address: SocketAddr,
+        identity: &Identity,
+    ) -> Result<(), String> {
+        let scope = RemoteResourceScope::Output(self.secondary.clone());
+        let lease = approve_scope(environment, address, identity, scope.clone(), false)?;
+        let approved = remote_snapshot(environment)?;
+        let before = scope_call(
+            address,
+            identity,
+            "list_windows",
+            json!({"lease_id": lease}),
+        )?;
+        let existing = before
+            .as_array()
+            .ok_or("prelaunch output inventory is not an array")?
+            .iter()
+            .filter_map(|window| window["id"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>();
+        let catalog = scope_call(
+            address,
+            identity,
+            "list_installed_applications",
+            json!({"lease_id": lease}),
+        )?;
+        let entry = catalog["applications"]
+            .as_array()
+            .and_then(|entries| {
+                entries
+                    .iter()
+                    .find(|entry| entry["id"] == COUNTER_CATALOG_ID)
+            })
+            .ok_or("counter fixture is unavailable to the output lease")?;
+        if entry["verified_application"] != self.counter_application {
+            return Err("launch catalog identity changed before output-scoped launch".into());
+        }
+        let outcome = scope_call(
+            address,
+            identity,
+            "launch_installed_application",
+            json!({
+                "lease_id": lease,
+                "application_id": COUNTER_CATALOG_ID,
+                "catalog_generation": catalog["catalog_generation"],
+            }),
+        )?;
+        if outcome["application_id"] != COUNTER_CATALOG_ID
+            || outcome["requested"] != true
+            || outcome["process_spawn_confirmed"] != true
+            || outcome["process_id"].as_u64().is_none_or(|pid| pid == 0)
+            || outcome["output_requested"]["id"] != self.secondary.id
+            || outcome["output_requested"]["generation"] != self.secondary.generation
+            || outcome["output_confirmed"] != false
+        {
+            return Err(format!(
+                "output-scoped launch returned an incoherent requested/confirmed outcome: {outcome}"
+            ));
+        }
+
+        let window = wait_for_scoped_window(address, identity, lease, &existing)?;
+        if window["title"] != "Nickel UI Counter"
+            || window["verified_application"] != self.counter_application
+        {
+            return Err("output-scoped launch mapped an unexpected native application".into());
+        }
+        verify_placement(
+            environment,
+            protocol_window_id(&window)?,
+            MOVEMENT_OUTPUT,
+            self.original_workspace,
+        )?;
+        scope_call(
+            address,
+            identity,
+            "focus_window",
+            window_arguments(lease, &window),
+        )?;
+        scope_call(
+            address,
+            identity,
+            "capture_window",
+            window_arguments(lease, &window),
+        )?;
+        let inventory = scope_call(
+            address,
+            identity,
+            "list_windows",
+            json!({"lease_id": lease}),
+        )?;
+        if !inventory.as_array().is_some_and(|windows| {
+            windows
+                .iter()
+                .any(|candidate| candidate["id"] == window["id"] && candidate["active"] == true)
+        }) {
+            return Err(
+                "output lease did not retain focus authority over its launched window".into(),
+            );
+        }
+        require_unchanged_scope_approval(&approved, &remote_snapshot(environment)?, lease, &scope)?;
+        revoke_scope(environment, lease)?;
+        println!(
+            "PASS: output lease launched the real catalog application, production placement confined its mapped window to that output, and focus/capture required no new approval"
         );
         Ok(())
     }
@@ -986,6 +1104,45 @@ fn wait_for_window(
         }
         if Instant::now() >= deadline {
             return Err("owned ordinary fixture did not obtain native application evidence".into());
+        }
+        thread::sleep(POLL);
+    }
+}
+
+fn wait_for_scoped_window(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    existing: &[String],
+) -> Result<Value, String> {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let windows = scope_call(
+            address,
+            identity,
+            "list_windows",
+            json!({"lease_id": lease}),
+        )?;
+        let windows = windows
+            .as_array()
+            .ok_or("native window inventory is not an array")?;
+        let mut found = windows.iter().filter(|window| {
+            window["id"]
+                .as_str()
+                .is_some_and(|id| !existing.iter().any(|previous| previous == id))
+                && window["verified_application"]
+                    .as_str()
+                    .is_some_and(|id| !id.is_empty())
+        });
+        if let Some(window) = found.next() {
+            if found.next().is_some() {
+                return Err("output-scoped launch attribution is ambiguous".into());
+            }
+            native_resource(window, "id")?;
+            return Ok(window.clone());
+        }
+        if Instant::now() >= deadline {
+            return Err("launched application did not map inside its authorized output".into());
         }
         thread::sleep(POLL);
     }
