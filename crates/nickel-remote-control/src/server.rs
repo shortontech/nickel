@@ -33,6 +33,17 @@ use http_body_util::BodyExt;
 #[cfg(test)]
 const MCP_ADDRESS: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::LOCALHOST, 42637);
 
+/// Hard limit for the complete JSON-RPC HTTP response produced by
+/// `diagnostic_snapshot`, including the MCP result envelope.
+pub(crate) const MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES: usize = 1024 * 1024;
+
+// Leave room for the JSON-RPC/MCP envelope and for the bounded request ID. The
+// transport layer below still verifies the exact emitted body length.
+const MAX_DIAGNOSTIC_SNAPSHOT_PAYLOAD_BYTES: usize =
+    MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES - crate::admission::MAX_REQUEST_BYTES - 1024;
+const DIAGNOSTIC_SNAPSHOT_TOO_LARGE: &str =
+    "diagnostic_snapshot response exceeds the serialized size limit";
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowSummary {
     pub id: String,
@@ -807,16 +818,21 @@ async fn bounded_http(
         let body = axum::body::to_bytes(body, crate::admission::MAX_REQUEST_BYTES)
             .await
             .map_err(|_| StatusCode::PAYLOAD_TOO_LARGE)?;
-        let capture = (parts.uri.path() == "/mcp" || parts.uri.path().starts_with("/mcp/"))
+        let mcp_request = (parts.uri.path() == "/mcp" || parts.uri.path().starts_with("/mcp/"))
             .then(|| serde_json::from_slice::<serde_json::Value>(&body).ok())
-            .flatten()
-            .is_some_and(|request| {
-                request["method"] == "tools/call"
-                    && matches!(
-                        request["params"]["name"].as_str(),
-                        Some("capture_window" | "capture_output" | "capture_surface")
-                    )
-            });
+            .flatten();
+        let capture = mcp_request.as_ref().is_some_and(|request| {
+            request["method"] == "tools/call"
+                && matches!(
+                    request["params"]["name"].as_str(),
+                    Some("capture_window" | "capture_output" | "capture_surface")
+                )
+        });
+        let diagnostic_snapshot_id = mcp_request.as_ref().and_then(|request| {
+            (request["method"] == "tools/call"
+                && request["params"]["name"] == "diagnostic_snapshot")
+                .then(|| request["id"].clone())
+        });
         let reservation = if capture {
             Some(CaptureReservation {
                 _permit: Arc::new(
@@ -833,9 +849,12 @@ async fn bounded_http(
             parts.extensions.insert(reservation.clone());
         }
         parts.extensions.insert(limits);
-        let response = next
+        let mut response = next
             .run(Request::from_parts(parts, axum::body::Body::from(body)))
             .await;
+        if let Some(id) = diagnostic_snapshot_id {
+            response = bound_diagnostic_snapshot_response(response, id).await;
+        }
         Ok::<_, StatusCode>(if let Some(reservation) = reservation {
             hold_response_budget(response, reservation)
         } else {
@@ -845,6 +864,107 @@ async fn bounded_http(
     .await
     .map_err(|_| StatusCode::REQUEST_TIMEOUT)??;
     Ok(hold_response_budget(response, admission))
+}
+
+async fn bound_diagnostic_snapshot_response(response: Response, id: serde_json::Value) -> Response {
+    let (mut parts, body) = response.into_parts();
+    match axum::body::to_bytes(body, MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES).await {
+        Ok(bytes) => {
+            parts.headers.remove(http::header::TRANSFER_ENCODING);
+            parts.headers.insert(
+                http::header::CONTENT_LENGTH,
+                bytes
+                    .len()
+                    .to_string()
+                    .parse()
+                    .expect("numeric content length"),
+            );
+            Response::from_parts(parts, axum::body::Body::from(bytes))
+        }
+        Err(_) => {
+            let bytes = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{"type": "text", "text": DIAGNOSTIC_SNAPSHOT_TOO_LARGE}],
+                    "isError": true
+                }
+            }))
+            .expect("fixed diagnostic size error serializes");
+            debug_assert!(bytes.len() <= MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES);
+            parts.status = StatusCode::OK;
+            parts.headers.remove(http::header::TRANSFER_ENCODING);
+            parts.headers.insert(
+                http::header::CONTENT_TYPE,
+                "application/json".parse().expect("static content type"),
+            );
+            parts.headers.insert(
+                http::header::CONTENT_LENGTH,
+                bytes
+                    .len()
+                    .to_string()
+                    .parse()
+                    .expect("numeric content length"),
+            );
+            Response::from_parts(parts, axum::body::Body::from(bytes))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticSnapshotPreflightFailure {
+    Cancelled,
+    TooLarge,
+}
+
+struct DiagnosticSnapshotCounter<'a> {
+    permit: &'a crate::DesktopPermit,
+    written: usize,
+    failure: Option<DiagnosticSnapshotPreflightFailure>,
+}
+
+impl std::io::Write for DiagnosticSnapshotCounter<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.permit.check_live().is_err() {
+            self.failure = Some(DiagnosticSnapshotPreflightFailure::Cancelled);
+            return Err(std::io::Error::other("diagnostic snapshot was cancelled"));
+        }
+        if bytes.len() > MAX_DIAGNOSTIC_SNAPSHOT_PAYLOAD_BYTES.saturating_sub(self.written) {
+            self.failure = Some(DiagnosticSnapshotPreflightFailure::TooLarge);
+            return Err(std::io::Error::other(DIAGNOSTIC_SNAPSHOT_TOO_LARGE));
+        }
+        self.written += bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn preflight_diagnostic_snapshot(
+    snapshot: crate::diagnostics::DiagnosticSnapshot,
+    permit: &crate::DesktopPermit,
+) -> Result<crate::diagnostics::DiagnosticSnapshot, String> {
+    permit.check_live()?;
+    let mut counter = DiagnosticSnapshotCounter {
+        permit,
+        written: 0,
+        failure: None,
+    };
+    if serde_json::to_writer(&mut counter, &snapshot).is_err() {
+        return Err(match counter.failure {
+            Some(DiagnosticSnapshotPreflightFailure::Cancelled) => {
+                "remote request was cancelled".to_owned()
+            }
+            Some(DiagnosticSnapshotPreflightFailure::TooLarge) => {
+                DIAGNOSTIC_SNAPSHOT_TOO_LARGE.to_owned()
+            }
+            None => "diagnostic_snapshot serialization failed".to_owned(),
+        });
+    }
+    permit.check_live()?;
+    Ok(snapshot)
 }
 
 async fn authorize_http(
@@ -1522,11 +1642,16 @@ impl McpHandler {
         self.metrics
             .measure(crate::operation_metrics::Method::Snapshot, async {
                 let permit = self.permit(&context, request.lease_id)?;
-                desktop_call(self.desktop.clone(), move |desktop| {
-                    desktop.diagnostic_snapshot(permit)
+                let owner_permit = permit.clone();
+                let snapshot = desktop_call(self.desktop.clone(), move |desktop| {
+                    desktop.diagnostic_snapshot(owner_permit)
+                })
+                .await?;
+                tokio::task::spawn_blocking(move || {
+                    preflight_diagnostic_snapshot(snapshot, &permit).map(Json)
                 })
                 .await
-                .map(Json)
+                .map_err(|_| "diagnostic_snapshot serializer stopped".to_owned())?
             })
             .await
     }
@@ -3098,6 +3223,309 @@ mod tests {
     use std::io::{Read, Write};
 
     static PORT_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn diagnostic_snapshot_fixture(title: String) -> crate::diagnostics::DiagnosticSnapshot {
+        use crate::diagnostics as d;
+        crate::diagnostics::DiagnosticSnapshot {
+            observation_generation: 1,
+            observed_at_us: 2,
+            windows: vec![WindowSummary {
+                id: "window-1".into(),
+                application_id: "org.nickel.fixture".into(),
+                title,
+                active: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                x: 0,
+                y: 0,
+                width: 800,
+                height: 600,
+                generation: 1,
+                workspace: 1,
+                verified_application: Some("org.nickel.fixture".into()),
+            }],
+            outputs: Vec::new(),
+            workspaces: Vec::new(),
+            internal_applications: Vec::new(),
+            internal_renderers: Vec::new(),
+            shell_renderers: Vec::new(),
+            shell_image_cache: None,
+            shared_presenter_cache: None,
+            projected_resources: d::ProjectedResourceDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                renderer_surfaces: 0,
+                software_frame_bytes: 0,
+                fallback_raster_bytes: 0,
+                shell_image_entries: 0,
+                shell_image_bytes: 0,
+            },
+            pending_effects: d::PendingEffectsDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                desktop_scene_updates: 0,
+                image_copy_frames: 0,
+                launch_observations: 0,
+                output_retirements: 0,
+                shell_focus_pending: false,
+            },
+            shell_surfaces: Vec::new(),
+            focused_window: Some("window-1".into()),
+            input: d::InputDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                keyboard: None,
+                pointer: None,
+                pointer_hit_test: None,
+            },
+            shortcuts: d::ShortcutDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                registration_revision: Some(1),
+                capability: d::ShortcutDiagnosticCapability::Available,
+                registrations: Vec::new(),
+                unprojected_bindings: 0,
+                truncated: false,
+            },
+            stacking_front_to_back: vec!["window-1".into()],
+            preview: d::PreviewDiagnostic {
+                presentation_generation: 0,
+                readback_bytes: 0,
+                capture_failures: 0,
+                native_presentation_generation: None,
+                native_presentation_failures: None,
+            },
+            metrics: None,
+            admission: None,
+            lease_metrics: None,
+            platform: d::PlatformDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                backend: Some(d::CompositorBackend::Winit),
+                keyboard_present: true,
+                pointer_present: true,
+                touch_present: false,
+                xwayland_connected: false,
+                xwayland_restart_pending: false,
+                isolated_x11_keyboard_initialized: false,
+                native_keyboard_worker_initialized: false,
+            },
+            platform_refreshes: Vec::new(),
+            application_inventory_refresh: None,
+            codex_feature: None,
+            shell_behavior: d::ShellBehaviorDiagnostic {
+                observation_generation: 1,
+                observed_at_us: 2,
+                topology_generation: 1,
+                bar_on_all_displays: true,
+                all_windows_on_every_bar: true,
+                configured_desktop_count: 1,
+                runtime_desktop_count: 1,
+            },
+            settings_worker: None,
+            diagnostic_worker: None,
+            application_launch: d::ApplicationLaunchDiagnostic {
+                preparation: None,
+                tracked_children: 0,
+                child_capacity: 0,
+            },
+            external_accessibility: None,
+            recent_events: crate::desktop_events::DesktopEventSnapshot {
+                generation: 0,
+                evicted: 0,
+                events: Vec::new(),
+            },
+            diagnostic_logs: None,
+            frame_trace: None,
+            trace_lifecycle: None,
+            truncated: false,
+            unavailable_domains: Vec::new(),
+        }
+    }
+
+    struct SnapshotDesktop {
+        snapshot: crate::diagnostics::DiagnosticSnapshot,
+        started: Option<std::sync::mpsc::SyncSender<()>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl SnapshotDesktop {
+        fn immediate(snapshot: crate::diagnostics::DiagnosticSnapshot) -> Self {
+            Self {
+                snapshot,
+                started: None,
+                release: Mutex::new(None),
+            }
+        }
+    }
+
+    impl DesktopAuthority for SnapshotDesktop {
+        fn keyboard_action(
+            &self,
+            _permit: crate::DesktopPermit,
+            _id: &str,
+            _generation: u64,
+            _action: crate::keyboard::KeyboardAction,
+        ) -> Result<(), String> {
+            Err("unsupported fixture operation".into())
+        }
+
+        fn pointer_action(
+            &self,
+            _permit: crate::DesktopPermit,
+            _target: crate::pointer::PointerTarget,
+            _x: i32,
+            _y: i32,
+            _action: crate::pointer::PointerAction,
+        ) -> Result<(), String> {
+            Err("unsupported fixture operation".into())
+        }
+
+        fn diagnostic_snapshot(
+            &self,
+            _permit: crate::DesktopPermit,
+        ) -> Result<crate::diagnostics::DiagnosticSnapshot, String> {
+            if let Some(started) = &self.started {
+                started.send(()).unwrap();
+                if let Some(release) = self.release.lock().unwrap().take() {
+                    let _ = release.recv();
+                }
+            }
+            Ok(self.snapshot.clone())
+        }
+
+        fn list_windows(
+            &self,
+            _permit: crate::DesktopPermit,
+        ) -> Result<Vec<WindowSummary>, String> {
+            Ok(Vec::new())
+        }
+
+        fn window_action(
+            &self,
+            _permit: crate::DesktopPermit,
+            _id: &str,
+            _generation: u64,
+            _action: crate::window_actions::WindowAction,
+        ) -> Result<crate::window_actions::WindowOutcome, String> {
+            Err("unsupported fixture operation".into())
+        }
+    }
+
+    fn full_debug_identity(control: &Arc<Mutex<ControlPlane>>) -> (String, String, u64) {
+        let now = std::time::Instant::now();
+        let mut plane = control.lock().unwrap();
+        plane.set_enabled(true);
+        let identity = plane.connect_identity("Snapshot response fixture").unwrap();
+        crate::ready_connection(&mut plane, &identity, now);
+        let request = crate::lease_requests::LeaseRequest {
+            renewal: None,
+            scope: crate::leases::ResourceScope::FullSession,
+            duration: Some(std::time::Duration::from_secs(1200)),
+            allow_resumption: false,
+            full_debug: true,
+        };
+        plane
+            .request_lease(&identity.client_id, &identity.token, request.clone(), now)
+            .unwrap();
+        let generation = plane
+            .lease_requests()
+            .pending_generation(&identity.client_id)
+            .unwrap();
+        let lease = plane
+            .approve_lease_local(&identity.client_id, &request, generation, now)
+            .unwrap();
+        (identity.client_id, identity.token, lease)
+    }
+
+    fn diagnostic_snapshot_http(client: &str, token: &str, lease: u64) -> String {
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 231,
+            "method": "tools/call",
+            "params": {
+                "name": "diagnostic_snapshot",
+                "arguments": {"lease_id": lease}
+            }
+        })
+        .to_string();
+        http(&format!(
+            "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nX-Nickel-Client: {client}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        ))
+    }
+
+    fn http_body(response: &str) -> &str {
+        response.split_once("\r\n\r\n").unwrap().1
+    }
+
+    #[test]
+    fn production_snapshot_http_response_is_bounded_and_oversize_data_is_not_leaked() {
+        const SECRET_CANARY: &str = "snapshot-secret-canary-must-not-leak";
+        let _port = PORT_TEST.lock().unwrap_or_else(|error| error.into_inner());
+        let control = Arc::new(Mutex::new(ControlPlane::default()));
+        let (client, token, lease) = full_debug_identity(&control);
+        let oversized_title = format!(
+            "{SECRET_CANARY}{}",
+            "x".repeat(MAX_DIAGNOSTIC_SNAPSHOT_PAYLOAD_BYTES)
+        );
+        let desktop = SnapshotDesktop::immediate(diagnostic_snapshot_fixture(oversized_title));
+        let server = RemoteControlServer::start(control, Arc::new(desktop)).unwrap();
+
+        let response = diagnostic_snapshot_http(&client, &token, lease);
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        let body = http_body(&response);
+        assert!(body.len() <= MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES);
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["id"], 231);
+        assert_eq!(value["result"]["isError"], true);
+        assert!(
+            value["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("serialized size limit")
+        );
+        assert!(!response.contains(SECRET_CANARY));
+        server.stop();
+    }
+
+    #[test]
+    fn revoked_snapshot_is_cancelled_before_serialization_on_the_http_path() {
+        const SECRET_CANARY: &str = "cancelled-snapshot-secret-canary";
+        let _port = PORT_TEST.lock().unwrap_or_else(|error| error.into_inner());
+        let control = Arc::new(Mutex::new(ControlPlane::default()));
+        let (client, token, lease) = full_debug_identity(&control);
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let desktop = SnapshotDesktop {
+            snapshot: diagnostic_snapshot_fixture(SECRET_CANARY.into()),
+            started: Some(started_tx),
+            release: Mutex::new(Some(release_rx)),
+        };
+        let server = RemoteControlServer::start(control.clone(), Arc::new(desktop)).unwrap();
+        let request = std::thread::spawn(move || diagnostic_snapshot_http(&client, &token, lease));
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        control.lock().unwrap().leases_mut().revoke(lease);
+        release_tx.send(()).unwrap();
+
+        let response = request.join().unwrap();
+        let body = http_body(&response);
+        assert!(body.len() <= MAX_DIAGNOSTIC_SNAPSHOT_RESPONSE_BYTES);
+        let value: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(value["result"]["isError"], true);
+        let error = value["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            error.contains("lease is missing")
+                || error.contains("cancelled")
+                || error.contains("revoked"),
+            "unexpected authority failure: {error}"
+        );
+        assert!(!response.contains(SECRET_CANARY));
+        server.stop();
+    }
 
     #[test]
     fn queued_capture_rechecks_revocation_before_encoding_and_releases_budget() {
