@@ -3216,6 +3216,7 @@ dependencies = [
  "qrcode",
  "resvg",
  "tracing",
+ "url",
  "windows",
  "winit 0.30.13",
  "zbus",

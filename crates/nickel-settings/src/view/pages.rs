@@ -5,6 +5,84 @@ use nickel_ui::{
     TextField, Track,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RemoteExposurePresentation {
+    pub(crate) kind: SettingsStatusKind,
+    pub(crate) exposure: String,
+    pub(crate) transport: String,
+}
+
+pub(crate) fn remote_exposure_presentation(
+    snapshot: &nickel_session_protocol::RemoteControlSnapshot,
+) -> RemoteExposurePresentation {
+    use nickel_session_protocol::RemoteControlEffectiveState as Effective;
+
+    let endpoint = url::Url::parse(&snapshot.endpoint).ok();
+    let loopback = endpoint
+        .as_ref()
+        .and_then(url::Url::host_str)
+        .and_then(|host| host.parse::<std::net::IpAddr>().ok())
+        .map(|address| address.is_loopback());
+    let https = endpoint
+        .as_ref()
+        .is_some_and(|endpoint| endpoint.scheme() == "https");
+    let transport = match (https, loopback, snapshot.host_fingerprint.is_some()) {
+        (true, _, true) => {
+            "HTTPS with a host certificate fingerprint available for verification".into()
+        }
+        (true, _, false) => {
+            "HTTPS reported, but the host certificate fingerprint is unavailable".into()
+        }
+        (false, Some(true), _) => "Local HTTP restricted to this computer".into(),
+        (false, Some(false), _) => {
+            "Unprotected HTTP was reported for a non-loopback address".into()
+        }
+        (false, None, _) => {
+            "Transport state unavailable; the endpoint could not be classified".into()
+        }
+    };
+
+    let (kind, exposure) = match (snapshot.effective, loopback, https) {
+        (Effective::Enabled, Some(false), true) => (
+            SettingsStatusKind::Validation,
+            "Remote exposure active. New connections have no authority until locally approved.".into(),
+        ),
+        (Effective::Enabled, Some(false), false) => (
+            SettingsStatusKind::Error,
+            "Unsafe remote exposure reported: the active non-loopback endpoint is not protected by HTTPS.".into(),
+        ),
+        (Effective::Enabled, Some(true), _) => (
+            SettingsStatusKind::Information,
+            "Local only. The listener accepts connections from this computer.".into(),
+        ),
+        (Effective::Enabled, None, _) => (
+            SettingsStatusKind::Unavailable,
+            "Exposure state unavailable because the active endpoint could not be classified.".into(),
+        ),
+        (Effective::Disabled, Some(false), _) => (
+            SettingsStatusKind::Unavailable,
+            "Not exposed. A remote address is configured, but the listener is disabled.".into(),
+        ),
+        (Effective::Disabled, _, _) => (
+            SettingsStatusKind::Unavailable,
+            "Not exposed. The listener is disabled.".into(),
+        ),
+        (Effective::Rejected, Some(false), _) => (
+            SettingsStatusKind::Error,
+            "Not exposed. A remote address is configured, but the listener failed to start.".into(),
+        ),
+        (Effective::Rejected, _, _) => (
+            SettingsStatusKind::Error,
+            "Not exposed. The listener failed to start.".into(),
+        ),
+    };
+    RemoteExposurePresentation {
+        kind,
+        exposure,
+        transport,
+    }
+}
+
 pub(crate) fn codex_switch_state(state: &FeatureState) -> SwitchState {
     let available = state.capability.support == FeatureSupport::Supported
         && state.capability.installation == FeatureInstallation::Installed;
@@ -774,6 +852,7 @@ impl SettingsApp {
             ),
         );
         let remote_effective = self.remote_control_runtime.effective;
+        let remote_exposure = remote_exposure_presentation(&self.remote_control_runtime);
         let remote_switch = match remote_effective {
             nickel_session_protocol::RemoteControlEffectiveState::Enabled => SwitchState::On,
             nickel_session_protocol::RemoteControlEffectiveState::Disabled
@@ -841,6 +920,16 @@ impl SettingsApp {
                         format!("{} wants to connect", client.label),
                         "Unverified client identity - local approval required",
                     )
+                    .child(SettingsRow::new(
+                        theme,
+                        "Claimed client name",
+                        client.label.clone(),
+                    ))
+                    .child(SettingsRow::new(
+                        theme,
+                        "Verified client identity",
+                        "Unavailable until this connection is approved",
+                    ))
                     .child(SettingsRow::new(theme, "Requested", requested))
                     .child(ui! { <Row gap={8.0}>
                         {Button::semantic(
@@ -890,7 +979,7 @@ impl SettingsApp {
                 let duration_button = |label: String, duration_seconds| Button::semantic(theme,
                     SettingsMessage::ApproveRemoteLeaseDuration {
                         pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), duration_seconds,
-                    }, label, ButtonPresentation::Secondary).width(150.0);
+                    }, label, ButtonPresentation::Secondary).width(160.0);
                 let mut changes = Column::new().fill_width().gap(4.0);
                 if pending.changes.access_changed {
                     changes = changes.child(SettingsStatus::new(theme, SettingsStatusKind::Validation,
@@ -900,9 +989,48 @@ impl SettingsApp {
                     changes = changes.child(SettingsStatus::new(theme, SettingsStatusKind::Validation,
                         "A longer duration was requested while this approval was pending."));
                 }
-                column.child(SettingsCard::titled(theme,
+                let mut approval = SettingsCard::titled(theme,
                     format!("{} requests {}", pending.client_label,
-                        if pending.request.renewal.is_some() { "lease renewal" } else { "control" }), scope)
+                        if pending.request.renewal.is_some() { "lease renewal" } else { "control" }), scope.clone());
+                if pending.request.full_debug {
+                    let origin = self.remote_control_runtime.granted_clients.iter()
+                        .find(|client| client.id == pending.client_id)
+                        .and_then(|client| client.origin.as_ref())
+                        .map_or_else(
+                            || "Unavailable — no authenticated peer origin is retained".to_owned(),
+                            |origin| format!("{} · {}", origin.address,
+                                if origin.tls { "TLS protected" } else { "Local HTTP" }),
+                        );
+                    approval = approval
+                        .child(SettingsStatus::new(
+                            theme,
+                            SettingsStatusKind::Validation,
+                            "Broad approval permits repeated control and bounded diagnostics for this duration.",
+                        ))
+                        .child(SettingsRow::new(theme, "Resource", scope))
+                        .child(SettingsRow::new(
+                            theme,
+                            "Diagnostic reach",
+                            "Ordinary applications and Nickel surfaces; capture, input, bounded diagnostics, logs, traces, safe diagnostic actions, and typed nonprotected settings",
+                        ))
+                        .child(SettingsRow::new(
+                            theme,
+                            "Protected boundary",
+                            "No lock or authentication surfaces, approval UI, Remote AI Control settings, trusted indicator, emergency controls, credentials, clipboard contents, or typed text history",
+                        ))
+                        .child(SettingsRow::new(
+                            theme,
+                            "Claimed client name",
+                            pending.client_label.clone(),
+                        ))
+                        .child(SettingsRow::new(
+                            theme,
+                            "Verified client identity",
+                            pending.client_id.clone(),
+                        ))
+                        .child(SettingsRow::new(theme, "Authenticated network origin", origin));
+                }
+                column.child(approval
                     .child(SettingsRow::new(theme, "Requested duration", duration))
                     .child(changes)
                     .child(SettingsRow::new(theme, "Reconnect", if pending.request.allow_resumption {
@@ -925,7 +1053,7 @@ impl SettingsApp {
                             .accessibility_label("Custom approval duration in minutes")
                             .color(theme.text.primary).width(150.0).height(40.0)}
                         {duration_button("Allow custom duration".into(), custom_seconds)
-                            .enabled(custom_seconds.is_some()).width(190.0)}
+                            .enabled(custom_seconds.is_some()).width(200.0)}
                     </Row> })
                     .child(ui! { <Row gap={8.0}>
                         {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
@@ -933,7 +1061,7 @@ impl SettingsApp {
                         }, "Deny", ButtonPresentation::Destructive).width(88.0)}
                         {Button::semantic(theme, SettingsMessage::DecideRemoteLease {
                             pending_generation: pending.pending_generation, client_id: pending.client_id.clone(), request: pending.request.clone(), allow: true,
-                        }, "Allow control", ButtonPresentation::Primary).width(150.0)}
+                        }, if pending.request.full_debug { "Allow full debug" } else { "Allow control" }, ButtonPresentation::Primary).width(150.0)}
                         {Button::semantic(theme, SettingsMessage::BlockRemoteClient {
                             client_id: pending.client_id.clone(), blocked: true,
                         }, "Block client", ButtonPresentation::Destructive).width(130.0)}
@@ -989,6 +1117,11 @@ impl SettingsApp {
                             "Connected client"
                         },
                     )
+                    .child(SettingsRow::new(
+                        theme,
+                        "Verified client identity",
+                        client.id.clone(),
+                    ))
                     .child(SettingsRow::new(theme, "Granted", granted))
                     .child(SettingsRow::new(
                         theme,
@@ -1066,6 +1199,11 @@ impl SettingsApp {
                 .accessibility_label("Allow Remote AI Control connections"),
             ),
         )
+        .child(SettingsStatus::new(
+            theme,
+            remote_exposure.kind,
+            remote_exposure.exposure,
+        ))
         .child(
             SettingsRow::new(theme, "Audible control status", "Play local cues for control changes and expiration. Uses current output volume and mute.")
                 .trailing(Switch::with_state_action(
@@ -1080,12 +1218,28 @@ impl SettingsApp {
         ))
         .child(SettingsRow::new(
             theme,
+            "Protected transport",
+            remote_exposure.transport,
+        ))
+        .child(SettingsRow::new(
+            theme,
             "Connected client identities",
             self.remote_control_runtime
                 .granted_clients
                 .len()
                 .to_string(),
         ))
+        .child(
+            Button::semantic(
+                theme,
+                SettingsMessage::CopyRemoteConnectionInfo,
+                "Copy connection info",
+                ButtonPresentation::Secondary,
+            )
+            .id("remote-control-copy-connection")
+            .accessibility_label("Copy MCP endpoint and host fingerprint")
+            .width(220.0),
+        )
         .child(SettingsRow::new(
             theme,
             "Listener configuration",

@@ -583,6 +583,7 @@ enum SettingsMessage {
     RetryCodexProbe,
     SetRemoteControlEnabled(bool),
     SetRemoteAudibleIndications(bool),
+    CopyRemoteConnectionInfo,
     StartRemotePairing,
     CancelRemotePairing,
     StopRemoteControlNow,
@@ -1453,6 +1454,17 @@ impl SettingsApp {
                         }
                     }
                 }
+            }
+            SettingsMessage::CopyRemoteConnectionInfo => {
+                let mut connection = format!(
+                    "Nickel MCP endpoint: {}",
+                    self.remote_control_runtime.endpoint
+                );
+                if let Some(fingerprint) = &self.remote_control_runtime.host_fingerprint {
+                    connection.push_str("\nHost certificate SHA-256: ");
+                    connection.push_str(fingerprint);
+                }
+                self.remote_clipboard_write = Some(connection);
             }
             SettingsMessage::StartRemotePairing => {
                 let now = std::time::SystemTime::now()
@@ -2949,6 +2961,10 @@ impl Application for SettingsApp {
         })
     }
 
+    fn take_clipboard_write(&mut self) -> Option<String> {
+        self.remote_clipboard_write.take()
+    }
+
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
         self.settings_view(
             context.viewport.size.width,
@@ -3232,9 +3248,9 @@ mod tests {
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
-    use nickel_ui::{Application, SemanticRole, SwitchState};
+    use nickel_ui::{ActionKind, Application, SemanticAction, SemanticRole, SwitchState};
 
-    use super::view::codex_switch_state;
+    use super::view::{codex_switch_state, remote_exposure_presentation};
     use super::{
         ApplicationScalePolicy, BluetoothDevice, BluetoothOperation, CodexSource, ControllerAction,
         DefaultAppsDiscovery, FeatureEffectiveState, FeatureHealth, FeatureInstallation,
@@ -5379,6 +5395,155 @@ mod tests {
             frame
                 .semantic_targets_for_message(&SettingsMessage::StartRemotePairing)
                 .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn remote_exposure_presentation_distinguishes_local_remote_and_inactive_listeners() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        app.remote_control_runtime.endpoint = "http://127.0.0.1:42637/mcp".into();
+        let local = remote_exposure_presentation(&app.remote_control_runtime);
+        assert_eq!(local.kind, nickel_ui::SettingsStatusKind::Information);
+        assert!(local.exposure.starts_with("Local only"));
+        assert_eq!(local.transport, "Local HTTP restricted to this computer");
+
+        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
+        app.remote_control_runtime.host_fingerprint = Some("SHA256:fixture".into());
+        let remote = remote_exposure_presentation(&app.remote_control_runtime);
+        assert_eq!(remote.kind, nickel_ui::SettingsStatusKind::Validation);
+        assert!(remote.exposure.starts_with("Remote exposure active"));
+        assert!(remote.transport.contains("fingerprint available"));
+
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Disabled;
+        let disabled = remote_exposure_presentation(&app.remote_control_runtime);
+        assert_eq!(disabled.kind, nickel_ui::SettingsStatusKind::Unavailable);
+        assert!(disabled.exposure.starts_with("Not exposed"));
+        assert!(disabled.exposure.contains("remote address is configured"));
+    }
+
+    #[test]
+    fn remote_connection_info_copy_uses_semantics_and_excludes_authority() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
+        app.remote_control_runtime.host_fingerprint = Some("SHA256:host-fixture".into());
+        app.remote_control_runtime.granted_clients =
+            vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
+                id: "client-authority-canary".into(),
+                label: "Development agent".into(),
+                capabilities: vec![],
+                remembered: false,
+                blocked: false,
+                origin: None,
+            }];
+        app.remote_control_runtime.active_leases =
+            vec![nickel_session_protocol::RemoteActiveLease {
+                lease_id: 8675309,
+                client_label: "Development agent".into(),
+                scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+                resource_label: None,
+                remaining_seconds: Some(1800),
+                suspended: false,
+                full_debug: true,
+            }];
+        let mut host = UiHost::new(app, 1100, 1200);
+        let target = host
+            .unique_semantic_target_for_message(&SettingsMessage::CopyRemoteConnectionInfo)
+            .expect("copy action has one production semantic target");
+        let outcome =
+            host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
+        let copied = outcome
+            .clipboard_text
+            .expect("semantic activation offers connection details to the host clipboard");
+        assert_eq!(
+            copied,
+            "Nickel MCP endpoint: https://192.0.2.40:42637/mcp\nHost certificate SHA-256: SHA256:host-fixture"
+        );
+        assert!(!copied.contains("client-authority-canary"));
+        assert!(!copied.contains("8675309"));
+    }
+
+    #[test]
+    fn full_debug_approval_lays_out_every_trusted_review_detail() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Enabled;
+        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
+        app.remote_control_runtime.host_fingerprint = Some("SHA256:host-fixture".into());
+        app.remote_control_runtime.granted_clients =
+            vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
+                id: "verified-development-client".into(),
+                label: "Claimed development agent".into(),
+                capabilities: vec![nickel_session_protocol::RemoteCapability::Observe],
+                remembered: false,
+                blocked: false,
+                origin: Some(nickel_session_protocol::RemoteClientOrigin {
+                    address: "192.0.2.8:4421".into(),
+                    tls: true,
+                }),
+            }];
+        let request = nickel_session_protocol::RemoteLeaseRequest {
+            renewal: None,
+            scope: nickel_session_protocol::RemoteResourceScope::FullSession,
+            duration_seconds: Some(7200),
+            allow_resumption: true,
+            full_debug: true,
+        };
+        app.remote_control_runtime.pending_leases =
+            vec![nickel_session_protocol::RemotePendingLease {
+                pending_generation: 19,
+                client_id: "verified-development-client".into(),
+                client_label: "Claimed development agent".into(),
+                request: request.clone(),
+                resource_label: None,
+                changes: Default::default(),
+            }];
+
+        let tree = app.build_ui_with_diagnostics(1100.0, 720.0);
+        let diagnostics = tree
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.kind != nickel_ui::DiagnosticKind::ClippedInteraction)
+            .collect::<Vec<_>>();
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        let labels = tree
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        for expected in [
+            "Resource",
+            "Full Control & Debug Nickel",
+            "Diagnostic reach",
+            "Protected boundary",
+            "Claimed client name",
+            "Claimed development agent",
+            "Verified client identity",
+            "verified-development-client",
+            "Authenticated network origin",
+            "192.0.2.8:4421 · TLS protected",
+            "Requested duration",
+            "2 hours",
+            "Allow full debug",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing approval detail {expected:?}"
+            );
+        }
+        assert_eq!(
+            tree.semantic_targets_for_message(&SettingsMessage::DecideRemoteLease {
+                pending_generation: 19,
+                client_id: "verified-development-client".into(),
+                request,
+                allow: true,
+            })
+            .len(),
             1
         );
     }

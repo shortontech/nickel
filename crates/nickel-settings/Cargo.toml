@@ -19,6 +19,7 @@ image.workspace = true
 qrcode.workspace = true
 resvg.workspace = true
 tracing.workspace = true
+url.workspace = true
 winit.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
