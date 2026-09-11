@@ -2034,7 +2034,7 @@ global rate, client concurrency, client rate and client capacity. They remain
 available before lease approval and carry no identity, peer, resource or payload
 labels.
 
-The current `nickel-remote-control` library suite has 153 tests and its host all-target/all-feature Clippy
+The current `nickel-remote-control` library suite has 154 tests and its host all-target/all-feature Clippy
 with warnings denied passed. The integrated primary checkout also passed strict
 Windows GNU cross-target Clippy using the available private MinGW toolchain. No
 native Windows result is claimed for this platform-neutral change.

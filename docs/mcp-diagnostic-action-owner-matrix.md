@@ -1,6 +1,6 @@
 # Diagnostic action production-owner matrix
 
-This active specification defines deterministic owner-boundary coverage for every
+This verification contract defines deterministic owner-boundary coverage for every
 `DiagnosticAction` variant. It supplements live native acceptance; it does not treat synthetic
 prepared observations as proof that a host provider, GPU, or Windows API succeeded.
 
