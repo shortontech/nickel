@@ -632,9 +632,7 @@ impl SessionProcess {
     }
 
     fn unavailable_environment_reason(&mut self) -> Option<String> {
-        if self.child.try_wait().ok().flatten().is_none() {
-            return None;
-        }
+        self.child.try_wait().ok().flatten()?;
         let mut stderr = String::new();
         self.child.stderr.take()?.read_to_string(&mut stderr).ok()?;
         [

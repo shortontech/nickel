@@ -410,13 +410,13 @@ mod tests {
     fn input_correlation_requires_exact_current_ordinary_surface() {
         let visible = observation(SurfaceRole::Launcher, 7);
         assert_eq!(
-            input_surface(false, 107, &[visible.clone()])
+            input_surface(false, 107, std::slice::from_ref(&visible))
                 .unwrap()
                 .generation,
             7
         );
-        assert!(input_surface(false, 108, &[visible.clone()]).is_none());
-        assert!(input_surface(true, 107, &[visible.clone()]).is_none());
+        assert!(input_surface(false, 108, std::slice::from_ref(&visible)).is_none());
+        assert!(input_surface(true, 107, std::slice::from_ref(&visible)).is_none());
 
         let mut hidden = visible.clone();
         hidden.native_visible = false;
