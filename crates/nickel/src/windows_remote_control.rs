@@ -939,6 +939,74 @@ impl Drop for WindowsPlatformRefreshAdmission {
     }
 }
 
+#[derive(Default)]
+struct WindowsSettingsWorkerState {
+    busy: bool,
+    generation: u64,
+    changed_us: u64,
+}
+
+struct WindowsSettingsWorker {
+    // Shared admission for the existing desktop_call preparation workers. No
+    // setting names, values, paths, authority identities, or errors are kept.
+    started: Instant,
+    state: std::sync::Mutex<WindowsSettingsWorkerState>,
+}
+
+impl Default for WindowsSettingsWorker {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            state: Default::default(),
+        }
+    }
+}
+
+struct WindowsSettingsAdmission(Arc<WindowsSettingsWorker>);
+
+impl WindowsSettingsWorker {
+    fn uptime_us(&self) -> u64 {
+        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<WindowsSettingsAdmission, String> {
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| "Windows settings preparation is busy or unavailable".to_owned())?;
+        if state.busy {
+            return Err("Windows settings preparation is busy or unavailable".into());
+        }
+        state.busy = true;
+        state.generation = state.generation.saturating_add(1);
+        state.changed_us = self.uptime_us();
+        drop(state);
+        Ok(WindowsSettingsAdmission(self.clone()))
+    }
+
+    fn snapshot(&self) -> Option<nickel_remote_control::diagnostics::SettingsWorkerDiagnostic> {
+        let state = self.state.try_lock().ok()?;
+        Some(
+            nickel_remote_control::diagnostics::SettingsWorkerDiagnostic {
+                generation: state.generation,
+                collector_uptime_us: self.uptime_us(),
+                last_changed_uptime_us: state.changed_us,
+                busy: state.busy,
+            },
+        )
+    }
+}
+
+impl Drop for WindowsSettingsAdmission {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.busy = false;
+            state.generation = state.generation.saturating_add(1);
+            state.changed_us = self.0.uptime_us();
+        }
+    }
+}
+
 fn prepare_windows_platform_refresh(
     permit: &DesktopPermit,
     worker: Arc<WindowsPlatformRefreshWorker>,
@@ -1016,6 +1084,7 @@ struct WindowsDesktopAuthority {
     desktop_session: Option<u32>,
     capture_generation: std::sync::atomic::AtomicU64,
     peripheral_generation: std::sync::atomic::AtomicU64,
+    settings_worker: Arc<WindowsSettingsWorker>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
 }
 impl WindowsDesktopAuthority {
@@ -1391,6 +1460,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::application_scale::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_application_scale::PreparedRead::prepare()?;
         permit.with_debug(false, || Ok(()))?;
@@ -1414,6 +1484,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::application_scale::Transaction,
     ) -> Result<nickel_remote_control::application_scale::TransactionOutcome, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared =
@@ -1444,6 +1515,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_settings::PreparedAppearanceRead::prepare()?;
         permit.with_debug(false, || Ok(()))?;
@@ -1467,6 +1539,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::appearance::Transaction,
     ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared =
@@ -1511,6 +1584,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_settings::PreparedFileIconsRead::prepare()?;
         permit.with_debug(false, || Ok(()))?;
@@ -1534,6 +1608,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::file_icons::Transaction,
     ) -> Result<nickel_remote_control::file_icons::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared =
@@ -1563,6 +1638,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         permit.with_debug(false, || Ok(()))?;
         let prepared =
             crate::windows_remote_settings::PreparedWallpaperRead::prepare_with_check(|| {
@@ -1589,6 +1665,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::wallpaper::Transaction,
     ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1622,6 +1699,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_terminal_presentation::PreparedRead::prepare()?;
@@ -1649,6 +1727,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::terminal_presentation::Transaction,
     ) -> Result<nickel_remote_control::terminal_presentation::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1678,6 +1757,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::terminal_launch_policy::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::remote_terminal_launch_policy::PreparedRead::prepare()?;
@@ -1705,6 +1785,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::terminal_launch_policy::Transaction,
     ) -> Result<nickel_remote_control::terminal_launch_policy::TransactionOutcome, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1733,6 +1814,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_codex::PreparedRead::prepare()?;
@@ -1761,6 +1843,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::codex_preference::Transaction,
     ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1790,6 +1873,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_session_protocol::ShellBehaviorTransaction,
     ) -> Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1818,6 +1902,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_settings::PreparedIdleRead::prepare()?;
@@ -1845,6 +1930,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::idle_preferences::Transaction,
     ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1873,6 +1959,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let prepared = crate::windows_remote_settings::PreparedKeyboardRead::prepare()?;
@@ -1900,6 +1987,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::keyboard_preference::Transaction,
     ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -1929,6 +2017,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         permit.with_debug(false, || Ok(()))?;
         let catalog = self.launcher_favorites_catalog(permit.clone(), deadline)?;
@@ -1958,6 +2047,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         transaction: nickel_remote_control::launcher_favorites::Transaction,
     ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let _settings = self.settings_worker.acquire()?;
         let deadline = Instant::now() + Duration::from_secs(2);
         let expected_local_input_epoch = local_input_epoch();
         permit.with_debug(false, || Ok(()))?;
@@ -2867,6 +2957,7 @@ pub(crate) struct WindowsRemoteControl {
     observation_generation: u64,
     platform_refresh_generation: u64,
     platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
+    settings_worker: Arc<WindowsSettingsWorker>,
     platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     indicators: std::collections::HashMap<String, IndicatorSurface>,
@@ -2998,6 +3089,7 @@ impl WindowsRemoteControl {
                 .ok()
                 .map(|identity| identity.session_id());
         let started = Instant::now();
+        let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let authority = Arc::new(WindowsDesktopAuthority {
             cleanup_wake,
@@ -3006,6 +3098,7 @@ impl WindowsRemoteControl {
             desktop_session,
             capture_generation: std::sync::atomic::AtomicU64::new(0),
             peripheral_generation: std::sync::atomic::AtomicU64::new(0),
+            settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
         });
         let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
@@ -3053,6 +3146,7 @@ impl WindowsRemoteControl {
             observation_generation: 0,
             platform_refresh_generation: 0,
             platform_refreshes: Vec::new(),
+            settings_worker,
             platform_refresh_worker,
             remote_frame_trace: None,
             indicators: Default::default(),
@@ -6651,7 +6745,7 @@ impl WindowsRemoteControl {
                     shell.bar_on_all_displays(),
                     shell_behavior_state,
                 ),
-                settings_worker: None,
+                settings_worker: self.settings_worker.snapshot(),
                 diagnostic_worker: self.platform_refresh_worker.snapshot(),
                 application_launch: self.application_launch_diagnostic(),
                 external_accessibility: self
@@ -8260,7 +8354,6 @@ fn windows_unavailable_diagnostic_domains()
         Domain::WindowsVirtualWorkspaceCreateSwitchRemove,
         Domain::WindowsPerSurfaceRendererCacheAttribution,
         Domain::WindowsPreviewPixelReadback,
-        Domain::WindowsSettingsWorker,
     ]
 }
 
@@ -8642,8 +8735,45 @@ mod tests {
             9
         );
     }
+    #[test]
+    fn settings_worker_is_single_flight_and_exposes_only_coarse_lifecycle() {
+        let worker = Arc::new(WindowsSettingsWorker::default());
+        let initial = worker.snapshot().unwrap();
+        assert!(!initial.busy);
+        assert_eq!(initial.generation, 0);
+
+        let admission = worker.acquire().unwrap();
+        let busy = worker.snapshot().unwrap();
+        assert!(busy.busy);
+        assert_eq!(busy.generation, 1);
+        assert_eq!(
+            worker.acquire().err().as_deref(),
+            Some("Windows settings preparation is busy or unavailable")
+        );
+        drop(admission);
+
+        let idle = worker.snapshot().unwrap();
+        assert!(!idle.busy);
+        assert_eq!(idle.generation, 2);
+        assert!(idle.last_changed_uptime_us >= busy.last_changed_uptime_us);
+        assert!(idle.collector_uptime_us >= idle.last_changed_uptime_us);
+        let json = serde_json::to_string(&idle).unwrap();
+        for excluded in ["path", "value", "request", "client", "lease", "error"] {
+            assert!(!json.contains(excluded), "leaked {excluded:?} in {json}");
+        }
+        assert!(!windows_unavailable_diagnostic_domains().contains(
+            &nickel_remote_control::diagnostics::UnavailableDiagnosticDomain::WindowsSettingsWorker
+        ));
+
+        let held = worker.state.lock().unwrap();
+        assert!(worker.snapshot().is_none());
+        assert!(worker.acquire().is_err());
+        drop(held);
+        assert!(worker.snapshot().is_some());
+    }
     fn owner() -> WindowsRemoteControl {
         let (sender, receiver) = mpsc::sync_channel(16);
+        let settings_worker = Arc::new(WindowsSettingsWorker::default());
         let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         WindowsRemoteControl {
             _transport: None,
@@ -8657,6 +8787,7 @@ mod tests {
             observation_generation: 0,
             platform_refresh_generation: 0,
             platform_refreshes: Vec::new(),
+            settings_worker: settings_worker.clone(),
             platform_refresh_worker: platform_refresh_worker.clone(),
             remote_frame_trace: None,
             indicators: Default::default(),
@@ -8667,6 +8798,7 @@ mod tests {
                 desktop_session: None,
                 capture_generation: std::sync::atomic::AtomicU64::new(0),
                 peripheral_generation: std::sync::atomic::AtomicU64::new(0),
+                settings_worker,
                 platform_refresh_worker,
             }),
             desktop_session: None,
