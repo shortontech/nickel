@@ -244,6 +244,10 @@ enum OwnerRequest {
             Result<nickel_remote_control::desktop_events::DesktopEventObservation, String>,
         >,
     },
+    Applications {
+        permit: DesktopPermit,
+        reply: SyncSender<Result<nickel_remote_control::diagnostics::ApplicationInventory, String>>,
+    },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
         action: nickel_remote_control::ClientConnectionAction,
@@ -319,6 +323,21 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 after,
                 reply,
             })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn list_installed_applications(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::diagnostics::ApplicationInventory, String> {
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::Applications { permit, reply })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
@@ -776,6 +795,10 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.read_desktop_events(permit, after);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::Applications { permit, reply } => {
+                    let result = self.application_inventory(permit);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -1509,6 +1532,41 @@ impl WindowsRemoteControl {
                 },
             )
         })
+    }
+
+    fn application_inventory(
+        &mut self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::diagnostics::ApplicationInventory, String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
+
+        if !self.desktop_unlocked {
+            return Err("Windows input desktop is protected".into());
+        }
+        let scope = permit.resource_scope()?;
+        let expected = match &scope {
+            ResourceScope::FullSession => None,
+            ResourceScope::Application(identity) => Some(identity.as_str()),
+            ResourceScope::Surface(_) | ResourceScope::Window(_) | ResourceScope::Output(_) => {
+                return Err("this Windows lease cannot enumerate launch targets".into());
+            }
+        };
+        self.observation_generation = self
+            .observation_generation
+            .checked_add(1)
+            .ok_or("Windows observation generations exhausted")?;
+        let inventory =
+            self.applications
+                .inventory(self.start_time, self.observation_generation, expected);
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: expected,
+            output: None,
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        permit.with_resource(&evidence, || Ok(inventory))
     }
 
     fn perform_window_action(

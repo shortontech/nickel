@@ -242,43 +242,100 @@ fn pin_launch_path(file: &File) -> Option<(String, Vec<File>)> {
     Some((path, ancestors))
 }
 
-fn catalog() -> Vec<Descriptor> {
+struct CatalogData {
+    descriptors: Vec<Descriptor>,
+    applications: Vec<nickel_remote_control::diagnostics::InstalledApplication>,
+    truncated: bool,
+}
+
+fn bounded_utf8(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_owned();
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn catalog() -> CatalogData {
     // Reuse the shell's installed application discovery, never a second scan or
     // list of executable names. Each unpackaged entry is conservatively treated
     // as a potential shared runtime and requires exact owner launch receipts.
     let discovery = crate::platform::application_discovery();
     if discovery.applications().len() > MAX_ENTRIES {
-        return Vec::new();
+        return CatalogData {
+            descriptors: Vec::new(),
+            applications: Vec::new(),
+            truncated: true,
+        };
     }
-    discovery
-        .applications()
-        .iter()
-        .map(|application| {
-            read_descriptor(
-                application,
-                (windows::Win32::Storage::FileSystem::FILE_SHARE_READ
-                    | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE
-                    | windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE)
-                    .0,
-            )
-            .map(|(descriptor, _)| descriptor)
-            .unwrap_or_else(|| Descriptor {
-                id: application.id().into(),
-                identity: format!(
-                    "windows:catalog-launch:{:x}",
-                    Sha256::digest(application.id().as_bytes())
-                ),
-                digest: [0; 32],
-                policy: RuntimePolicy::Unavailable,
-            })
-        })
-        .collect()
+    let mut descriptors = Vec::with_capacity(discovery.applications().len());
+    let mut applications = Vec::with_capacity(
+        discovery
+            .applications()
+            .len()
+            .min(nickel_remote_control::diagnostics::MAX_INSTALLED_APPLICATIONS),
+    );
+    let mut truncated = false;
+    for application in discovery.applications() {
+        let descriptor = read_descriptor(
+            application,
+            (windows::Win32::Storage::FileSystem::FILE_SHARE_READ
+                | windows::Win32::Storage::FileSystem::FILE_SHARE_WRITE
+                | windows::Win32::Storage::FileSystem::FILE_SHARE_DELETE)
+                .0,
+        )
+        .map(|(descriptor, _)| descriptor)
+        .unwrap_or_else(|| Descriptor {
+            id: application.id().into(),
+            identity: format!(
+                "windows:catalog-launch:{:x}",
+                Sha256::digest(application.id().as_bytes())
+            ),
+            digest: [0; 32],
+            policy: RuntimePolicy::Unavailable,
+        });
+        if application.id().len() > 512 {
+            truncated = true;
+        } else if applications.len()
+            < nickel_remote_control::diagnostics::MAX_INSTALLED_APPLICATIONS
+        {
+            applications.push(nickel_remote_control::diagnostics::InstalledApplication {
+                id: descriptor.id.clone(),
+                name: bounded_utf8(application.name(), 512),
+                verified_application: (descriptor.policy == RuntimePolicy::LaunchBound)
+                    .then(|| descriptor.identity.clone()),
+            });
+        } else {
+            truncated = true;
+        }
+        descriptors.push(descriptor);
+    }
+    CatalogData {
+        descriptors,
+        truncated,
+        applications,
+    }
 }
 
 struct CatalogSnapshot {
     started: Instant,
     completed: Instant,
-    descriptors: Vec<Descriptor>,
+    catalog: CatalogData,
+}
+
+fn same_catalog(
+    left: &[nickel_remote_control::diagnostics::InstalledApplication],
+    right: &[nickel_remote_control::diagnostics::InstalledApplication],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.id == right.id
+                && left.name == right.name
+                && left.verified_application == right.verified_application
+        })
 }
 
 pub(crate) struct OwnerRegistry {
@@ -289,6 +346,9 @@ pub(crate) struct OwnerRegistry {
     stop: Arc<AtomicBool>,
     next_refresh: Instant,
     observed: Option<Instant>,
+    catalog_generation: u64,
+    applications: Vec<nickel_remote_control::diagnostics::InstalledApplication>,
+    catalog_truncated: bool,
 }
 impl Default for OwnerRegistry {
     fn default() -> Self {
@@ -332,12 +392,12 @@ impl Default for OwnerRegistry {
                 match requests.recv_timeout(Duration::from_secs(1)) {
                     Ok(()) => {
                         let started = Instant::now();
-                        let descriptors = catalog();
+                        let catalog = catalog();
                         let completed = Instant::now();
                         let _ = sender.try_send(CatalogSnapshot {
                             started,
                             completed,
-                            descriptors,
+                            catalog,
                         });
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -353,6 +413,9 @@ impl Default for OwnerRegistry {
             stop,
             next_refresh: Instant::now(),
             observed: None,
+            catalog_generation: 0,
+            applications: Vec::new(),
+            catalog_truncated: false,
         }
     }
 }
@@ -365,15 +428,30 @@ impl OwnerRegistry {
         }
         if let Ok(snapshot) = self.snapshots.try_recv() {
             if fresh_catalog(snapshot.started, snapshot.completed, Instant::now()) {
-                self.registry.reconcile(snapshot.descriptors, |id| {
+                self.registry.reconcile(snapshot.catalog.descriptors, |id| {
                     control.leases_mut().revoke(id);
                 });
-                self.observed = Some(snapshot.started);
+                let changed = self.catalog_truncated != snapshot.catalog.truncated
+                    || !same_catalog(&self.applications, &snapshot.catalog.applications);
+                if !changed || self.catalog_generation < u64::MAX {
+                    if changed {
+                        self.catalog_generation += 1;
+                    }
+                    self.applications = snapshot.catalog.applications;
+                    self.catalog_truncated = snapshot.catalog.truncated;
+                    self.observed = Some(snapshot.completed);
+                } else {
+                    self.applications.clear();
+                    self.catalog_truncated = false;
+                    self.observed = None;
+                }
             } else {
                 self.registry.reconcile(Vec::new(), |id| {
                     control.leases_mut().revoke(id);
                 });
                 self.observed = None;
+                self.applications.clear();
+                self.catalog_truncated = false;
             }
         }
         // A worker can publish after this poll's initial clock observation.
@@ -387,6 +465,8 @@ impl OwnerRegistry {
             self.registry.reconcile(Vec::new(), |id| {
                 control.leases_mut().revoke(id);
             });
+            self.applications.clear();
+            self.catalog_truncated = false;
         }
         for _ in 0..16 {
             let Ok(receipt) = self.receipts.try_recv() else {
@@ -430,6 +510,45 @@ impl OwnerRegistry {
                 .filter(|observed| observed.elapsed() < MAX_CATALOG_AGE)?;
             self.registry.membership(process)
         })
+    }
+
+    pub(crate) fn inventory(
+        &self,
+        session_start: Instant,
+        observation_generation: u64,
+        expected_application: Option<&str>,
+    ) -> nickel_remote_control::diagnostics::ApplicationInventory {
+        let observed_at_us = session_start.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let fresh = self
+            .observed
+            .is_some_and(|observed| observed.elapsed() < MAX_CATALOG_AGE);
+        let applications = if fresh {
+            self.applications
+                .iter()
+                .filter(|application| {
+                    expected_application.is_none_or(|expected| {
+                        application.verified_application.as_deref() == Some(expected)
+                    })
+                })
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        nickel_remote_control::diagnostics::ApplicationInventory {
+            observation_generation,
+            observed_at_us,
+            catalog_observed_at_us: self.observed.map_or(0, |observed| {
+                observed
+                    .saturating_duration_since(session_start)
+                    .as_micros()
+                    .min(u64::MAX as u128) as u64
+            }),
+            catalog_generation: self.catalog_generation,
+            available: fresh && self.catalog_generation != 0,
+            applications,
+            truncated: fresh && expected_application.is_none() && self.catalog_truncated,
+        }
     }
 }
 impl Drop for OwnerRegistry {
