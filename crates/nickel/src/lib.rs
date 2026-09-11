@@ -2858,6 +2858,10 @@ pub fn run() -> Result<(), String> {
             requested.codex_enabled = requested.effective_codex_enabled();
             if requested != feature_settings {
                 feature_settings = requested;
+                #[cfg(target_os = "windows")]
+                let keyboard_changed = state.apply_windows_keyboard_settings(&feature_settings);
+                #[cfg(not(target_os = "windows"))]
+                let keyboard_changed = false;
                 if codex.apply_settings(&mut shell, &feature_settings) {
                     if feature_settings.codex_enabled {
                         state.apply_codex_projection(CodexAvailabilityProjection::new(
@@ -2883,6 +2887,11 @@ pub fn run() -> Result<(), String> {
                     }
                     sync_visibility(&mut shell, &state);
                     render_all(&mut shell, &mut state)?;
+                }
+                if keyboard_changed {
+                    sync_visibility(&mut shell, &state);
+                    render_role(&mut shell, &mut state, SurfaceRole::Panel)?;
+                    render_role(&mut shell, &mut state, SurfaceRole::OnScreenKeyboard)?;
                 }
             }
             let _ = codex

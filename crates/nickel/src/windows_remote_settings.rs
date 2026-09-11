@@ -5,6 +5,10 @@
 //! continuously-authorized commit boundary.
 
 use nickel_core::shell_settings::ShellSettings;
+use nickel_core::{
+    on_screen_keyboard::KeyboardPreference as CoreKeyboardPreference,
+    optional_features::{OptionalFeatureSettings, PreparedKeyboardPreference},
+};
 use nickel_remote_control::appearance::{
     Animations, Preferences, Snapshot, ThemePreference, Transaction,
 };
@@ -14,6 +18,375 @@ use std::{io, path::PathBuf, time::Instant};
 
 const STALE: &str = "appearance changed; read current appearance before retrying";
 const UNAVAILABLE: &str = "appearance unavailable; inspect current state before retrying";
+
+const IDLE_STALE: &str = "idle preferences changed; read current state before retrying";
+const IDLE_UNAVAILABLE: &str = "idle preferences unavailable; read current state before retrying";
+const KEYBOARD_STALE: &str = "keyboard preference changed; read current state before retrying";
+const KEYBOARD_UNAVAILABLE: &str =
+    "keyboard preference unavailable; read current state before retrying";
+
+fn idle_timeout(value: Option<u32>) -> nickel_remote_control::idle_preferences::Timeout {
+    value.map_or(
+        nickel_remote_control::idle_preferences::Timeout::Disabled,
+        nickel_remote_control::idle_preferences::Timeout::AfterSeconds,
+    )
+}
+
+fn idle_seconds(value: nickel_remote_control::idle_preferences::Timeout) -> Option<u32> {
+    match value {
+        nickel_remote_control::idle_preferences::Timeout::Disabled => None,
+        nickel_remote_control::idle_preferences::Timeout::AfterSeconds(seconds) => Some(seconds),
+    }
+}
+
+fn idle_preferences(
+    settings: &ShellSettings,
+) -> nickel_remote_control::idle_preferences::Preferences {
+    nickel_remote_control::idle_preferences::Preferences {
+        dim: idle_timeout(settings.idle_dim_seconds),
+        suspend: idle_timeout(settings.idle_suspend_seconds),
+    }
+}
+
+pub(crate) struct PreparedIdleRead {
+    path: PathBuf,
+    pub(crate) revision: Option<RegularFileRevision>,
+    settings: ShellSettings,
+}
+
+impl PreparedIdleRead {
+    pub(crate) fn prepare() -> Result<Self, String> {
+        Self::at(nickel_core::shell_settings::settings_path().map_err(|_| IDLE_UNAVAILABLE)?)
+    }
+
+    fn at(path: PathBuf) -> Result<Self, String> {
+        let revision = regular_file_revision(&path).map_err(|_| IDLE_UNAVAILABLE)?;
+        let settings = ShellSettings::load_for_update(&path).map_err(|_| IDLE_UNAVAILABLE)?;
+        if regular_file_revision(&path).map_err(|_| IDLE_UNAVAILABLE)? != revision {
+            return Err(IDLE_STALE.into());
+        }
+        Ok(Self {
+            path,
+            revision,
+            settings,
+        })
+    }
+
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        if regular_file_revision(&self.path).map_err(|_| IDLE_UNAVAILABLE)? != self.revision {
+            return Err(IDLE_STALE.into());
+        }
+        Ok(())
+    }
+
+    fn configured(&self) -> nickel_remote_control::idle_preferences::Preferences {
+        idle_preferences(&self.settings)
+    }
+}
+
+pub(crate) struct PreparedIdleChange {
+    previous: PreparedIdleRead,
+    requested: ShellSettings,
+    staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
+}
+
+impl PreparedIdleChange {
+    pub(crate) fn prepare(
+        transaction: &nickel_remote_control::idle_preferences::Transaction,
+    ) -> Result<Self, String> {
+        Self::prepare_at(
+            nickel_core::shell_settings::settings_path().map_err(|_| IDLE_UNAVAILABLE)?,
+            transaction,
+        )
+    }
+
+    fn prepare_at(
+        path: PathBuf,
+        transaction: &nickel_remote_control::idle_preferences::Transaction,
+    ) -> Result<Self, String> {
+        if transaction.generation == 0
+            || !transaction.requested.valid_request()
+            || transaction.prior == transaction.requested
+        {
+            return Err(IDLE_STALE.into());
+        }
+        let previous = PreparedIdleRead::at(path)?;
+        let lock = nickel_storage::TransactionLock::try_acquire(&previous.path)
+            .map_err(|_| IDLE_UNAVAILABLE)?;
+        previous.ensure_current()?;
+        if previous.configured() != transaction.prior {
+            return Err(IDLE_STALE.into());
+        }
+        let mut requested = previous.settings.clone();
+        requested.idle_dim_seconds = idle_seconds(transaction.requested.dim);
+        requested.idle_suspend_seconds = idle_seconds(transaction.requested.suspend);
+        let staged = requested
+            .stage(&previous.path)
+            .map_err(|_| IDLE_UNAVAILABLE)?;
+        Ok(Self {
+            previous,
+            requested,
+            staged,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn commit(
+        self,
+        deadline: Instant,
+        check_boundary: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(ShellSettings, Option<RegularFileRevision>), String> {
+        self.staged
+            .commit(|| {
+                if regular_file_revision(&self.previous.path)? != self.previous.revision {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, IDLE_STALE));
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "idle preference commit expired",
+                    ));
+                }
+                check_boundary().map_err(io::Error::other)
+            })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    IDLE_STALE
+                } else {
+                    IDLE_UNAVAILABLE
+                }
+                .to_owned()
+            })?;
+        let revision = regular_file_revision(&self.previous.path).map_err(|_| IDLE_UNAVAILABLE)?;
+        Ok((self.requested, revision))
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct IdleState {
+    generation: u64,
+    observed: Option<(
+        Option<RegularFileRevision>,
+        nickel_remote_control::idle_preferences::Preferences,
+    )>,
+    applied_generation: u64,
+}
+
+impl IdleState {
+    pub(crate) fn observe(
+        &mut self,
+        read: &PreparedIdleRead,
+        applied: nickel_remote_control::idle_preferences::Preferences,
+        observed_at_us: u64,
+    ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let configured = read.configured();
+        let observed = (read.revision.clone(), configured);
+        if self.observed.as_ref() != Some(&observed) {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or("idle preference generation exhausted")?;
+            self.observed = Some(observed);
+        }
+        if configured == applied {
+            self.applied_generation = self.generation;
+        }
+        Ok(nickel_remote_control::idle_preferences::Snapshot {
+            generation: self.generation,
+            observed_at_us,
+            configured,
+            applied,
+            applied_generation: self.applied_generation,
+            pending: configured != applied,
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        prepared: &PreparedIdleChange,
+        transaction: &nickel_remote_control::idle_preferences::Transaction,
+    ) -> Result<(), String> {
+        if self.generation == u64::MAX
+            || self.generation != transaction.generation
+            || self.observed.as_ref().is_none_or(|(revision, prior)| {
+                revision != &prepared.previous.revision || *prior != transaction.prior
+            })
+        {
+            return Err(IDLE_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.observed = None;
+    }
+}
+
+fn keyboard_preference(
+    value: CoreKeyboardPreference,
+) -> nickel_remote_control::keyboard_preference::Preference {
+    use nickel_remote_control::keyboard_preference::Preference;
+    match value {
+        CoreKeyboardPreference::Automatic => Preference::Automatic,
+        CoreKeyboardPreference::Enabled => Preference::Enabled,
+        CoreKeyboardPreference::Disabled => Preference::Disabled,
+    }
+}
+
+fn core_keyboard_preference(
+    value: nickel_remote_control::keyboard_preference::Preference,
+) -> CoreKeyboardPreference {
+    use nickel_remote_control::keyboard_preference::Preference;
+    match value {
+        Preference::Automatic => CoreKeyboardPreference::Automatic,
+        Preference::Enabled => CoreKeyboardPreference::Enabled,
+        Preference::Disabled => CoreKeyboardPreference::Disabled,
+    }
+}
+
+pub(crate) struct PreparedKeyboardRead {
+    path: PathBuf,
+    pub(crate) revision: Option<RegularFileRevision>,
+    settings: OptionalFeatureSettings,
+}
+
+impl PreparedKeyboardRead {
+    pub(crate) fn prepare() -> Result<Self, String> {
+        Self::at(nickel_core::optional_features::settings_path().map_err(|_| KEYBOARD_UNAVAILABLE)?)
+    }
+
+    fn at(path: PathBuf) -> Result<Self, String> {
+        let revision = regular_file_revision(&path).map_err(|_| KEYBOARD_UNAVAILABLE)?;
+        let settings = match OptionalFeatureSettings::load(&path) {
+            Ok(settings) => settings,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && revision.is_none() => {
+                OptionalFeatureSettings::default()
+            }
+            Err(_) => return Err(KEYBOARD_UNAVAILABLE.into()),
+        };
+        if regular_file_revision(&path).map_err(|_| KEYBOARD_UNAVAILABLE)? != revision {
+            return Err(KEYBOARD_STALE.into());
+        }
+        Ok(Self {
+            path,
+            revision,
+            settings,
+        })
+    }
+
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        if regular_file_revision(&self.path).map_err(|_| KEYBOARD_UNAVAILABLE)? != self.revision {
+            return Err(KEYBOARD_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn configured(&self) -> nickel_remote_control::keyboard_preference::Preference {
+        keyboard_preference(self.settings.on_screen_keyboard)
+    }
+
+    pub(crate) fn generation(&self) -> u64 {
+        self.settings.on_screen_keyboard_generation
+    }
+}
+
+pub(crate) struct PreparedKeyboardChange {
+    previous: PreparedKeyboardRead,
+    staged: PreparedKeyboardPreference,
+}
+
+impl PreparedKeyboardChange {
+    pub(crate) fn prepare(
+        transaction: &nickel_remote_control::keyboard_preference::Transaction,
+    ) -> Result<Self, String> {
+        Self::prepare_at(
+            nickel_core::optional_features::settings_path().map_err(|_| KEYBOARD_UNAVAILABLE)?,
+            transaction,
+        )
+    }
+
+    fn prepare_at(
+        path: PathBuf,
+        transaction: &nickel_remote_control::keyboard_preference::Transaction,
+    ) -> Result<Self, String> {
+        if transaction.prior == transaction.requested {
+            return Err(KEYBOARD_STALE.into());
+        }
+        let previous = PreparedKeyboardRead::at(path)?;
+        if transaction.generation != previous.generation()
+            || transaction.prior != previous.configured()
+            || previous.generation() == u64::MAX
+        {
+            return Err(KEYBOARD_STALE.into());
+        }
+        let staged = PreparedKeyboardPreference::prepare(
+            previous.path.clone(),
+            &previous.settings,
+            core_keyboard_preference(transaction.requested),
+        )
+        .map_err(|_| KEYBOARD_STALE)?;
+        Ok(Self { previous, staged })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        transaction: &nickel_remote_control::keyboard_preference::Transaction,
+    ) -> Result<(), String> {
+        if transaction.generation != self.previous.generation()
+            || transaction.prior != self.previous.configured()
+        {
+            return Err(KEYBOARD_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit(
+        self,
+        deadline: Instant,
+        check_boundary: impl FnOnce() -> Result<(), String>,
+    ) -> Result<(OptionalFeatureSettings, Option<RegularFileRevision>), String> {
+        let path = self.previous.path.clone();
+        let settings = self
+            .staged
+            .commit(|| {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "keyboard preference commit expired",
+                    ));
+                }
+                check_boundary().map_err(io::Error::other)
+            })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    KEYBOARD_STALE
+                } else {
+                    KEYBOARD_UNAVAILABLE
+                }
+                .to_owned()
+            })?;
+        let revision = regular_file_revision(&path).map_err(|_| KEYBOARD_UNAVAILABLE)?;
+        Ok((settings, revision))
+    }
+}
+
+pub(crate) fn keyboard_snapshot(
+    read: &PreparedKeyboardRead,
+    runtime: nickel_session_protocol::OnScreenKeyboardSnapshot,
+    observed_at_us: u64,
+) -> nickel_remote_control::keyboard_preference::Snapshot {
+    nickel_remote_control::keyboard_preference::Snapshot {
+        generation: read.generation(),
+        observed_at_us,
+        configured: read.configured(),
+        runtime_generation: runtime.generation,
+        runtime_enabled: runtime.enabled,
+        touchscreen_present: runtime.touchscreen_present,
+        environment_override: runtime.environment_override,
+        pending: runtime.generation != read.generation(),
+    }
+}
 
 fn preferences(settings: &ShellSettings) -> Preferences {
     use nickel_core::shell_settings::{AnimationLevel as A, ThemePreference as T};
@@ -722,6 +1095,133 @@ mod tests {
                 .is_err()
         );
         assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+    }
+
+    #[test]
+    fn idle_commit_preserves_lock_and_unrelated_settings_and_checks_boundary() {
+        use nickel_remote_control::idle_preferences::{
+            Preferences as IdlePreferences, Timeout, Transaction as IdleTransaction,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shell.conf");
+        let settings = ShellSettings {
+            idle_dim_seconds: Some(300),
+            idle_lock_seconds: Some(731),
+            idle_suspend_seconds: None,
+            preferred_terminal: Some("private-terminal".into()),
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let read = PreparedIdleRead::at(path.clone()).unwrap();
+        let mut state = IdleState::default();
+        let snapshot = state.observe(&read, read.configured(), 10).unwrap();
+        let transaction = IdleTransaction {
+            generation: snapshot.generation,
+            prior: snapshot.configured,
+            requested: IdlePreferences {
+                dim: Timeout::AfterSeconds(600),
+                suspend: Timeout::AfterSeconds(3600),
+            },
+        };
+
+        let denied = PreparedIdleChange::prepare_at(path.clone(), &transaction).unwrap();
+        assert!(
+            denied
+                .commit(Instant::now() + Duration::from_secs(1), || Err(
+                    "revoked".into()
+                ))
+                .is_err()
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+
+        let staged = PreparedIdleChange::prepare_at(path.clone(), &transaction).unwrap();
+        state.validate(&staged, &transaction).unwrap();
+        let (committed, _) = staged
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        assert_eq!(committed.idle_dim_seconds, Some(600));
+        assert_eq!(committed.idle_suspend_seconds, Some(3600));
+        assert_eq!(committed.idle_lock_seconds, Some(731));
+        assert_eq!(
+            committed.preferred_terminal.as_deref(),
+            Some("private-terminal")
+        );
+    }
+
+    #[test]
+    fn keyboard_commit_preserves_codex_fields_and_reports_runtime_acknowledgement() {
+        use nickel_core::optional_features::CodexSource;
+        use nickel_remote_control::keyboard_preference::{
+            Preference, Transaction as KeyboardTransaction,
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("optional-features.conf");
+        let settings = OptionalFeatureSettings {
+            codex_enabled: false,
+            codex_generation: 41,
+            codex_source: CodexSource::Executable("private-codex-path".into()),
+            on_screen_keyboard: CoreKeyboardPreference::Automatic,
+            on_screen_keyboard_generation: 7,
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let transaction = KeyboardTransaction {
+            generation: 7,
+            prior: Preference::Automatic,
+            requested: Preference::Enabled,
+        };
+
+        let expired = PreparedKeyboardChange::prepare_at(path.clone(), &transaction).unwrap();
+        assert!(expired.commit(Instant::now(), || Ok(())).is_err());
+        assert_eq!(OptionalFeatureSettings::load(&path).unwrap(), settings);
+
+        let staged = PreparedKeyboardChange::prepare_at(path.clone(), &transaction).unwrap();
+        staged.validate(&transaction).unwrap();
+        let (committed, _) = staged
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        assert_eq!(
+            committed.on_screen_keyboard,
+            CoreKeyboardPreference::Enabled
+        );
+        assert_eq!(committed.on_screen_keyboard_generation, 8);
+        assert!(!committed.codex_enabled);
+        assert_eq!(committed.codex_generation, 41);
+        assert_eq!(
+            committed.codex_source,
+            CodexSource::Executable("private-codex-path".into())
+        );
+
+        let read = PreparedKeyboardRead::at(path).unwrap();
+        let pending = keyboard_snapshot(
+            &read,
+            nickel_session_protocol::OnScreenKeyboardSnapshot {
+                generation: 7,
+                enabled: false,
+                touchscreen_present: true,
+                environment_override: false,
+                ..Default::default()
+            },
+            19,
+        );
+        assert!(pending.pending);
+        assert_eq!(pending.runtime_generation, 7);
+        let acknowledged = keyboard_snapshot(
+            &read,
+            nickel_session_protocol::OnScreenKeyboardSnapshot {
+                generation: 8,
+                enabled: true,
+                touchscreen_present: true,
+                environment_override: false,
+                ..Default::default()
+            },
+            20,
+        );
+        assert!(!acknowledged.pending);
+        assert!(acknowledged.runtime_enabled);
+        assert_eq!(acknowledged.observed_at_us, 20);
     }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, Transaction) {

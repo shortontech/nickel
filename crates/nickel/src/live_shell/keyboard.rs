@@ -8,6 +8,56 @@ use nickel_session_protocol::OnScreenKeyboardInput;
 use nickel_ui::on_screen_keyboard::KeyboardEffect;
 
 impl LiveShell {
+    #[cfg(target_os = "windows")]
+    pub(crate) fn apply_windows_keyboard_settings(
+        &mut self,
+        settings: &nickel_core::optional_features::OptionalFeatureSettings,
+    ) -> bool {
+        use nickel_core::on_screen_keyboard::{TouchscreenPresence, resolve_enablement};
+
+        let enabled = resolve_enablement(
+            settings.on_screen_keyboard,
+            self.keyboard_override,
+            if self.keyboard_touchscreen_present {
+                TouchscreenPresence::Present
+            } else {
+                TouchscreenPresence::Absent
+            },
+        )
+        .enabled;
+        let changed = self.keyboard_generation != settings.on_screen_keyboard_generation
+            || self.keyboard_enabled != enabled;
+        self.keyboard_generation = settings.on_screen_keyboard_generation;
+        self.keyboard_enabled = enabled;
+        if !enabled {
+            self.keyboard_visible = false;
+            self.keyboard_resize = None;
+            self.keyboard_gesture_leases.clear();
+            self.keyboard_recipient = None;
+            self.keyboard_host
+                .application_mut()
+                .recipient_changed(false);
+        }
+        changed
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_keyboard_snapshot(
+        &self,
+    ) -> nickel_session_protocol::OnScreenKeyboardSnapshot {
+        nickel_session_protocol::OnScreenKeyboardSnapshot {
+            generation: self.keyboard_generation,
+            enabled: self.keyboard_enabled,
+            visible: self.keyboard_visible,
+            touchscreen_present: self.keyboard_touchscreen_present,
+            environment_override: self.keyboard_override
+                != nickel_core::on_screen_keyboard::KeyboardOverride::None,
+            dock_top: self.keyboard_dock_top,
+            height: self.keyboard_height,
+            ..Default::default()
+        }
+    }
+
     pub(super) fn refresh_keyboard(&mut self) -> bool {
         #[cfg(target_os = "linux")]
         {

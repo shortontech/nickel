@@ -42,6 +42,11 @@ pub fn renders_desktop_background() -> bool {
     cfg!(any(target_os = "linux", target_os = "windows"))
 }
 
+#[cfg(target_os = "windows")]
+pub(crate) fn windows_touchscreen_present() -> bool {
+    windows::touchscreen_present()
+}
+
 pub struct DesktopCapture {
     pub image: image::RgbaImage,
 }

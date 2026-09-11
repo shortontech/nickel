@@ -1854,10 +1854,28 @@ revisions. Commit repeats the appearance transaction's protected-focus,
 shared-input, physical-input epoch, deadline and permit checks before replacement,
 then advances the production launcher icon generation and requests a live cache
 refresh. The response claims that refresh request, not decoded or presented pixels.
-Wallpaper, Codex, idle, terminal, on-screen-keyboard and
-shell-behavior trait methods remain unavailable on the Windows authority;
+Wallpaper and terminal-presentation trait methods remain unavailable on the Windows authority;
 `windows_settings_worker` therefore remains an explicit diagnostic gap. Native
 Windows cache and presented-icon acceptance remain open.
+
+Windows now implements typed idle-policy and on-screen-keyboard preference reads
+and transactions through the same production settings and winit-owner boundary.
+Idle preparation exposes only dim and suspend intervals, retains the protected
+idle-lock timeout and every unrelated shell field, and installs a committed policy
+in `LiveShell`; native Windows dim and suspend execution remains open and is not
+claimed by compatibility-layer tests. Keyboard preparation uses the existing
+keyboard-only `OptionalFeatureSettings` replacement, preserving Codex enablement,
+generation and source. The Windows owner resolves the effective preference against
+the process environment and native digitizer presence, updates panel/keyboard
+visibility state, and reports the persisted and runtime generations separately.
+Both commits use a single request deadline, checked file revision, cooperative
+lock, full-debug and protected-focus authorization, shared/physical-input
+exclusion, local-input epoch, and final permit check. A durable commit is reconciled
+even when authority races immediately afterward; a caller timeout remains an
+explicitly uncertain result. Portable transaction tests and Windows cross/Wine
+execution cover the non-native slice. Native focus, touchscreen, visible keyboard,
+idle dimming and suspend acceptance remain open; tests never request an immediate
+suspend.
 
 Windows now implements typed launcher-favorites reads and transactions against
 the production `LiveShell` launcher model and launcher-preferences file. The

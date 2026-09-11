@@ -648,6 +648,32 @@ enum OwnerRequest {
         reply:
             SyncSender<Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String>>,
     },
+    ReadIdlePreferences {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedIdleRead,
+        reply: SyncSender<Result<nickel_remote_control::idle_preferences::Snapshot, String>>,
+    },
+    IdlePreferencesTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::idle_preferences::Transaction,
+        prepared: crate::windows_remote_settings::PreparedIdleChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::idle_preferences::Snapshot, String>>,
+    },
+    ReadKeyboardPreference {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedKeyboardRead,
+        reply: SyncSender<Result<nickel_remote_control::keyboard_preference::Snapshot, String>>,
+    },
+    KeyboardPreferenceTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::keyboard_preference::Transaction,
+        prepared: crate::windows_remote_settings::PreparedKeyboardChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::keyboard_preference::Snapshot, String>>,
+    },
     LauncherFavoritesCatalog {
         permit: DesktopPermit,
         deadline: Instant,
@@ -1440,6 +1466,117 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             "Windows shell behavior result uncertain; read diagnostics before retrying".to_owned()
         })?
     }
+    fn read_idle_preferences(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedIdleRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows idle preference observation expired before dispatch")?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadIdlePreferences {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows idle preference observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn idle_preferences_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::idle_preferences::Transaction,
+    ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedIdleChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows idle preference transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::IdlePreferencesTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows idle preference result uncertain; read current state before retrying"
+                .to_owned()
+        })?
+    }
+    fn read_keyboard_preference(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedKeyboardRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows keyboard preference observation expired before dispatch")?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadKeyboardPreference {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows keyboard preference observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn keyboard_preference_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::keyboard_preference::Transaction,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_settings::PreparedKeyboardChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows keyboard preference transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::KeyboardPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows keyboard preference result uncertain; read current state before retrying"
+                .to_owned()
+        })?
+    }
     fn read_launcher_favorites(
         &self,
         permit: DesktopPermit,
@@ -2016,6 +2153,201 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
 }
 
+impl WindowsRemoteControl {
+    fn read_idle_preferences(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedIdleRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            self.idle_preferences.observe(
+                &prepared,
+                state.windows_idle_preferences(),
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_idle_preferences(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::idle_preferences::Transaction,
+        prepared: crate::windows_remote_settings::PreparedIdleChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::idle_preferences::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("idle preference transaction expired before commit".into());
+            }
+            if input_busy
+                || local_input_epoch() != expected_local_input_epoch
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("shared input is busy".into());
+            }
+            self.idle_preferences.validate(&prepared, &transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            self.idle_preferences.invalidate();
+            Ok(())
+        });
+        let (requested, revision) = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err(
+                    "idle preferences unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        // The production shell owner must consume a committed policy even if
+        // authority is revoked immediately after the filesystem replacement.
+        state.apply_shell_settings(requested);
+        authorization?;
+        let read = crate::windows_remote_settings::PreparedIdleRead::prepare()?;
+        if read.revision != revision {
+            return Err("idle preferences changed; read current state before retrying".into());
+        }
+        self.idle_preferences.observe(
+            &read,
+            state.windows_idle_preferences(),
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        )
+    }
+
+    fn read_keyboard_preference(
+        &self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedKeyboardRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            Ok(crate::windows_remote_settings::keyboard_snapshot(
+                &prepared,
+                state.windows_keyboard_snapshot(),
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            ))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_keyboard_preference(
+        &mut self,
+        shell: &mut WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::keyboard_preference::Transaction,
+        prepared: crate::windows_remote_settings::PreparedKeyboardChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::keyboard_preference::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("keyboard preference transaction expired before commit".into());
+            }
+            if input_busy
+                || local_input_epoch() != expected_local_input_epoch
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("shared input is busy".into());
+            }
+            prepared.validate(&transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            Ok(())
+        });
+        let (settings, revision) = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err(
+                    "keyboard preference unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        // Reconcile the production LiveShell owner after the durable boundary,
+        // including a raced post-commit revocation.
+        let changed = state.apply_windows_keyboard_settings(&settings);
+        if changed {
+            crate::sync_visibility(shell, state);
+            shell.request_all_redraws();
+        }
+        authorization?;
+        let read = crate::windows_remote_settings::PreparedKeyboardRead::prepare()?;
+        if read.revision != revision {
+            return Err("keyboard preference changed; read current state before retrying".into());
+        }
+        Ok(crate::windows_remote_settings::keyboard_snapshot(
+            &read,
+            state.windows_keyboard_snapshot(),
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        ))
+    }
+}
+
 impl WindowsDesktopAuthority {
     fn launcher_favorites_catalog(
         &self,
@@ -2064,6 +2396,7 @@ pub(crate) struct WindowsRemoteControl {
     appearance: crate::windows_remote_settings::AppearanceState,
     application_scale: crate::windows_remote_application_scale::State,
     file_icons: crate::windows_remote_settings::FileIconState,
+    idle_preferences: crate::windows_remote_settings::IdleState,
     launcher_favorites: crate::windows_remote_launcher_favorites::FavoritesState,
     shell_focus: Option<ShellFocusState>,
     external_accessibility:
@@ -2246,6 +2579,7 @@ impl WindowsRemoteControl {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            idle_preferences: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,
             external_accessibility: None,
@@ -2831,6 +3165,76 @@ impl WindowsRemoteControl {
                         || Err("Windows presentation owner is unavailable".into()),
                         |(shell, state)| {
                             self.change_shell_behavior(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadIdlePreferences {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_idle_preferences(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::IdlePreferencesTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_idle_preferences(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadKeyboardPreference {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_keyboard_preference(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::KeyboardPreferenceTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_keyboard_preference(
                                 shell,
                                 state,
                                 &permit,
@@ -7066,6 +7470,7 @@ mod tests {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            idle_preferences: Default::default(),
             launcher_favorites: Default::default(),
             shell_focus: None,
             external_accessibility: None,

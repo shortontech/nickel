@@ -535,6 +535,8 @@ pub struct LiveShell {
     panel_output: Option<String>,
     pending_popover_anchor: Option<PendingPopoverAnchor>,
     all_windows_on_every_bar: bool,
+    #[cfg(target_os = "windows")]
+    idle_policy: nickel_core::idle::IdlePolicy,
     preview_group: Option<usize>,
     preview_pending: Option<(usize, Instant)>,
     preview_focus_requested: bool,
@@ -583,10 +585,13 @@ pub struct LiveShell {
     keyboard_host: nickel_ui::UiHost<nickel_ui::on_screen_keyboard::KeyboardApp>,
     keyboard_visible: bool,
     keyboard_enabled: bool,
+    #[cfg(target_os = "windows")]
+    keyboard_generation: u64,
+    #[cfg(target_os = "windows")]
+    keyboard_touchscreen_present: bool,
     keyboard_dock_top: bool,
     keyboard_height: u32,
     keyboard_resize: Option<(nickel_input::DeviceId, Option<nickel_input::TouchId>, f64)>,
-    #[cfg(target_os = "linux")]
     keyboard_override: nickel_core::on_screen_keyboard::KeyboardOverride,
     keyboard_deadline: Instant,
     keyboard_gesture_leases: HashMap<(nickel_input::DeviceId, Option<nickel_input::TouchId>), u64>,
@@ -753,6 +758,34 @@ impl LiveShell {
         external_session_transport: bool,
     ) -> Result<Self, String> {
         let shell_settings = ShellSettings::load_default();
+        #[cfg(target_os = "windows")]
+        let optional_feature_settings =
+            nickel_core::optional_features::OptionalFeatureSettings::load_default();
+        let keyboard_override = {
+            let value = std::env::var(nickel_core::on_screen_keyboard::ENVIRONMENT_VARIABLE)
+                .unwrap_or_else(|_| "auto".into());
+            nickel_core::on_screen_keyboard::KeyboardOverride::parse(&value).unwrap_or_else(|| {
+                eprintln!(
+                    "Invalid NICKEL_ON_SCREEN_KEYBOARD value; using saved keyboard preference"
+                );
+                Default::default()
+            })
+        };
+        #[cfg(target_os = "windows")]
+        let keyboard_touchscreen_present = crate::platform::windows_touchscreen_present();
+        #[cfg(target_os = "windows")]
+        let keyboard_enabled = nickel_core::on_screen_keyboard::resolve_enablement(
+            optional_feature_settings.on_screen_keyboard,
+            keyboard_override,
+            if keyboard_touchscreen_present {
+                nickel_core::on_screen_keyboard::TouchscreenPresence::Present
+            } else {
+                nickel_core::on_screen_keyboard::TouchscreenPresence::Absent
+            },
+        )
+        .enabled;
+        #[cfg(not(target_os = "windows"))]
+        let keyboard_enabled = false;
         let application_discovery = platform::application_discovery();
         let application_status = application_discovery_status_label(application_discovery.status());
         let mut launcher = Launcher::new(application_discovery.into_applications());
@@ -984,6 +1017,12 @@ impl LiveShell {
             panel_output: None,
             pending_popover_anchor: None,
             all_windows_on_every_bar: shell_settings.all_windows_on_every_bar,
+            #[cfg(target_os = "windows")]
+            idle_policy: nickel_core::idle::IdlePolicy::from_seconds(
+                shell_settings.idle_dim_seconds,
+                shell_settings.idle_lock_seconds,
+                shell_settings.idle_suspend_seconds,
+            ),
             preview_group: None,
             preview_pending: None,
             preview_focus_requested: false,
@@ -1035,21 +1074,17 @@ impl LiveShell {
                 nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             ),
             keyboard_visible: false,
-            keyboard_enabled: false,
+            keyboard_enabled,
+            #[cfg(target_os = "windows")]
+            keyboard_generation: optional_feature_settings.on_screen_keyboard_generation,
+            #[cfg(target_os = "windows")]
+            keyboard_touchscreen_present,
             keyboard_dock_top: false,
             keyboard_height: nickel_core::on_screen_keyboard::KEYBOARD_HEIGHT,
             keyboard_resize: None,
             keyboard_deadline: Instant::now(),
             keyboard_gesture_leases: HashMap::new(),
-            #[cfg(target_os = "linux")]
-            keyboard_override: {
-                let value = std::env::var(nickel_core::on_screen_keyboard::ENVIRONMENT_VARIABLE)
-                    .unwrap_or_else(|_| "auto".into());
-                nickel_core::on_screen_keyboard::KeyboardOverride::parse(&value).unwrap_or_else(|| {
-                    eprintln!("Invalid NICKEL_ON_SCREEN_KEYBOARD value; using saved keyboard preference");
-                    Default::default()
-                })
-            },
+            keyboard_override,
             keyboard_recipient: None,
         })
     }
@@ -1427,6 +1462,18 @@ impl LiveShell {
             self.configured_desktop_count = shell_settings.desktop_count;
             changed = true;
         }
+        #[cfg(target_os = "windows")]
+        {
+            let idle_policy = nickel_core::idle::IdlePolicy::from_seconds(
+                shell_settings.idle_dim_seconds,
+                shell_settings.idle_lock_seconds,
+                shell_settings.idle_suspend_seconds,
+            );
+            if self.idle_policy != idle_policy {
+                self.idle_policy = idle_policy;
+                changed = true;
+            }
+        }
         let palette =
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         if palette != self.palette {
@@ -1447,6 +1494,22 @@ impl LiveShell {
             changed = true;
         }
         changed
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_idle_preferences(
+        &self,
+    ) -> nickel_remote_control::idle_preferences::Preferences {
+        use nickel_remote_control::idle_preferences::{Preferences, Timeout};
+        let timeout = |value: Option<Duration>| {
+            value.map_or(Timeout::Disabled, |duration| {
+                Timeout::AfterSeconds(u32::try_from(duration.as_secs()).unwrap_or(u32::MAX))
+            })
+        };
+        Preferences {
+            dim: timeout(self.idle_policy.dim_after),
+            suspend: timeout(self.idle_policy.suspend_after),
+        }
     }
 
     #[cfg(target_os = "windows")]

@@ -77,10 +77,11 @@ use windows::{
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
                 HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
                 HTTOPRIGHT, HWND_BOTTOM, HWND_BROADCAST, HWND_TOPMOST, IMAGE_ICON, IsIconic,
-                IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA, PostMessageW,
-                RegisterClassW, RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON,
-                SM_CYICON, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE, SW_MAXIMIZE,
-                SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
+                IsWindow, IsWindowVisible, IsZoomed, LR_COPYFROMRESOURCE, LWA_ALPHA,
+                NID_INTEGRATED_TOUCH, NID_READY, PostMessageW, RegisterClassW,
+                RegisterShellHookWindow, RegisterWindowMessageW, SM_CXICON, SM_CYICON,
+                SM_DIGITIZER, SPI_GETWORKAREA, SPI_SETWORKAREA, SPIF_SENDCHANGE, SW_HIDE,
+                SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, SW_SHOWNOACTIVATE, SW_SHOWNORMAL,
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
@@ -105,6 +106,12 @@ use nickel_input::{
         physical_key, run_native_hook_loop,
     },
 };
+
+pub(crate) fn touchscreen_present() -> bool {
+    // SAFETY: GetSystemMetrics is a process-local, read-only system query.
+    let digitizer = unsafe { GetSystemMetrics(SM_DIGITIZER) } as u32;
+    digitizer & (NID_READY | NID_INTEGRATED_TOUCH) == (NID_READY | NID_INTEGRATED_TOUCH)
+}
 
 use crate::{
     desktop::{Wallpaper, WallpaperPosition},
