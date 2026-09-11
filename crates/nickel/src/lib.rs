@@ -17,6 +17,8 @@ mod windows_remote_settings;
 mod windows_resource_owner;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_shell_diagnostics;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_virtual_workspaces;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{
     ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,

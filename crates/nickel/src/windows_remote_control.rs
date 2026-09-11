@@ -562,6 +562,12 @@ enum OwnerRequest {
             Result<nickel_remote_control::semantics::SurfaceSemanticActionOutcome, String>,
         >,
     },
+    WorkspaceAction {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        action: nickel_remote_control::diagnostics::WorkspaceAction,
+        reply: SyncSender<Result<nickel_remote_control::diagnostics::WorkspaceOutcome, String>>,
+    },
     Diagnostic {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
@@ -1107,6 +1113,31 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn workspace_action(
+        &self,
+        permit: DesktopPermit,
+        action: nickel_remote_control::diagnostics::WorkspaceAction,
+    ) -> Result<nickel_remote_control::diagnostics::WorkspaceOutcome, String> {
+        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
+            &permit,
+        )?);
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::WorkspaceAction {
+                permit,
+                prepared,
+                action,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows workspace observation timed out".to_owned())?;
         completion.check_live()?;
         result
     }
@@ -1697,6 +1728,10 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         action: nickel_remote_control::window_actions::WindowAction,
     ) -> Result<nickel_remote_control::window_actions::WindowOutcome, String> {
         action.validate()?;
+        let workspace_move = matches!(
+            &action,
+            nickel_remote_control::window_actions::WindowAction::MoveToWorkspace { .. }
+        );
         let _admission = crate::platform::remote_observation::Admission::acquire()?;
         let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
             &permit,
@@ -1716,7 +1751,12 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "Windows desktop owner timed out".to_owned())?;
-        completion.check_live()?;
+        // A workspace move is irreversible once the native manager accepts
+        // it. Its owner result remains truthful if revocation races after that
+        // boundary; returning a denial here would invite an unsafe retry.
+        if !workspace_move || result.is_err() {
+            completion.check_live()?;
+        }
         result
     }
 }
@@ -1728,6 +1768,7 @@ pub(crate) struct WindowsRemoteControl {
     local_cues: crate::local_cues::LocalCues,
     applications: crate::windows_application_registry::native::OwnerRegistry,
     resources: crate::windows_resource_owner::Owner,
+    workspaces: crate::windows_virtual_workspaces::Owner,
     resource_lifecycle: Option<crate::platform::remote_observation::Lifecycle>,
     observation_generation: u64,
     platform_refresh_generation: u64,
@@ -1876,6 +1917,7 @@ impl WindowsRemoteControl {
             local_cues: Default::default(),
             applications: Default::default(),
             resources: Default::default(),
+            workspaces: Default::default(),
             resource_lifecycle: crate::platform::remote_observation::Lifecycle::install().ok(),
             observation_generation: 0,
             platform_refresh_generation: 0,
@@ -2267,6 +2309,15 @@ impl WindowsRemoteControl {
                             )
                         },
                     );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::WorkspaceAction {
+                    permit,
+                    prepared,
+                    action,
+                    reply,
+                } => {
+                    let result = self.perform_workspace_action(permit, *prepared, action);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Diagnostic {
@@ -3890,17 +3941,42 @@ impl WindowsRemoteControl {
         let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
         let lease_metrics = permit.lease_metrics_snapshot(observed_at_us);
         let scope = permit.resource_scope()?;
+        let native_windows = self.resources.native_windows(&scope).collect::<Vec<_>>();
+        let workspaces_available = permit
+            .with_debug(!self.desktop_unlocked, || {
+                crate::windows_virtual_workspaces::native::observe(&native_windows)
+            })
+            .and_then(|observation| self.workspaces.reconcile(observation))
+            .is_ok();
         let snapshot = permit.with_debug(!self.desktop_unlocked, || {
             self.observation_generation = self
                 .observation_generation
                 .checked_add(1)
                 .ok_or("Windows observation generations exhausted")?;
             let generation = self.observation_generation;
-            let windows: Vec<_> = self
+            let mut windows: Vec<_> = self
                 .resources
                 .windows(&scope)
                 .map(|(window, _)| window)
                 .collect();
+            for window in &mut windows {
+                if let Some(native) = self
+                    .resources
+                    .window(&window.id, window.generation)
+                    .map(|window| window.native)
+                {
+                    window.workspace = self.workspaces.workspace_for_window(native).unwrap_or(0);
+                }
+            }
+            let projected_workspace_windows = self
+                .resources
+                .projected_native_windows(&scope)
+                .collect::<Vec<_>>();
+            let (workspaces, workspaces_truncated) = if workspaces_available {
+                self.workspaces.diagnostics(&projected_workspace_windows)
+            } else {
+                (Vec::new(), false)
+            };
             let outputs: Vec<_> = self
                 .resources
                 .outputs(&scope)
@@ -4074,7 +4150,7 @@ impl WindowsRemoteControl {
                 observed_at_us,
                 windows,
                 outputs,
-                workspaces: Vec::new(),
+                workspaces,
                 internal_applications: windows_internal_application_diagnostics(),
                 internal_renderers: Vec::new(),
                 shell_renderers,
@@ -4153,7 +4229,7 @@ impl WindowsRemoteControl {
                     .as_ref()
                     .map(|trace| trace.snapshot()),
                 trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
-                truncated: shell_surfaces_truncated,
+                truncated: shell_surfaces_truncated || workspaces_truncated,
                 unavailable_domains: windows_unavailable_diagnostic_domains(),
             })
         })?;
@@ -4775,6 +4851,52 @@ impl WindowsRemoteControl {
             .resources
             .window_resource(&scope, id, generation)
             .ok_or("Windows resource is unavailable")?;
+        if let nickel_remote_control::window_actions::WindowAction::MoveToWorkspace { workspace } =
+            action
+        {
+            if self.keyboard_hold.is_some()
+                || self.pointer_hold.is_some()
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("local or remote input is already active".into());
+            }
+            let native = window.native;
+            let native_windows = self.resources.native_windows(&scope).collect::<Vec<_>>();
+            self.workspaces
+                .reconcile(crate::windows_virtual_workspaces::native::observe(
+                    &native_windows,
+                )?)?;
+            let target = self
+                .workspaces
+                .native_id(workspace)
+                .ok_or("Windows workspace is unavailable")?;
+            let expected_input_epoch = local_input_epoch();
+            permit.with_input(&evidence, || {
+                if expected_input_epoch != local_input_epoch() {
+                    return Err("local input cancelled the workspace move".into());
+                }
+                crate::windows_virtual_workspaces::native::move_window(native, target)
+            })?;
+
+            // The public call only confirms request acceptance. Re-observe the
+            // native desktop membership before claiming that the move landed.
+            let mut observed = crate::platform::remote_observation::Prepared::prepare(&permit)?;
+            self.reconcile_prepared_resources(&permit, &mut observed)?;
+            let native_windows = self.resources.native_windows(&scope).collect::<Vec<_>>();
+            self.workspaces
+                .reconcile(crate::windows_virtual_workspaces::native::observe(
+                    &native_windows,
+                )?)?;
+            let mut window = self.resources.windows(&scope).find_map(|(window, _)| {
+                (window.id == id && window.generation == generation).then_some(window)
+            });
+            if let Some(window) = &mut window {
+                window.workspace = self.workspaces.workspace_for_window(native).unwrap_or(0);
+            }
+            return Ok(
+                nickel_remote_control::window_actions::WindowOutcome::observed(action, window),
+            );
+        }
         permit.with_resource(&evidence, || {
             crate::platform::remote_observation::request_window_action(window, session, action)
         })?;
@@ -4789,6 +4911,59 @@ impl WindowsRemoteControl {
         });
         permit.check_live()?;
         Ok(nickel_remote_control::window_actions::WindowOutcome::observed(action, window))
+    }
+
+    fn perform_workspace_action(
+        &mut self,
+        permit: DesktopPermit,
+        mut prepared: crate::platform::remote_observation::Prepared,
+        action: nickel_remote_control::diagnostics::WorkspaceAction,
+    ) -> Result<nickel_remote_control::diagnostics::WorkspaceOutcome, String> {
+        use nickel_remote_control::{
+            diagnostics::{WorkspaceAction, WorkspaceOutcome},
+            leases::ResourceEvidence,
+        };
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: None,
+            output: None,
+            authorized_surface_ancestors: &[],
+            protected: !self.desktop_unlocked,
+        };
+        permit.with_resource(&evidence, || match action {
+            WorkspaceAction::List => Ok(()),
+            WorkspaceAction::Create | WorkspaceAction::Switch { .. } | WorkspaceAction::Remove { .. } => Err(
+                "Windows does not expose supported create, switch, or remove virtual-desktop authority"
+                    .into(),
+            ),
+        })?;
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
+        let scope = permit.resource_scope()?;
+        let native_windows = self.resources.native_windows(&scope).collect::<Vec<_>>();
+        self.workspaces
+            .reconcile(crate::windows_virtual_workspaces::native::observe(
+                &native_windows,
+            )?)?;
+        prepared.revalidate()?;
+        permit.check_live()?;
+        let projected = self
+            .resources
+            .projected_native_windows(&scope)
+            .collect::<Vec<_>>();
+        let (workspaces, truncated) = self.workspaces.diagnostics(&projected);
+        self.observation_generation = self
+            .observation_generation
+            .checked_add(1)
+            .ok_or("Windows observation generations exhausted")?;
+        Ok(WorkspaceOutcome {
+            requested: action,
+            created_workspace: None,
+            observation_generation: self.observation_generation,
+            observed_at_us: self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            workspaces,
+            truncated,
+        })
     }
 
     /// This is the real production host path. It does not relax the separate
@@ -5583,7 +5758,7 @@ impl WindowsRemoteControl {
 
 fn windows_unavailable_diagnostic_domains() -> Vec<String> {
     vec![
-        "windows_virtual_workspaces".into(),
+        "windows_virtual_workspace_create_switch_remove".into(),
         "windows_per_surface_renderer_cache_attribution".into(),
         "windows_preview_pixel_readback".into(),
         "windows_settings_worker".into(),
@@ -5952,6 +6127,7 @@ mod tests {
             local_cues: Default::default(),
             applications: Default::default(),
             resources: Default::default(),
+            workspaces: Default::default(),
             resource_lifecycle: crate::platform::remote_observation::Lifecycle::install().ok(),
             observation_generation: 0,
             platform_refresh_generation: 0,

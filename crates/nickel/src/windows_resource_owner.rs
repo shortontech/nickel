@@ -352,6 +352,16 @@ impl Owner {
         })
     }
 
+    pub(crate) fn projected_native_windows<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+    ) -> impl Iterator<Item = (usize, String)> + 'a {
+        self.windows(scope).filter_map(|(summary, _)| {
+            self.window(&summary.id, summary.generation)
+                .map(|window| (window.native, summary.id))
+        })
+    }
+
     /// Map a freshly sampled native recipient through the same exact scoped,
     /// protected-filtered projection used by the containing snapshot.
     pub(crate) fn diagnostic_window_id(
