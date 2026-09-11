@@ -2947,6 +2947,264 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_permission_bursts_keep_the_owner_responsive_across_local_policy() {
+        fn burst(
+            control: std::sync::Arc<std::sync::Mutex<ControlPlane>>,
+            clients: Vec<IssuedCapability>,
+            request: lease_requests::LeaseRequest,
+            now: std::time::Instant,
+            calls_per_client: usize,
+        ) -> (usize, usize, Duration) {
+            let lanes = clients.len();
+            let start = std::sync::Arc::new(std::sync::Barrier::new(lanes + 2));
+            let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+            let mut workers = Vec::with_capacity(lanes + 1);
+            for client in clients {
+                let control = control.clone();
+                let request = request.clone();
+                let start = start.clone();
+                let completed_tx = completed_tx.clone();
+                workers.push(std::thread::spawn(move || {
+                    start.wait();
+                    let mut submitted = 0;
+                    let mut coalesced = 0;
+                    for _ in 0..calls_per_client {
+                        match control.lock().unwrap().request_lease(
+                            &client.client_id,
+                            &client.token,
+                            request.clone(),
+                            now,
+                        ) {
+                            Ok(true) => submitted += 1,
+                            Ok(false) => coalesced += 1,
+                            Err(error) => panic!("request burst failed: {error}"),
+                        }
+                    }
+                    completed_tx.send((submitted, coalesced)).unwrap();
+                }));
+            }
+            drop(completed_tx);
+
+            let probe_control = control;
+            let probe_start = start.clone();
+            let (probe_tx, probe_rx) = std::sync::mpsc::channel();
+            workers.push(std::thread::spawn(move || {
+                probe_start.wait();
+                let mut max_wait = Duration::ZERO;
+                for _ in 0..lanes * calls_per_client {
+                    let before = std::time::Instant::now();
+                    let _generation = probe_control.lock().unwrap().generation();
+                    max_wait = max_wait.max(before.elapsed());
+                }
+                probe_tx.send(max_wait).unwrap();
+            }));
+
+            let deadline = Duration::from_secs(2);
+            start.wait();
+            let mut submitted = 0;
+            let mut coalesced = 0;
+            for _ in 0..lanes {
+                let (new, duplicate) = completed_rx
+                    .recv_timeout(deadline)
+                    .expect("permission request lane exceeded the responsiveness bound");
+                submitted += new;
+                coalesced += duplicate;
+            }
+            let max_wait = probe_rx
+                .recv_timeout(deadline)
+                .expect("local owner probe exceeded the responsiveness bound");
+            for worker in workers {
+                worker.join().unwrap();
+            }
+            (submitted, coalesced, max_wait)
+        }
+
+        const CLIENTS: usize = 8;
+        const CALLS_PER_CLIENT: usize = 32;
+        const OWNER_WAIT_BOUND: Duration = Duration::from_millis(250);
+
+        let now = std::time::Instant::now();
+        let mut plane = ControlPlane::default();
+        plane.set_enabled(true);
+        let clients = (0..CLIENTS)
+            .map(|index| {
+                let client = plane
+                    .connect_identity(&format!("Concurrent permission fixture {index}"))
+                    .unwrap();
+                crate::ready_connection(&mut plane, &client, now);
+                client
+            })
+            .collect::<Vec<_>>();
+        let request = lease_requests::LeaseRequest {
+            renewal: None,
+            scope: leases::ResourceScope::FullSession,
+            duration: Some(Duration::from_secs(30)),
+            allow_resumption: false,
+            full_debug: false,
+        };
+        let control = std::sync::Arc::new(std::sync::Mutex::new(plane));
+
+        let (submitted, coalesced, max_wait) = burst(
+            control.clone(),
+            clients.clone(),
+            request.clone(),
+            now,
+            CALLS_PER_CLIENT,
+        );
+        assert_eq!(submitted, CLIENTS);
+        assert_eq!(coalesced, CLIENTS * (CALLS_PER_CLIENT - 1));
+        assert!(
+            max_wait < OWNER_WAIT_BOUND,
+            "the local owner waited {max_wait:?} during equivalent request load"
+        );
+        assert_eq!(
+            control.lock().unwrap().lease_requests().pending().count(),
+            CLIENTS,
+            "each authenticated client owns at most one pending card"
+        );
+
+        let client = &clients[0];
+        {
+            let mut plane = control.lock().unwrap();
+            let generation = plane
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            assert!(plane.lease_requests_mut().deny_displayed_local(
+                &client.client_id,
+                &request,
+                generation,
+                now,
+            ));
+            assert_eq!(
+                plane.request_lease(&client.client_id, &client.token, request.clone(), now),
+                Err(lease_requests::RequestError::Cooldown {
+                    retry_after: Duration::from_secs(5),
+                })
+            );
+            let retry = now + Duration::from_secs(5);
+            assert!(
+                plane
+                    .request_lease(&client.client_id, &client.token, request.clone(), retry)
+                    .unwrap()
+            );
+            let generation = plane
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            assert!(plane.lease_requests_mut().deny_displayed_local(
+                &client.client_id,
+                &request,
+                generation,
+                retry,
+            ));
+            assert_eq!(
+                plane.request_lease(&client.client_id, &client.token, request.clone(), retry),
+                Err(lease_requests::RequestError::Cooldown {
+                    retry_after: Duration::from_secs(10),
+                })
+            );
+            let retry = now + Duration::from_secs(15);
+            assert!(
+                plane
+                    .request_lease(&client.client_id, &client.token, request.clone(), retry)
+                    .unwrap()
+            );
+            plane.block_client_local(&client.client_id, true).unwrap();
+            assert_eq!(
+                plane.request_lease(&client.client_id, &client.token, request.clone(), retry),
+                Err(lease_requests::RequestError::Blocked)
+            );
+            plane.block_client_local(&client.client_id, false).unwrap();
+            crate::ready_connection(&mut plane, client, retry);
+            assert!(
+                plane
+                    .request_lease(&client.client_id, &client.token, request.clone(), retry)
+                    .unwrap()
+            );
+            let generation = plane
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            plane
+                .approve_lease_local(&client.client_id, &request, generation, retry)
+                .unwrap();
+        }
+
+        let retry = now + Duration::from_secs(15);
+        let lease = control
+            .lock()
+            .unwrap()
+            .leases()
+            .iter()
+            .find(|lease| lease.client_identity == client.client_id)
+            .unwrap()
+            .clone();
+        let renewal = lease_requests::LeaseRequest {
+            renewal: Some(nickel_session_protocol::RemoteLeaseRenewal {
+                lease_id: lease.id,
+                generation: lease.renewal_generation,
+            }),
+            duration: Some(Duration::from_secs(120)),
+            ..request
+        };
+        let (submitted, coalesced, max_wait) = burst(
+            control.clone(),
+            vec![client.clone(); CLIENTS],
+            renewal.clone(),
+            retry,
+            CALLS_PER_CLIENT,
+        );
+        assert_eq!(submitted, 1);
+        assert_eq!(coalesced, CLIENTS * CALLS_PER_CLIENT - 1);
+        assert!(
+            max_wait < OWNER_WAIT_BOUND,
+            "the local owner waited {max_wait:?} during renewal load"
+        );
+
+        let mut plane = control.lock().unwrap();
+        let generation = plane
+            .lease_requests()
+            .pending_generation(&client.client_id)
+            .unwrap();
+        assert_eq!(
+            plane
+                .approve_lease_local(&client.client_id, &renewal, generation, retry)
+                .unwrap(),
+            lease.id
+        );
+        let renewed = plane
+            .leases()
+            .active_lease(lease.id, &client.client_id, retry)
+            .unwrap();
+        assert_eq!(renewed.renewal_generation, lease.renewal_generation + 1);
+        assert_eq!(renewed.expires_at, Some(retry + Duration::from_secs(120)));
+        assert_eq!(
+            plane.request_lease(&client.client_id, &client.token, renewal, retry),
+            Err(lease_requests::RequestError::Invalid),
+            "an approved renewal cannot be replayed"
+        );
+        assert_eq!(plane.lease_requests().pending().count(), CLIENTS - 1);
+
+        let metrics = plane.lease_requests().metrics();
+        for (outcome, count) in [
+            ("submitted", 12),
+            ("coalesced", 503),
+            ("approved", 2),
+            ("denied", 2),
+            ("blocked", 1),
+            ("invalid", 1),
+            ("cooldown", 2),
+            ("blocked_request", 1),
+        ] {
+            assert!(
+                metrics.contains(&format!("outcome=\"{outcome}\"}} {count}\n")),
+                "unexpected permission metrics for {outcome}: {metrics}"
+            );
+        }
+    }
+
+    #[test]
     fn pending_renewal_retires_with_its_lease_without_denial_or_restoring_authority() {
         for state in ["expired", "paused", "revoked", "client_revoked"] {
             let now = std::time::Instant::now();

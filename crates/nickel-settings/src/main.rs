@@ -3251,7 +3251,9 @@ mod tests {
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
     };
-    use nickel_ui::{ActionKind, Application, SemanticAction, SemanticRole, SwitchState};
+    use nickel_ui::{
+        ActionKind, Application, HostBatch, SemanticAction, SemanticRole, SwitchState,
+    };
 
     use super::view::{codex_switch_state, remote_exposure_presentation};
     use super::{
@@ -5628,24 +5630,14 @@ mod tests {
             allow_resumption: false,
             full_debug: false,
         };
-        app.remote_control_runtime.pending_leases = vec![
-            RemotePendingLease {
-                pending_generation: 7,
-                client_id: "initial-client".into(),
-                client_label: "Initial client".into(),
-                request: initial_request.clone(),
-                resource_label: None,
-                changes: Default::default(),
-            },
-            RemotePendingLease {
-                pending_generation: 8,
-                client_id: "renewing-client".into(),
-                client_label: "Renewing client".into(),
-                request: renewal_request.clone(),
-                resource_label: None,
-                changes: Default::default(),
-            },
-        ];
+        app.remote_control_runtime.pending_leases = vec![RemotePendingLease {
+            pending_generation: 7,
+            client_id: "initial-client".into(),
+            client_label: "Initial client".into(),
+            request: initial_request.clone(),
+            resource_label: None,
+            changes: Default::default(),
+        }];
         app.remote_control_runtime.active_leases = vec![
             RemoteActiveLease {
                 lease_id: 41,
@@ -5678,12 +5670,6 @@ mod tests {
                 request: initial_request,
                 duration_seconds: Some(7200),
             },
-            SettingsMessage::ApproveRemoteLeaseDuration {
-                pending_generation: 8,
-                client_id: "renewing-client".into(),
-                request: renewal_request,
-                duration_seconds: Some(7200),
-            },
             SettingsMessage::ManageRemoteLease {
                 lease_id: 41,
                 action: RemoteLeaseAction::Pause,
@@ -5709,6 +5695,8 @@ mod tests {
                     "remote access target is too small: {:?}",
                     target.bounds
                 );
+                assert_eq!(target.role, Some(SemanticRole::Button));
+                assert!(target.interactive);
                 target.id
             })
             .collect::<Vec<_>>();
@@ -5727,6 +5715,82 @@ mod tests {
         assert!(
             remaining.is_empty(),
             "keyboard traversal did not reach remote access actions: {remaining:?}"
+        );
+
+        // Keep focus on an existing local action while a production runtime
+        // observation adds a renewal card. A renewal is ordinary page content,
+        // never a focus-taking prompt or transient surface.
+        let pause = host
+            .unique_semantic_target_for_message(&SettingsMessage::ManageRemoteLease {
+                lease_id: 41,
+                action: RemoteLeaseAction::Pause,
+            })
+            .unwrap()
+            .id;
+        for _ in 0..512 {
+            if host.inspect().keyboard_focus.as_ref() == Some(&pause) {
+                break;
+            }
+            host.handle_event(nickel_ui::UiEvent::FocusNext);
+        }
+        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&pause));
+        let focus_generation = host.inspect().keyboard_focus_generation;
+
+        let mut refreshed = host.application().remote_control_runtime.clone();
+        refreshed.pending_leases.push(RemotePendingLease {
+            pending_generation: 8,
+            client_id: "renewing-client".into(),
+            client_label: "Renewing client".into(),
+            request: renewal_request.clone(),
+            resource_label: None,
+            changes: Default::default(),
+        });
+        host.application_mut().apply_remote_control_observation(Ok(
+            nickel_session_protocol::ServerMessage::RemoteControl(refreshed),
+        ));
+        let refresh = host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        assert!(refresh.telemetry.rebuilt);
+        assert!(
+            refresh.telemetry.input_to_frame_us < 1_000_000,
+            "renewal refresh stalled Settings for {}us",
+            refresh.telemetry.input_to_frame_us
+        );
+        assert!(host.inspect().window_focused);
+        assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&pause));
+        assert_eq!(
+            host.inspect().keyboard_focus_generation,
+            focus_generation,
+            "a renewal observation stole or reset local keyboard focus"
+        );
+
+        let renewal = host
+            .unique_semantic_target_for_message(&SettingsMessage::ApproveRemoteLeaseDuration {
+                pending_generation: 8,
+                client_id: "renewing-client".into(),
+                request: renewal_request,
+                duration_seconds: Some(7200),
+            })
+            .expect("the refreshed renewal has one production semantic action");
+        assert_eq!(renewal.role, Some(SemanticRole::Button));
+        assert!(renewal.interactive);
+        assert!(
+            renewal.bounds.size.width >= 44.0 && renewal.bounds.size.height >= 44.0,
+            "renewal target is too small: {:?}",
+            renewal.bounds
+        );
+        for _ in 0..512 {
+            if host.inspect().keyboard_focus.as_ref() == Some(&renewal.id) {
+                break;
+            }
+            host.handle_event(nickel_ui::UiEvent::FocusNext);
+        }
+        assert_eq!(
+            host.inspect().keyboard_focus.as_ref(),
+            Some(&renewal.id),
+            "renewal action was not reachable through production keyboard traversal"
         );
     }
 
