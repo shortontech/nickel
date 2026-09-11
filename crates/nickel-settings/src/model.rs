@@ -152,6 +152,8 @@ impl Default for SettingsApp {
             permission_audit_evicted: 0,
             trace_audit: Vec::new(),
             trace_audit_evicted: 0,
+            operation_audit: Vec::new(),
+            operation_audit_evicted: 0,
             connection_audit: Vec::new(),
             connection_audit_evicted: 0,
         });

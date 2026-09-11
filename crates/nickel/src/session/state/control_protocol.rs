@@ -308,6 +308,8 @@ impl NickelSession {
             .collect();
         let (trace_events, trace_audit_evicted) =
             control.trace_audit().snapshot().unwrap_or_default();
+        let (operation_events, operation_audit_evicted) =
+            control.operation_audit().snapshot().unwrap_or_default();
         ServerMessage::RemoteControl(nickel_session_protocol::RemoteControlSnapshot {
             requested_enabled: status.requested_enabled,
             effective,
@@ -395,6 +397,22 @@ impl NickelSession {
                     .collect()
             },
             trace_audit_evicted,
+            operation_audit: operation_events
+                .into_iter()
+                .map(|event| nickel_session_protocol::RemoteOperationAuditEvent {
+                    generation: event.generation,
+                    observed_at_us: event
+                        .observed_at
+                        .saturating_duration_since(self.start_time)
+                        .as_micros()
+                        .min(u128::from(u64::MAX)) as u64,
+                    method: event.method.to_owned(),
+                    matched_lease_id: event.matched_lease_id,
+                    duration_us: event.duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                    outcome: event.outcome,
+                })
+                .collect(),
+            operation_audit_evicted,
 
             active_leases: control
                 .leases()

@@ -1379,6 +1379,41 @@ impl SettingsApp {
                 ))
             },
         );
+        let operations = &self.remote_control_runtime.operation_audit;
+        let operation_summary = if operations.is_empty() {
+            "No remote operations in this session.".to_owned()
+        } else {
+            format!(
+                "Showing the latest {} of {} retained operations. {} older operations discarded.",
+                operations.len().min(16),
+                operations.len(),
+                self.remote_control_runtime.operation_audit_evicted
+            )
+        };
+        let operation_card = operations.iter().rev().take(16).fold(
+            SettingsCard::titled(theme, "Recent remote operations", operation_summary),
+            |card, event| {
+                use nickel_session_protocol::RemoteOperationOutcome as Outcome;
+                let outcome = match event.outcome {
+                    Outcome::Success => "Succeeded",
+                    Outcome::Error => "Failed",
+                    Outcome::Cancelled => "Cancelled",
+                };
+                let lease = event.matched_lease_id.map_or_else(
+                    || "No matching lease".to_owned(),
+                    |lease_id| format!("Matched lease {lease_id}"),
+                );
+                card.child(SettingsRow::new(
+                    theme,
+                    format!("{} · {outcome}", event.method),
+                    format!(
+                        "{lease} · {:.3}s duration · {}s after session start",
+                        event.duration_us as f64 / 1_000_000.0,
+                        event.observed_at_us / 1_000_000
+                    ),
+                ))
+            },
+        );
         Column::new()
             .fill_width()
             .grow(1.0)
@@ -1395,6 +1430,7 @@ impl SettingsApp {
             .child(audit_card.shrink(0.0))
             .child(connection_card.shrink(0.0))
             .child(trace_card.shrink(0.0))
+            .child(operation_card.shrink(0.0))
     }
 
     pub(super) fn default_apps_components(&self) -> impl nickel_ui::Component<SettingsMessage> {

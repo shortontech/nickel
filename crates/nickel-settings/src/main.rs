@@ -5403,6 +5403,50 @@ mod tests {
     }
 
     #[test]
+    fn trusted_settings_show_bounded_payload_free_operation_audit_fields() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_runtime.operation_audit = vec![
+            nickel_session_protocol::RemoteOperationAuditEvent {
+                generation: 7,
+                observed_at_us: 9_000_000,
+                method: "pointer_action".into(),
+                matched_lease_id: Some(42),
+                duration_us: 12_500,
+                outcome: nickel_session_protocol::RemoteOperationOutcome::Success,
+            },
+            nickel_session_protocol::RemoteOperationAuditEvent {
+                generation: 8,
+                observed_at_us: 10_000_000,
+                method: "capture_window".into(),
+                matched_lease_id: None,
+                duration_us: 3_000,
+                outcome: nickel_session_protocol::RemoteOperationOutcome::Error,
+            },
+        ];
+        app.remote_control_runtime.operation_audit_evicted = 3;
+
+        let tree = app.build_ui(1100.0, 1200.0);
+        let labels = tree
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        for expected in [
+            "Recent remote operations",
+            "Showing the latest 2 of 2 retained operations. 3 older operations discarded.",
+            "pointer_action · Succeeded",
+            "Matched lease 42 · 0.013s duration · 9s after session start",
+            "capture_window · Failed",
+            "No matching lease · 0.003s duration · 10s after session start",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing operation audit field {expected:?}"
+            );
+        }
+    }
+
+    #[test]
     fn remote_exposure_presentation_distinguishes_local_remote_and_inactive_listeners() {
         let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
         app.remote_control_runtime.effective =

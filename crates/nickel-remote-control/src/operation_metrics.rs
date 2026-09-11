@@ -305,6 +305,7 @@ pub(crate) fn current_authorization(
 pub(crate) struct OperationMetrics {
     started: Instant,
     samples: Mutex<Samples>,
+    audit: crate::operation_audit::OperationAudit,
 }
 
 impl Default for OperationMetrics {
@@ -312,11 +313,16 @@ impl Default for OperationMetrics {
         Self {
             started: Instant::now(),
             samples: Mutex::new(Samples::default()),
+            audit: crate::operation_audit::OperationAudit::default(),
         }
     }
 }
 
 impl OperationMetrics {
+    pub(crate) fn audit(&self) -> &crate::operation_audit::OperationAudit {
+        &self.audit
+    }
+
     pub(crate) async fn measure<T, E>(
         self: &Arc<Self>,
         method: Method,
@@ -472,6 +478,12 @@ impl Drop for Measurement {
             samples.recent_completions.pop_front();
             samples.evicted_completions = samples.evicted_completions.saturating_add(1);
         }
+        let outcome = match self.outcome {
+            0 => OperationOutcome::Success,
+            1 => OperationOutcome::Error,
+            _ => OperationOutcome::Cancelled,
+        };
+        let authorization = self.authorization.get().copied();
         let completion = Completion {
             generation: samples.generation,
             collector_uptime_us: self
@@ -481,15 +493,22 @@ impl Drop for Measurement {
                 .as_micros()
                 .min(u64::MAX as u128) as u64,
             method: self.method,
-            outcome: match self.outcome {
-                0 => OperationOutcome::Success,
-                1 => OperationOutcome::Error,
-                _ => OperationOutcome::Cancelled,
-            },
+            outcome,
             duration_us: duration.as_micros().min(u64::MAX as u128) as u64,
-            authorization: self.authorization.get().copied(),
+            authorization,
         };
         samples.recent_completions.push_back(completion);
+        drop(samples);
+        self.metrics.audit.record(
+            self.method.label(),
+            authorization.map(|authorization| authorization.lease_id),
+            duration,
+            match outcome {
+                OperationOutcome::Success => crate::operation_audit::Outcome::Success,
+                OperationOutcome::Error => crate::operation_audit::Outcome::Error,
+                OperationOutcome::Cancelled => crate::operation_audit::Outcome::Cancelled,
+            },
+        );
     }
 }
 
@@ -628,6 +647,14 @@ mod tests {
                 .find(|record| record.method == method)
                 .unwrap();
             assert_eq!(record.authorization, Some(correlation(id)));
+        }
+        let (audit, evicted) = metrics.audit().snapshot().unwrap();
+        assert_eq!(evicted, 0);
+        assert_eq!(audit.len(), 2);
+        for (method, lease_id) in [("pointer_action", 11), ("keyboard_action", 22)] {
+            let event = audit.iter().find(|event| event.method == method).unwrap();
+            assert_eq!(event.matched_lease_id, Some(lease_id));
+            assert_eq!(event.outcome, crate::operation_audit::Outcome::Success);
         }
         assert!(current_authorization(&metrics).is_none());
     }
@@ -850,6 +877,25 @@ mod tests {
         assert!(
             !serialized.contains("typed-secret") && !serialized.contains("credential-and-path")
         );
+        assert!(
+            !serialized.contains("operation_audit"),
+            "the trusted local audit must not enter MCP diagnostics"
+        );
+        let (audit, evicted) = metrics.audit().snapshot().unwrap();
+        assert_eq!(evicted, 0);
+        assert_eq!(audit.len(), 3);
+        for (event, (method, outcome)) in audit.iter().zip([
+            ("keyboard_action", crate::operation_audit::Outcome::Success),
+            ("capture_window", crate::operation_audit::Outcome::Error),
+            (
+                "diagnostic_snapshot",
+                crate::operation_audit::Outcome::Cancelled,
+            ),
+        ]) {
+            assert_eq!(event.method, method);
+            assert_eq!(event.outcome, outcome);
+            assert_eq!(event.matched_lease_id, None);
+        }
         assert_eq!(
             text.lines()
                 .filter(|line| line.starts_with("nickel_mcp_requests_total{"))

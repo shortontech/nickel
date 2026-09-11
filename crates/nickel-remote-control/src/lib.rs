@@ -40,6 +40,7 @@ pub mod leases;
 pub mod listener;
 pub mod local_cues;
 pub mod native_semantics;
+pub mod operation_audit;
 mod operation_metrics;
 pub mod peripheral_controls;
 pub mod pointer;
@@ -1181,6 +1182,12 @@ impl ControlPlane {
 
     pub fn trace_audit(&self) -> &trace_audit::TraceAudit {
         &self.trace_audit
+    }
+
+    /// Trusted local Settings history. MCP diagnostics deliberately have no corresponding permit
+    /// accessor, so an agent cannot inspect this audit through its lease.
+    pub fn operation_audit(&self) -> &operation_audit::OperationAudit {
+        self.operation_metrics.audit()
     }
     /// Establish a session identity with no desktop authority. The random credential is issued
     /// once over the listener's protected transport and is distinct from any lease approval.

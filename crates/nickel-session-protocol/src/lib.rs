@@ -984,6 +984,10 @@ pub struct RemoteControlSnapshot {
     #[serde(default)]
     pub trace_audit_evicted: u64,
     #[serde(default)]
+    pub operation_audit: Vec<RemoteOperationAuditEvent>,
+    #[serde(default)]
+    pub operation_audit_evicted: u64,
+    #[serde(default)]
     pub connection_audit: Vec<RemoteConnectionAuditEvent>,
     #[serde(default)]
     pub connection_audit_evicted: u64,
@@ -1026,6 +1030,28 @@ pub struct RemoteTraceAuditEvent {
     pub transition: RemoteTraceTransition,
     pub duration_limit_seconds: u16,
     pub elapsed_us: u64,
+}
+
+/// Fixed outcomes for the trusted local operation history.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteOperationOutcome {
+    Success,
+    Error,
+    Cancelled,
+}
+
+/// Trusted local Settings projection, excluded from MCP tools and diagnostic snapshots.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteOperationAuditEvent {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    /// Fixed server-owned method name, never supplied by a caller.
+    pub method: String,
+    /// First lease that authorized the operation. None means authorization never succeeded.
+    pub matched_lease_id: Option<u64>,
+    pub duration_us: u64,
+    pub outcome: RemoteOperationOutcome,
 }
 
 /// Fixed permission outcomes; no caller-controlled labels or request payloads.
