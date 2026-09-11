@@ -1458,6 +1458,15 @@ remove and selection outcomes as the resulting active workspace and workspace
 count. Redundant notifications coalesce, and the event carries no window
 membership, title, client identity or input payload.
 
+Launcher and panel semantic pin toggles and reorder actions now stage on the
+bounded favorites worker and commit through the existing preferences owner. The
+commit retains the originating surface/output permit, current installed catalog,
+file revision, shared-input reservation and cancellation boundary, then applies
+only the accepted persisted preferences to the runtime launcher. An owned nested
+X11 fixture invoked the advertised launcher unpin action through MCP, observed a
+confirmed persisted/runtime change, and proved that private recent history was
+preserved; its existing stale-write, scope and revocation matrix also passed.
+
 Ordinary shell presentation insertions and retirements now enter the same
 bounded event stream with a generation-bearing surface identity, fixed role and
 visibility bit. Lock, trusted-control and unsupported Codex roles never enter

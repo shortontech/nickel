@@ -86,6 +86,68 @@ pub(super) struct PreparedChange {
     prior: PreparedRead,
     staged: PreparedLauncherPreferences,
 }
+
+pub(super) enum SemanticFavoriteAction {
+    Toggle(String),
+    MoveLeft(String),
+    MoveRight(String),
+}
+
+pub(super) struct PreparedSemanticFavorite {
+    prior: PreparedRead,
+    staged: PreparedLauncherPreferences,
+}
+
+impl PreparedSemanticFavorite {
+    pub(super) fn prepare(action: SemanticFavoriteAction) -> Result<Self, String> {
+        let prior = PreparedRead::prepare()?;
+        let (visible, _) = projection(&prior.preferences, &prior.catalog);
+        let change = match action {
+            SemanticFavoriteAction::Toggle(application_id) => {
+                let app = prior
+                    .catalog
+                    .iter()
+                    .find(|app| app.id() == application_id)
+                    .ok_or("installed application is unavailable")?;
+                if visible.iter().any(|id| id == app.id()) {
+                    Change::Remove { application_id }
+                } else {
+                    Change::Add { application_id }
+                }
+            }
+            SemanticFavoriteAction::MoveLeft(application_id) => Change::Reorder {
+                application_ids: moved_favorite(visible, &application_id, -1)?,
+            },
+            SemanticFavoriteAction::MoveRight(application_id) => Change::Reorder {
+                application_ids: moved_favorite(visible, &application_id, 1)?,
+            },
+        };
+        let requested = changed_preferences(&prior.preferences, &prior.catalog, &change)?;
+        let staged =
+            PreparedLauncherPreferences::prepare(prior.path.clone(), &prior.preferences, requested)
+                .map_err(|_| STALE)?;
+        prior.current()?;
+        Ok(Self { prior, staged })
+    }
+}
+
+fn moved_favorite(
+    mut favorites: Vec<String>,
+    application_id: &str,
+    direction: isize,
+) -> Result<Vec<String>, String> {
+    let index = favorites
+        .iter()
+        .position(|id| id == application_id)
+        .ok_or("favorite is unavailable")?;
+    let destination = index
+        .saturating_add_signed(direction)
+        .min(favorites.len() - 1);
+    if destination != index {
+        favorites.swap(index, destination);
+    }
+    Ok(favorites)
+}
 impl PreparedChange {
     pub fn prepare(transaction: &Transaction) -> Result<Self, String> {
         if !transaction.valid() {
@@ -211,6 +273,75 @@ impl FavoritesState {
     }
 }
 impl NickelSession {
+    pub(super) fn remote_commit_semantic_favorite(
+        &mut self,
+        permit: &DesktopPermit,
+        origin: &nickel_remote_control::leases::ResourceId,
+        output: &nickel_remote_control::leases::ResourceId,
+        prepared: PreparedSemanticFavorite,
+    ) -> Result<(), String> {
+        let controller_busy = self.poll_remote_controller_ownership();
+        let evidence = nickel_remote_control::leases::ResourceEvidence {
+            window: None,
+            surface: Some(origin),
+            output: Some(output),
+            verified_application: None,
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        let prior = prepared.prior;
+        let mut committed = None;
+        let authorized = permit.with_input_boundary(&evidence, |boundary| {
+            if controller_busy
+                || self.remote_held_keyboard.is_some()
+                || self.remote_held_pointer.is_some()
+                || !self.active_touch_slots.is_empty()
+                || self.internal_ui.pointer_interaction_active()
+                || self.internal_ui.desktop_keyboard_interaction_active()
+                || self.seat.get_keyboard().is_some_and(|keyboard| {
+                    !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                })
+                || self
+                    .seat
+                    .get_pointer()
+                    .is_some_and(|pointer| pointer.is_grabbed())
+                || self.internal_shell.as_ref().is_some_and(|shell| {
+                    shell.pointer_interaction_active() || shell.launcher_preferences_busy()
+                })
+            {
+                return Err("shared input or local preferences are busy".into());
+            }
+            if self.internal_shell.is_none() {
+                return Err(UNAVAILABLE.into());
+            }
+            prior.current()?;
+            committed = Some(
+                prepared
+                    .staged
+                    .commit(|| {
+                        permit
+                            .check_commit_boundary(boundary)
+                            .map_err(std::io::Error::other)
+                    })
+                    .map_err(|_| UNAVAILABLE)?,
+            );
+            self.remote_launcher_favorites.observed = None;
+            Ok(())
+        });
+        let Some(preferences) = committed else {
+            authorized?;
+            return Err(UNAVAILABLE.into());
+        };
+        let changed = self
+            .internal_shell
+            .as_mut()
+            .ok_or(UNAVAILABLE)?
+            .apply_committed_launcher_preferences(preferences)?;
+        self.sync_internal_shell_changes(Some(&changed));
+        self.schedule_internal_shell_deadline();
+        authorized
+    }
+
     pub(super) fn remote_read_launcher_favorites(
         &mut self,
         permit: &DesktopPermit,
@@ -389,6 +520,20 @@ mod tests {
             projection(&preferences, &catalog),
             (vec!["one.desktop".into()], 1)
         );
+    }
+
+    #[test]
+    fn semantic_pin_moves_are_bounded_and_keep_exact_membership() {
+        let favorites = vec!["one.desktop".into(), "two.desktop".into()];
+        assert_eq!(
+            moved_favorite(favorites.clone(), "two.desktop", -1).unwrap(),
+            ["two.desktop", "one.desktop"]
+        );
+        assert_eq!(
+            moved_favorite(favorites.clone(), "one.desktop", -1).unwrap(),
+            favorites
+        );
+        assert!(moved_favorite(vec!["one.desktop".into()], "missing.desktop", 1).is_err());
     }
     #[test]
     fn favorites_generation_rejects_same_content_replacement_and_projection_hides_history() {

@@ -729,6 +729,29 @@ impl NickelSession {
             let changed = outcome.host.changed;
             let mut steps = Vec::new();
             for effect in outcome.effects {
+                use super::remote_launcher_favorites::SemanticFavoriteAction;
+                let favorite = match &effect {
+                    crate::live_shell::remote_semantics::RemoteShellEffect::Launcher(
+                        crate::launcher_view::LauncherShellEffect::TogglePin(application),
+                    )
+                    | crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                        crate::live_shell::PanelAction::ToggleTaskPin(application),
+                        _,
+                    ) => Some(SemanticFavoriteAction::Toggle(application.clone())),
+                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                        crate::live_shell::PanelAction::MoveTaskPinLeft(application),
+                        _,
+                    ) => Some(SemanticFavoriteAction::MoveLeft(application.clone())),
+                    crate::live_shell::remote_semantics::RemoteShellEffect::Panel(
+                        crate::live_shell::PanelAction::MoveTaskPinRight(application),
+                        _,
+                    ) => Some(SemanticFavoriteAction::MoveRight(application.clone())),
+                    _ => None,
+                };
+                if let Some(action) = favorite {
+                    steps.push(ShellActionStep::Favorite(action));
+                    continue;
+                }
                 let (_, current_output) = self.surface_capture_evidence(&identity)?;
                 let resource = ResourceEvidence {
                     window: None,

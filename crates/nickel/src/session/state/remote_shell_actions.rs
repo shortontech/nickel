@@ -16,6 +16,7 @@ pub(super) enum ShellActionStep {
         application: crate::model::Application,
         catalog_generation: u64,
     },
+    Favorite(super::remote_launcher_favorites::SemanticFavoriteAction),
 }
 
 pub(super) struct ShellActionPlan {
@@ -29,6 +30,7 @@ pub(super) struct ShellActionPlan {
 pub(super) enum PreparedShellStep {
     Command(crate::platform::ShellCommand),
     Launch(Box<remote_launch::PreparedLaunch>),
+    Favorite(Box<super::remote_launcher_favorites::PreparedSemanticFavorite>),
     DeviceResult {
         registration: u64,
         outcome: crate::platform::GuardedControlOutcome,
@@ -92,6 +94,17 @@ impl RemoteDesktopBridge {
                         &plan.output,
                     ) {
                         Ok(prepared) => PreparedShellStep::Launch(Box::new(prepared)),
+                        Err(error) if !committed => return Err(error),
+                        Err(_) => {
+                            return Ok(incomplete(changed, Completion::Unavailable, committed));
+                        }
+                    }
+                }
+                ShellActionStep::Favorite(action) => {
+                    match super::remote_launcher_favorites::PreparedSemanticFavorite::prepare(
+                        action,
+                    ) {
+                        Ok(prepared) => PreparedShellStep::Favorite(Box::new(prepared)),
                         Err(error) if !committed => return Err(error),
                         Err(_) => {
                             return Ok(incomplete(changed, Completion::Unavailable, committed));
@@ -250,6 +263,15 @@ impl NickelSession {
                 .map(|completion| {
                     (
                         nickel_remote_control::desktop_events::ProductionEffectKind::ApplicationLaunch,
+                        completion,
+                    )
+                }),
+            PreparedShellStep::Favorite(prepared) => self
+                .remote_commit_semantic_favorite(permit, origin, output, *prepared)
+                .map(|_| Completion::Confirmed)
+                .map(|completion| {
+                    (
+                        nickel_remote_control::desktop_events::ProductionEffectKind::SettingsTransaction,
                         completion,
                     )
                 }),

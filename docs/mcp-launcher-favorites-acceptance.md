@@ -25,6 +25,9 @@ but no application was launched. Real MCP calls verified:
   while responses disclose neither value.
 - Production launcher semantic nodes show the two committed fixture favorites
   and exclude the removed favorite.
+- A surface-scoped semantic action opens the production launcher item menu and
+  commits its advertised unpin action through the guarded favorites owner,
+  preserving the private recent-history record.
 - Ordinary full-session and narrow surface leases cannot access the domain.
 - External file replacement invalidates an earlier observed generation.
 - Revocation rejects subsequent reads and writes without changing preferences.

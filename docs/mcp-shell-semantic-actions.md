@@ -36,9 +36,11 @@ original guarded owner boundary, not left in an unguarded later poll.
 Filesystem access, file transfer, and remote clipboard transfer remain excluded
 by spec0230; generic GUI callbacks do not provide a bypass for those operations.
 Arbitrary command execution is not granted by a desktop lease; Run submission
-remains unavailable. Remaining in-scope pin persistence, tray actions,
-projection changes, and other native callbacks need guarded completion paths
-before admission. Their
+remains unavailable. Launcher and panel pin toggles and pin reordering commit
+through the bounded favorites owner under the original surface/output permit,
+catalog generation, file revision, shared-input reservation and final cancellation
+check. Remaining in-scope tray actions, projection changes, and other native
+callbacks need guarded completion paths before admission. Their
 current unsupported errors are interim; this slice does not complete the full
 semantic-action requirements of spec0230. This shell tool does not provide
 external application accessibility; native Windows shell mutation remains unavailable.
