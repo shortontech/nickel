@@ -2886,6 +2886,77 @@ mod tests {
         );
     }
 
+    fn schema_fixture(schema: &serde_json::Value, root: &serde_json::Value) -> serde_json::Value {
+        if let Some(reference) = schema.get("$ref").and_then(serde_json::Value::as_str) {
+            return schema_fixture(
+                root.pointer(reference.strip_prefix('#').expect("local schema reference"))
+                    .expect("schema reference resolves"),
+                root,
+            );
+        }
+        if let Some(value) = schema.get("const") {
+            return value.clone();
+        }
+        if let Some(value) = schema
+            .get("enum")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|values| values.iter().find(|value| !value.is_null()))
+        {
+            return value.clone();
+        }
+        for keyword in ["oneOf", "anyOf"] {
+            if let Some(options) = schema.get(keyword).and_then(serde_json::Value::as_array) {
+                let option = options
+                    .iter()
+                    .find(|option| {
+                        option.get("type").and_then(serde_json::Value::as_str) != Some("null")
+                    })
+                    .expect("schema union has a concrete fixture");
+                return schema_fixture(option, root);
+            }
+        }
+        match schema.get("type").and_then(serde_json::Value::as_str) {
+            Some("object") | None if schema.get("properties").is_some() => {
+                let properties = schema["properties"].as_object().expect("object properties");
+                let required = schema
+                    .get("required")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|name| name.as_str().expect("required property name"));
+                serde_json::Value::Object(
+                    required
+                        .map(|name| (name.to_owned(), schema_fixture(&properties[name], root)))
+                        .collect(),
+                )
+            }
+            Some("array") => serde_json::Value::Array(Vec::new()),
+            Some("integer") => serde_json::json!(
+                schema
+                    .get("minimum")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(1)
+                    .max(1)
+            ),
+            Some("number") => serde_json::json!(
+                schema
+                    .get("minimum")
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(1.0)
+                    .max(1.0)
+            ),
+            Some("boolean") => serde_json::Value::Bool(false),
+            Some("string") => serde_json::Value::String("fixture".into()),
+            Some("null") => serde_json::Value::Null,
+            kind => panic!("unsupported generated schema kind {kind:?}: {schema}"),
+        }
+    }
+
+    fn tool_fixture(tool: &rmcp::model::Tool) -> serde_json::Value {
+        let root = serde_json::Value::Object(tool.input_schema.as_ref().clone());
+        schema_fixture(&root, &root)
+    }
+
     #[test]
     fn capture_output_contract_requires_exact_typed_identity_fields() {
         let request: CaptureOutputRequest = serde_json::from_value(serde_json::json!({
@@ -3231,6 +3302,115 @@ mod tests {
             );
             result.unwrap();
         });
+    }
+
+    #[test]
+    fn every_published_desktop_tool_requires_a_lease_before_dispatch() {
+        let _port = PORT_TEST.lock().unwrap_or_else(|error| error.into_inner());
+        let control = Arc::new(Mutex::new(ControlPlane::default()));
+        control.lock().unwrap().set_enabled(true);
+        let handler = McpHandler::new(control.clone(), Arc::new(EmptyDesktop));
+        let fixtures = handler
+            .tool_router
+            .list_all()
+            .into_iter()
+            .map(|tool| (tool.name.to_string(), tool_fixture(&tool)))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let capability_free = [
+            "client_connection",
+            "request_control_lease",
+            "list_control_leases",
+            "get_control_status",
+        ];
+        for name in capability_free {
+            assert!(fixtures.contains_key(name), "missing public tool {name}");
+        }
+        assert_eq!(
+            fixtures.len() - capability_free.len(),
+            42,
+            "a newly published tool must be explicitly classified"
+        );
+
+        let server = RemoteControlServer::start(control.clone(), Arc::new(EmptyDesktop)).unwrap();
+        let identities = ["prelease-matrix-a", "prelease-matrix-b"].map(|label| {
+            let identity = response_json(&post_json(
+                "/clients/connect",
+                &serde_json::json!({"label": label}).to_string(),
+            ));
+            let client = identity["client_id"].as_str().unwrap().to_owned();
+            let token = identity["token"].as_str().unwrap().to_owned();
+            let mut state = control.lock().unwrap();
+            let now = std::time::Instant::now();
+            let watch = state
+                .reserve_connection_watch(&client, &token, now)
+                .unwrap();
+            state
+                .activate_connection_watch(&client, &token, watch, false, now)
+                .unwrap();
+            (client, token)
+        });
+        let call = |client: &str, token: &str, name: &str, arguments: serde_json::Value| {
+            let body = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":name,"arguments":arguments}}).to_string();
+            http(&format!(
+                "POST /mcp HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nX-Nickel-Client: {client}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            ))
+        };
+
+        let status = call(
+            &identities[0].0,
+            &identities[0].1,
+            "get_control_status",
+            fixtures["get_control_status"].clone(),
+        );
+        assert!(status.contains("emergency_stop"), "{status}");
+        for (index, (name, arguments)) in fixtures.iter().enumerate() {
+            if capability_free.contains(&name.as_str()) {
+                continue;
+            }
+            let identity = &identities[index % identities.len()];
+            let response = call(&identity.0, &identity.1, name, arguments.clone());
+            assert!(
+                response.contains("isError"),
+                "pre-lease {name} succeeded: {response}"
+            );
+            assert!(
+                response.contains(
+                    "lease is missing, expired, suspended, or outside the resource boundary"
+                ),
+                "pre-lease {name} did not reach the production lease gate with {arguments}: {response}"
+            );
+        }
+        for name in [
+            "list_control_leases",
+            "request_control_lease",
+            "client_connection",
+        ] {
+            let response = call(
+                &identities[0].0,
+                &identities[0].1,
+                name,
+                fixtures[name].clone(),
+            );
+            assert!(
+                !response.contains("capability is invalid or revoked"),
+                "capability-free control-plane tool {name} demanded a lease: {response}"
+            );
+        }
+        let metrics = http("GET /metrics HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        assert!(metrics.starts_with("HTTP/1.1 200"), "{metrics}");
+        assert!(metrics.contains("nickel_mcp_active_leases 0"));
+        for secret in [
+            identities[0].0.as_str(),
+            identities[0].1.as_str(),
+            identities[1].0.as_str(),
+            identities[1].1.as_str(),
+            "prelease-matrix-a",
+            "fixture",
+        ] {
+            assert!(!metrics.contains(secret));
+        }
+        server.stop();
     }
 
     #[test]
