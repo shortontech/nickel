@@ -1359,6 +1359,7 @@ fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction
 }
 
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
+    crate::windows_remote_control::observe_physical_pointer(event);
     let point = POINT {
         x: event.x,
         y: event.y,

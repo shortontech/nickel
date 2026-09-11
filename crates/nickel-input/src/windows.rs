@@ -484,6 +484,9 @@ mod native_runtime {
         pub y: i32,
         pub time: u32,
         pub super_physically_held: bool,
+        /// WH_MOUSE_LL attribution. Nickel-generated events must never count as
+        /// local input or satisfy trusted emergency/control arbitration.
+        pub injected: bool,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -618,6 +621,7 @@ mod native_runtime {
             y: native.pt.y,
             time: native.time,
             super_physically_held,
+            injected: native.flags & 1 != 0,
         };
         if with_callbacks(|callbacks| (callbacks.pointer)(event)) == Some(HookDisposition::Suppress)
         {

@@ -231,6 +231,13 @@ impl LeaseAuthority {
         }
     }
 
+    /// Cancel whichever remote gesture owns shared input, without changing its
+    /// lease. The platform owner must release native state before or alongside
+    /// this call; the retained `HeldInput` immediately fails its next check.
+    pub fn cancel_input(&mut self) -> bool {
+        self.input_owner.take().is_some()
+    }
+
     pub(crate) fn owns_input(&self, lease: u64, operation: u64) -> bool {
         self.input_owner == Some((lease, operation))
     }
@@ -760,6 +767,9 @@ mod tests {
         );
         assert_eq!(authority.expire(deadline), vec![a]);
         authority.reserve_input(b, 11).unwrap();
+        assert!(authority.cancel_input());
+        assert!(!authority.cancel_input());
+        authority.reserve_input(b, 12).unwrap();
         authority.clear();
         assert!(authority.authorize(b, "b", &evidence, now, false).is_err());
     }

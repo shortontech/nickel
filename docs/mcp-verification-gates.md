@@ -26,7 +26,7 @@ binding; this checklist does not replace them.
 | 9 Request UX and rate behavior | Coalescing/generation, cooldown/blocking/renewal policy and bounded admission tests. | Realistic concurrent native request load with measured interaction responsiveness and full local UX traversal. |
 | 10 Native scopes and assistive workflow | Isolated nested Linux fixtures provide partial evidence. | Each scope with actual local assistive input on Linux and Windows; physical backend acceptance. |
 | 11 Movement and launch inheritance | Linux output-placement native tests; window/workspace owner paths. | Complete movement matrix and different-app denial with already-applicable lease success; Windows native equivalent. |
-| 12 Overlapping input owners | Production arbitration and disconnect cleanup tests; watch native fixture releases held input. | Native overlapping clients across all key/drag/focus/cancel combinations and preservation of physical local input on both platforms. |
+| 12 Overlapping input owners | Production arbitration and disconnect cleanup tests; watch native fixture releases held input. Windows low-level hooks now exclude injected events from a payload-free physical-input epoch, and the owner cancels shared remote-input ownership before queued work when that epoch changes. | Complete Windows native held-state release, then exercise overlapping clients across all key/drag/focus/cancel combinations and preservation of physical local input on both platforms. |
 
 ## Spec 0231
 

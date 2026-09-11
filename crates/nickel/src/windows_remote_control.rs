@@ -17,6 +17,7 @@ use std::{
 };
 
 static STOP_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static LOCAL_INPUT_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 static EMERGENCY: std::sync::OnceLock<nickel_remote_control::EmergencyStopHandle> =
     std::sync::OnceLock::new();
 static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
@@ -24,12 +25,40 @@ static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
 
 pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
+    if !event.injected {
+        advance_local_input_epoch();
+    }
     if CHORD.observe(event) {
         if let Some(handle) = EMERGENCY.get() {
             handle.trigger();
         }
         STOP_REQUESTED.store(true, Ordering::Release);
     }
+}
+
+pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
+    if !event.injected {
+        advance_local_input_epoch();
+    }
+}
+
+fn advance_local_input_epoch() {
+    use std::sync::atomic::Ordering;
+    if LOCAL_INPUT_EPOCH
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |epoch| {
+            epoch.checked_add(1)
+        })
+        .is_err()
+    {
+        if let Some(handle) = EMERGENCY.get() {
+            handle.trigger();
+        }
+        STOP_REQUESTED.store(true, Ordering::Release);
+    }
+}
+
+fn local_input_epoch() -> u64 {
+    LOCAL_INPUT_EPOCH.load(std::sync::atomic::Ordering::Acquire)
 }
 
 const NOT_READY: &str = "Windows trusted indication and native control are not available yet";
@@ -333,6 +362,7 @@ pub(crate) struct WindowsRemoteControl {
     authority: Arc<WindowsDesktopAuthority>,
     desktop_session: Option<u32>,
     desktop_unlocked: bool,
+    local_input_epoch: u64,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
@@ -407,6 +437,7 @@ impl WindowsRemoteControl {
             authority,
             desktop_session,
             desktop_unlocked,
+            local_input_epoch: local_input_epoch(),
             start_time: started,
             last_stop: None,
         };
@@ -444,6 +475,7 @@ impl WindowsRemoteControl {
     }
     pub(crate) fn poll(&mut self) {
         self.reconcile_desktop_authority();
+        self.reconcile_local_input();
         // Service transport loss before ordinary requests, even if their queue is full.
         if self.authority.cleanup_wake.take_wake_failure() {
             tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
@@ -517,6 +549,22 @@ impl WindowsRemoteControl {
         if let Ok(mut control) = control.lock() {
             self.applications.poll(&mut control);
             self.local_cues.update(control.leases(), Instant::now());
+        }
+    }
+    fn reconcile_local_input(&mut self) {
+        let observed = local_input_epoch();
+        self.reconcile_local_input_observation(observed);
+    }
+    fn reconcile_local_input_observation(&mut self, observed: u64) {
+        if observed == self.local_input_epoch {
+            return;
+        }
+        self.local_input_epoch = observed;
+        if let Ok(mut control) = self.remote_control.control().lock() {
+            // Native release is added with Windows held-input dispatch. Clear
+            // shared ownership first so no continuation can blend with this
+            // newly observed physical key or pointer event.
+            control.leases_mut().cancel_input();
         }
     }
     fn reconcile_desktop_authority(&mut self) {
@@ -1396,6 +1444,7 @@ mod tests {
             }),
             desktop_session: None,
             desktop_unlocked: false,
+            local_input_epoch: local_input_epoch(),
             start_time: Instant::now(),
             last_stop: None,
         }
@@ -1506,6 +1555,52 @@ mod tests {
         assert!(control.lease_requests().pending().next().is_none());
         assert!(!control.has_ready_connection(&client.client_id, Instant::now()));
         assert!(control.leases().iter().next().is_none());
+    }
+    #[test]
+    fn physical_input_epoch_cancels_shared_input_without_revoking_lease() {
+        let mut owner = owner();
+        let control = owner.remote_control.control();
+        let lease = {
+            let mut control = control.lock().unwrap();
+            control.set_enabled(true);
+            let client = control.connect_identity("Windows local collision").unwrap();
+            let now = Instant::now();
+            let watch = control
+                .reserve_connection_watch(&client.client_id, &client.token, now)
+                .unwrap();
+            control
+                .activate_connection_watch(&client.client_id, &client.token, watch, false, now)
+                .unwrap();
+            let request = nickel_remote_control::lease_requests::LeaseRequest {
+                renewal: None,
+                scope: nickel_remote_control::leases::ResourceScope::FullSession,
+                duration: Some(Duration::from_secs(1200)),
+                allow_resumption: false,
+                full_debug: false,
+            };
+            control
+                .request_lease(
+                    &client.client_id,
+                    &client.token,
+                    request.clone(),
+                    now,
+                )
+                .unwrap();
+            let generation = control
+                .lease_requests()
+                .pending_generation(&client.client_id)
+                .unwrap();
+            let lease = control
+                .approve_lease_local(&client.client_id, &request, generation, now)
+                .unwrap();
+            control.leases_mut().reserve_input(lease, 7).unwrap();
+            lease
+        };
+        let next = owner.local_input_epoch.checked_add(1).unwrap();
+        owner.reconcile_local_input_observation(next);
+        let mut control = control.lock().unwrap();
+        assert!(control.leases().iter().any(|active| active.id == lease));
+        assert!(control.leases_mut().reserve_input(lease, 8).is_ok());
     }
     #[test]
     fn expired_settings_request_cannot_change_owner_generation() {
