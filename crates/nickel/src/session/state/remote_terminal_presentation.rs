@@ -254,6 +254,116 @@ impl NickelSession {
     }
 }
 
+impl NickelSession {
+    pub(super) fn remote_read_terminal_launch_policy(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::remote_terminal_launch_policy::PreparedRead,
+    ) -> Result<nickel_remote_control::terminal_launch_policy::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current(std::time::Instant::now())?;
+        let protected = self.locked
+            || self.shell_recovery_visible()
+            || self
+                .internal_ui
+                .focused()
+                .is_some_and(|surface| self.internal_ui.remote_access_protected(surface));
+        permit.with_debug(protected, || {
+            self.remote_terminal_launch_policy.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            )
+        })
+    }
+
+    pub(super) fn remote_change_terminal_launch_policy(
+        &mut self,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::terminal_launch_policy::Transaction,
+        prepared: crate::remote_terminal_launch_policy::PreparedChange,
+    ) -> Result<nickel_remote_control::terminal_launch_policy::TransactionOutcome, String> {
+        let controller_busy = self.poll_remote_controller_ownership();
+        let protected = self.locked
+            || self.shell_recovery_visible()
+            || self
+                .internal_ui
+                .focused()
+                .is_some_and(|surface| self.internal_ui.remote_access_protected(surface));
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if controller_busy
+                || self.remote_held_keyboard.is_some()
+                || self.remote_held_pointer.is_some()
+                || !self.active_touch_slots.is_empty()
+                || self.internal_ui.pointer_interaction_active()
+                || self.internal_ui.desktop_keyboard_interaction_active()
+                || self.seat.get_keyboard().is_some_and(|keyboard| {
+                    !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                })
+                || self
+                    .seat
+                    .get_pointer()
+                    .is_some_and(|pointer| pointer.is_grabbed())
+                || self
+                    .internal_shell
+                    .as_ref()
+                    .is_some_and(|shell| shell.pointer_interaction_active())
+            {
+                return Err("shared input is busy".into());
+            }
+            self.remote_terminal_launch_policy.validate(
+                &prepared,
+                &transaction,
+                std::time::Instant::now(),
+            )?;
+            committed = Some(prepared.commit(boundary.deadline(), || {
+                if self.remote_held_keyboard.is_some()
+                    || self.remote_held_pointer.is_some()
+                    || !self.active_touch_slots.is_empty()
+                    || self.internal_ui.pointer_interaction_active()
+                    || self.internal_ui.desktop_keyboard_interaction_active()
+                    || self.seat.get_keyboard().is_some_and(|keyboard| {
+                        !keyboard.pressed_keys().is_empty() || keyboard.is_grabbed()
+                    })
+                    || self
+                        .seat
+                        .get_pointer()
+                        .is_some_and(|pointer| pointer.is_grabbed())
+                    || self
+                        .internal_shell
+                        .as_ref()
+                        .is_some_and(|shell| shell.pointer_interaction_active())
+                {
+                    return Err("shared input is busy".into());
+                }
+                permit.check_commit_boundary(boundary)
+            })?);
+            Ok(())
+        });
+        let committed = match committed {
+            Some(committed) => committed,
+            None => {
+                authorization?;
+                return Err(
+                    "terminal launch policy unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        let snapshot = self.remote_terminal_launch_policy.observe_committed(
+            &committed,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        )?;
+        authorization?;
+        Ok(crate::remote_terminal_launch_policy::outcome(snapshot))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

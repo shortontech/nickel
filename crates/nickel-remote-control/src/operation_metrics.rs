@@ -55,6 +55,8 @@ pub(crate) enum Method {
     WallpaperTransaction,
     ReadTerminalPresentation,
     TerminalPresentationTransaction,
+    ReadTerminalLaunchPolicy,
+    TerminalLaunchPolicyTransaction,
     ReadKeyboardPreference,
     KeyboardPreferenceTransaction,
     ReadFileIcons,
@@ -67,7 +69,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 53] = [
+    pub(crate) const ALL: [Self; 55] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -113,6 +115,8 @@ impl Method {
         Self::WallpaperTransaction,
         Self::ReadTerminalPresentation,
         Self::TerminalPresentationTransaction,
+        Self::ReadTerminalLaunchPolicy,
+        Self::TerminalLaunchPolicyTransaction,
         Self::ReadKeyboardPreference,
         Self::KeyboardPreferenceTransaction,
         Self::ReadFileIcons,
@@ -128,7 +132,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 53] = [
+const METHODS: [&str; 55] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -174,6 +178,8 @@ const METHODS: [&str; 53] = [
     "wallpaper_transaction",
     "read_terminal_presentation",
     "terminal_presentation_transaction",
+    "read_terminal_launch_policy",
+    "terminal_launch_policy_transaction",
     "read_keyboard_preference",
     "keyboard_preference_transaction",
     "read_file_icons",

@@ -43,6 +43,7 @@ mod operation_metrics;
 pub mod pointer;
 pub mod semantics;
 mod server;
+pub mod terminal_launch_policy;
 pub mod terminal_presentation;
 pub mod trace_audit;
 pub mod wallpaper;

@@ -248,6 +248,19 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::terminal_presentation::Snapshot, String> {
         Err("terminal presentation transactions are unavailable on this backend".into())
     }
+    fn read_terminal_launch_policy(
+        &self,
+        _permit: crate::DesktopPermit,
+    ) -> Result<crate::terminal_launch_policy::Snapshot, String> {
+        Err("terminal launch-policy observation is unavailable on this backend".into())
+    }
+    fn terminal_launch_policy_transaction(
+        &self,
+        _permit: crate::DesktopPermit,
+        _transaction: crate::terminal_launch_policy::Transaction,
+    ) -> Result<crate::terminal_launch_policy::TransactionOutcome, String> {
+        Err("terminal launch-policy transactions are unavailable on this backend".into())
+    }
     fn read_keyboard_preference(
         &self,
         _permit: crate::DesktopPermit,
@@ -1065,6 +1078,13 @@ struct IdlePreferencesRequest {
 struct TerminalPresentationRequest {
     lease_id: u64,
     transaction: crate::terminal_presentation::Transaction,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct TerminalLaunchPolicyRequest {
+    lease_id: u64,
+    transaction: crate::terminal_launch_policy::Transaction,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2024,6 +2044,65 @@ impl McpHandler {
                     .await
                     .map_err(|_| {
                         "terminal presentation result uncertain; read current state before retrying"
+                    })?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Read the path-free terminal launch-policy catalog and configured selections. Requires Full Control & Debug Nickel. Shells are fixed known identities confirmed installed by the production owner; directories are canonical owner-selected user locations. Private or unavailable configured values are reported only as unavailable."
+    )]
+    async fn read_terminal_launch_policy(
+        &self,
+        Parameters(request): Parameters<LeaseOperation>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::terminal_launch_policy::Snapshot>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::ReadTerminalLaunchPolicy,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.read_terminal_launch_policy(permit)
+                        }),
+                    )
+                    .await
+                    .map_err(|_| "terminal launch-policy observation timed out")?
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Select a terminal default shell and initial directory from the exact fresh typed catalog. Requires Full Control & Debug Nickel, exact generation/prior state and idle shared input. Arbitrary executable, command and path strings are impossible. A confirmed result applies only when production creates a new terminal process; existing terminals are unchanged."
+    )]
+    async fn terminal_launch_policy_transaction(
+        &self,
+        Parameters(request): Parameters<TerminalLaunchPolicyRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::terminal_launch_policy::TransactionOutcome>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::TerminalLaunchPolicyTransaction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        desktop_call(self.desktop.clone(), move |desktop| {
+                            desktop.terminal_launch_policy_transaction(
+                                permit,
+                                request.transaction,
+                            )
+                        }),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "terminal launch-policy result uncertain; read current state before retrying"
                     })?
                     .map(Json)
                 },
@@ -3803,7 +3882,7 @@ mod tests {
         }
         assert_eq!(
             fixtures.len() - capability_free.len(),
-            48,
+            50,
             "a newly published tool must be explicitly classified"
         );
 

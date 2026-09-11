@@ -29,6 +29,7 @@ backend-udev = [
 
 [dependencies]
 image.workspace = true
+dirs.workspace = true
 jiff.workspace = true
 sha2.workspace = true
 nickel-ui = { path = "../nickel-ui" }

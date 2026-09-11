@@ -2,6 +2,7 @@
 mod remote_default_associations;
 mod remote_indicator;
 mod remote_surface_authority;
+mod remote_terminal_launch_policy;
 #[cfg(any(test, target_os = "windows"))]
 mod trusted_accessibility;
 #[cfg(any(test, target_os = "windows"))]

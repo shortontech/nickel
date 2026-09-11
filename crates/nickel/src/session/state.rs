@@ -203,6 +203,21 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::terminal_presentation::Snapshot, String>,
         >,
     },
+    ReadTerminalLaunchPolicy {
+        permit: nickel_remote_control::DesktopPermit,
+        prepared: crate::remote_terminal_launch_policy::PreparedRead,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::terminal_launch_policy::Snapshot, String>,
+        >,
+    },
+    TerminalLaunchPolicyTransaction {
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::terminal_launch_policy::Transaction,
+        prepared: crate::remote_terminal_launch_policy::PreparedChange,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::terminal_launch_policy::TransactionOutcome, String>,
+        >,
+    },
     ReadKeyboardPreference {
         permit: nickel_remote_control::DesktopPermit,
         prepared: remote_keyboard_preference::PreparedRead,
@@ -983,6 +998,48 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             .map_err(|_| "terminal presentation queue is busy or stopped")?;
         response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
             "terminal presentation result uncertain; read current state before retrying".to_owned()
+        })?
+    }
+    fn read_terminal_launch_policy(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+    ) -> Result<nickel_remote_control::terminal_launch_policy::Snapshot, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::remote_terminal_launch_policy::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ReadTerminalLaunchPolicy {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "terminal launch-policy queue is busy or stopped")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "terminal launch-policy observation timed out")?
+    }
+    fn terminal_launch_policy_transaction(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        transaction: nickel_remote_control::terminal_launch_policy::Transaction,
+    ) -> Result<nickel_remote_control::terminal_launch_policy::TransactionOutcome, String> {
+        let _staging = self.settings_staging.acquire()?;
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::remote_terminal_launch_policy::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::TerminalLaunchPolicyTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "terminal launch-policy queue is busy or stopped")?;
+        response.recv_timeout(Duration::from_secs(2)).map_err(|_| {
+            "terminal launch-policy result uncertain; read current state before retrying".to_owned()
         })?
     }
     fn read_keyboard_preference(
@@ -2366,6 +2423,7 @@ pub struct NickelSession {
     remote_idle_preferences: remote_idle_preferences::IdlePreferenceState,
     remote_codex_runtime_generation: u64,
     remote_terminal_presentation: remote_terminal_presentation::TerminalPresentationState,
+    remote_terminal_launch_policy: crate::remote_terminal_launch_policy::State,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_window_event_states: HashMap<u64, RemoteWindowEventState>,
     remote_output_event_states: HashMap<u64, RemoteOutputEventState>,
@@ -3305,6 +3363,25 @@ impl NickelSession {
             } => {
                 let result =
                     self.remote_change_terminal_presentation(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&permit, &result);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::ReadTerminalLaunchPolicy {
+                permit,
+                prepared,
+                reply,
+            } => {
+                let result = self.remote_read_terminal_launch_policy(&permit, prepared);
+                let _ = reply.send(result);
+            }
+            RemoteDesktopRequest::TerminalLaunchPolicyTransaction {
+                permit,
+                transaction,
+                prepared,
+                reply,
+            } => {
+                let result =
+                    self.remote_change_terminal_launch_policy(&permit, transaction, prepared);
                 self.record_remote_settings_transaction(&permit, &result);
                 let _ = reply.send(result);
             }
@@ -6460,6 +6537,7 @@ impl NickelSession {
             remote_idle_preferences: Default::default(),
             remote_codex_runtime_generation: 0,
             remote_terminal_presentation: Default::default(),
+            remote_terminal_launch_policy: Default::default(),
             remote_desktop_events: Default::default(),
             remote_window_event_states: HashMap::new(),
             remote_output_event_states: HashMap::new(),

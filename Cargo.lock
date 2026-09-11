@@ -2880,6 +2880,7 @@ dependencies = [
  "arboard",
  "async-io",
  "bitflags 2.13.1",
+ "dirs",
  "evdev",
  "freedesktop-desktop-entry",
  "freedesktop-icons",
