@@ -452,6 +452,15 @@ struct PreparedApplicationDiscovery {
     preparation_duration_us: u64,
 }
 
+const DIAGNOSTIC_PREPARED_RESULT_MAX_AGE: Duration = Duration::from_secs(2);
+
+fn require_fresh_diagnostic_preparation(observed: Instant) -> Result<(), String> {
+    if Instant::now().saturating_duration_since(observed) >= DIAGNOSTIC_PREPARED_RESULT_MAX_AGE {
+        return Err("diagnostic preparation expired before owner commit".into());
+    }
+    Ok(())
+}
+
 struct PreparedPlatformRefresh {
     domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
     data: PreparedPlatformRefreshData,
@@ -3784,6 +3793,7 @@ impl NickelSession {
                                 let prepared = application_discovery.ok_or(
                                     "application inventory preparation is unavailable",
                                 )?;
+                                require_fresh_diagnostic_preparation(prepared.observed)?;
                                 let generation = self
                                     .remote_application_inventory_generation
                                     .checked_add(1)
@@ -3852,6 +3862,7 @@ impl NickelSession {
                                 if prepared.domain != domain {
                                     return Err("platform refresh domain changed before commit".into());
                                 }
+                                require_fresh_diagnostic_preparation(prepared.observed)?;
                                 if self.internal_shell.is_none() {
                                     return Err("internal shell unavailable".into());
                                 }
@@ -11661,6 +11672,10 @@ mod protocol_tests {
 
     struct InternalWindowTestApp;
     struct InternalHitTestApp;
+
+    mod diagnostic_action_scenarios {
+        include!("state/diagnostic_action_scenarios.rs");
+    }
 
     fn internal_shell_test_session() -> (
         EventLoop<'static, super::NickelSession>,

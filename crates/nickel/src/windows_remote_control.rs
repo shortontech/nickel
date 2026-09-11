@@ -7115,6 +7115,11 @@ impl WindowsRemoteControl {
                 if prepared.domain != *domain {
                     return Err("Windows platform refresh domain changed before commit".into());
                 }
+                if Instant::now().saturating_duration_since(prepared.observed)
+                    >= Duration::from_secs(2)
+                {
+                    return Err("Windows diagnostic preparation expired before owner commit".into());
+                }
                 permit.with_debug(!self.desktop_unlocked, || {
                     self.platform_refresh_generation = self
                         .platform_refresh_generation
