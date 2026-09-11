@@ -38,10 +38,53 @@ target/debug/nickel-linux-remote-control-acceptance
 The commands above are the reproducible evidence path. A missing host backend
 produces `SKIP`, which must not be counted as native acceptance.
 
-Ordinary window and application scopes remain uncovered: this fixture owns shell
-resources and does not invent application identities. The new matrix does not
+Without `--ordinary-scopes`, ordinary window and application scopes remain
+uncovered: the default fixture owns shell resources. The shell matrix does not
 prove raw keyboard/pointer delivery, multiple-output confinement, workspace
 movement, external application accessibility, a local assistive workflow,
 physical keyboard/DRM behavior, or native Windows acceptance. The Wayland run
 exercises nested presentation and compositor-owned shell semantics, not ordinary
 Wayland application identity. Xwayland was not rerun for this increment.
+
+## Ordinary Wayland clients
+
+The optional `--ordinary-scopes` increment uses the unchanged repository examples
+`nickel-ui/examples/keyboard_recipient.rs` and `standalone.rs`. Build these beside
+the compositor and harness:
+
+```sh
+cargo build -p nickel-ui --example keyboard_recipient --example standalone
+target/debug/nickel-linux-remote-control-acceptance --ordinary-scopes
+```
+
+The harness starts the examples on its private nested Wayland socket. A bootstrap
+lease obtains real window generations and `verified_application` identities from
+the production compositor; titles only locate the expected fixtures and never
+establish authority. The bootstrap lease is revoked before narrow assertions.
+
+One window lease repeatedly focuses the keyboard recipient and sends three native
+keys. Fresh owner observations confirm focus, and the actual client's bounded
+stdout receipt confirms each resulting text change. One application lease then
+repeats the actions and admits a second keyboard-recipient process/window created
+after approval, using the same native executable identity without another prompt.
+Its inventory contains exactly those two windows.
+
+The distinct counter executable remains excluded. Focus, capture and keyboard
+requests must fail with the resource-boundary denial. Before the keyboard negative
+control, the counter is focused locally and its live focus is verified through
+the trusted owner query, eliminating lack of focus as an alternative rejection
+reason. Every phase retains exactly one active lease and unchanged local approval
+history. All fixture processes are killed and reaped on both success and failure.
+
+Native Wayland acceptance passed September 11, 2026, on `2426214` plus this change,
+including the complete earlier shell/privacy/emergency checks. Five focused
+harness tests and strict harness Clippy passed. Evidence:
+`/tmp/nickel-native-ordinary-scopes-build.log`,
+`/tmp/nickel-native-ordinary-scopes-focused.log`, and
+`/tmp/nickel-native-ordinary-scopes-wayland.log`.
+
+This proves ordinary native Wayland executable identity and later same-application
+window admission for these real examples. It does not prove Flatpak/shared-runtime
+or broker identity, remote application launch, transients, cross-output/workspace
+movement, Xwayland application behavior, physical input, assistive workflows, or
+native Windows acceptance.

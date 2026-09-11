@@ -13,6 +13,8 @@ use nickel_session_protocol::{
     decode, encode,
 };
 use serde_json::{Value, json};
+#[path = "linux_remote_control_acceptance/ordinary_scopes.rs"]
+mod ordinary_scopes;
 use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
@@ -225,6 +227,11 @@ fn exercise(
         true,
     )?;
     let lease_id = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
+    let lease_id = if env::args().any(|argument| argument == "--ordinary-scopes") {
+        ordinary_scopes::exercise(&environment, address, &identity, lease_id)?
+    } else {
+        lease_id
+    };
 
     let trace_started = mcp_call(
         address,
@@ -502,7 +509,7 @@ fn exercise_scope_matrix(
         }
     }
     println!(
-        "UNCOVERED: ordinary window/application scopes, cross-output movement, physical input and assistive workflow; this fixture owns shell resources only"
+        "SHELL MATRIX LIMIT: ordinary window/application scopes require --ordinary-scopes; cross-output movement, physical input and assistive workflow remain separate acceptance"
     );
     last_lease.ok_or_else(|| "scope matrix did not retain its final debug lease".into())
 }
@@ -1313,6 +1320,7 @@ struct SessionEnvironment {
     control: PathBuf,
     token: String,
     runtime: PathBuf,
+    wayland: String,
 }
 
 fn wait_for_environment(
@@ -1498,6 +1506,7 @@ fn read_environment(path: &Path) -> Result<SessionEnvironment, String> {
         control: PathBuf::from(value("NICKEL_SESSION_CONTROL")?),
         token: value("NICKEL_SESSION_TOKEN")?,
         runtime: PathBuf::from(value("XDG_RUNTIME_DIR")?),
+        wayland: value("WAYLAND_DISPLAY")?,
     })
 }
 
