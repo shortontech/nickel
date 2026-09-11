@@ -1507,6 +1507,10 @@ impl WindowsRemoteControl {
                 .outputs(&scope)
                 .map(|(output, _)| output)
                 .collect();
+            let projected_native_windows = self
+                .resources
+                .native_windows(&scope)
+                .collect::<std::collections::HashSet<_>>();
             let mut active = windows.iter().filter(|window| window.active);
             let focused_window = active.next().map(|window| window.id.clone());
             let focused_window = active.next().is_none().then_some(focused_window).flatten();
@@ -1517,6 +1521,16 @@ impl WindowsRemoteControl {
                     !self.desktop_unlocked
                         || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
                     shell.remote_shell_surface_observations(state),
+                );
+            let (shell_image_cache, projected_resources) =
+                crate::windows_shell_diagnostics::project_image_cache(
+                    generation,
+                    observed_at_us,
+                    state.image_cache_diagnostics_for_previews(|window| {
+                        usize::try_from(window.0)
+                            .ok()
+                            .is_some_and(|native| projected_native_windows.contains(&native))
+                    }),
                 );
             let keyboard = focused_window.as_ref().map(|window| InputDeviceDiagnostic {
                 focused_window: Some(window.clone()),
@@ -1543,16 +1557,8 @@ impl WindowsRemoteControl {
                 internal_applications: Vec::new(),
                 internal_renderers: Vec::new(),
                 shell_renderers: Vec::new(),
-                shell_image_cache: None,
-                projected_resources: ProjectedResourceDiagnostic {
-                    observation_generation: generation,
-                    observed_at_us,
-                    renderer_surfaces: 0,
-                    software_frame_bytes: 0,
-                    fallback_raster_bytes: 0,
-                    shell_image_entries: 0,
-                    shell_image_bytes: 0,
-                },
+                shell_image_cache: Some(shell_image_cache),
+                projected_resources,
                 pending_effects: PendingEffectsDiagnostic {
                     observation_generation: generation,
                     observed_at_us,
@@ -1630,7 +1636,7 @@ impl WindowsRemoteControl {
                     "windows_virtual_workspaces".into(),
                     "windows_internal_applications".into(),
                     "windows_shell_surfaces_without_production_scene_identity".into(),
-                    "windows_renderer_and_resource_accounting".into(),
+                    "windows_renderer_and_shared_presenter_cache_accounting".into(),
                     "windows_pointer_recipient_and_hit_testing".into(),
                     "windows_shortcut_inventory".into(),
                     "windows_preview_state".into(),

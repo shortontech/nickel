@@ -306,6 +306,27 @@ impl Owner {
             ))
         })
     }
+    /// Native identities for the same protected-filtered projection returned by
+    /// `windows`. These are consumed only on the owner thread to filter retained
+    /// preview accounting; they are never serialized or granted as authority.
+    #[cfg(any(test, target_os = "windows"))]
+    pub(crate) fn native_windows<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+    ) -> impl Iterator<Item = usize> + 'a {
+        self.windows.values().filter_map(move |record| {
+            let window = &record.value;
+            let evidence = ResourceEvidence {
+                surface: None,
+                window: Some(&record.identity),
+                verified_application: window.application.as_deref(),
+                output: self.output_for(window.bounds),
+                authorized_surface_ancestors: &[],
+                protected: window.protected,
+            };
+            scope.covers(&evidence).then_some(window.native)
+        })
+    }
     pub(crate) fn outputs<'a>(
         &'a self,
         scope: &'a ResourceScope,
@@ -425,6 +446,11 @@ mod tests {
         let visible: Vec<_> = owner.windows(&left).collect();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].0.x, -500);
+        assert_eq!(owner.native_windows(&left).collect::<Vec<_>>(), vec![1]);
+        assert_eq!(
+            owner.native_windows(&full).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
         assert_eq!(owner.windows(&full).count(), 3);
     }
     #[test]

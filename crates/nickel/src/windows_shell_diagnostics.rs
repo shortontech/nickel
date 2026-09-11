@@ -1,6 +1,7 @@
 use crate::winit_shell::SurfaceRole;
 use nickel_remote_control::diagnostics::{
-    MAX_DIAGNOSTIC_SHELL_SURFACES, ShellDiagnosticRole, ShellSurfaceDiagnostic,
+    MAX_DIAGNOSTIC_SHELL_SURFACES, ProjectedResourceDiagnostic, ShellDiagnosticRole,
+    ShellImageCacheDiagnostic, ShellSurfaceDiagnostic,
 };
 
 #[derive(Clone, Debug)]
@@ -78,6 +79,51 @@ pub(crate) fn project(
         .collect();
     let truncated = eligible.next().is_some();
     (records, truncated)
+}
+
+fn bounded_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
+
+/// Project count and retained-byte accounting only. No cache keys, image
+/// dimensions, source paths, pixels, titles, or application identities cross
+/// this boundary. Preview accounting must already be filtered to the ordinary
+/// windows present in the containing diagnostic snapshot.
+pub(crate) fn project_image_cache(
+    observation_generation: u64,
+    observed_at_us: u64,
+    cache: crate::live_shell::ShellImageCacheDiagnostics,
+) -> (ShellImageCacheDiagnostic, ProjectedResourceDiagnostic) {
+    let cache = ShellImageCacheDiagnostic {
+        observation_generation,
+        observed_at_us,
+        launcher_icon_entries: bounded_u64(cache.launcher_icon_entries),
+        launcher_icon_bytes: bounded_u64(cache.launcher_icon_bytes),
+        wallpaper_entries: bounded_u64(cache.wallpaper_entries),
+        wallpaper_bytes: bounded_u64(cache.wallpaper_bytes),
+        tray_entries: bounded_u64(cache.tray_entries),
+        tray_bytes: bounded_u64(cache.tray_bytes),
+        preview_entries: bounded_u64(cache.preview_entries),
+        preview_bytes: bounded_u64(cache.preview_bytes),
+    };
+    let projected = ProjectedResourceDiagnostic {
+        observation_generation,
+        observed_at_us,
+        renderer_surfaces: 0,
+        software_frame_bytes: 0,
+        fallback_raster_bytes: 0,
+        shell_image_entries: cache
+            .launcher_icon_entries
+            .saturating_add(cache.wallpaper_entries)
+            .saturating_add(cache.tray_entries)
+            .saturating_add(cache.preview_entries),
+        shell_image_bytes: cache
+            .launcher_icon_bytes
+            .saturating_add(cache.wallpaper_bytes)
+            .saturating_add(cache.tray_bytes)
+            .saturating_add(cache.preview_bytes),
+    };
+    (cache, projected)
 }
 
 #[cfg(test)]
@@ -162,5 +208,34 @@ mod tests {
             records.last().unwrap().generation,
             MAX_DIAGNOSTIC_SHELL_SURFACES as u64
         );
+    }
+
+    #[test]
+    fn image_cache_projection_is_generation_correlated_and_aggregate_only() {
+        let (cache, projected) = project_image_cache(
+            17,
+            23,
+            crate::live_shell::ShellImageCacheDiagnostics {
+                launcher_icon_entries: 2,
+                launcher_icon_bytes: 20,
+                wallpaper_entries: 1,
+                wallpaper_bytes: 30,
+                tray_entries: 4,
+                tray_bytes: 40,
+                preview_entries: 3,
+                preview_bytes: 50,
+            },
+        );
+        assert_eq!(cache.observation_generation, 17);
+        assert_eq!(cache.observed_at_us, 23);
+        assert_eq!(cache.preview_entries, 3);
+        assert_eq!(cache.preview_bytes, 50);
+        assert_eq!(projected.observation_generation, 17);
+        assert_eq!(projected.observed_at_us, 23);
+        assert_eq!(projected.shell_image_entries, 10);
+        assert_eq!(projected.shell_image_bytes, 140);
+        assert_eq!(projected.renderer_surfaces, 0);
+        assert_eq!(projected.software_frame_bytes, 0);
+        assert_eq!(projected.fallback_raster_bytes, 0);
     }
 }
