@@ -111,6 +111,11 @@ impl PreparedChange {
         Self::from_read_with_check(prior, transaction, &mut check)
     }
 
+    #[cfg(test)]
+    fn from_read(prior: PreparedRead, transaction: &Transaction) -> Result<Self, String> {
+        Self::from_read_with_check(prior, transaction, &mut || Ok(()))
+    }
+
     fn from_read_with_check(
         prior: PreparedRead,
         transaction: &Transaction,
