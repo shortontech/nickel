@@ -1490,6 +1490,13 @@ bit. The owned catalog and PipeWire fixtures correlated each event with the exac
 retained snapshot record. Application identities, device/provider labels, paths,
 errors and returned native state remain outside the event payload.
 
+The coherent snapshot now exposes the existing bounded trace lifecycle audit as
+generation-bearing start, stop, timeout and cancellation records. Projection
+removes client, lease and trace IDs while retaining only fixed category/transition,
+duration limit, elapsed time and session-relative observation time. An owned
+nested X11 fixture exercised explicit stop, natural timeout and lease-revocation
+cancellation, then read each transition through a fresh full-debug snapshot.
+
 Ordinary shell presentation insertions and retirements now enter the same
 bounded event stream with a generation-bearing surface identity, fixed role and
 visibility bit. Lock, trusted-control and unsupported Codex roles never enter

@@ -3726,6 +3726,7 @@ impl NickelSession {
                                 .as_ref()
                                 .filter(|trace| trace.owned_by(&permit))
                                 .map(|trace| trace.snapshot()),
+                            trace_lifecycle: self.remote_trace_lifecycle(&permit),
                             truncated,
                             unavailable_domains: [
                                 "shell_transients_without_host_owned_protection_and_codex_content",

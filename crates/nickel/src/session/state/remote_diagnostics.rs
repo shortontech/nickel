@@ -96,6 +96,13 @@ impl NickelSession {
         })
     }
 
+    pub(super) fn remote_trace_lifecycle(
+        &self,
+        permit: &nickel_remote_control::DesktopPermit,
+    ) -> Option<nickel_remote_control::diagnostics::TraceLifecycleSnapshot> {
+        nickel_remote_control::diagnostics::trace_lifecycle_snapshot(permit, self.start_time)
+    }
+
     pub(crate) fn record_remote_focus_event(&mut self, focused: Option<&KeyboardFocusTarget>) {
         let id = match focused {
             Some(KeyboardFocusTarget::X11(surface)) => {

@@ -499,6 +499,71 @@ pub struct DiagnosticLogSnapshot {
     pub records: Vec<DiagnosticLogRecord>,
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TraceLifecycleTransition {
+    Started,
+    Stopped,
+    TimedOut,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct TraceLifecycleDiagnostic {
+    pub generation: u64,
+    pub observed_at_us: u64,
+    pub category: crate::frame_trace::FrameTraceCategory,
+    pub transition: TraceLifecycleTransition,
+    pub duration_limit_seconds: u16,
+    pub elapsed_us: u64,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct TraceLifecycleSnapshot {
+    pub evicted: u64,
+    pub events: Vec<TraceLifecycleDiagnostic>,
+}
+
+pub fn trace_lifecycle_snapshot(
+    permit: &crate::DesktopPermit,
+    session_start: std::time::Instant,
+) -> Option<TraceLifecycleSnapshot> {
+    let (events, evicted) = permit.trace_audit.as_ref()?.snapshot()?;
+    Some(project_trace_lifecycle(events, evicted, session_start))
+}
+
+fn project_trace_lifecycle(
+    events: Vec<crate::trace_audit::Event>,
+    evicted: u64,
+    session_start: std::time::Instant,
+) -> TraceLifecycleSnapshot {
+    TraceLifecycleSnapshot {
+        evicted,
+        events: events
+            .into_iter()
+            .map(|event| TraceLifecycleDiagnostic {
+                generation: event.generation,
+                observed_at_us: event
+                    .observed_at
+                    .saturating_duration_since(session_start)
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                category: event.category,
+                transition: match event.transition {
+                    crate::trace_audit::Transition::Started => TraceLifecycleTransition::Started,
+                    crate::trace_audit::Transition::Stopped => TraceLifecycleTransition::Stopped,
+                    crate::trace_audit::Transition::TimedOut => TraceLifecycleTransition::TimedOut,
+                    crate::trace_audit::Transition::Cancelled => {
+                        TraceLifecycleTransition::Cancelled
+                    }
+                },
+                duration_limit_seconds: event.duration_limit_seconds,
+                elapsed_us: event.elapsed_us,
+            })
+            .collect(),
+    }
+}
+
 /// Aggregate production HTTP admission state. No client table or identifiers.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct AdmissionDiagnostic {
@@ -605,6 +670,9 @@ pub struct DiagnosticSnapshot {
     /// None means the collector is unavailable or busy; never reads log files.
     pub diagnostic_logs: Option<DiagnosticLogSnapshot>,
     pub frame_trace: Option<crate::frame_trace::FrameTraceSnapshot>,
+    /// Payload-free lifecycle for bounded traces across clients. Client, lease
+    /// and trace identities are removed at projection time.
+    pub trace_lifecycle: Option<TraceLifecycleSnapshot>,
     pub truncated: bool,
     /// Explicitly identifies domains not supplied by this projection.
     pub unavailable_domains: Vec<String>,
@@ -910,6 +978,34 @@ mod output_identification_tests {
         assert_eq!(value["observed_at_us"], 20);
         for excluded in ["provider", "path", "error", "ssid", "device_name"] {
             assert!(value.get(excluded).is_none());
+        }
+    }
+
+    #[test]
+    fn trace_lifecycle_projection_removes_owner_and_trace_identity() {
+        let start = std::time::Instant::now();
+        let snapshot = project_trace_lifecycle(
+            vec![crate::trace_audit::Event {
+                generation: 9,
+                observed_at: start + std::time::Duration::from_micros(12),
+                client_id: 111,
+                lease_id: 222,
+                trace_id: 333,
+                category: crate::frame_trace::FrameTraceCategory::NestedFrameDispatch,
+                transition: crate::trace_audit::Transition::Stopped,
+                duration_limit_seconds: 30,
+                elapsed_us: 12,
+            }],
+            4,
+            start,
+        );
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value["evicted"], 4);
+        assert_eq!(value["events"][0]["observed_at_us"], 12);
+        assert_eq!(value["events"][0]["transition"], "stopped");
+        let event = value["events"][0].as_object().unwrap();
+        for excluded in ["client_id", "lease_id", "trace_id", "client", "payload"] {
+            assert!(!event.contains_key(excluded));
         }
     }
 }
