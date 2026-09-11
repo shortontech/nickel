@@ -1267,6 +1267,9 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
             SessionCommand::RemoveWorkspace { .. } => "remove-workspace",
             SessionCommand::SwitchWorkspace { .. } => "switch-workspace",
             SessionCommand::MoveWindowToWorkspace { .. } => "move-window-to-workspace",
+            SessionCommand::MoveWindowToWorkspaceAndSwitch { .. } => {
+                "move-window-to-workspace-and-switch"
+            }
             SessionCommand::MoveWindowToOutput { .. } => "move-window-to-output",
             SessionCommand::HighlightWindow { .. } => "highlight-window",
             SessionCommand::WindowAction { .. } => "window-action",

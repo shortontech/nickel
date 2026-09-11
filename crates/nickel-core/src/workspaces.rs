@@ -296,6 +296,30 @@ impl<WindowId: Clone + Eq + Hash> Workspaces<WindowId> {
         Ok(transition)
     }
 
+    /// Move a window and follow it to the destination as one owner transition.
+    /// Consumers can apply the returned hide/show/focus set without exposing an
+    /// intermediate workspace whose focus no longer matches the moved window.
+    pub fn move_window_and_switch(
+        &mut self,
+        window: &WindowId,
+        target: WorkspaceId,
+        output: Option<String>,
+    ) -> Result<WorkspaceTransition<WindowId>, WorkspaceError> {
+        let moved = self.move_window(window, target)?;
+        let switched = self.switch_to(target, output)?;
+        let mut hide = moved.hide;
+        hide.extend(switched.hide);
+        hide.dedup();
+        let mut show = moved.show;
+        show.extend(switched.show);
+        show.dedup();
+        Ok(WorkspaceTransition {
+            hide,
+            show,
+            focus: switched.focus.or(moved.focus),
+        })
+    }
+
     pub fn remove(
         &mut self,
         workspace: WorkspaceId,
@@ -439,6 +463,27 @@ mod tests {
             }
         );
         assert!(!workspaces.is_visible(&"terminal"));
+    }
+
+    #[test]
+    fn moving_and_following_a_window_is_one_target_focused_transition() {
+        let mut workspaces = Workspaces::default();
+        workspaces.add_window("editor");
+        workspaces.add_window("terminal");
+        workspaces.focused(&"editor");
+        workspaces.focused(&"terminal");
+        let second = workspaces.create().unwrap();
+
+        let transition = workspaces
+            .move_window_and_switch(&"terminal", second, Some("DP-2".into()))
+            .unwrap();
+
+        assert_eq!(transition.hide, vec!["terminal", "editor"]);
+        assert_eq!(transition.show, vec!["terminal"]);
+        assert_eq!(transition.focus, Some("terminal"));
+        assert_eq!(workspaces.active(), second);
+        assert_eq!(workspaces.active_output(), Some("DP-2"));
+        assert!(workspaces.is_visible(&"terminal"));
     }
 
     #[test]

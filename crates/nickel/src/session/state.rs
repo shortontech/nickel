@@ -7387,7 +7387,6 @@ impl NickelSession {
     }
 
     fn apply_workspace_transition(&mut self, transition: WorkspaceTransition<WindowId>) {
-        self.cancel_remote_keyboard();
         self.hide_overlays();
         for id in transition.hide {
             if let Some(surface) = self.internal_surface_for_window(id) {
@@ -7430,6 +7429,7 @@ impl NickelSession {
         if let Some(focus) = transition.focus {
             self.activate_window(focus);
         } else {
+            self.cancel_remote_keyboard();
             self.windows.deactivate_all();
             self.seat
                 .get_keyboard()
@@ -7442,6 +7442,12 @@ impl NickelSession {
         self.request_output_redraw();
         self.notify_workspace_state();
         self.notify_protocol_snapshot();
+        // A move-and-follow transition can retain held input only when the
+        // final native focus, exact target incarnation, protection state and
+        // freshly resolved lease scope still authorize it. Every other focus
+        // or resource change releases the production input before returning.
+        self.revalidate_remote_pointer();
+        self.revalidate_remote_keyboard();
     }
 
     fn apply_configured_workspace_count(&mut self) {

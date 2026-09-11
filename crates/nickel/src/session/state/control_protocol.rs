@@ -1508,6 +1508,32 @@ impl NickelSession {
                 };
                 self.apply_workspace_transition(transition);
             }
+            SessionCommand::MoveWindowToWorkspaceAndSwitch {
+                window,
+                workspace,
+                output,
+            } => {
+                if output.as_ref().is_some_and(|name| {
+                    !self
+                        .space
+                        .outputs()
+                        .any(|candidate| candidate.name() == *name)
+                }) {
+                    return protocol_error(ErrorCode::InvalidRequest, "unknown output");
+                }
+                let id = WindowId(window.0);
+                let transition = match self.workspaces.move_window_and_switch(
+                    &id,
+                    WorkspaceId(workspace.0),
+                    output,
+                ) {
+                    Ok(transition) => transition,
+                    Err(error) => {
+                        return protocol_error(ErrorCode::InvalidRequest, workspace_error(error));
+                    }
+                };
+                self.apply_workspace_transition(transition);
+            }
             SessionCommand::MoveWindowToOutput { window, output } => {
                 if !self.window_exists(window) {
                     return protocol_error(ErrorCode::InvalidWindow, "unknown window id");

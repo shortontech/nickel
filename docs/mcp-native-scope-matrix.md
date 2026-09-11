@@ -187,7 +187,7 @@ does not cover PID reuse, sandbox brokers, shared runtimes, transient ownership,
 physical input, assistive workflows, multiple outputs/workspaces, or native
 Windows behavior.
 
-## Held-input output movement and arbitration
+## Held-input movement and arbitration
 
 The `--movement` path also runs two-client held ShiftLeft and left-button drag
 cases against the real Wayland keyboard-recipient example. The example enables
@@ -197,13 +197,40 @@ text, and coordinates are not added to its receipt log.
 An output-scoped owner starts each hold while a window-scoped contender can
 observe the same target. The contender's key, drag, and focus requests must fail
 specifically because shared input or the native opposite input primitive is
-busy (the pointer adapter currently labels any pressed keyboard input local). A trusted local move takes the target
-to the virtual output. The client must receive the native release, and the old
+busy (the pointer adapter currently labels any pressed keyboard input local). A
+trusted local move takes the target to the virtual output. The client must
+receive the native release, and the old
 output lease must lose both continuation and inventory access. The window-scoped
 contender then acquires the hold on the moved target. The previous owner's cancel
 must fail without releasing the new owner's input; the new owner continues and
 ends it with a matching native release. Returning the target does not resurrect
 the old hold. Both leases remain unchanged, with no additional approval.
+
+The application-scope cases keep that lease active and approve one overlapping
+window-scoped contender before either hold begins. The application owner starts
+the real key or button hold, and the contender's key, drag and focus operations
+must fail while still being able to observe its exact authorized window. The
+production output owner then moves that window to the virtual output. A single
+production workspace-owner transition moves it to the second workspace and
+follows it there, avoiding an intermediate unrelated focus. After each boundary,
+the original owner continues the hold and the client receipt remains pressed
+without a release.
+
+The seat owner permits this only after freshly resolving the same window
+incarnation, unprotected state, verified application identity, native focus and
+live lease. Window-targeted drags retain their client-local anchor as the
+production window geometry moves; output-targeted and desktop-targeted holds
+retain their fixed global anchor. Output-scoped holds still fail their fresh
+resource check and release when the same window leaves the output.
+
+The harness then activates the unrelated real counter application. The client
+must receive a native release, and focus, capture, pointer and keyboard requests
+against that application must fail at the application resource boundary. The
+old application owner cannot continue. After the contender starts a new hold on
+the original window, a stale cancel from the application owner cannot release
+it; the contender continues and ends with its own native release. The two
+approved leases and permission/lease audit histories remain unchanged throughout
+each movement and arbitration case.
 
 The drag case exposed missing output evidence for window-targeted pointer
 requests. The resolver now uses the same current-window output helper as keyboard
@@ -211,17 +238,21 @@ authorization. Before this fix the real output-scoped drag was denied before
 press; the native case retains that positive authorization regression alongside
 the negative boundary checks.
 
-This covers output-boundary cancellation, cross-client arbitration, and native
-release delivery. It does not cover physical multi-monitor presentation,
-workspace changes during a hold, application-scoped hold continuation, physical
-local-input takeover, or held-input movement on Xwayland or Windows.
+This covers output-boundary cancellation, application-scoped continuation across
+one output and workspace move, cross-client arbitration, unrelated-focus
+cancellation, stale-owner isolation and native release delivery. The
+move-and-follow fixture is one capability-gated local session command backed by
+the production workspace owner; it does not prove a physical shortcut or
+Settings UI workflow.
+The remote input remains synthetic. Physical multi-monitor presentation,
+physical local-input takeover, more complex workspace sequences, held-input
+movement on Xwayland and native Windows remain open.
 
-Native Wayland acceptance passed September 11, 2026, on `7f5aea9` plus this
-increment: both hold cases and the complete preceding movement/scope suite passed.
-Five harness tests, the production pointer-target resolution test, and strict
-harness/example Clippy passed. The combined stress check completed 27 requests in
-2.95 seconds with a 679 ms maximum response and 6.3 MiB RSS growth. The virtual
-output remains a compositor authority/geometry fixture, not a physical presenter.
+Native Wayland acceptance passed September 11, 2026, on `c0f1878` plus this
+increment: all four held-input cases and the complete preceding movement/scope
+suite passed. The combined stress check completed 27 requests in 2.890 seconds
+with a 661 ms maximum response and 8,120 KiB RSS growth. The virtual output
+remains a compositor authority/geometry fixture, not a physical presenter.
 
 ## Bounded long connection and lease churn
 

@@ -13,11 +13,16 @@ cleanup is armed only after continuous input authorization succeeds, so a
 rejected X11 plan reports the resource-boundary denial instead of masking it as
 cancellation. The Wayland movement mode also verifies window/application scope
 across owner-managed output and workspace moves and verifies output-scope loss
-and regain. An output lease now launches the real catalog-backed counter fixture,
-retains spawn and requested-placement outcomes separately, observes its first
-mapped window on the selected output, and focuses and captures it without another
-approval. Flatpak/shared-runtime, transient/broker, physical-output and native
-Windows identity cases remain open.
+and regain. Application-scoped key and drag holds continue across an
+owner-observed output move and one atomic production workspace move-and-follow
+while the exact window, verified application, protection, focus and lease remain
+valid. An unrelated application focus releases the real client input; shared
+contenders remain denied, and stale continuation/cancel cannot affect their
+replacement hold. An output lease now launches the real catalog-backed counter
+fixture, retains spawn and requested-placement outcomes separately, observes its
+first mapped window on the selected output, and focuses and captures it without
+another approval. Flatpak/shared-runtime, transient/broker, physical-output and
+native Windows identity cases remain open.
 
 A current-process native Linux acceptance test now activates the real AccessKit
 AT-SPI provider, connects through a separate session-bus consumer, verifies the
@@ -143,7 +148,7 @@ This timing case has deterministic owner coverage; it is not claimed as a native
 scheduling test.
 
 Pending approval cards now carry a checked monotonic `pending_generation` through
-session protocol version 27, Settings semantic messages, and Linux/Windows local
+session protocol version 28, Settings semantic messages, and Linux/Windows local
 decision handlers. Equivalent still-pending requests coalesce without changing
 the generation. Replacement or cancellation followed by an identical new request
 cannot reuse an earlier card. Approval and denial check both generation and payload;

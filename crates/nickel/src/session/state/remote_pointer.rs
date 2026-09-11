@@ -105,8 +105,8 @@ impl NickelSession {
         let valid = Instant::now() < held.idle_deadline
             && self.remote_pointer_has_click_grab()
             && resolved.is_ok_and(|resolved| {
-                resolved.global_x == held.x
-                    && resolved.global_y == held.y
+                (matches!(held.target, PointerTarget::Window { .. })
+                    || (resolved.global_x == held.x && resolved.global_y == held.y))
                     && held.owner.check_resource(&resolved.evidence()).is_ok()
             });
         if !valid {

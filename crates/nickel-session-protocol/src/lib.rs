@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 27;
+pub const PROTOCOL_VERSION: u16 = 28;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -204,6 +204,13 @@ pub enum Command {
     MoveWindowToWorkspace {
         window: WindowId,
         workspace: WorkspaceId,
+    },
+    /// Apply a window move and destination switch as one production workspace
+    /// transition, retaining focus on the exact moved window.
+    MoveWindowToWorkspaceAndSwitch {
+        window: WindowId,
+        workspace: WorkspaceId,
+        output: Option<String>,
     },
     MoveWindowToOutput {
         window: WindowId,
@@ -2208,6 +2215,11 @@ mod tests {
             Command::MoveWindowToWorkspace {
                 window: WindowId(11),
                 workspace: WorkspaceId(7),
+            },
+            Command::MoveWindowToWorkspaceAndSwitch {
+                window: WindowId(11),
+                workspace: WorkspaceId(7),
+                output: Some("DP-2".into()),
             },
             Command::MoveWindowToOutput {
                 window: WindowId(11),
