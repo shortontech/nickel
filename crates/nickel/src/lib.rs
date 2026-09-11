@@ -14,24 +14,31 @@ mod windows_emergency_chord;
 #[cfg(target_os = "windows")]
 mod windows_external_accessibility;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_application_scale;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_codex;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
 #[cfg(target_os = "windows")]
 mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_launcher_favorites;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_settings;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_remote_terminal_presentation;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_resource_owner;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_shell_diagnostics;
 #[cfg(any(test, target_os = "windows"))]
+#[cfg_attr(all(test, not(target_os = "windows")), allow(dead_code))]
 mod windows_virtual_workspaces;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{

@@ -872,6 +872,47 @@ fn set_effective_volume(graph: &Graph, percent: u8) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn device_observation(
+    graph: &Mutex<Graph>,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    use super::linux_device_settings::{GuardedDeviceObservation, NativeIdentity};
+    let graph = graph.lock().map_err(|_| "audio observation unavailable")?;
+    if graph.invalid_inventory {
+        return Err("audio inventory unavailable".into());
+    }
+    let sink = effective_sink(&graph)?;
+    if !sink.volume_observed || !sink.mute_observed {
+        return Err("audio properties unobserved".into());
+    }
+    Ok(GuardedDeviceObservation {
+        values: nickel_remote_control::device_settings::Values::Audio {
+            volume_percent: average_volume(&sink.channel_volumes),
+            muted: sink.muted,
+        },
+        identity: NativeIdentity::Audio {
+            cookie: graph.cookie.ok_or("audio server identity unavailable")?,
+            serial: sink.serial.ok_or("audio node identity unavailable")?,
+        },
+    })
+}
+pub(super) fn observe_guarded(
+    permit: &nickel_remote_control::DesktopPermit,
+) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
+    let snapshot = Arc::new(RwLock::new(AudioStatus::default()));
+    let subscribers = Arc::new(Mutex::new(Vec::new()));
+    let connection = create_connection(&snapshot, &subscribers, true)?;
+    for _ in 0..3 {
+        permit.check_live()?;
+        audio_roundtrip(
+            &connection.core,
+            &connection.main_loop,
+            &connection.completed,
+        )?;
+    }
+    permit.check_live()?;
+    device_observation(&connection.graph)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1224,45 +1265,4 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
     }
-}
-
-fn device_observation(
-    graph: &Mutex<Graph>,
-) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
-    use super::linux_device_settings::{GuardedDeviceObservation, NativeIdentity};
-    let graph = graph.lock().map_err(|_| "audio observation unavailable")?;
-    if graph.invalid_inventory {
-        return Err("audio inventory unavailable".into());
-    }
-    let sink = effective_sink(&graph)?;
-    if !sink.volume_observed || !sink.mute_observed {
-        return Err("audio properties unobserved".into());
-    }
-    Ok(GuardedDeviceObservation {
-        values: nickel_remote_control::device_settings::Values::Audio {
-            volume_percent: average_volume(&sink.channel_volumes),
-            muted: sink.muted,
-        },
-        identity: NativeIdentity::Audio {
-            cookie: graph.cookie.ok_or("audio server identity unavailable")?,
-            serial: sink.serial.ok_or("audio node identity unavailable")?,
-        },
-    })
-}
-pub(super) fn observe_guarded(
-    permit: &nickel_remote_control::DesktopPermit,
-) -> Result<super::linux_device_settings::GuardedDeviceObservation, String> {
-    let snapshot = Arc::new(RwLock::new(AudioStatus::default()));
-    let subscribers = Arc::new(Mutex::new(Vec::new()));
-    let connection = create_connection(&snapshot, &subscribers, true)?;
-    for _ in 0..3 {
-        permit.check_live()?;
-        audio_roundtrip(
-            &connection.core,
-            &connection.main_loop,
-            &connection.completed,
-        )?;
-    }
-    permit.check_live()?;
-    device_observation(&connection.graph)
 }

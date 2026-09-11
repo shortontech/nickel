@@ -14,6 +14,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+type RemoteIndicatorAccessibility = (
+    crate::trusted_accessibility::native::IndicatorAccessibility,
+    Vec<(u64, u64, u64)>,
+);
+
 /// A stalled local subscriber must never block compositor input or revocation.
 /// Existing send-error handling retires subscribers whose bounded queue is full.
 fn notification_socket() -> std::io::Result<UnixDatagram> {
@@ -2387,13 +2392,8 @@ pub struct NickelSession {
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
     /// compositor's private surface identity and never enter remote inventory.
-    pub(crate) remote_indicator_accessibility: HashMap<
-        nickel_ui::InternalSurfaceId,
-        (
-            crate::trusted_accessibility::native::IndicatorAccessibility,
-            Vec<(u64, u64, u64)>,
-        ),
-    >,
+    pub(crate) remote_indicator_accessibility:
+        HashMap<nickel_ui::InternalSurfaceId, RemoteIndicatorAccessibility>,
     remote_indicator_accessibility_wake: smithay::reexports::calloop::channel::Sender<()>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.

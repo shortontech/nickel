@@ -391,57 +391,6 @@ impl LiveShell {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn assert_advertised_actions_are_guarded<A: UiApplication>(
-        host: &nickel_ui::UiHost<A>,
-        classify: impl Fn(&A::Message) -> RemoteActionDisposition,
-    ) {
-        let (_, nodes) = project(host, &classify).expect("bounded production semantics");
-        for node in nodes {
-            for action in node.actions {
-                let callback = host
-                    .message_for_semantic_action(&node.id, action)
-                    .map(&classify)
-                    .unwrap_or(RemoteActionDisposition::Unavailable);
-                assert_eq!(
-                    action_disposition(action, callback),
-                    RemoteActionDisposition::Guarded,
-                    "{:?} advertises {action:?} without a guarded callback",
-                    node.id
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
-        let shell = LiveShell::new().expect("live shell");
-
-        assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
-        assert_advertised_actions_are_guarded(&shell.run_host, run_activate);
-        assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
-        assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
-        assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
-            RemoteActionDisposition::Unavailable
-        });
-
-        let submit = shell
-            .run_host
-            .unique_semantic_target_for_message(&RunAction::Submit)
-            .expect("run submit target");
-        let (_, projected) = project(&shell.run_host, run_activate).expect("run semantics");
-        let submit = projected
-            .iter()
-            .find(|node| node.id == submit.id)
-            .expect("projected submit node");
-        assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
-        assert!(!submit.enabled);
-    }
-}
-
 impl LiveShell {
     pub(crate) fn resolve_remote_installed_launch(
         &mut self,
@@ -537,5 +486,56 @@ impl LiveShell {
         self.session_host = original;
         result?;
         Ok(staged.take_commands())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_advertised_actions_are_guarded<A: UiApplication>(
+        host: &nickel_ui::UiHost<A>,
+        classify: impl Fn(&A::Message) -> RemoteActionDisposition,
+    ) {
+        let (_, nodes) = project(host, &classify).expect("bounded production semantics");
+        for node in nodes {
+            for action in node.actions {
+                let callback = host
+                    .message_for_semantic_action(&node.id, action)
+                    .map(&classify)
+                    .unwrap_or(RemoteActionDisposition::Unavailable);
+                assert_eq!(
+                    action_disposition(action, callback),
+                    RemoteActionDisposition::Guarded,
+                    "{:?} advertises {action:?} without a guarded callback",
+                    node.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
+        let shell = LiveShell::new().expect("live shell");
+
+        assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
+        assert_advertised_actions_are_guarded(&shell.run_host, run_activate);
+        assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
+        assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
+        assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
+            RemoteActionDisposition::Unavailable
+        });
+
+        let submit = shell
+            .run_host
+            .unique_semantic_target_for_message(&RunAction::Submit)
+            .expect("run submit target");
+        let (_, projected) = project(&shell.run_host, run_activate).expect("run semantics");
+        let submit = projected
+            .iter()
+            .find(|node| node.id == submit.id)
+            .expect("projected submit node");
+        assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
+        assert!(!submit.enabled);
     }
 }
