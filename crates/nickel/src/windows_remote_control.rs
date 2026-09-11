@@ -3608,10 +3608,10 @@ impl WindowsRemoteControl {
             &request.surface_id,
             request.surface_generation,
         )?;
-        // The volume OSD has no deferred platform effects. Other LiveShell roles
-        // require the Linux staged-effect dispatcher before they can be exposed
-        // safely on Windows.
-        if observation.role != crate::winit_shell::SurfaceRole::VolumeOsd {
+        // Text edits in the launcher/run field and volume-OSD actions update
+        // only their production UiHost. Actions that can emit a platform effect
+        // stay closed until Windows has an authority-preserving continuation.
+        if !windows_semantic_action_is_effect_free(observation.role, &request.action) {
             return Err(
                 "semantic mutation effects are unavailable for this Windows shell role".into(),
             );
@@ -5531,9 +5531,43 @@ fn windows_semantic_mutation(
     }
 }
 
+fn windows_semantic_action_is_effect_free(
+    role: crate::winit_shell::SurfaceRole,
+    action: &nickel_remote_control::semantics::SemanticMutation,
+) -> bool {
+    role == crate::winit_shell::SurfaceRole::VolumeOsd
+        || (role == crate::winit_shell::SurfaceRole::Launcher
+            && matches!(
+                action,
+                nickel_remote_control::semantics::SemanticMutation::SetText(_)
+            ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_semantic_policy_admits_only_effect_free_windows_actions() {
+        use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
+
+        assert!(windows_semantic_action_is_effect_free(
+            crate::winit_shell::SurfaceRole::Launcher,
+            &SemanticMutation::SetText("query".into()),
+        ));
+        assert!(windows_semantic_action_is_effect_free(
+            crate::winit_shell::SurfaceRole::VolumeOsd,
+            &SemanticMutation::SetNumber(0.5),
+        ));
+        assert!(!windows_semantic_action_is_effect_free(
+            crate::winit_shell::SurfaceRole::Launcher,
+            &SemanticMutation::Invoke(SemanticInvocation::Activate),
+        ));
+        assert!(!windows_semantic_action_is_effect_free(
+            crate::winit_shell::SurfaceRole::ControlCenter,
+            &SemanticMutation::SetBoolean(true),
+        ));
+    }
 
     #[test]
     fn launch_preparation_diagnostic_tracks_bounded_worker_transitions() {

@@ -1838,8 +1838,8 @@ tree. Each observation is filtered against the current protected state and exact
 surface/output lease generations, and protected text rejects the whole semantic
 projection. Semantic mutation rechecks the request deadline, resource permit,
 remote holds, physical-input idle state and local-input epoch immediately around
-dispatch. Mutation is currently limited to the volume OSD because it produces no
-deferred platform effects; other roles fail closed until their native effects can
+dispatch. Mutation is currently limited to the volume OSD and launcher/run text
+editing because those operations produce no deferred platform effects; other roles fail closed until their native effects can
 be staged and delivered without escaping revocation. Windows cross-compilation
 and Wine cover protocol and projection behavior; live native HWND/MCP acceptance
 remains open.
