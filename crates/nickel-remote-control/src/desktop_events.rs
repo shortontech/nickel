@@ -11,6 +11,8 @@ pub enum ProductionEffectKind {
     ShellCommand,
     DeviceControl,
     ApplicationLaunch,
+    WindowAction,
+    WorkspaceAction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
@@ -291,6 +293,24 @@ mod tests {
         for excluded in ["command", "target", "client", "path", "application_id"] {
             assert!(!json.contains(excluded));
         }
+
+        events.record(
+            DesktopEventKind::ProductionEffectCompleted {
+                effect: ProductionEffectKind::WindowAction,
+                outcome: ProductionEffectOutcome::Requested,
+            },
+            18,
+        );
+        events.record(
+            DesktopEventKind::ProductionEffectCompleted {
+                effect: ProductionEffectKind::WorkspaceAction,
+                outcome: ProductionEffectOutcome::Confirmed,
+            },
+            19,
+        );
+        let json = serde_json::to_string(&events.snapshot()).unwrap();
+        assert!(json.contains("window_action"));
+        assert!(json.contains("workspace_action"));
     }
 
     #[test]

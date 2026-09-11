@@ -2767,6 +2767,14 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_workspace_action(&permit, action);
+                if result.is_ok()
+                    && action != nickel_remote_control::diagnostics::WorkspaceAction::List
+                {
+                    self.record_remote_production_effect_outcome(
+                        nickel_remote_control::desktop_events::ProductionEffectKind::WorkspaceAction,
+                        nickel_remote_control::desktop_events::ProductionEffectOutcome::Confirmed,
+                    );
+                }
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ApplicationScale { permit, request } => {
@@ -3809,6 +3817,16 @@ impl NickelSession {
                             Ok(WindowOutcome::observed(action, window))
                         })
                     });
+                if let Ok(outcome) = &result {
+                    self.record_remote_production_effect_outcome(
+                        nickel_remote_control::desktop_events::ProductionEffectKind::WindowAction,
+                        if outcome.confirmed {
+                            nickel_remote_control::desktop_events::ProductionEffectOutcome::Confirmed
+                        } else {
+                            nickel_remote_control::desktop_events::ProductionEffectOutcome::Requested
+                        },
+                    );
+                }
                 let _ = reply.send(result);
             }
         }
@@ -7199,6 +7217,20 @@ impl NickelSession {
             self.remote_held_keyboard.is_some(),
             self.remote_held_pointer.is_some(),
             observed_at_us,
+        );
+    }
+
+    fn record_remote_production_effect_outcome(
+        &mut self,
+        effect: nickel_remote_control::desktop_events::ProductionEffectKind,
+        outcome: nickel_remote_control::desktop_events::ProductionEffectOutcome,
+    ) {
+        self.remote_desktop_events.record(
+            nickel_remote_control::desktop_events::DesktopEventKind::ProductionEffectCompleted {
+                effect,
+                outcome,
+            },
+            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
         );
     }
 
