@@ -13360,6 +13360,344 @@ mod protocol_tests {
         assert!(control.lock().unwrap().granted_clients().next().is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    struct NativeAtspiStatus {
+        session: zbus::blocking::Connection,
+        original_enabled: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    impl NativeAtspiStatus {
+        fn connect() -> Result<Self, String> {
+            let session = zbus::blocking::connection::Builder::session()
+                .map_err(|error| error.to_string())?
+                .method_timeout(Duration::from_secs(1))
+                .build()
+                .map_err(|error| error.to_string())?;
+            let original_enabled = Self::enabled(&session)?;
+            Ok(Self {
+                session,
+                original_enabled,
+            })
+        }
+
+        fn enabled(session: &zbus::blocking::Connection) -> Result<bool, String> {
+            let value: zbus::zvariant::OwnedValue = session
+                .call_method(
+                    Some("org.a11y.Bus"),
+                    "/org/a11y/bus",
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Get",
+                    &("org.a11y.Status", "IsEnabled"),
+                )
+                .map_err(|error| error.to_string())?
+                .body()
+                .deserialize()
+                .map_err(|error| error.to_string())?;
+            bool::try_from(value).map_err(|error| error.to_string())
+        }
+
+        fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+            self.session
+                .call_method(
+                    Some("org.a11y.Bus"),
+                    "/org/a11y/bus",
+                    Some("org.freedesktop.DBus.Properties"),
+                    "Set",
+                    &(
+                        "org.a11y.Status",
+                        "IsEnabled",
+                        zbus::zvariant::Value::from(enabled),
+                    ),
+                )
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+
+        fn accessibility_bus(&self) -> Result<zbus::blocking::Connection, String> {
+            let address: String = self
+                .session
+                .call_method(
+                    Some("org.a11y.Bus"),
+                    "/org/a11y/bus",
+                    Some("org.a11y.Bus"),
+                    "GetAddress",
+                    &(),
+                )
+                .map_err(|error| error.to_string())?
+                .body()
+                .deserialize()
+                .map_err(|error| error.to_string())?;
+            zbus::blocking::connection::Builder::address(address.as_str())
+                .map_err(|error| error.to_string())?
+                .method_timeout(Duration::from_secs(1))
+                .build()
+                .map_err(|error| error.to_string())
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    impl Drop for NativeAtspiStatus {
+        fn drop(&mut self) {
+            let _ = self.set_enabled(self.original_enabled);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn atspi_children(
+        bus: &zbus::blocking::Connection,
+        peer: &str,
+        path: &str,
+    ) -> Result<Vec<(String, zbus::zvariant::OwnedObjectPath)>, String> {
+        bus.call_method(
+            Some(peer),
+            path,
+            Some("org.a11y.atspi.Accessible"),
+            "GetChildren",
+            &(),
+        )
+        .map_err(|error| error.to_string())?
+        .body()
+        .deserialize()
+        .map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn atspi_name(
+        bus: &zbus::blocking::Connection,
+        peer: &str,
+        path: &str,
+    ) -> Result<String, String> {
+        let value: zbus::zvariant::OwnedValue = bus
+            .call_method(
+                Some(peer),
+                path,
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.a11y.atspi.Accessible", "Name"),
+            )
+            .map_err(|error| error.to_string())?
+            .body()
+            .deserialize()
+            .map_err(|error| error.to_string())?;
+        String::try_from(value).map_err(|error| error.to_string())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn atspi_peer_is_current_process(bus: &zbus::blocking::Connection, peer: &str) -> bool {
+        bus.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetConnectionUnixProcessID",
+            &(peer,),
+        )
+        .ok()
+        .and_then(|message| message.body().deserialize::<u32>().ok())
+            == Some(std::process::id())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn atspi_action_count(bus: &zbus::blocking::Connection, peer: &str, path: &str) -> Option<i32> {
+        let value: zbus::zvariant::OwnedValue = bus
+            .call_method(
+                Some(peer),
+                path,
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.a11y.atspi.Action", "NActions"),
+            )
+            .ok()?
+            .body()
+            .deserialize()
+            .ok()?;
+        i32::try_from(value).ok()
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[ignore = "requires live session and AT-SPI buses; temporarily toggles accessibility status"]
+    fn native_atspi_consumer_observes_mcp_excluded_indicator_and_invokes_stop() {
+        use nickel_remote_control::{DesktopPermit, leases::ResourceScope};
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let status = NativeAtspiStatus::connect().expect("live session accessibility service");
+        status
+            .set_enabled(false)
+            .expect("disable accessibility before adapter registration");
+
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let control = session.remote_control.control();
+        let now = Instant::now();
+        let (identity, lease) = {
+            let mut owner = control.lock().unwrap();
+            owner.set_enabled(true);
+            let identity = owner.connect_identity("Native AT-SPI acceptance").unwrap();
+            let watch = owner
+                .reserve_connection_watch(&identity.client_id, &identity.token, now)
+                .unwrap();
+            owner
+                .activate_connection_watch(&identity.client_id, &identity.token, watch, false, now)
+                .unwrap();
+            let lease = owner
+                .leases_mut()
+                .approve_local(
+                    identity.client_id.clone(),
+                    ResourceScope::FullSession,
+                    now,
+                    Some(now + Duration::from_secs(120)),
+                    false,
+                    false,
+                )
+                .unwrap();
+            (identity, lease)
+        };
+        session.sync_remote_control_indicators();
+        let indicator = *session
+            .remote_indicator_surfaces
+            .values()
+            .next()
+            .expect("production trusted indicator");
+
+        let permit = DesktopPermit::from_active_lease(
+            control.clone(),
+            identity.client_id,
+            identity.token,
+            lease,
+        )
+        .unwrap();
+        let remote_surfaces = session.list_remote_surfaces(&permit).unwrap();
+        let protected_id = format!("internal:{}", indicator.snapshot_token());
+        assert!(
+            remote_surfaces
+                .iter()
+                .all(|surface| surface.id != protected_id),
+            "MCP surface inventory exposed the trusted indicator"
+        );
+
+        // AccessKit starts its session-bus listener asynchronously. Toggle only
+        // after the production adapter exists so the property change activates
+        // and registers that exact adapter on the real AT-SPI bus.
+        std::thread::sleep(Duration::from_millis(100));
+        status
+            .set_enabled(true)
+            .expect("activate live accessibility service");
+        let bus = status.accessibility_bus().expect("live AT-SPI bus");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let (indicator_peer, indicator_path, stop_peer, stop_path, labels) = loop {
+            let applications = atspi_children(
+                &bus,
+                "org.a11y.atspi.Registry",
+                "/org/a11y/atspi/accessible/root",
+            )
+            .unwrap_or_default();
+            let mut found = None;
+            for (peer, application_path) in applications {
+                if !atspi_peer_is_current_process(&bus, &peer) {
+                    continue;
+                }
+                let Ok(windows) = atspi_children(&bus, &peer, application_path.as_str()) else {
+                    continue;
+                };
+                for (window_peer, window_path) in windows {
+                    if atspi_name(&bus, &window_peer, window_path.as_str()).as_deref()
+                        != Ok("Nickel Remote AI Control")
+                    {
+                        continue;
+                    }
+                    let children = atspi_children(&bus, &window_peer, window_path.as_str())
+                        .expect("indicator children");
+                    let mut labels = Vec::new();
+                    let mut stop = None;
+                    for (child_peer, child_path) in children {
+                        let label = atspi_name(&bus, &child_peer, child_path.as_str())
+                            .expect("indicator child name");
+                        if label == "Stop"
+                            && atspi_action_count(&bus, &child_peer, child_path.as_str()) == Some(1)
+                        {
+                            stop = Some((child_peer.clone(), child_path.clone()));
+                        }
+                        labels.push(label);
+                    }
+                    found = stop.map(|(stop_peer, stop_path)| {
+                        (
+                            window_peer.clone(),
+                            window_path.clone(),
+                            stop_peer,
+                            stop_path,
+                            labels,
+                        )
+                    });
+                    if found.is_some() {
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            if let Some(found) = found {
+                break found;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "production AT-SPI indicator unavailable"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(labels.iter().any(|label| label == "Stop"));
+        let safe_labels = labels
+            .iter()
+            .filter(|label| !label.starts_with("Peer:"))
+            .collect::<Vec<_>>();
+        assert!(
+            labels
+                .iter()
+                .any(|label| label == "Client: Native AT-SPI acceptance"),
+            "unexpected non-peer indicator labels: {safe_labels:?}"
+        );
+        assert_eq!(
+            atspi_name(&bus, &indicator_peer, indicator_path.as_str()).unwrap(),
+            "Nickel Remote AI Control"
+        );
+        assert_eq!(
+            atspi_action_count(&bus, &stop_peer, stop_path.as_str()),
+            Some(1)
+        );
+        let invoked: bool = bus
+            .call_method(
+                Some(stop_peer.as_str()),
+                stop_path.as_str(),
+                Some("org.a11y.atspi.Action"),
+                "DoAction",
+                &(0_i32,),
+            )
+            .unwrap()
+            .body()
+            .deserialize()
+            .unwrap();
+        assert!(invoked, "AT-SPI provider rejected Stop");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while control.lock().unwrap().leases().iter().next().is_some() {
+            session.sync_remote_control_indicators();
+            assert!(
+                Instant::now() < deadline,
+                "owner did not dispatch the native Stop action"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(session.remote_indicator_accessibility.is_empty());
+        assert!(session.remote_indicator_surfaces.values().all(|surface| {
+            session
+                .internal_ui
+                .application::<super::super::remote_indicator::RemoteIndicator>(*surface)
+                .is_some_and(|indicator| {
+                    indicator.grants.is_empty() && indicator.stopped_confirmation
+                })
+        }));
+    }
+
     #[test]
     fn file_open_focus_close_uses_the_canonical_application_lifecycle() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();

@@ -157,8 +157,9 @@ impl TrustedAccessibility {
                 }
             };
             let is_stop = source.id == stop_target;
+            let label = source.label.as_ref().expect("named node").clone();
             let mut node = Node::new(if is_stop { Role::Button } else { Role::Label });
-            node.set_label(source.label.as_ref().expect("named node").clone());
+            node.set_label(label.clone());
             let bounds = source.rect;
             let rect = accesskit::Rect::new(
                 f64::from(bounds.origin.x) * scale,
@@ -177,6 +178,10 @@ impl TrustedAccessibility {
                 node.add_action(Action::Click);
                 self.stop = Some((id, source.id.clone()));
             } else {
+                // AccessKit maps static AT-SPI labels from their value while
+                // actionable controls use their accessible name. Publish both
+                // fields so the same bounded text is present on Unix and UIA.
+                node.set_value(label);
                 node.set_read_only();
             }
             if source.focused {
@@ -493,6 +498,7 @@ mod tests {
             assert!(!node.supports_action(Action::Focus));
             if node.role() == Role::Label {
                 assert!(node.is_read_only());
+                assert_eq!(node.value(), node.label());
             }
         }
         // This is the same callback used by COM; it can only enqueue.
