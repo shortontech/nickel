@@ -56,6 +56,7 @@ pub struct DiagnosticActionOutcome {
 pub enum PlatformRefreshDomain {
     Connectivity,
     Audio,
+    Peripherals,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -66,6 +67,12 @@ pub struct PlatformRefreshOutcome {
     pub network_available: bool,
     pub bluetooth_available: bool,
     pub audio_available: bool,
+    pub printers_available: bool,
+    pub volumes_available: bool,
+    pub filesystems_available: bool,
+    pub printer_count: u32,
+    pub volume_count: u32,
+    pub filesystem_count: u32,
     pub partial: bool,
     /// The compositor reconciled the returned snapshots; this is not presentation confirmation.
     pub reconciliation_confirmed: bool,
@@ -640,6 +647,16 @@ mod output_identification_tests {
             audio,
             DiagnosticAction::RefreshPlatformStatus {
                 domain: PlatformRefreshDomain::Audio
+            }
+        ));
+        let peripherals: DiagnosticAction = serde_json::from_value(serde_json::json!({
+            "refresh_platform_status": {"domain": "peripherals"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            peripherals,
+            DiagnosticAction::RefreshPlatformStatus {
+                domain: PlatformRefreshDomain::Peripherals
             }
         ));
         for field in ["path", "root", "limit", "executable", "icon_theme"] {

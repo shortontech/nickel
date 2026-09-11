@@ -143,6 +143,54 @@ pub(crate) struct AudioRefresh {
     pub partial: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PeripheralRefresh {
+    pub printers_available: bool,
+    pub volumes_available: bool,
+    pub filesystems_available: bool,
+    pub printer_count: u32,
+    pub volume_count: u32,
+    pub filesystem_count: u32,
+    pub partial: bool,
+}
+
+fn summarize_peripherals(snapshot: nickel_platform::PeripheralSnapshot) -> PeripheralRefresh {
+    let printers_available = snapshot.printers.is_ok();
+    let volumes_available = snapshot.volumes.is_ok();
+    let filesystems_available = snapshot.filesystems.is_ok();
+    let printer_count = snapshot
+        .printers
+        .as_ref()
+        .map_or(0, |values| values.len().min(u32::MAX as usize) as u32);
+    let volume_count = snapshot
+        .volumes
+        .as_ref()
+        .map_or(0, |values| values.len().min(u32::MAX as usize) as u32);
+    let filesystem_count = snapshot
+        .filesystems
+        .as_ref()
+        .map_or(0, |values| values.len().min(u32::MAX as usize) as u32);
+    PeripheralRefresh {
+        printers_available,
+        volumes_available,
+        filesystems_available,
+        printer_count,
+        volume_count,
+        filesystem_count,
+        partial: snapshot.omitted_printers != 0
+            || snapshot.omitted_jobs != 0
+            || snapshot.omitted_volumes != 0
+            || snapshot.omitted_filesystems != 0,
+    }
+}
+
+pub(crate) fn refresh_peripheral_status() -> Result<PeripheralRefresh, String> {
+    nickel_platform::peripheral_service()
+        .inspect()
+        .map(summarize_peripherals)
+        .map_err(|error| error.to_string())
+}
+
 pub(crate) fn bound_audio_refresh(mut audio: AudioStatus) -> AudioRefresh {
     let mut partial = audio.devices.len() > AUDIO_DEVICE_LIMIT;
     audio.devices.truncate(AUDIO_DEVICE_LIMIT);
@@ -630,6 +678,60 @@ mod tests {
             device.id.chars().count() <= super::AUDIO_TEXT_LIMIT
                 && device.name.chars().count() <= super::AUDIO_TEXT_LIMIT
         }));
+    }
+
+    #[test]
+    fn peripheral_refresh_retains_only_coarse_counts_and_availability() {
+        let refresh = super::summarize_peripherals(nickel_platform::PeripheralSnapshot {
+            provider: nickel_platform::PeripheralProvider::Unsupported {
+                platform: "sensitive provider detail".into(),
+            },
+            printers: Ok(vec![nickel_platform::Printer {
+                id: "private-printer-id".into(),
+                name: "Private printer".into(),
+                is_default: true,
+                state: nickel_platform::PrinterState::Ready,
+                jobs: vec![nickel_platform::PrintJob {
+                    id: "private-job-id".into(),
+                    name: "Secret document".into(),
+                    state: nickel_platform::PrintJobState::Pending,
+                }],
+            }]),
+            volumes: Err("private volume path".into()),
+            filesystems: Ok(vec![nickel_platform::FilesystemUsage {
+                id: "private-filesystem-id".into(),
+                name: "Private filesystem".into(),
+                mount_path: "/private/path".into(),
+                capacity_bytes: 10,
+                available_bytes: 5,
+            }]),
+            omitted_printers: 0,
+            omitted_jobs: 2,
+            omitted_volumes: 0,
+            omitted_filesystems: 0,
+        });
+        assert_eq!(
+            refresh,
+            super::PeripheralRefresh {
+                printers_available: true,
+                volumes_available: false,
+                filesystems_available: true,
+                printer_count: 1,
+                volume_count: 0,
+                filesystem_count: 1,
+                partial: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "queries live CUPS, UDisks2, and filesystem providers"]
+    fn live_peripheral_refresh_returns_only_coarse_status() {
+        let refresh = super::refresh_peripheral_status().expect("live peripheral refresh");
+        assert!(refresh.printer_count <= 512);
+        assert!(refresh.volume_count <= 512);
+        assert!(refresh.filesystem_count <= 256);
     }
 }
 

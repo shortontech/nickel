@@ -354,6 +354,7 @@ struct PreparedPlatformRefresh {
 enum PreparedPlatformRefreshData {
     Connectivity(crate::platform::ConnectivityRefresh),
     Audio(crate::platform::AudioRefresh),
+    Peripherals(crate::platform::PeripheralRefresh),
 }
 
 impl RemoteDesktopBridge {
@@ -981,6 +982,11 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
                 }
                 nickel_remote_control::diagnostics::PlatformRefreshDomain::Audio => {
                     PreparedPlatformRefreshData::Audio(crate::platform::refresh_audio_status()?)
+                }
+                nickel_remote_control::diagnostics::PlatformRefreshDomain::Peripherals => {
+                    PreparedPlatformRefreshData::Peripherals(
+                        crate::platform::refresh_peripheral_status()?,
+                    )
                 }
             };
             let preparation_duration_us =
@@ -2976,9 +2982,6 @@ impl NickelSession {
                                 let prepared = application_discovery.ok_or(
                                     "application inventory preparation is unavailable",
                                 )?;
-                                if self.internal_shell.is_none() {
-                                    return Err("internal shell unavailable".into());
-                                }
                                 let generation = self
                                     .remote_application_inventory_generation
                                     .checked_add(1)
@@ -3055,13 +3058,19 @@ impl NickelSession {
                                 {
                                     return Err("shared input is busy or unavailable".into());
                                 }
-                                let shell = self.internal_shell.as_mut().unwrap();
-                                let (mut changed, network_available, bluetooth_available, audio_available, partial) =
+                                let (mut changed, network_available, bluetooth_available, audio_available,
+                                    printers_available, volumes_available, filesystems_available,
+                                    printer_count, volume_count, filesystem_count, partial,
+                                    reconciliation_confirmed) =
                                     match (domain, prepared.data) {
                                         (
                                             nickel_remote_control::diagnostics::PlatformRefreshDomain::Connectivity,
                                             PreparedPlatformRefreshData::Connectivity(refresh),
                                         ) => {
+                                            let shell = self
+                                                .internal_shell
+                                                .as_mut()
+                                                .ok_or("internal shell unavailable")?;
                                             let network_available = refresh.network.available;
                                             let bluetooth_available = refresh.bluetooth.available;
                                             let mut changed = shell.apply_system_status_update(
@@ -3070,17 +3079,33 @@ impl NickelSession {
                                             changed.extend(shell.apply_system_status_update(
                                                 crate::platform::SystemStatusUpdate::Bluetooth(refresh.bluetooth),
                                             ));
-                                            (changed, network_available, bluetooth_available, false, refresh.partial)
+                                            (changed, network_available, bluetooth_available, false,
+                                                false, false, false, 0, 0, 0, refresh.partial, true)
                                         }
                                         (
                                             nickel_remote_control::diagnostics::PlatformRefreshDomain::Audio,
                                             PreparedPlatformRefreshData::Audio(refresh),
                                         ) => {
+                                            let shell = self
+                                                .internal_shell
+                                                .as_mut()
+                                                .ok_or("internal shell unavailable")?;
                                             let available = refresh.audio.available;
                                             let changed = shell.apply_system_status_update(
                                                 crate::platform::SystemStatusUpdate::Audio(refresh.audio),
                                             );
-                                            (changed, false, false, available, refresh.partial)
+                                            (changed, false, false, available,
+                                                false, false, false, 0, 0, 0, refresh.partial, true)
+                                        }
+                                        (
+                                            nickel_remote_control::diagnostics::PlatformRefreshDomain::Peripherals,
+                                            PreparedPlatformRefreshData::Peripherals(refresh),
+                                        ) => {
+                                            (Vec::new(), false, false, false,
+                                                refresh.printers_available, refresh.volumes_available,
+                                                refresh.filesystems_available, refresh.printer_count,
+                                                refresh.volume_count, refresh.filesystem_count,
+                                                refresh.partial, false)
                                         }
                                         _ => return Err("platform refresh data changed before commit".into()),
                                     };
@@ -3095,8 +3120,14 @@ impl NickelSession {
                                         network_available,
                                         bluetooth_available,
                                         audio_available,
+                                        printers_available,
+                                        volumes_available,
+                                        filesystems_available,
+                                        printer_count,
+                                        volume_count,
+                                        filesystem_count,
                                         partial,
-                                        reconciliation_confirmed: true,
+                                        reconciliation_confirmed,
                                     },
                                 );
                                 self.sync_internal_shell_changes(Some(&changed));

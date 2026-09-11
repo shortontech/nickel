@@ -1361,7 +1361,8 @@ and presented launcher/icon acceptance remain open. The installed Windows Rust t
 slice because `x86_64-w64-mingw32-gcc` is unavailable, and no native Windows
 execution is claimed. No source files were added; the exact inventory remains 344.
 
-The safe platform re-query action now has exact `connectivity` and `audio` domains.
+The safe platform re-query action now has exact `connectivity`, `audio`, and
+`peripherals` domains.
 Linux queues acknowledged immediate NetworkManager/BlueZ or PipeWire observations
 on their existing production workers; requested preparation cannot publish or
 replace shell state. Windows uses its existing native status readers on the bounded
@@ -1372,6 +1373,11 @@ physical, shell, touch, controller, grab or remote-held interaction, advances it
 own generation, and reconciles only the fresh returned snapshots. The outcome
 contains coarse availability, timing, generation and reconciliation without SSIDs,
 device names, paths, credentials or a pixel-presentation claim. Schema, bounds,
-prepublication and native Linux connectivity and PipeWire production-worker tests pass. Live delayed
+prepublication and native Linux connectivity and PipeWire production-worker tests pass. Peripheral
+refresh reuses the production service after bounding its helper process groups to two seconds and
+64 KiB per output stream. The private snapshot is reduced before owner delivery to availability,
+counts, and partial status, excluding printer/job identities, volume and filesystem paths, provider
+details, and errors; it makes no compositor reconciliation or presentation claim. Native Linux
+timeout, output-flood, production-service refresh, and redaction tests pass. Live delayed
 revocation and Control Center presentation acceptance and native Windows execution
 remain open. No source files were added; the exact inventory remains 344.
