@@ -3178,6 +3178,197 @@ mod tests {
     }
 
     #[test]
+    fn physical_emergency_cancels_all_debug_work_together_without_late_effects() {
+        use crate::{
+            event_subscriptions::{SubscriptionAdmission, TEST_LOCK},
+            frame_trace::{FrameTrace, FrameTraceCategory},
+            lease_requests::LeaseRequest,
+            leases::{ResourceEvidence, ResourceScope},
+        };
+        use nickel_input::{KeyCode, KeyEdge};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let _subscription_test_guard = TEST_LOCK.lock().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let control = Arc::new(Mutex::new(ControlPlane::default()));
+            let now = std::time::Instant::now();
+            let (identity, lease) = {
+                let mut plane = control.lock().unwrap();
+                plane.set_enabled(true);
+                let identity = plane
+                    .connect_identity("Combined emergency fixture")
+                    .unwrap();
+                crate::ready_connection(&mut plane, &identity, now);
+                let request = LeaseRequest {
+                    renewal: None,
+                    scope: ResourceScope::FullSession,
+                    duration: Some(std::time::Duration::from_secs(1200)),
+                    allow_resumption: false,
+                    full_debug: true,
+                };
+                plane
+                    .request_lease(&identity.client_id, &identity.token, request.clone(), now)
+                    .unwrap();
+                let generation = plane
+                    .lease_requests()
+                    .pending_generation(&identity.client_id)
+                    .unwrap();
+                let lease = plane
+                    .approve_lease_local(&identity.client_id, &request, generation, now)
+                    .unwrap();
+                (identity, lease)
+            };
+            let permit = crate::DesktopPermit::new(
+                control.clone(),
+                identity.client_id.clone(),
+                identity.token,
+                lease,
+            );
+            let evidence = ResourceEvidence {
+                surface: None,
+                window: None,
+                verified_application: None,
+                output: None,
+                authorized_surface_ancestors: &[],
+                protected: false,
+            };
+
+            let synthetic_deliveries = AtomicUsize::new(0);
+            let held = permit
+                .begin_input(&evidence, || Ok(()))
+                .expect("production input owner accepts the held gesture");
+            let held_operation = held.permit.operation_id.unwrap();
+            permit
+                .continue_input(&held, &evidence, || {
+                    // Controlled keyboard delivery never feeds EmergencyChord. These
+                    // two synthetic Control positions therefore remain ordinary held input.
+                    synthetic_deliveries.fetch_add(2, Ordering::SeqCst);
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(synthetic_deliveries.load(Ordering::SeqCst), 2);
+            assert!(permit.check_live().is_ok());
+
+            let mut trace = FrameTrace::new_authorized(
+                permit.clone(),
+                60,
+                FrameTraceCategory::NestedFrameDispatch,
+            )
+            .unwrap();
+            assert!(trace.record(false, 1, std::time::Duration::from_micros(1)));
+
+            let subscription = SubscriptionAdmission::acquire(&identity.client_id).unwrap();
+            let stream_permit = permit.clone();
+            let stream_probe = permit.clone();
+            let (poll_stream, release_stream) = tokio::sync::oneshot::channel();
+            let stream = tokio::spawn(async move {
+                let _subscription = subscription;
+                let _ = release_stream.await;
+                stream_permit.continued_observation()
+            });
+
+            let (blocker_started, blocker_ready) = std::sync::mpsc::sync_channel(1);
+            let (release_blocker, blocker_waiting) = std::sync::mpsc::sync_channel(1);
+            let blocker = tokio::task::spawn_blocking(move || {
+                blocker_started.send(()).unwrap();
+                let _ = blocker_waiting.recv();
+            });
+            blocker_ready
+                .recv_timeout(std::time::Duration::from_secs(1))
+                .unwrap();
+
+            let capture_gate = Arc::new(tokio::sync::Semaphore::new(1));
+            let capture_reservation = CaptureReservation {
+                _permit: Arc::new(capture_gate.clone().try_acquire_owned().unwrap()),
+            };
+            let capture = queue_capture_encoding(
+                crate::capture::CapturedWindow {
+                    window_id: "combined-emergency".into(),
+                    generation: 1,
+                    capture_generation: 1,
+                    submitted_at_us: 1,
+                    completed_at_us: 2,
+                    width: 1,
+                    height: 1,
+                    // Invalid on purpose: reaching the encoder would expose a late effect.
+                    rgba: Vec::new(),
+                },
+                permit.clone(),
+                capture_reservation,
+            );
+            let diagnostic_effects = Arc::new(AtomicUsize::new(0));
+            let diagnostic_effects_worker = diagnostic_effects.clone();
+            let diagnostic_permit = permit.clone();
+            let diagnostic = tokio::spawn(desktop_call(Arc::new(EmptyDesktop), move |_| {
+                diagnostic_permit.with_debug_input(false, || {
+                    diagnostic_effects_worker.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }));
+            tokio::task::yield_now().await;
+            assert!(!capture.is_finished());
+            assert!(!diagnostic.is_finished());
+            assert_eq!(capture_gate.available_permits(), 0);
+
+            let mut chord = crate::EmergencyChord::default();
+            assert!(!chord.handle_physical(KeyCode::ControlLeft, KeyEdge::Pressed, true));
+            assert!(chord.handle_physical(KeyCode::ControlRight, KeyEdge::Pressed, true));
+
+            // This is the production owner ordering: native hooks invalidate every
+            // detached permit first, then the seat and control owners synchronously clean up.
+            control.lock().unwrap().emergency.trigger();
+            assert!(permit.check_live().is_err());
+            assert!(stream_probe.continued_observation().is_err());
+            assert!(!trace.revalidate(false));
+            drop(held);
+            assert!(
+                !control
+                    .lock()
+                    .unwrap()
+                    .leases()
+                    .owns_input(lease, held_operation)
+            );
+            control.lock().unwrap().emergency_stop();
+            assert!(!control.lock().unwrap().enabled());
+            assert_eq!(control.lock().unwrap().leases().iter().count(), 0);
+
+            poll_stream.send(()).unwrap();
+            assert!(stream.await.unwrap().is_err());
+            assert!(SubscriptionAdmission::acquire(&identity.client_id).is_ok());
+
+            release_blocker.send(()).unwrap();
+            blocker.await.unwrap();
+            let capture_error = match capture.await.unwrap() {
+                Ok(_) => panic!("revoked queued capture encoded a late image"),
+                Err(error) => error,
+            };
+            assert!(capture_error.contains("stopped") || capture_error.contains("revoked"));
+            assert!(diagnostic.await.unwrap().is_err());
+            assert_eq!(capture_gate.available_permits(), 1);
+            assert_eq!(diagnostic_effects.load(Ordering::SeqCst), 0);
+
+            // Rearming the listener can issue only new authority. Every permit captured
+            // by the stopped stream and queued work remains permanently invalid.
+            control.lock().unwrap().set_enabled(true);
+            assert!(stream_probe.continued_observation().is_err());
+            assert!(
+                permit
+                    .with_debug::<()>(false, || {
+                        diagnostic_effects.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    })
+                    .is_err()
+            );
+            assert_eq!(diagnostic_effects.load(Ordering::SeqCst), 0);
+        });
+    }
+
+    #[test]
     fn capture_budget_remains_owned_by_queued_response_bytes_after_body_drop() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3423,6 +3614,7 @@ mod tests {
             (MAX_RECENT_OPERATION_COMPLETIONS * 2) as u64
         );
 
+        let _subscription_test_guard = crate::event_subscriptions::TEST_LOCK.lock().unwrap();
         let subscriptions = (0..MAX_SUBSCRIPTIONS)
             .map(|id| SubscriptionAdmission::acquire(&format!("churn-{id}")))
             .collect::<Result<Vec<_>, _>>()

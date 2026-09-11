@@ -5,6 +5,8 @@ use std::{
 };
 pub const MAX_SUBSCRIPTIONS: usize = 4;
 pub const MAX_SUBSCRIPTION_SECONDS: u64 = 60;
+#[cfg(test)]
+pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 fn clients() -> &'static Mutex<HashSet<String>> {
     static CLIENTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     CLIENTS.get_or_init(Default::default)
@@ -49,6 +51,7 @@ mod tests {
     use super::*;
     #[test]
     fn subscription_capacity_is_global_per_client_and_released_on_drop() {
+        let _test_guard = TEST_LOCK.lock().unwrap();
         let mut guards = Vec::new();
         for id in 0..MAX_SUBSCRIPTIONS {
             guards.push(SubscriptionAdmission::acquire(&format!("fixture-{id}")).unwrap());
