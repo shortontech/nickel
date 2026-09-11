@@ -28,6 +28,7 @@ use std::{
 
 const DEADLINE: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
+const SESSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_VERSION: &str = "2025-06-18";
 const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
 const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
@@ -132,9 +133,8 @@ fn exercise(
     capability_file: &Path,
     address: SocketAddr,
 ) -> Result<(), String> {
-    let deadline = Instant::now() + DEADLINE;
-    let environment = wait_for_environment(session, capability_file, deadline)?;
-    wait_for_readiness(session, &environment, deadline)?;
+    let environment = wait_for_environment(session, capability_file, Instant::now() + DEADLINE)?;
+    wait_for_readiness(session, &environment, Instant::now() + DEADLINE)?;
 
     let initial = remote_snapshot(&environment)?;
     if initial.effective != RemoteControlEffectiveState::Enabled
@@ -168,6 +168,7 @@ fn exercise(
         ));
     }
 
+    let deadline = Instant::now() + DEADLINE;
     let pending = loop {
         let snapshot = remote_snapshot(&environment)?;
         if let Some(pending) = snapshot.pending_leases.first().cloned() {
@@ -543,19 +544,61 @@ fn wait_for_readiness(
     environment: &SessionEnvironment,
     deadline: Instant,
 ) -> Result<(), String> {
+    poll_readiness(
+        deadline,
+        SESSION_RESPONSE_TIMEOUT,
+        POLL,
+        |read_timeout| {
+            session_message_with_timeout(
+                environment,
+                Request::Query(Query::ShellReadiness),
+                read_timeout,
+            )
+        },
+        || {
+            if let Some(status) = session.try_wait()? {
+                Err(format!(
+                    "nested compositor exited while awaiting readiness: {status}"
+                ))
+            } else {
+                Ok(())
+            }
+        },
+    )
+}
+
+fn poll_readiness(
+    deadline: Instant,
+    response_timeout: Duration,
+    poll_interval: Duration,
+    mut query: impl FnMut(Duration) -> Result<ServerMessage, SessionMessageError>,
+    mut ensure_running: impl FnMut() -> Result<(), String>,
+) -> Result<(), String> {
     loop {
-        match session_message(environment, Request::Query(Query::ShellReadiness)) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err("shell readiness did not become ready within 30 seconds".into());
+        }
+        match query(response_timeout.min(remaining)) {
             Ok(ServerMessage::ShellReadiness(readiness)) if readiness.ready => return Ok(()),
-            Ok(ServerMessage::ShellReadiness(_)) | Err(_) if Instant::now() < deadline => {}
+            Ok(ServerMessage::ShellReadiness(_)) => {}
             Ok(message) => return Err(format!("readiness query returned {message:?}")),
-            Err(error) => return Err(format!("readiness failed before deadline: {error}")),
+            Err(SessionMessageError::RetryableReceive(_)) if Instant::now() < deadline => {}
+            Err(SessionMessageError::RetryableReceive(error)) => {
+                return Err(format!(
+                    "readiness did not respond within 30 seconds: {error}"
+                ));
+            }
+            Err(SessionMessageError::Fatal(error)) => {
+                return Err(format!("readiness query failed: {error}"));
+            }
         }
-        if let Some(status) = session.try_wait()? {
-            return Err(format!(
-                "nested compositor exited while awaiting readiness: {status}"
-            ));
+        ensure_running()?;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let sleep_for = poll_interval.min(remaining);
+        if !sleep_for.is_zero() {
+            thread::sleep(sleep_for);
         }
-        thread::sleep(POLL);
     }
 }
 
@@ -572,16 +615,39 @@ fn session_message(
     environment: &SessionEnvironment,
     request: Request,
 ) -> Result<ServerMessage, String> {
+    session_message_with_timeout(environment, request, SESSION_RESPONSE_TIMEOUT)
+        .map_err(SessionMessageError::into_string)
+}
+
+enum SessionMessageError {
+    RetryableReceive(String),
+    Fatal(String),
+}
+
+impl SessionMessageError {
+    fn into_string(self) -> String {
+        match self {
+            Self::RetryableReceive(error) | Self::Fatal(error) => error,
+        }
+    }
+}
+
+fn session_message_with_timeout(
+    environment: &SessionEnvironment,
+    request: Request,
+    read_timeout: Duration,
+) -> Result<ServerMessage, SessionMessageError> {
     let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
     let reply = environment
         .runtime
         .join(format!("nickel-0230-{}-{id}.sock", std::process::id()));
-    let socket = UnixDatagram::bind(&reply)
-        .map_err(|error| format!("could not bind private test reply socket: {error}"))?;
+    let socket = UnixDatagram::bind(&reply).map_err(|error| {
+        SessionMessageError::Fatal(format!("could not bind private test reply socket: {error}"))
+    })?;
     let _reply = ReplyPath(reply);
     socket
-        .set_read_timeout(Some(Duration::from_secs(15)))
-        .map_err(|error| error.to_string())?;
+        .set_read_timeout(Some(read_timeout))
+        .map_err(|error| SessionMessageError::Fatal(error.to_string()))?;
     socket
         .send_to(
             &encode(&ClientEnvelope {
@@ -589,22 +655,36 @@ fn session_message(
                 request_id: id,
                 request,
             })
-            .map_err(|error| error.to_string())?,
+            .map_err(|error| SessionMessageError::Fatal(error.to_string()))?,
             &environment.control,
         )
-        .map_err(|error| format!("could not send private test request: {error}"))?;
+        .map_err(|error| {
+            SessionMessageError::Fatal(format!("could not send private test request: {error}"))
+        })?;
     let mut response = vec![0; nickel_session_protocol::MAX_FRAME_BYTES];
-    let length = socket
-        .recv(&mut response)
-        .map_err(|error| format!("could not receive private test response: {error}"))?;
-    let envelope =
-        decode::<ServerEnvelope>(&response[..length]).map_err(|error| error.to_string())?;
+    let length = socket.recv(&mut response).map_err(classify_receive_error)?;
+    let envelope = decode::<ServerEnvelope>(&response[..length])
+        .map_err(|error| SessionMessageError::Fatal(error.to_string()))?;
     if envelope.request_id != id {
-        return Err("private test response correlation mismatch".into());
+        return Err(SessionMessageError::Fatal(
+            "private test response correlation mismatch".into(),
+        ));
     }
     match envelope.message {
-        ServerMessage::Error { message, .. } => Err(message),
+        ServerMessage::Error { message, .. } => Err(SessionMessageError::Fatal(message)),
         message => Ok(message),
+    }
+}
+
+fn classify_receive_error(error: std::io::Error) -> SessionMessageError {
+    let message = format!("could not receive private test response: {error}");
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ) {
+        SessionMessageError::RetryableReceive(message)
+    } else {
+        SessionMessageError::Fatal(message)
     }
 }
 
@@ -748,4 +828,71 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
     path.is_file()
         .then_some(path)
         .ok_or_else(|| format!("missing {}; build nickel and this harness together", name))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionMessageError, classify_receive_error, poll_readiness};
+    use nickel_session_protocol::{ServerMessage, ShellReadinessSnapshot};
+    use std::{
+        io,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn readiness_retries_would_block_before_deadline() {
+        let mut attempts = 0;
+        poll_readiness(
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            |_| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(classify_receive_error(io::Error::from(
+                        io::ErrorKind::WouldBlock,
+                    )))
+                } else {
+                    Ok(ready_message())
+                }
+            },
+            || Ok(()),
+        )
+        .expect("a transient EAGAIN should be retried");
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn readiness_does_not_retry_fatal_protocol_errors() {
+        let mut attempts = 0;
+        let error = poll_readiness(
+            Instant::now() + Duration::from_secs(1),
+            Duration::from_millis(10),
+            Duration::ZERO,
+            |_| {
+                attempts += 1;
+                Err(SessionMessageError::Fatal("malformed reply".into()))
+            },
+            || Ok(()),
+        )
+        .expect_err("a fatal protocol error should fail immediately");
+        assert_eq!(attempts, 1);
+        assert_eq!(error, "readiness query failed: malformed reply");
+    }
+
+    fn ready_message() -> ServerMessage {
+        ServerMessage::ShellReadiness(ShellReadinessSnapshot {
+            expected_shell_pid: None,
+            authenticated_shell_pid: None,
+            outputs: 1,
+            desktops: 1,
+            panels: 1,
+            locks: 1,
+            launchers: 1,
+            required_singletons_ready: true,
+            output_roles_ready: true,
+            reserved_ordinary_windows: 0,
+            ready: true,
+        })
+    }
 }
