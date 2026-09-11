@@ -281,12 +281,13 @@ impl NickelSession {
         prepared: PreparedSemanticFavorite,
     ) -> Result<(), String> {
         let controller_busy = self.poll_remote_controller_ownership();
+        let ancestors = self.remote_surface_ancestors(origin);
         let evidence = nickel_remote_control::leases::ResourceEvidence {
             window: None,
             surface: Some(origin),
             output: Some(output),
             verified_application: None,
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors: &ancestors,
             protected: false,
         };
         let prior = prepared.prior;

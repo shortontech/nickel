@@ -1,4 +1,5 @@
 mod remote_indicator;
+mod remote_surface_authority;
 #[cfg(any(test, target_os = "windows"))]
 mod trusted_accessibility;
 #[cfg(any(test, target_os = "windows"))]

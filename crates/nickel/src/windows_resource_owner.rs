@@ -455,6 +455,7 @@ impl Owner {
         scope: &ResourceScope,
         surface: &ResourceId,
         output_name: Option<&str>,
+        authorized_surface_ancestors: &[ResourceId],
     ) -> bool {
         let Some(output) =
             output_name.and_then(|name| self.outputs.get(name).map(|record| &record.identity))
@@ -466,7 +467,7 @@ impl Owner {
             window: None,
             verified_application: None,
             output: Some(output),
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors,
             protected: false,
         })
     }
@@ -700,12 +701,14 @@ mod tests {
         assert!(owner.shell_surface_authorized(
             &ResourceScope::FullSession,
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
         ));
         assert!(owner.shell_surface_authorized(
             &ResourceScope::Surface(surface.clone()),
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
         ));
         assert!(owner.shell_surface_authorized(
             &ResourceScope::Output(ResourceId {
@@ -713,7 +716,8 @@ mod tests {
                 generation: output.generation,
             }),
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
         ));
         assert!(!owner.shell_surface_authorized(
             &ResourceScope::Surface(ResourceId {
@@ -721,12 +725,14 @@ mod tests {
                 generation: surface.generation + 1,
             }),
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
         ));
         assert!(!owner.shell_surface_authorized(
             &ResourceScope::Window(surface.clone()),
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
         ));
         assert!(!owner.shell_surface_authorized(
             &ResourceScope::Output(ResourceId {
@@ -734,7 +740,28 @@ mod tests {
                 generation: output.generation + 1,
             }),
             &surface,
-            Some("main")
+            Some("main"),
+            &[],
+        ));
+
+        let parent = ResourceId {
+            id: "windows-shell:39".into(),
+            generation: 39,
+        };
+        assert!(owner.shell_surface_authorized(
+            &ResourceScope::Surface(parent.clone()),
+            &surface,
+            Some("main"),
+            std::slice::from_ref(&parent),
+        ));
+        assert!(!owner.shell_surface_authorized(
+            &ResourceScope::Surface(ResourceId {
+                id: parent.id.clone(),
+                generation: parent.generation + 1,
+            }),
+            &surface,
+            Some("main"),
+            std::slice::from_ref(&parent),
         ));
     }
     #[test]

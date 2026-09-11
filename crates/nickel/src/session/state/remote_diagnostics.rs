@@ -750,12 +750,13 @@ impl NickelSession {
             .find(|entry| self.internal_shell_surfaces.get(&entry.id) == Some(&runtime))
             .ok_or("shell surface has retired")?
             .id;
+        let ancestors = self.remote_surface_ancestors(&identity);
         let evidence = ResourceEvidence {
             window: None,
             surface: Some(&identity),
             output: output.as_ref(),
             verified_application: None,
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors: &ancestors,
             protected: false,
         };
         let result = permit.with_input(&evidence, || {
@@ -812,12 +813,13 @@ impl NickelSession {
                     continue;
                 }
                 let (_, current_output) = self.surface_capture_evidence(&identity)?;
+                let ancestors = self.remote_surface_ancestors(&identity);
                 let resource = ResourceEvidence {
                     window: None,
                     surface: Some(&identity),
                     output: current_output.as_ref(),
                     verified_application: None,
-                    authorized_surface_ancestors: &[],
+                    authorized_surface_ancestors: &ancestors,
                     protected: false,
                 };
                 let selected = permit.with_input(&resource, || {
@@ -1010,12 +1012,13 @@ impl NickelSession {
         use nickel_remote_control::leases::ResourceEvidence;
         let output = self.preflight_remote_shell_command(permit, origin, &command)?;
         let controller_busy = self.poll_remote_controller_ownership();
+        let ancestors = self.remote_surface_ancestors(origin);
         let evidence = ResourceEvidence {
             window: None,
             surface: Some(origin),
             output: Some(&output),
             verified_application: None,
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors: &ancestors,
             protected: false,
         };
         permit.with_input(&evidence, || {
@@ -1221,6 +1224,19 @@ impl NickelSession {
             .collect();
         let truncated = records.next().is_some();
         (result, truncated)
+    }
+
+    pub(super) fn remote_surface_ancestors(
+        &self,
+        identity: &nickel_remote_control::leases::ResourceId,
+    ) -> Vec<nickel_remote_control::leases::ResourceId> {
+        let (surfaces, truncated) = self.remote_shell_surface_diagnostics();
+        if truncated {
+            return Vec::new();
+        }
+        crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(&surfaces)
+            .map(|authority| authority.ancestors(identity))
+            .unwrap_or_default()
     }
 
     pub(super) fn remote_internal_application_diagnostics(

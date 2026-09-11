@@ -161,13 +161,14 @@ impl NickelSession {
         effect: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
         let (_, output) = self.surface_capture_evidence(identity)?;
+        let ancestors = self.remote_surface_ancestors(identity);
         permit.with_resource(
             &nickel_remote_control::leases::ResourceEvidence {
                 window: None,
                 surface: Some(identity),
                 output: output.as_ref(),
                 verified_application: None,
-                authorized_surface_ancestors: &[],
+                authorized_surface_ancestors: &ancestors,
                 protected: false,
             },
             effect,
@@ -400,13 +401,14 @@ impl NickelSession {
                         }
                         // The owner cannot mutate visibility/placement while this closure runs;
                         // the permit lock excludes concurrent revocation throughout submission.
+                        let ancestors = self.remote_surface_ancestors(identity);
                         work.permit.with_resource(
                             &nickel_remote_control::leases::ResourceEvidence {
                                 window: None,
                                 surface: Some(identity),
                                 output: output.as_ref(),
                                 verified_application: None,
-                                authorized_surface_ancestors: &[],
+                                authorized_surface_ancestors: &ancestors,
                                 protected: false,
                             },
                             || {

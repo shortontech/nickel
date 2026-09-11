@@ -5455,10 +5455,15 @@ impl WindowsRemoteControl {
         let scope = permit.resource_scope()?;
         let protected =
             !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
-        let (surfaces, _) = crate::windows_shell_diagnostics::project(
+        let (surfaces, truncated) = crate::windows_shell_diagnostics::project(
             protected,
             shell.remote_shell_surface_observations(state),
         );
+        if truncated {
+            return Err("Windows shell surface ancestry exceeds its bound".into());
+        }
+        let authority =
+            crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(&surfaces)?;
         let mut result = Vec::new();
         for surface in surfaces {
             let identity = ResourceId {
@@ -5473,18 +5478,21 @@ impl WindowsRemoteControl {
                         generation,
                     })
             });
+            let ancestors = authority.ancestors(&identity);
             let evidence = ResourceEvidence {
                 surface: Some(&identity),
                 window: None,
                 verified_application: None,
                 output: output.as_ref(),
-                authorized_surface_ancestors: &[],
+                authorized_surface_ancestors: &ancestors,
                 protected: output.is_none(),
             };
-            if self
-                .resources
-                .shell_surface_authorized(&scope, &identity, surface.output.as_deref())
-            {
+            if self.resources.shell_surface_authorized(
+                &scope,
+                &identity,
+                surface.output.as_deref(),
+                &ancestors,
+            ) {
                 result.push(permit.with_resource(&evidence, || Ok(surface))?);
             }
         }
@@ -5515,6 +5523,27 @@ impl WindowsRemoteControl {
             .ok_or_else(|| "shell surface is unavailable or protected".into())
     }
 
+    fn shell_surface_ancestors(
+        &self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        identity: &nickel_remote_control::leases::ResourceId,
+    ) -> Result<Vec<nickel_remote_control::leases::ResourceId>, String> {
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let (surfaces, truncated) = crate::windows_shell_diagnostics::project(
+            protected,
+            shell.remote_shell_surface_observations(state),
+        );
+        if truncated {
+            return Err("Windows shell surface ancestry exceeds its bound".into());
+        }
+        Ok(
+            crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(&surfaces)?
+                .ancestors(identity),
+        )
+    }
+
     fn inspect_shell_surface(
         &self,
         shell: &WinitShell,
@@ -5540,12 +5569,13 @@ impl WindowsRemoteControl {
                 .output_generation(output_name)
                 .ok_or("shell output has retired")?,
         };
+        let ancestors = self.shell_surface_ancestors(shell, state, &identity)?;
         let evidence = ResourceEvidence {
             surface: Some(&identity),
             window: None,
             verified_application: None,
             output: Some(&output),
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors: &ancestors,
             protected: false,
         };
         permit.with_resource(&evidence, || {
@@ -5619,12 +5649,13 @@ impl WindowsRemoteControl {
                 .output_generation(output_name)
                 .ok_or("shell output has retired")?,
         };
+        let ancestors = self.shell_surface_ancestors(shell, state, &identity)?;
         let evidence = ResourceEvidence {
             surface: Some(&identity),
             window: None,
             verified_application: None,
             output: Some(&output),
-            authorized_surface_ancestors: &[],
+            authorized_surface_ancestors: &ancestors,
             protected: false,
         };
         permit.with_input(&evidence, || {
@@ -5743,6 +5774,10 @@ impl WindowsRemoteControl {
                     protected_desktop,
                     shell_input_observations.iter().cloned(),
                 );
+            let shell_surface_authority =
+                crate::remote_surface_authority::SurfaceAuthority::from_shell_surfaces(
+                    &shell_surfaces,
+                )?;
             let shell_renderers = crate::windows_shell_diagnostics::project_presenters(
                 protected_desktop,
                 observed_at_us,
@@ -5798,8 +5833,14 @@ impl WindowsRemoteControl {
                         id: format!("windows-shell:{}", surface.generation),
                         generation: surface.generation,
                     };
+                    let ancestors = shell_surface_authority.ancestors(&identity);
                     self.resources
-                        .shell_surface_authorized(&scope, &identity, surface.output.as_deref())
+                        .shell_surface_authorized(
+                            &scope,
+                            &identity,
+                            surface.output.as_deref(),
+                            &ancestors,
+                        )
                         .then_some(InputDeviceDiagnostic {
                             focused_window: None,
                             focused_surface: Some(identity),
@@ -5839,10 +5880,12 @@ impl WindowsRemoteControl {
                             id: format!("windows-shell:{}", surface.generation),
                             generation: surface.generation,
                         };
+                        let ancestors = shell_surface_authority.ancestors(&identity);
                         if !self.resources.shell_surface_authorized(
                             &scope,
                             &identity,
                             surface.output.as_deref(),
+                            &ancestors,
                         ) {
                             return None;
                         }
