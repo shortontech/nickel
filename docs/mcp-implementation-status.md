@@ -140,12 +140,15 @@ desktop protection and lease scope. The bounded catalog worker retains the actua
 launchable application records and descriptor digests, so the owner does not rescan
 the Start Menu and a changed shortcut advances the catalog generation. The owner
 then pins the exact shortcut and every ancestor through its final permit check.
-It deliberately releases that staging and reports the launch broker unavailable
-before any native effect. The remaining one-shot suspended broker is required to
-make the irreversible `ShellExecuteExW` boundary cancellable without holding the
-global authority mutex; output-scoped launch also still requires verified first-map
-placement. Windows cross-build and strict cross-Clippy passed, but no native launch
-is claimed.
+The pinned launch is retained by a two-second, one-shot commit gate through the
+final `DesktopPermit` check. Its future callback contract permits only resuming
+an already-created suspended broker and local bookkeeping; it excludes shell
+execution, IPC, waits, allocation, and broker construction while the authority
+mutex is held. The current callback refuses and reports the broker unavailable
+before any native effect. Authenticated inherited transfer of the pinned shortcut
+and ancestor handles remains required before the broker can safely run
+`ShellExecuteExW`; output-scoped launch also requires verified first-map placement.
+Windows cross-build and strict cross-Clippy passed, but no native launch is claimed.
 
 Catalog preparation now reads application-scale settings once per request and
 applies that snapshot to every inspected entry, avoiding repeated reads and mixed

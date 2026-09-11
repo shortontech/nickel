@@ -1775,6 +1775,8 @@ impl WindowsRemoteControl {
         let capture = self
             .applications
             .prepare_launch(request.catalog_generation, &request.application_id)?;
+        let staged = crate::windows_launch_broker::StagedLaunch::new(capture, Instant::now());
+        let staged_identity = staged.application_identity().to_owned();
         let scope = permit.resource_scope()?;
         let expected = match &scope {
             ResourceScope::FullSession => None,
@@ -1788,22 +1790,22 @@ impl WindowsRemoteControl {
                 return Err("this Windows lease cannot launch applications".into());
             }
         };
-        if expected.is_some_and(|expected| expected != capture.application_identity()) {
+        if expected.is_some_and(|expected| expected != staged_identity) {
             return Err("installed launch target is outside the application lease".into());
         }
         let evidence = ResourceEvidence {
             surface: None,
             window: None,
-            verified_application: Some(capture.application_identity()),
+            verified_application: Some(&staged_identity),
             output: None,
             authorized_surface_ancestors: &[],
             protected: false,
         };
-        permit.with_input(&evidence, || Ok(()))?;
-        // Keep the pinned capture alive through every authority check. Execution
-        // remains denied until a one-shot broker provides a linearizable resume
-        // boundary; calling ShellExecuteEx here would hold the ControlPlane mutex.
-        drop(capture);
+        let _capture = staged.commit(&permit, &evidence, Instant::now(), || {
+            // Broker construction and inherited-handle transfer are not yet
+            // available. Refuse before a process can be resumed.
+            Err("Windows launch broker is unavailable".into())
+        })?;
         Err("Windows launch broker is unavailable".into())
     }
 
