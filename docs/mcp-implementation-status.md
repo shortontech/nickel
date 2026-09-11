@@ -1422,5 +1422,7 @@ effects awaiting compositor reconciliation: desktop scene updates, clipboard
 image-copy frames, launch attribution observations, deferred output retirements,
 and whether shell focus work is pending. It never includes clipboard pixels,
 launch commands, output identities, or shell targets. The broader `effects`
-domain remains explicitly unavailable until completed-effect ordering and native
-platform acknowledgement are projected and exercised.
+domain remains explicitly unavailable. Completed remote shell-command, guarded
+device-control, and application-launch commits now enter the bounded event stream
+in production order with fixed coarse outcomes. Native platform acknowledgement
+coverage and non-shell effect categories remain to be projected and exercised.

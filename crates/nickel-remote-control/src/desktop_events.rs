@@ -6,6 +6,25 @@ use std::collections::VecDeque;
 pub const MAX_DESKTOP_EVENTS: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionEffectKind {
+    ShellCommand,
+    DeviceControl,
+    ApplicationLaunch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProductionEffectOutcome {
+    Confirmed,
+    UiUpdated,
+    Requested,
+    Cancelled,
+    Unavailable,
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopEventKind {
     /// Native process evidence made this ordinary window observable.
@@ -18,6 +37,12 @@ pub enum DesktopEventKind {
     OutputMembershipChanged {
         latest_output_identity_generation: u64,
         outputs: usize,
+    },
+    /// A production owner committed a typed shell continuation. Fixed enums
+    /// deliberately exclude the command, target, client and application.
+    ProductionEffectCompleted {
+        effect: ProductionEffectKind,
+        outcome: ProductionEffectOutcome,
     },
 }
 
@@ -158,5 +183,22 @@ mod tests {
             snapshot.events.last().unwrap().event,
             DesktopEventKind::KeyboardFocusChanged { window_id: 2 }
         );
+    }
+
+    #[test]
+    fn production_effect_events_serialize_without_targets_or_payload_fields() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::ProductionEffectCompleted {
+                effect: ProductionEffectKind::ApplicationLaunch,
+                outcome: ProductionEffectOutcome::Confirmed,
+            },
+            17,
+        );
+        let json = serde_json::to_string(&events.snapshot()).unwrap();
+        assert!(json.contains("application_launch"));
+        for excluded in ["command", "target", "client", "path", "application_id"] {
+            assert!(!json.contains(excluded));
+        }
     }
 }

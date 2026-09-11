@@ -135,6 +135,26 @@ impl RemoteDesktopBridge {
 }
 
 impl NickelSession {
+    fn record_remote_production_effect(
+        &mut self,
+        effect: nickel_remote_control::desktop_events::ProductionEffectKind,
+        completion: Completion,
+    ) {
+        use nickel_remote_control::desktop_events::{DesktopEventKind, ProductionEffectOutcome};
+        let outcome = match completion {
+            Completion::Confirmed => ProductionEffectOutcome::Confirmed,
+            Completion::UiUpdated => ProductionEffectOutcome::UiUpdated,
+            Completion::Requested => ProductionEffectOutcome::Requested,
+            Completion::Cancelled => ProductionEffectOutcome::Cancelled,
+            Completion::Unavailable => ProductionEffectOutcome::Unavailable,
+            Completion::Uncertain => ProductionEffectOutcome::Uncertain,
+        };
+        self.remote_desktop_events.record(
+            DesktopEventKind::ProductionEffectCompleted { effect, outcome },
+            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        );
+    }
+
     pub(super) fn commit_shell_semantic_step(
         &mut self,
         permit: &DesktopPermit,
@@ -193,11 +213,16 @@ impl NickelSession {
                 }
                 Ok(completion)
             };
-            return Ok(validate().unwrap_or(match outcome {
+            let completion = validate().unwrap_or(match outcome {
                 crate::platform::GuardedControlOutcome::Cancelled
                 | crate::platform::GuardedControlOutcome::Unavailable => Completion::Cancelled,
                 _ => Completion::Uncertain,
-            }));
+            });
+            self.record_remote_production_effect(
+                nickel_remote_control::desktop_events::ProductionEffectKind::DeviceControl,
+                completion,
+            );
+            return Ok(completion);
         }
         // Preparation and queueing cannot preserve stale visibility or membership.
         let (_, current_output) = self.surface_capture_evidence(origin)?;
@@ -208,15 +233,29 @@ impl NickelSession {
         if current.tree_generation != tree_generation {
             return Err("shell tree changed during effect preparation; do not retry".into());
         }
-        match prepared {
+        let (effect, result) = match prepared {
             PreparedShellStep::Command(command) => self
                 .remote_replay_shell_command(permit, origin, command)
-                .map(|_| Completion::UiUpdated),
+                .map(|_| Completion::UiUpdated)
+                .map(|completion| {
+                    (
+                        nickel_remote_control::desktop_events::ProductionEffectKind::ShellCommand,
+                        completion,
+                    )
+                }),
             PreparedShellStep::DeviceResult { .. } => unreachable!("device result handled above"),
             PreparedShellStep::Launch(prepared) => self
                 .remote_launch_installed_application(permit, *prepared)
-                .map(|_| Completion::Confirmed),
-        }
+                .map(|_| Completion::Confirmed)
+                .map(|completion| {
+                    (
+                        nickel_remote_control::desktop_events::ProductionEffectKind::ApplicationLaunch,
+                        completion,
+                    )
+                }),
+        }?;
+        self.record_remote_production_effect(effect, result);
+        Ok(result)
     }
 }
 
