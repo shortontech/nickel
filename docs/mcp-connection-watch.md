@@ -23,9 +23,11 @@ expiry, or represent another user action.
 
 Clients must support concurrent long-running tool requests, progress notifications,
 request cancellation, and background transport maintenance. A client that cannot
-supply these features needs a Rust client-side MCP adapter that owns the watch and
-forwards ordinary requests. That adapter is not yet shipped. Such clients can
-still discover Nickel and establish identity, but cannot obtain desktop authority.
+supply these features can use the workspace's `nickel-mcp-client` Rust stdio
+adapter. It owns the watch, waits for owner-confirmed readiness, rotates watches
+with overlap, forwards ordinary requests, and closes presence on watch, keepalive,
+stdin, or stdout loss. Clients using neither mechanism can still discover Nickel
+and establish identity, but cannot obtain desktop authority.
 `get_control_status` reports `connection_ready`, `connection_watch_required`, and
 `connection_watch_seconds` so clients can diagnose their setup. Quiet user time
 alone never constitutes disconnect when the transport maintains presence.

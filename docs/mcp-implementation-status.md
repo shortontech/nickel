@@ -550,7 +550,11 @@ leases. Duplicate notification is idempotent. Authenticated reconnection does no
 restore pending cards, expired/revoked leases, cancelled gestures, or locally
 paused authority. The graceful MCP operation now invokes these transitions
 through the native owner and releases synthesized input before replying.
-Automatic transport lifetime detection remains pending.
+The shipped `nickel-mcp-client` stdio adapter maintains overlapping,
+owner-acknowledged watches independently of user messages and closes its transports
+on watch, keepalive, stdin or stdout loss. Direct MCP clients still have to
+implement the documented watch contract; silent network blackholes remain bounded
+by the watch lifetime rather than detected immediately.
 
 All 62 remote-control tests passed (`client-transition-results.txt`); the
 extended focused regression also checks pause preservation
