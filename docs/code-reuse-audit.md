@@ -304,3 +304,8 @@ input provenance, while the bounded observer exposes only admitted metadata.
 Owned GTK menu dispatch, stale-revocation replacement, Escape and physical
 semantic-action acceptance are recorded in `target/mcp-native-2026-09-10/`;
 native Windows UI Automation acceptance remains an open gate.
+
+The Windows remote-input boundary adds one Nickel source (345 total). It reuses
+the shared lease and held-input authority, the existing physical low-level hooks,
+and the Windows resource owner. Only synthesized virtual-key bits are retained
+for synchronous release; text, chords, coordinates and timing are not logged.

@@ -26,6 +26,7 @@ static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
 pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
     if !event.injected {
+        crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }
     if CHORD.observe(event) {
@@ -38,6 +39,7 @@ pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardE
 
 pub(crate) fn observe_physical_pointer(event: nickel_input::windows::NativePointerEvent) {
     if !event.injected {
+        crate::windows_remote_input::release_all();
         advance_local_input_epoch();
     }
 }
@@ -61,7 +63,57 @@ fn local_input_epoch() -> u64 {
     LOCAL_INPUT_EPOCH.load(std::sync::atomic::Ordering::Acquire)
 }
 
-const NOT_READY: &str = "Windows trusted indication and native control are not available yet";
+fn windows_key_chord(keysym: u32, modifiers: &[u32]) -> Result<Vec<u8>, String> {
+    fn virtual_key(keysym: u32) -> Option<u8> {
+        match keysym {
+            0x20..=0x7e => match char::from_u32(keysym)? {
+                'a'..='z' => Some((keysym as u8).to_ascii_uppercase()),
+                'A'..='Z' | '0'..='9' => Some(keysym as u8),
+                ' ' => Some(0x20),
+                _ => None,
+            },
+            0xff08 => Some(0x08),
+            0xff09 => Some(0x09),
+            0xff0d => Some(0x0d),
+            0xff1b => Some(0x1b),
+            0xff50 => Some(0x24),
+            0xff51 => Some(0x25),
+            0xff52 => Some(0x26),
+            0xff53 => Some(0x27),
+            0xff54 => Some(0x28),
+            0xff55 => Some(0x21),
+            0xff56 => Some(0x22),
+            0xff57 => Some(0x23),
+            0xffff => Some(0x2e),
+            0xffbe..=0xffc9 => Some(0x70 + (keysym - 0xffbe) as u8),
+            _ => None,
+        }
+    }
+    fn modifier(keysym: u32) -> Option<u8> {
+        match keysym {
+            0xffe1 => Some(0x10),
+            0xffe3 => Some(0x11),
+            0xffe9 => Some(0x12),
+            0xffeb => Some(0x5b),
+            0xfe03 => Some(0xa5),
+            _ => None,
+        }
+    }
+    let mut keys = Vec::with_capacity(modifiers.len() + 1);
+    for keysym in modifiers {
+        let key = modifier(*keysym).ok_or("unsupported Windows modifier")?;
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+    let key = virtual_key(keysym).ok_or("unsupported Windows keysym")?;
+    if !keys.contains(&key) {
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+const NOT_READY: &str = "Windows control approval remains unavailable";
 fn error(message: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         code: ErrorCode::InvalidRequest,
@@ -135,6 +187,14 @@ enum OwnerRequest {
         action: nickel_remote_control::window_actions::WindowAction,
         reply: SyncSender<Result<nickel_remote_control::window_actions::WindowOutcome, String>>,
     },
+    Keyboard {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        id: String,
+        generation: u64,
+        action: nickel_remote_control::keyboard::KeyboardAction,
+        reply: SyncSender<Result<(), String>>,
+    },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
         action: nickel_remote_control::ClientConnectionAction,
@@ -199,12 +259,32 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
     fn keyboard_action(
         &self,
-        _permit: DesktopPermit,
-        _id: &str,
-        _generation: u64,
-        _action: nickel_remote_control::keyboard::KeyboardAction,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::keyboard::KeyboardAction,
     ) -> Result<(), String> {
-        Err(NOT_READY.into())
+        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
+            &permit,
+        )?);
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::Keyboard {
+                permit,
+                prepared,
+                id: id.to_owned(),
+                generation,
+                action,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
     }
     fn pointer_action(
         &self,
@@ -363,8 +443,17 @@ pub(crate) struct WindowsRemoteControl {
     desktop_session: Option<u32>,
     desktop_unlocked: bool,
     local_input_epoch: u64,
+    keyboard_hold: Option<WindowsKeyboardHold>,
     start_time: Instant,
     last_stop: Option<Instant>,
+}
+struct WindowsKeyboardHold {
+    authority: nickel_remote_control::HeldInput,
+    keys: Vec<u8>,
+    window_id: String,
+    generation: u64,
+    native: usize,
+    deadline: Instant,
 }
 struct IndicatorSurface {
     id: SurfaceId,
@@ -438,6 +527,7 @@ impl WindowsRemoteControl {
             desktop_session,
             desktop_unlocked,
             local_input_epoch: local_input_epoch(),
+            keyboard_hold: None,
             start_time: started,
             last_stop: None,
         };
@@ -476,6 +566,7 @@ impl WindowsRemoteControl {
     pub(crate) fn poll(&mut self) {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
+        self.reconcile_keyboard_hold();
         // Service transport loss before ordinary requests, even if their queue is full.
         if self.authority.cleanup_wake.take_wake_failure() {
             tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
@@ -486,13 +577,15 @@ impl WindowsRemoteControl {
                 .lock()
                 .unwrap()
                 .reconcile_pending_lease_requests(Instant::now());
-            // Native input is still unavailable on Windows. When it is enabled,
-            // its cancellation drain must run here before any owner replies.
+            self.reconcile_keyboard_hold();
         }
         if STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            crate::windows_remote_input::release_all();
+            self.keyboard_hold.take();
             self.handle(Request::Command(Command::EmergencyStopRemoteControl));
         }
         self.drain_resource_lifecycle();
+        self.reconcile_keyboard_hold();
         for _ in 0..8 {
             let Ok(request) = self.receiver.try_recv() else {
                 break;
@@ -517,6 +610,18 @@ impl WindowsRemoteControl {
                 } => {
                     let result =
                         self.perform_window_action(permit, *prepared, &id, generation, action);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::Keyboard {
+                    permit,
+                    prepared,
+                    id,
+                    generation,
+                    action,
+                    reply,
+                } => {
+                    let result =
+                        self.perform_keyboard_action(permit, *prepared, &id, generation, action);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -560,11 +665,28 @@ impl WindowsRemoteControl {
             return;
         }
         self.local_input_epoch = observed;
+        crate::windows_remote_input::release_all();
+        self.keyboard_hold.take();
         if let Ok(mut control) = self.remote_control.control().lock() {
-            // Native release is added with Windows held-input dispatch. Clear
-            // shared ownership first so no continuation can blend with this
-            // newly observed physical key or pointer event.
+            // The hook has already released registered keys. Clear shared
+            // ownership so no continuation can blend with this newly observed
+            // physical key or pointer event.
             control.leases_mut().cancel_input();
+        }
+    }
+    fn reconcile_keyboard_hold(&mut self) {
+        let expired = self.keyboard_hold.as_ref().is_some_and(|held| {
+            Instant::now() >= held.deadline
+                || held.authority.check_live().is_err()
+                || self
+                    .resources
+                    .window(&held.window_id, held.generation)
+                    .is_none_or(|window| window.native != held.native)
+                || !crate::windows_remote_input::foreground_is(held.native)
+        });
+        if expired {
+            crate::windows_remote_input::release_all();
+            self.keyboard_hold.take();
         }
     }
     fn reconcile_desktop_authority(&mut self) {
@@ -698,6 +820,157 @@ impl WindowsRemoteControl {
                 revoke_native_resource(&control, id)
             })?;
         permit.check_live()
+    }
+
+    fn perform_keyboard_action(
+        &mut self,
+        permit: DesktopPermit,
+        mut prepared: crate::platform::remote_observation::Prepared,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::keyboard::KeyboardAction,
+    ) -> Result<(), String> {
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
+        let scope = permit.resource_scope()?;
+        let (window, evidence) = self
+            .resources
+            .window_resource(&scope, id, generation)
+            .ok_or("Windows resource is unavailable")?;
+        if !window.active {
+            return Err("Windows keyboard target is not focused".into());
+        }
+        let native = window.native;
+        if !crate::windows_remote_input::foreground_is(native) {
+            if self
+                .keyboard_hold
+                .as_ref()
+                .is_some_and(|held| held.window_id == id && held.generation == generation)
+            {
+                crate::windows_remote_input::release_all();
+                self.keyboard_hold.take();
+            }
+            return Err("Windows keyboard target lost focus".into());
+        }
+        match action {
+            nickel_remote_control::keyboard::KeyboardAction::Text { text } => {
+                if self.keyboard_hold.is_some()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
+                    return Err("local or remote input is already active".into());
+                }
+                let input_epoch = local_input_epoch();
+                permit.with_input(&evidence, || {
+                    if local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native)
+                    {
+                        return Err("local input or focus change cancelled the transaction".into());
+                    }
+                    crate::windows_remote_input::send_text(&text)?;
+                    if local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native)
+                    {
+                        return Err(
+                            "local input or focus change interrupted the transaction".into()
+                        );
+                    }
+                    Ok(())
+                })
+            }
+            nickel_remote_control::keyboard::KeyboardAction::Key { keysym, modifiers } => {
+                if self.keyboard_hold.is_some()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
+                    return Err("local or remote input is already active".into());
+                }
+                let keys = windows_key_chord(keysym, &modifiers)?;
+                let input_epoch = local_input_epoch();
+                permit.with_input(&evidence, || {
+                    if local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native)
+                    {
+                        return Err("local input or focus change cancelled the transaction".into());
+                    }
+                    crate::windows_remote_input::press_keys(&keys)?;
+                    let collision = local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native);
+                    let released = crate::windows_remote_input::release_keys(&keys);
+                    if collision || released.is_err() {
+                        crate::windows_remote_input::release_all();
+                        return Err(released.err().unwrap_or_else(|| {
+                            "local input or focus change interrupted the transaction".into()
+                        }));
+                    }
+                    Ok(())
+                })
+            }
+            nickel_remote_control::keyboard::KeyboardAction::HoldStart { keysym, modifiers } => {
+                if self.keyboard_hold.is_some()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
+                    return Err("local or remote input is already active".into());
+                }
+                let keys = windows_key_chord(keysym, &modifiers)?;
+                let input_epoch = local_input_epoch();
+                let authority = permit.begin_input(&evidence, || {
+                    if local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native)
+                    {
+                        return Err("local input or focus change cancelled the gesture".into());
+                    }
+                    crate::windows_remote_input::press_keys(&keys)?;
+                    if local_input_epoch() != input_epoch
+                        || !crate::windows_remote_input::foreground_is(native)
+                    {
+                        crate::windows_remote_input::release_all();
+                        return Err("local input or focus change interrupted the gesture".into());
+                    }
+                    Ok(())
+                })?;
+                self.keyboard_hold = Some(WindowsKeyboardHold {
+                    authority,
+                    keys,
+                    window_id: id.to_owned(),
+                    generation,
+                    native,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                });
+                Ok(())
+            }
+            nickel_remote_control::keyboard::KeyboardAction::HoldKeepAlive => {
+                let held = self
+                    .keyboard_hold
+                    .as_mut()
+                    .ok_or("no Windows keyboard gesture is active")?;
+                if held.window_id != id
+                    || held.generation != generation
+                    || !held.authority.owned_by(&permit)
+                {
+                    return Err("request does not own this input gesture".into());
+                }
+                permit.continue_input(&held.authority, &evidence, || Ok(()))?;
+                held.deadline = Instant::now() + Duration::from_secs(30);
+                Ok(())
+            }
+            nickel_remote_control::keyboard::KeyboardAction::HoldEnd
+            | nickel_remote_control::keyboard::KeyboardAction::HoldCancel => {
+                let owned = self.keyboard_hold.as_ref().is_some_and(|held| {
+                    held.window_id == id
+                        && held.generation == generation
+                        && held.authority.owned_by(&permit)
+                });
+                if !owned {
+                    return Err("request does not own this input gesture".into());
+                }
+                let held = self.keyboard_hold.take().unwrap();
+                let result = permit.continue_input(&held.authority, &evidence, || {
+                    crate::windows_remote_input::release_keys(&held.keys)
+                });
+                if result.is_err() {
+                    crate::windows_remote_input::release_all();
+                }
+                result
+            }
+        }
     }
 
     fn perform_window_action(
@@ -1063,6 +1336,8 @@ impl WindowsRemoteControl {
                 self.remote_control.apply(&settings, self.authority.clone());
             }
             Command::EmergencyStopRemoteControl => {
+                crate::windows_remote_input::release_all();
+                self.keyboard_hold.take();
                 self.last_stop = Some(Instant::now());
                 let mut settings = RemoteAiControlSettings::load_default().unwrap_or_default();
                 settings.set_requested(false);
@@ -1423,6 +1698,18 @@ fn control_capability(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_key_chords_are_bounded_and_reject_unmapped_keysyms() {
+        assert_eq!(
+            windows_key_chord(u32::from('a'), &[0xffe3, 0xffeb]).unwrap(),
+            vec![0x11, 0x5b, b'A']
+        );
+        assert_eq!(windows_key_chord(0xff0d, &[]).unwrap(), vec![0x0d]);
+        assert_eq!(windows_key_chord(0xffbe, &[]).unwrap(), vec![0x70]);
+        assert!(windows_key_chord(u32::from('!'), &[]).is_err());
+        assert!(windows_key_chord(u32::from('a'), &[0x61]).is_err());
+    }
     fn owner() -> WindowsRemoteControl {
         let (sender, receiver) = mpsc::sync_channel(16);
         WindowsRemoteControl {
@@ -1445,6 +1732,7 @@ mod tests {
             desktop_session: None,
             desktop_unlocked: false,
             local_input_epoch: local_input_epoch(),
+            keyboard_hold: None,
             start_time: Instant::now(),
             last_stop: None,
         }
@@ -1579,12 +1867,7 @@ mod tests {
                 full_debug: false,
             };
             control
-                .request_lease(
-                    &client.client_id,
-                    &client.token,
-                    request.clone(),
-                    now,
-                )
+                .request_lease(&client.client_id, &client.token, request.clone(), now)
                 .unwrap();
             let generation = control
                 .lease_requests()

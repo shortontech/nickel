@@ -7,6 +7,8 @@ mod windows_application_registry;
 mod windows_emergency_chord;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
+#[cfg(target_os = "windows")]
+mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_resource_owner;
 use nickel_codex::ThreadId;

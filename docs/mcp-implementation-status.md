@@ -14,8 +14,13 @@ Windows low-level key and pointer hooks now distinguish OS-attributed injected
 events from physical activity. Physical activity advances only a lock-free epoch;
 Nickel retains no key, coordinate or timing history. The owner consumes epoch
 changes before queued remote work and cancels shared remote-input ownership without
-revoking the lease. Windows native held-state injection and synchronous native
-release are still unavailable, so this arbitration wiring does not open approval.
+revoking the lease. Windows keyboard transactions and owned held chords now use
+bounded native batches behind fresh window, focus, desktop, resource, permit and
+physical-input checks. The hook synchronously releases registered remote keys when
+physical input arrives; the owner also releases them on focus loss, timeout,
+disconnect, revocation, protected desktop and emergency stop. Payloads and timing
+are not retained or logged. Native pointer ownership and Windows execution remain
+unavailable, so this keyboard path does not open approval.
 | Logical client disconnect/resumption | Lease requests, local approvals, reconnects and desktop permits now require an unexpired owner-ready watch. Last-watch loss invalidates authority and triggers native cleanup; overlapping watches preserve connection continuity. | The stdio client adapter and saturation/cancellation fixes are integrated; complete broader native lifecycle acceptance. See `mcp-connection-watch.md`. |
 | Launch under an output lease | Verified Wayland/X11 launch ancestry now drives output placement before scene insertion, under the original lease and output incarnation. Nested native success/cancellation/replacement tests passed. | Complete broker/daemon attribution and broader physical, overload, deadline and cancellation acceptance. |
 | Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary shell transients use production visibility and protection evidence; typed shell actions, effect ordering, every typed platform refresh, and bounded external accessibility are integrated. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation/node ordinal or a fixed Nickel frame role. | Complete GPU timing, shared renderer resources/caches, remaining event and trace categories, and the protected-safe portion of unsupported Codex transient diagnostics. |
