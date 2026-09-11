@@ -1416,3 +1416,11 @@ credentials are excluded. A redaction regression seeds private source/failure
 text and proves it cannot reach serialized output. Explicit feature re-probing
 remains separate because the configured source may be an arbitrary executable or
 remote host and cannot be invoked as a generic diagnostic action.
+
+The coherent snapshot also reports payload-free aggregate counts for production
+effects awaiting compositor reconciliation: desktop scene updates, clipboard
+image-copy frames, launch attribution observations, deferred output retirements,
+and whether shell focus work is pending. It never includes clipboard pixels,
+launch commands, output identities, or shell targets. The broader `effects`
+domain remains explicitly unavailable until completed-effect ordering and native
+platform acknowledgement are projected and exercised.

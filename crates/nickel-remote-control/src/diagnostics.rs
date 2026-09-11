@@ -481,6 +481,20 @@ pub struct ShellImageCacheDiagnostic {
     pub preview_bytes: u64,
 }
 
+/// Payload-free compositor work awaiting reconciliation. Counts describe
+/// production-owned queues at one observation point; they expose neither
+/// clipboard contents, launch commands, output identities, nor shell targets.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct PendingEffectsDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    pub desktop_scene_updates: u64,
+    pub image_copy_frames: u64,
+    pub launch_observations: u64,
+    pub output_retirements: u64,
+    pub shell_focus_pending: bool,
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DiagnosticSnapshot {
     pub observation_generation: u64,
@@ -499,6 +513,8 @@ pub struct DiagnosticSnapshot {
     pub shell_renderers: Vec<InternalRendererDiagnostic>,
     /// None means the in-process shell is unavailable.
     pub shell_image_cache: Option<ShellImageCacheDiagnostic>,
+    /// Pending production effects without their targets or payloads.
+    pub pending_effects: PendingEffectsDiagnostic,
     pub shell_surfaces: Vec<ShellSurfaceDiagnostic>,
     pub focused_window: Option<String>,
     pub input: InputDiagnostic,

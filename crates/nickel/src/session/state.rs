@@ -3516,6 +3516,10 @@ impl NickelSession {
                                     preview_bytes: cache.preview_bytes as u64,
                                 }
                             }),
+                            pending_effects: self.remote_pending_effects_diagnostic(
+                                self.remote_observation_generation,
+                                observed_at_us,
+                            ),
                             shell_surfaces,
                             windows,
                             outputs: all_outputs
@@ -10587,6 +10591,35 @@ mod protocol_tests {
         let json = serde_json::to_string(&diagnostic).unwrap();
         assert!(!json.contains("private path"));
         assert!(!json.contains("provider failure"));
+    }
+
+    #[test]
+    fn pending_effect_diagnostic_counts_work_without_payloads_or_targets() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .first()
+            .unwrap()
+            .id;
+        session.pending_desktop_scenes.insert(surface);
+        session.pending_shell_focus_role = Some(ShellRole::Launcher);
+
+        let diagnostic = session.remote_pending_effects_diagnostic(12, 34);
+        assert_eq!(diagnostic.observation_generation, 12);
+        assert_eq!(diagnostic.observed_at_us, 34);
+        assert_eq!(diagnostic.desktop_scene_updates, 1);
+        assert_eq!(diagnostic.image_copy_frames, 0);
+        assert_eq!(diagnostic.launch_observations, 0);
+        assert_eq!(diagnostic.output_retirements, 0);
+        assert!(diagnostic.shell_focus_pending);
+
+        let json = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!json.contains("launcher"));
+        assert!(!json.contains("internal:"));
     }
 
     #[test]

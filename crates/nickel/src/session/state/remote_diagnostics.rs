@@ -7,6 +7,24 @@ use smithay::reexports::wayland_server::Resource;
 use smithay::wayland::seat::WaylandFocus;
 
 impl NickelSession {
+    pub(super) fn remote_pending_effects_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::PendingEffectsDiagnostic {
+        use nickel_remote_control::diagnostics::PendingEffectsDiagnostic;
+
+        PendingEffectsDiagnostic {
+            observation_generation,
+            observed_at_us,
+            desktop_scene_updates: self.pending_desktop_scenes.len() as u64,
+            image_copy_frames: self.pending_image_copy_frames.len() as u64,
+            launch_observations: self.pending_launch_observations.len() as u64,
+            output_retirements: self.pending_output_global_retirements.len() as u64,
+            shell_focus_pending: self.pending_shell_focus_role.is_some(),
+        }
+    }
+
     #[cfg(any(feature = "backend-winit", feature = "backend-udev"))]
     pub(super) fn remote_frame_trace_category(
         &self,
