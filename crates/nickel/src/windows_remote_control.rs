@@ -4872,7 +4872,9 @@ impl WindowsRemoteControl {
                 .ok_or("Windows workspace is unavailable")?;
             let expected_input_epoch = local_input_epoch();
             permit.with_input(&evidence, || {
-                if expected_input_epoch != local_input_epoch() {
+                if expected_input_epoch != local_input_epoch()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
                     return Err("local input cancelled the workspace move".into());
                 }
                 crate::windows_virtual_workspaces::native::move_window(native, target)
