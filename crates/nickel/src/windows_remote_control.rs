@@ -228,6 +228,22 @@ enum OwnerRequest {
         kind: ObservationKind,
         reply: SyncSender<Result<ObservationResult, String>>,
     },
+    PrepareNativeAccessibility {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        id: String,
+        generation: u64,
+        reply: SyncSender<Result<crate::windows_external_accessibility::Proof, String>>,
+    },
+    FinishNativeAccessibility {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        proof: crate::windows_external_accessibility::Proof,
+        observation: crate::windows_external_accessibility::Observation,
+        reply: SyncSender<
+            Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String>,
+        >,
+    },
     WindowAction {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
@@ -302,6 +318,44 @@ struct WindowsDesktopAuthority {
     capture_generation: std::sync::atomic::AtomicU64,
 }
 impl WindowsDesktopAuthority {
+    fn prepare_accessibility_inventory(
+        permit: &DesktopPermit,
+        deadline: Instant,
+    ) -> Result<Box<crate::platform::remote_observation::Prepared>, String> {
+        let worker_permit = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("nickel-windows-uia-inventory".into())
+            .spawn(move || {
+                let result = crate::platform::remote_observation::Admission::acquire().and_then(
+                    |_admission| {
+                        let prepared =
+                            crate::platform::remote_observation::Prepared::prepare(&worker_permit)?;
+                        worker_permit.check_live()?;
+                        if Instant::now() >= deadline {
+                            return Err("Windows UI Automation observation timed out".into());
+                        }
+                        Ok(Box::new(prepared))
+                    },
+                );
+                let _ = reply.try_send(result);
+            })
+            .map_err(|_| "Windows UI Automation inventory worker is unavailable".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows UI Automation observation timed out")?;
+        receiver
+            .recv_timeout(remaining)
+            .map_err(|error| match error {
+                mpsc::RecvTimeoutError::Timeout => {
+                    "Windows UI Automation observation timed out".to_owned()
+                }
+                mpsc::RecvTimeoutError::Disconnected => {
+                    "Windows UI Automation inventory worker stopped".to_owned()
+                }
+            })?
+    }
+
     fn observe(
         &self,
         permit: DesktopPermit,
@@ -324,6 +378,96 @@ impl WindowsDesktopAuthority {
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+
+    fn inspect_native_accessibility(
+        &self,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        let admission = crate::windows_external_accessibility::Admission::acquire()?;
+        let deadline = crate::windows_external_accessibility::deadline();
+        let prepared = Self::prepare_accessibility_inventory(&permit, deadline)?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::PrepareNativeAccessibility {
+                permit: permit.clone(),
+                prepared,
+                id: id.to_owned(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows UI Automation observation timed out")?
+            .min(Duration::from_millis(200));
+        let proof = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows UI Automation owner timed out".to_owned())??;
+        permit.check_live()?;
+        let (worker_reply, worker_receiver) = mpsc::sync_channel(1);
+        let worker_permit = permit.clone();
+        let worker_proof = proof.clone();
+        std::thread::Builder::new()
+            .name("nickel-windows-uia-observe".into())
+            .spawn(move || {
+                let _admission = admission;
+                let result = crate::windows_external_accessibility::observe(
+                    &worker_proof,
+                    &worker_permit,
+                    deadline,
+                )
+                .and_then(|observation| {
+                    let _inventory_admission =
+                        crate::platform::remote_observation::Admission::acquire()?;
+                    let prepared = Box::new(
+                        crate::platform::remote_observation::Prepared::prepare(&worker_permit)?,
+                    );
+                    worker_permit.check_live()?;
+                    if Instant::now() >= deadline {
+                        return Err("Windows UI Automation observation timed out".into());
+                    }
+                    Ok((observation, prepared))
+                });
+                let _ = worker_reply.try_send(result);
+            })
+            .map_err(|_| "Windows UI Automation worker is unavailable".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows UI Automation observation timed out")?;
+        let (observation, prepared) =
+            worker_receiver
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        "Windows UI Automation observation timed out".to_owned()
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "Windows UI Automation worker stopped".to_owned()
+                    }
+                })??;
+        permit.check_live()?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::FinishNativeAccessibility {
+                permit,
+                prepared,
+                proof,
+                observation,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows UI Automation observation timed out")?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows UI Automation owner timed out".to_owned())?;
         completion.check_live()?;
         result
     }
@@ -369,6 +513,23 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .map_err(|_| "Windows desktop owner timed out".to_owned())?;
         completion.check_live()?;
         result
+    }
+    fn inspect_native_window(
+        &self,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        self.inspect_native_accessibility(permit, id, generation)
+    }
+    fn inspect_native_application(
+        &self,
+        permit: DesktopPermit,
+        _id: &str,
+        _generation: u64,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        permit.check_live()?;
+        Err("Windows application-wide UI Automation observation is unavailable".into())
     }
     fn list_installed_applications(
         &self,
@@ -746,6 +907,8 @@ pub(crate) struct WindowsRemoteControl {
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    external_accessibility:
+        Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
     pending_indicator_activation: std::collections::BTreeSet<u64>,
     start_time: Instant,
     last_stop: Option<Instant>,
@@ -841,6 +1004,7 @@ impl WindowsRemoteControl {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            external_accessibility: None,
             pending_indicator_activation: Default::default(),
             start_time: started,
             last_stop: None,
@@ -929,6 +1093,32 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.observe_resources(permit, *prepared, kind);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::PrepareNativeAccessibility {
+                    permit,
+                    mut prepared,
+                    id,
+                    generation,
+                    reply,
+                } => {
+                    let result =
+                        self.prepare_native_accessibility(&permit, &mut prepared, &id, generation);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::FinishNativeAccessibility {
+                    permit,
+                    mut prepared,
+                    proof,
+                    mut observation,
+                    reply,
+                } => {
+                    let result = self.finish_native_accessibility(
+                        &permit,
+                        &mut prepared,
+                        &proof,
+                        &mut observation,
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::WindowAction {
@@ -1217,6 +1407,100 @@ impl WindowsRemoteControl {
         };
         prepared.revalidate()?;
         permit.check_live()?;
+        Ok(result)
+    }
+
+    fn prepare_native_accessibility(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: &mut crate::platform::remote_observation::Prepared,
+        id: &str,
+        generation: u64,
+    ) -> Result<crate::windows_external_accessibility::Proof, String> {
+        self.reconcile_prepared_resources(permit, prepared)?;
+        let scope = permit.resource_scope()?;
+        let (window, evidence) = self
+            .resources
+            .window_resource(&scope, id, generation)
+            .ok_or("Windows resource is unavailable or protected")?;
+        permit.with_resource(&evidence, || {
+            Ok(crate::windows_external_accessibility::Proof {
+                id: id.to_owned(),
+                generation,
+                native: window.native,
+                pid: window.pid,
+                created: window.created,
+                thread: window.thread,
+                bounds: window.bounds,
+            })
+        })
+    }
+
+    fn finish_native_accessibility(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: &mut crate::platform::remote_observation::Prepared,
+        proof: &crate::windows_external_accessibility::Proof,
+        observation: &mut crate::windows_external_accessibility::Observation,
+    ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
+        self.reconcile_prepared_resources(permit, prepared)?;
+        let scope = permit.resource_scope()?;
+        let (window, evidence) = self
+            .resources
+            .window_resource(&scope, &proof.id, proof.generation)
+            .ok_or("Windows resource is unavailable or protected")?;
+        if (
+            window.native,
+            window.pid,
+            window.created,
+            window.thread,
+            window.bounds,
+        ) != (
+            proof.native,
+            proof.pid,
+            proof.created,
+            proof.thread,
+            proof.bounds,
+        ) {
+            return Err("Windows UI Automation identity changed".into());
+        }
+        self.observation_generation = self
+            .observation_generation
+            .checked_add(1)
+            .ok_or("Windows observation generations exhausted")?;
+        let validated = Instant::now();
+        let to_us = |time: Instant| {
+            time.saturating_duration_since(self.start_time)
+                .as_micros()
+                .min(u64::MAX as u128) as u64
+        };
+        observation.snapshot.observation_generation = self.observation_generation;
+        observation.snapshot.observation_started_at_us = to_us(observation.started);
+        observation.snapshot.observed_at_us = to_us(observation.completed);
+        observation.snapshot.owner_validated_at_us = to_us(validated);
+        let result = permit.with_resource(&evidence, || Ok(observation.snapshot.clone()))?;
+        if let Some(operation_id) = permit.operation_id() {
+            let diagnostic = nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic {
+                operation_id,
+                scope: result.scope,
+                observation_started_at_us: result.observation_started_at_us,
+                observed_at_us: result.observed_at_us,
+                owner_validated_at_us: result.owner_validated_at_us,
+                nodes: result.nodes.len().min(u32::MAX as usize) as u32,
+                truncated: result.truncated,
+                stale: false,
+            };
+            self.desktop_events.record(
+                nickel_remote_control::desktop_events::DesktopEventKind::ExternalAccessibilityCompleted {
+                    operation_id,
+                    scope: diagnostic.scope,
+                    nodes: diagnostic.nodes,
+                    truncated: diagnostic.truncated,
+                },
+                diagnostic.owner_validated_at_us,
+            );
+            self.external_accessibility = Some(diagnostic);
+        }
         Ok(result)
     }
 
@@ -1767,7 +2051,10 @@ impl WindowsRemoteControl {
                     tracked_children: 0,
                     child_capacity: 0,
                 },
-                external_accessibility: None,
+                external_accessibility: self
+                    .external_accessibility
+                    .as_ref()
+                    .map(|snapshot| snapshot.retained_at(observed_at_us)),
                 recent_events: self.desktop_events.snapshot(),
                 diagnostic_logs: windows_diagnostic_logs(),
                 frame_trace: None,
@@ -1785,7 +2072,7 @@ impl WindowsRemoteControl {
                     "windows_shell_behavior".into(),
                     "windows_settings_and_diagnostic_workers".into(),
                     "windows_application_launch_state".into(),
-                    "windows_external_accessibility".into(),
+                    "windows_external_accessibility_actions".into(),
                     "windows_frame_trace".into(),
                 ],
             })
@@ -2925,6 +3212,7 @@ mod tests {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            external_accessibility: None,
             pending_indicator_activation: Default::default(),
             start_time: Instant::now(),
             last_stop: None,

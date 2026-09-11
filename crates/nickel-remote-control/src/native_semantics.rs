@@ -1,5 +1,6 @@
-//! Read-only external accessibility structure. Provider strings and values are
-//! deliberately unavailable: AT-SPI offers no atomic protected-text projection.
+//! Read-only external accessibility structure. Each platform reports unavailable
+//! fields explicitly; provider text is excluded unless its protected-state and
+//! boundedness can be proved at the native authority boundary.
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -8,7 +9,7 @@ pub struct NativeSemanticNode {
     /// Ordinal scoped to this observation, never an actionable object handle.
     pub id: u32,
     pub parent: Option<u32>,
-    /// Numeric AT-SPI role from the provider; unknown future roles are retained.
+    /// Numeric native-provider role/control type; unknown future roles are retained.
     pub role: u32,
     /// Logical coordinates relative to the associated native window.
     pub bounds: Option<[i32; 4]>,
@@ -38,9 +39,9 @@ pub struct NativeSemanticSnapshot {
     pub observation_started_at_us: u64,
     /// Final compositor-owner authority validation time, separate from provider data age.
     pub owner_validated_at_us: u64,
-    /// Always false: AT-SPI does not provide atomic tree snapshots.
+    /// False for current native providers, which do not provide atomic tree snapshots.
     pub atomic: bool,
-    /// Names, descriptions, text, values and actions are not collected.
+    /// Provider fields deliberately omitted by this platform observation.
     pub unavailable_fields: Vec<String>,
     pub nodes: Vec<NativeSemanticNode>,
     pub truncated: bool,

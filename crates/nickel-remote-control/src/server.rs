@@ -2050,7 +2050,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Inspect bounded read-only AT-SPI role/state/geometry of an authorized native GTK Wayland window with an exact surface association. Names, descriptions, text, values and actions are unavailable. XWayland and clients without an authenticated association are unavailable. Results are non-atomic and cannot be used as action handles."
+        description = "Inspect bounded read-only native accessibility role/state/geometry for an authorized external window. Linux requires an exact native Wayland/AT-SPI association; Windows requires an owner-verified HWND and process incarnation. Each result lists unavailable fields. Protected windows, unverified associations, and XWayland are denied. Results are non-atomic and cannot be used as action handles."
     )]
     async fn inspect_native_window(
         &self,
@@ -2073,7 +2073,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Inspect bounded AT-SPI role/state metadata from one authenticated accessibility connection of an authorized native window's owning process. Requires application or full-session scope; window/output/surface leases are denied. The window is an OS identity anchor, not a claimed accessibility-window mapping. Names, descriptions, text, values, geometry and actions are unavailable; results are non-atomic and partial."
+        description = "Inspect bounded native accessibility role/state metadata for an authorized external application when the platform can prove the application-wide provider boundary. Linux uses one authenticated AT-SPI connection anchored by the window. Windows application-wide UI Automation is currently unavailable. Requires application or full-session scope; window/output/surface leases are denied. Results list unavailable fields and are non-atomic and partial."
     )]
     async fn inspect_native_application(
         &self,
