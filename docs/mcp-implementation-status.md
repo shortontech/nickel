@@ -1542,3 +1542,11 @@ bounded stream of typed completions correlated to MCP operations. The stale
 whole-domain `effects` unavailability declaration has been removed. Individual
 effect kinds that Nickel does not yet implement remain absent rather than being
 reported as completed.
+
+Native Linux acceptance also exercised every typed platform refresh domain in
+one live session: connectivity, audio, peripherals, maintenance and default
+associations. Each refresh reached its production worker, retained its own
+generation and observation interval, and emitted the matching payload-free
+completion event. Linux therefore no longer advertises a generic unspecified
+platform-query gap. Windows continues to report the concrete default-association
+query limitation until its registry reads have enforced deadlines.
