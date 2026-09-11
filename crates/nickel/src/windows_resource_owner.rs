@@ -227,6 +227,26 @@ impl Owner {
             .find(|record| record.identity.id == id && record.identity.generation == generation)
             .map(|record| &record.value)
     }
+    pub(crate) fn scope_is_live(&self, scope: &ResourceScope) -> bool {
+        match scope {
+            ResourceScope::Window(identity) => self
+                .windows
+                .values()
+                .any(|record| record.identity == *identity && !record.value.protected),
+            ResourceScope::Output(identity) => self
+                .outputs
+                .values()
+                .any(|record| record.identity == *identity),
+            ResourceScope::Application(identity) => self.windows.values().any(|record| {
+                !record.value.protected
+                    && record.value.application.as_deref() == Some(identity.as_str())
+            }),
+            // Native external surfaces do not have a separately owned surface
+            // incarnation on Windows yet. Never reinterpret one as a HWND.
+            ResourceScope::Surface(_) => false,
+            ResourceScope::FullSession => true,
+        }
+    }
     pub(crate) fn window_resource<'a>(
         &'a self,
         scope: &'a ResourceScope,
@@ -461,6 +481,42 @@ mod tests {
         assert!(protected_executable(Some("CONSENT.EXE")));
         assert!(protected_executable(Some("nickel-settings.exe")));
         assert!(!protected_executable(Some("ordinary.exe")));
+    }
+    #[test]
+    fn approval_scope_requires_the_exact_live_owner_incarnation() {
+        let mut app = window(1, 10);
+        app.application = Some("windows:catalog-launch:trusted".into());
+        let mut owner = Owner::default();
+        owner
+            .reconcile(vec![app], vec![output(1, "main", 0, 1000)], |_| {})
+            .unwrap();
+        let live_window = owner.windows(&ResourceScope::FullSession).next().unwrap().0;
+        let live_output = owner.outputs(&ResourceScope::FullSession).next().unwrap().0;
+        assert!(owner.scope_is_live(&ResourceScope::Window(ResourceId {
+            id: live_window.id.clone(),
+            generation: live_window.generation,
+        })));
+        assert!(!owner.scope_is_live(&ResourceScope::Window(ResourceId {
+            id: live_window.id,
+            generation: live_window.generation + 1,
+        })));
+        assert!(owner.scope_is_live(&ResourceScope::Output(ResourceId {
+            id: live_output.name.clone(),
+            generation: live_output.generation,
+        })));
+        assert!(!owner.scope_is_live(&ResourceScope::Output(ResourceId {
+            id: live_output.name,
+            generation: live_output.generation + 1,
+        })));
+        assert!(owner.scope_is_live(&ResourceScope::Application(
+            "windows:catalog-launch:trusted".into(),
+        )));
+        assert!(!owner.scope_is_live(&ResourceScope::Application("Unverified label".into(),)));
+        assert!(!owner.scope_is_live(&ResourceScope::Surface(ResourceId {
+            id: "1".into(),
+            generation: 1,
+        })));
+        assert!(owner.scope_is_live(&ResourceScope::FullSession));
     }
     #[test]
     fn output_replacement_and_ambiguous_overlap_fail_closed() {

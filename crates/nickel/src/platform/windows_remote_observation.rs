@@ -580,7 +580,20 @@ pub(crate) struct Prepared {
 }
 impl Prepared {
     pub(crate) fn prepare(permit: &DesktopPermit) -> Result<Self, String> {
-        permit.check_live()?;
+        Self::prepare_checked(|| permit.check_live())
+    }
+
+    /// Collect the same bounded native evidence for a trusted Settings
+    /// decision. This path has no remote capability to authenticate; its
+    /// authority is the owner-thread local transport and the live input
+    /// desktop. The caller must still compare the requested resource identity
+    /// with the reconciled owner inventory before changing lease authority.
+    pub(crate) fn prepare_local() -> Result<Self, String> {
+        Self::prepare_checked(|| Ok(()))
+    }
+
+    fn prepare_checked(mut check: impl FnMut() -> Result<(), String>) -> Result<Self, String> {
+        check()?;
         let _dpi = DpiContext::enter()?;
         let started = Instant::now();
         let serial = lifecycle_serial()?;
@@ -610,7 +623,7 @@ impl Prepared {
         let mut processes = BTreeMap::new();
         let mut windows = Vec::new();
         for native in handles.handles {
-            permit.check_live()?;
+            check()?;
             let hwnd = HWND(native as *mut std::ffi::c_void);
             let mut pid = 0;
             // SAFETY: This is a revalidated window observation, not PID authority.
@@ -647,7 +660,7 @@ impl Prepared {
         if serial != lifecycle_serial()? || !desktop_is_unlocked(session) {
             return Err(unavailable());
         }
-        permit.check_live()?;
+        check()?;
         let completed = Instant::now();
         if completed.duration_since(started) >= Duration::from_secs(2) {
             return Err(unavailable());

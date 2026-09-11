@@ -1,6 +1,4 @@
 //! Windows winit-owned remote-control lifecycle and private Settings requests.
-//! Native resource operations remain denied until trusted Windows indication,
-//! input arbitration and resource identities are integrated.
 use crate::remote_indicator::{IndicatorGrant, RemoteIndicator};
 use crate::winit_shell::{DisplayGeometry, ShellEvent, SurfaceId, WinitShell, WinitWindowCompat};
 use nickel_remote_control::{
@@ -137,7 +135,6 @@ fn windows_diagnostic_logs() -> Option<nickel_remote_control::diagnostics::Diagn
     })
 }
 
-const NOT_READY: &str = "Windows control approval remains unavailable";
 fn error(message: impl Into<String>) -> ServerMessage {
     ServerMessage::Error {
         code: ErrorCode::InvalidRequest,
@@ -236,6 +233,12 @@ enum OwnerRequest {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
         reply: SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String>>,
+    },
+    DiagnosticAction {
+        permit: DesktopPermit,
+        action: nickel_remote_control::diagnostics::DiagnosticAction,
+        reply:
+            SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>>,
     },
     Events {
         permit: DesktopPermit,
@@ -432,6 +435,28 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         completion.check_live()?;
         result
     }
+    fn diagnostic_action(
+        &self,
+        permit: DesktopPermit,
+        action: nickel_remote_control::diagnostics::DiagnosticAction,
+    ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
+        action.validate()?;
+        permit.with_debug(false, || Ok(()))?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::DiagnosticAction {
+                permit,
+                action,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
     fn list_windows(
         &self,
         permit: DesktopPermit,
@@ -575,6 +600,7 @@ pub(crate) struct WindowsRemoteControl {
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    pending_indicator_activation: std::collections::BTreeSet<u64>,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
@@ -669,6 +695,7 @@ impl WindowsRemoteControl {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            pending_indicator_activation: Default::default(),
             start_time: started,
             last_stop: None,
         };
@@ -704,7 +731,11 @@ impl WindowsRemoteControl {
             STOP_REQUESTED.store(true, Ordering::Release);
         }
     }
-    pub(crate) fn poll(&mut self) {
+    pub(crate) fn poll(&mut self, shell: &mut WinitShell) {
+        self.poll_with_shell(Some(shell));
+    }
+
+    fn poll_with_shell(&mut self, mut shell: Option<&mut WinitShell>) {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
         self.reconcile_keyboard_hold();
@@ -732,6 +763,11 @@ impl WindowsRemoteControl {
         self.drain_resource_lifecycle();
         self.reconcile_keyboard_hold();
         self.reconcile_pointer_hold();
+        // Catalog and launch receipts are owner evidence used by the fresh
+        // resource probe below, so consume them before trusted decisions.
+        if let Ok(mut control) = self.remote_control.control().lock() {
+            self.applications.poll(&mut control);
+        }
         for _ in 0..8 {
             let Ok(request) = self.receiver.try_recv() else {
                 break;
@@ -787,6 +823,17 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.perform_diagnostic_snapshot(permit, *prepared);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::DiagnosticAction {
+                    permit,
+                    action,
+                    reply,
+                } => {
+                    let result = shell.as_deref_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |shell| self.perform_diagnostic_action(shell, permit, action),
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Events {
@@ -995,6 +1042,14 @@ impl WindowsRemoteControl {
         prepared: &mut crate::platform::remote_observation::Prepared,
     ) -> Result<(), String> {
         permit.check_live()?;
+        self.reconcile_native_resources(prepared)?;
+        permit.check_live()
+    }
+
+    fn reconcile_native_resources(
+        &mut self,
+        prepared: &mut crate::platform::remote_observation::Prepared,
+    ) -> Result<(), String> {
         self.drain_resource_lifecycle();
         self.reconcile_keyboard_hold();
         self.reconcile_pointer_hold();
@@ -1021,7 +1076,42 @@ impl WindowsRemoteControl {
             .reconcile(prepared.windows.clone(), prepared.outputs.clone(), |id| {
                 revoke_native_resource(&control, id)
             })?;
-        permit.check_live()
+        prepared.revalidate()
+    }
+
+    /// Refresh native evidence at the trusted local decision boundary. A
+    /// cached card or generation can only be approved while that exact scope is
+    /// still represented by the owner after a bounded Win32 re-observation.
+    fn remote_lease_target_live(
+        &mut self,
+        scope: &nickel_remote_control::leases::ResourceScope,
+    ) -> bool {
+        if !self.desktop_unlocked
+            || self.desktop_session.is_none_or(|session| {
+                !crate::platform::remote_observation::desktop_is_unlocked(session)
+            })
+        {
+            return false;
+        }
+        let Ok(_admission) = crate::platform::remote_observation::Admission::acquire() else {
+            return false;
+        };
+        let Ok(mut prepared) = crate::platform::remote_observation::Prepared::prepare_local()
+        else {
+            return false;
+        };
+        if Some(prepared.session) != self.desktop_session
+            || self.reconcile_native_resources(&mut prepared).is_err()
+        {
+            return false;
+        }
+        match scope {
+            nickel_remote_control::leases::ResourceScope::Application(identity) => {
+                self.applications.contains_application(identity)
+                    || self.resources.scope_is_live(scope)
+            }
+            _ => self.resources.scope_is_live(scope),
+        }
     }
 
     fn perform_keyboard_action(
@@ -1513,6 +1603,51 @@ impl WindowsRemoteControl {
         Ok(snapshot)
     }
 
+    fn perform_diagnostic_action(
+        &mut self,
+        shell: &mut WinitShell,
+        permit: DesktopPermit,
+        action: nickel_remote_control::diagnostics::DiagnosticAction,
+    ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
+        use nickel_remote_control::desktop_events::{
+            DesktopEventKind, ProductionEffectKind, ProductionEffectOutcome,
+        };
+        use nickel_remote_control::diagnostics::{DiagnosticAction, DiagnosticActionOutcome};
+
+        action.validate()?;
+        permit.with_debug(!self.desktop_unlocked, || match &action {
+            DiagnosticAction::Repaint => Ok(()),
+            _ => Err("diagnostic action is unavailable on the Windows backend".into()),
+        })?;
+        permit.check_live()?;
+        shell.request_all_redraws();
+        permit.check_live()?;
+        self.observation_generation = self
+            .observation_generation
+            .checked_add(1)
+            .ok_or("Windows observation generations exhausted")?;
+        let submitted_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        if let Some(operation_id) = permit.operation_id() {
+            self.desktop_events.record(
+                DesktopEventKind::ProductionEffectCompleted {
+                    operation_id,
+                    effect: ProductionEffectKind::DiagnosticAction,
+                    outcome: ProductionEffectOutcome::Requested,
+                },
+                submitted_at_us,
+            );
+        }
+        Ok(DiagnosticActionOutcome {
+            action,
+            observation_generation: self.observation_generation,
+            submitted_at_us,
+            presentation_confirmed: false,
+            output_identification: None,
+            application_inventory_refresh: None,
+            platform_refresh: None,
+        })
+    }
+
     fn read_desktop_events(
         &mut self,
         permit: DesktopPermit,
@@ -1608,7 +1743,41 @@ impl WindowsRemoteControl {
         shell: &mut WinitShell,
         theme: nickel_ui::SemanticTheme,
     ) {
-        if let Err(error) = self.sync_indicators(shell, theme) {
+        let result = self.sync_indicators(shell, theme).and_then(|()| {
+            if self.pending_indicator_activation.is_empty() {
+                return Ok(());
+            }
+            let pending = std::mem::take(&mut self.pending_indicator_activation);
+            let control = self.remote_control.control();
+            let mut control = control
+                .lock()
+                .map_err(|_| "control owner unavailable".to_owned())?;
+            for lease in pending {
+                let resumable = control
+                    .leases()
+                    .iter()
+                    .find(|candidate| candidate.id == lease)
+                    .is_some_and(|candidate| {
+                        candidate.suspended
+                            && candidate
+                                .expires_at
+                                .is_none_or(|deadline| Instant::now() < deadline)
+                    });
+                if !resumable {
+                    continue;
+                }
+                control
+                    .leases_mut()
+                    .resume_local(lease, Instant::now())
+                    .map_err(|error| error.to_string())?;
+            }
+            drop(control);
+            // Authority becomes usable only after every output exposed the
+            // trusted paused grant. Publish its active state immediately; any
+            // failure revokes the just-activated authority below.
+            self.sync_indicators(shell, theme)
+        });
+        if let Err(error) = result {
             self.stop_indicators(shell);
             self.remote_control
                 .set_diagnostic(format!("Trusted indication unavailable: {error}"));
@@ -1935,6 +2104,7 @@ impl WindowsRemoteControl {
                 crate::windows_remote_input::release_all();
                 self.keyboard_hold.take();
                 self.pointer_hold.take();
+                self.pending_indicator_activation.clear();
                 self.last_stop = Some(Instant::now());
                 let mut settings = RemoteAiControlSettings::load_default().unwrap_or_default();
                 settings.set_requested(false);
@@ -2036,23 +2206,125 @@ impl WindowsRemoteControl {
                     return error("permission request changed");
                 }
             }
-            Command::DecideRemoteLease { .. } | Command::ApproveRemoteLeaseDuration { .. } => {
-                return error(NOT_READY);
+            Command::DecideRemoteLease {
+                client_id,
+                request,
+                pending_generation,
+                allow: true,
+            } => {
+                let request: nickel_remote_control::lease_requests::LeaseRequest = request.into();
+                if !self.remote_lease_target_live(&request.scope) {
+                    return error("lease target is unavailable or protected");
+                }
+                let lease = match self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .approve_lease_local(&client_id, &request, pending_generation, Instant::now())
+                {
+                    Ok(lease) => lease,
+                    Err(reason) => return error(reason.to_string()),
+                };
+                self.remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .leases_mut()
+                    .suspend_local(lease)
+                    .expect("new Windows lease exists");
+                self.pending_indicator_activation.insert(lease);
+            }
+            Command::ApproveRemoteLeaseDuration {
+                client_id,
+                request,
+                pending_generation,
+                duration_seconds,
+            } => {
+                let request: nickel_remote_control::lease_requests::LeaseRequest = request.into();
+                if !self.remote_lease_target_live(&request.scope) {
+                    return error("lease target is unavailable or protected");
+                }
+                let lease = match self
+                    .remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .approve_lease_with_duration_local(
+                        &client_id,
+                        &request,
+                        pending_generation,
+                        duration_seconds.map(Duration::from_secs),
+                        Instant::now(),
+                    ) {
+                    Ok(lease) => lease,
+                    Err(reason) => return error(reason.to_string()),
+                };
+                self.remote_control
+                    .control()
+                    .lock()
+                    .unwrap()
+                    .leases_mut()
+                    .suspend_local(lease)
+                    .expect("new Windows lease exists");
+                self.pending_indicator_activation.insert(lease);
             }
             Command::ManageRemoteLease { lease_id, action } => {
                 use nickel_session_protocol::RemoteLeaseAction;
-                let control = self.remote_control.control();
-                let mut control = control.lock().unwrap();
                 match action {
                     RemoteLeaseAction::Revoke => {
-                        control.leases_mut().revoke(lease_id);
+                        self.pending_indicator_activation.remove(&lease_id);
+                        self.remote_control
+                            .control()
+                            .lock()
+                            .unwrap()
+                            .leases_mut()
+                            .revoke(lease_id);
                     }
                     RemoteLeaseAction::Pause => {
-                        if let Err(reason) = control.leases_mut().suspend_local(lease_id) {
+                        self.pending_indicator_activation.remove(&lease_id);
+                        if let Err(reason) = self
+                            .remote_control
+                            .control()
+                            .lock()
+                            .unwrap()
+                            .leases_mut()
+                            .suspend_local(lease_id)
+                        {
                             return error(reason.to_string());
                         }
                     }
-                    RemoteLeaseAction::Resume => return error(NOT_READY),
+                    RemoteLeaseAction::Resume => {
+                        let lease = self
+                            .remote_control
+                            .control()
+                            .lock()
+                            .unwrap()
+                            .leases()
+                            .iter()
+                            .find(|lease| lease.id == lease_id)
+                            .map(|lease| {
+                                (
+                                    lease.scope.clone(),
+                                    lease.suspended,
+                                    lease
+                                        .expires_at
+                                        .is_none_or(|deadline| Instant::now() < deadline),
+                                )
+                            });
+                        let Some((scope, suspended, unexpired)) = lease else {
+                            return error("lease is unavailable");
+                        };
+                        if !unexpired {
+                            return error("lease is expired");
+                        }
+                        if suspended {
+                            if !self.remote_lease_target_live(&scope) {
+                                return error("lease target is unavailable or protected");
+                            }
+                            self.pending_indicator_activation.insert(lease_id);
+                        }
+                    }
                 }
             }
             _ => return error("request is unavailable on the Windows Settings transport"),
@@ -2332,6 +2604,7 @@ mod tests {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            pending_indicator_activation: Default::default(),
             start_time: Instant::now(),
             last_stop: None,
         }
@@ -2506,7 +2779,7 @@ mod tests {
             }))
             .ok()
             .unwrap();
-        owner.poll();
+        owner.poll_with_shell(None);
         assert_eq!(owner.remote_control.status().generation, 0);
         assert!(receiver.try_recv().is_err());
     }

@@ -2296,7 +2296,7 @@ pub fn run() -> Result<(), String> {
     loop {
         #[cfg(target_os = "windows")]
         if let Some(owner) = &mut remote_control {
-            owner.poll();
+            owner.poll(&mut shell);
             owner.reconcile_indicators(&mut shell, state.semantic_theme());
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);

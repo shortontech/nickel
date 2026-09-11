@@ -785,12 +785,97 @@ pub struct LaunchApplicationRequest {
     pub application_id: String,
 }
 
-/// Spawn acknowledgement, not proof of a mapped window or a new control grant.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+/// Bounded launch acknowledgement, not a new control grant.
+///
+/// Process creation and requested output placement are reported independently:
+/// accepting a native spawn does not prove that a resulting window mapped, or
+/// that its first-map placement completed.
+#[derive(
+    Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize, schemars::JsonSchema,
+)]
+#[serde(deny_unknown_fields)]
 pub struct LaunchApplicationOutcome {
     pub catalog_generation: u64,
     pub application_id: String,
-    pub process_id: u32,
+    /// True once the production desktop owner accepted the launch request.
+    pub requested: bool,
+    /// True only when the platform confirmed native process creation.
+    pub process_spawn_confirmed: bool,
+    /// Native process identity when the platform can confirm one.
+    pub process_id: Option<u32>,
+    /// Exact generation-bearing output requested by an output-scoped lease.
+    /// None means no output placement was requested.
+    pub output_requested: Option<crate::leases::ResourceId>,
+    /// True only after production output placement has completed. A pending
+    /// first-map association is not confirmation.
+    pub output_confirmed: bool,
+}
+
+#[cfg(test)]
+mod launch_application_contract_tests {
+    use super::*;
+
+    #[test]
+    fn launch_outcome_keeps_spawn_and_output_confirmation_independent() {
+        let output = crate::leases::ResourceId {
+            id: "DP-2".into(),
+            generation: 7,
+        };
+        let outcome = LaunchApplicationOutcome {
+            catalog_generation: 11,
+            application_id: "org.example.Editor".into(),
+            requested: true,
+            process_spawn_confirmed: true,
+            process_id: Some(42),
+            output_requested: Some(output.clone()),
+            output_confirmed: false,
+        };
+
+        let value = serde_json::to_value(&outcome).unwrap();
+        assert_eq!(value["output_requested"]["id"], "DP-2");
+        assert_eq!(value["output_requested"]["generation"], 7);
+        assert_eq!(value["process_id"], 42);
+        assert_eq!(
+            serde_json::from_value::<LaunchApplicationOutcome>(value).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn launch_outcome_can_truthfully_report_unconfirmed_native_evidence() {
+        let outcome: LaunchApplicationOutcome = serde_json::from_value(serde_json::json!({
+            "catalog_generation": 11,
+            "application_id": "org.example.Editor",
+            "requested": true,
+            "process_spawn_confirmed": false,
+            "process_id": null,
+            "output_requested": null,
+            "output_confirmed": false
+        }))
+        .unwrap();
+
+        assert!(!outcome.process_spawn_confirmed);
+        assert_eq!(outcome.process_id, None);
+        assert_eq!(outcome.output_requested, None);
+        assert!(!outcome.output_confirmed);
+    }
+
+    #[test]
+    fn launch_outcome_rejects_undeclared_confirmation_fields() {
+        assert!(
+            serde_json::from_value::<LaunchApplicationOutcome>(serde_json::json!({
+                "catalog_generation": 11,
+                "application_id": "org.example.Editor",
+                "requested": true,
+                "process_spawn_confirmed": true,
+                "process_id": 42,
+                "output_requested": null,
+                "output_confirmed": false,
+                "window_mapped": true
+            }))
+            .is_err()
+        );
+    }
 }
 
 /// Static registration metadata only. No key events, held state or emergency controls.

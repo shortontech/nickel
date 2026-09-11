@@ -512,6 +512,19 @@ impl OwnerRegistry {
         })
     }
 
+    /// Returns whether the fresh production Start Menu catalog contains an
+    /// exact launch-bound identity. This permits a trusted local application
+    /// lease decision before the application has created its first window;
+    /// later windows must still prove the same process-backed identity.
+    pub(crate) fn contains_application(&self, identity: &str) -> bool {
+        self.observed
+            .is_some_and(|observed| observed.elapsed() < MAX_CATALOG_AGE)
+            && self
+                .applications
+                .iter()
+                .any(|application| application.verified_application.as_deref() == Some(identity))
+    }
+
     pub(crate) fn inventory(
         &self,
         session_start: Instant,

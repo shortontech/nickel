@@ -375,7 +375,13 @@ impl NickelSession {
             Ok(LaunchApplicationOutcome {
                 catalog_generation: generation,
                 application_id: prepared.application.id().to_owned(),
-                process_id,
+                requested: true,
+                process_spawn_confirmed: true,
+                process_id: Some(process_id),
+                output_requested: prepared.output.clone(),
+                // Placement is retained until a verified descendant maps and
+                // the production first-map effect runs under live authority.
+                output_confirmed: false,
             })
         })
     }

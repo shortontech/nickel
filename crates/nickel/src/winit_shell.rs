@@ -1381,6 +1381,16 @@ impl WinitShell {
         shown
     }
 
+    /// Queue a production redraw for every live winit surface. This only
+    /// requests presentation; callers must not report a presented frame until
+    /// the normal redraw path observes one.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn request_all_redraws(&self) {
+        for surface in &self.surfaces {
+            surface.window.request_redraw();
+        }
+    }
+
     pub fn hide(&mut self, id: SurfaceId) -> bool {
         let Some(index) = self.surface_indices.get(&id.0).copied() else {
             return false;

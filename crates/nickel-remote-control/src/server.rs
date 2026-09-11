@@ -1938,7 +1938,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Launch an installed application by exact catalog ID and generation using a full-session or verified application lease. No arbitrary command or arguments are accepted. Acknowledges process spawn only; resulting windows require independent observation and lease checks. An uncertain result must be inspected before retrying. Application-scoped launch pins a matching native executable; shared runtimes and interpreter scripts require stronger identity evidence and are unavailable. Output-scoped launch is not yet available."
+        description = "Launch an installed application by exact catalog ID and generation using an output, full-session, or verified application lease. No arbitrary command or arguments are accepted. The result reports request acceptance, confirmed native process creation, and output placement separately; a pending output first-map association is not confirmation. Resulting windows require independent observation and lease checks. An uncertain result must be inspected before retrying. Application-scoped launch pins a matching native executable; shared runtimes and interpreter scripts require stronger identity evidence and are unavailable."
     )]
     async fn launch_installed_application(
         &self,
