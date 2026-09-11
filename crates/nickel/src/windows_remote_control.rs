@@ -494,6 +494,7 @@ enum OwnerRequest {
     DiagnosticAction {
         permit: DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
+        platform_refresh: Option<PreparedWindowsPlatformRefresh>,
         reply:
             SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String>>,
     },
@@ -547,12 +548,161 @@ enum OwnerRequest {
         reply: SyncSender<Result<(), String>>,
     },
 }
+
+struct PreparedWindowsPlatformRefresh {
+    domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
+    data: PreparedWindowsPlatformRefreshData,
+    observation_started: Instant,
+    observed: Instant,
+    preparation_duration_us: u64,
+}
+
+enum PreparedWindowsPlatformRefreshData {
+    Connectivity(crate::platform::ConnectivityRefresh),
+    Audio(crate::platform::AudioRefresh),
+    Peripherals(crate::platform::PeripheralRefresh),
+    DefaultAssociations(crate::platform::DefaultAssociationsRefresh),
+}
+
+#[derive(Default)]
+struct WindowsPlatformRefreshState {
+    busy: bool,
+    generation: u64,
+    changed_us: u64,
+}
+
+struct WindowsPlatformRefreshWorker {
+    started: Instant,
+    state: std::sync::Mutex<WindowsPlatformRefreshState>,
+}
+
+impl Default for WindowsPlatformRefreshWorker {
+    fn default() -> Self {
+        Self {
+            started: Instant::now(),
+            state: Default::default(),
+        }
+    }
+}
+
+struct WindowsPlatformRefreshAdmission(Arc<WindowsPlatformRefreshWorker>);
+
+impl WindowsPlatformRefreshWorker {
+    fn uptime_us(&self) -> u64 {
+        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn acquire(self: &Arc<Self>) -> Result<WindowsPlatformRefreshAdmission, String> {
+        let mut state = self
+            .state
+            .try_lock()
+            .map_err(|_| "Windows platform refresh worker is busy or unavailable".to_owned())?;
+        if state.busy {
+            return Err("Windows platform refresh worker is already in progress".to_owned());
+        }
+        state.busy = true;
+        state.generation = state.generation.saturating_add(1);
+        state.changed_us = self.uptime_us();
+        drop(state);
+        Ok(WindowsPlatformRefreshAdmission(self.clone()))
+    }
+
+    fn snapshot(&self) -> Option<nickel_remote_control::diagnostics::BackgroundWorkerDiagnostic> {
+        let state = self.state.try_lock().ok()?;
+        Some(
+            nickel_remote_control::diagnostics::BackgroundWorkerDiagnostic {
+                generation: state.generation,
+                collector_uptime_us: self.uptime_us(),
+                last_changed_uptime_us: state.changed_us,
+                busy: state.busy,
+            },
+        )
+    }
+}
+
+impl Drop for WindowsPlatformRefreshAdmission {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.0.state.lock() {
+            state.busy = false;
+            state.generation = state.generation.saturating_add(1);
+            state.changed_us = self.0.uptime_us();
+        }
+    }
+}
+
+fn prepare_windows_platform_refresh(
+    permit: &DesktopPermit,
+    worker: Arc<WindowsPlatformRefreshWorker>,
+    domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
+) -> Result<PreparedWindowsPlatformRefresh, String> {
+    use nickel_remote_control::diagnostics::PlatformRefreshDomain;
+    const DEADLINE: Duration = Duration::from_secs(2);
+
+    permit.with_debug(false, || Ok(()))?;
+    if domain == PlatformRefreshDomain::Maintenance {
+        return Err("bounded Windows maintenance diagnostics remain unavailable because the production PowerShell provider has no cancellable job containment".into());
+    }
+    let observation_started = Instant::now();
+    let data = run_windows_platform_refresh_worker(worker, DEADLINE, move || match domain {
+        PlatformRefreshDomain::Connectivity => crate::platform::refresh_connectivity_status()
+            .map(PreparedWindowsPlatformRefreshData::Connectivity),
+        PlatformRefreshDomain::Audio => {
+            crate::platform::refresh_audio_status().map(PreparedWindowsPlatformRefreshData::Audio)
+        }
+        PlatformRefreshDomain::Peripherals => crate::platform::refresh_peripheral_status()
+            .map(PreparedWindowsPlatformRefreshData::Peripherals),
+        PlatformRefreshDomain::DefaultAssociations => {
+            crate::platform::refresh_default_associations()
+                .map(PreparedWindowsPlatformRefreshData::DefaultAssociations)
+        }
+        PlatformRefreshDomain::Maintenance => unreachable!("rejected before worker start"),
+    })?;
+    let observed = Instant::now();
+    permit.with_debug(false, || Ok(()))?;
+    Ok(PreparedWindowsPlatformRefresh {
+        domain,
+        data,
+        observation_started,
+        observed,
+        preparation_duration_us: observed
+            .saturating_duration_since(observation_started)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+    })
+}
+
+fn run_windows_platform_refresh_worker<T: Send + 'static>(
+    worker: Arc<WindowsPlatformRefreshWorker>,
+    deadline: Duration,
+    query: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let admission = worker.acquire()?;
+    let (sender, receiver) = mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("nickel-windows-platform-refresh".into())
+        .spawn(move || {
+            let _admission = admission;
+            let _ = sender.try_send(query());
+        })
+        .map_err(|_| "Windows platform refresh worker is unavailable".to_owned())?;
+    receiver
+        .recv_timeout(deadline)
+        .map_err(|error| match error {
+            mpsc::RecvTimeoutError::Timeout => {
+                "Windows platform refresh exceeded its deadline".to_owned()
+            }
+            mpsc::RecvTimeoutError::Disconnected => {
+                "Windows platform refresh worker stopped".to_owned()
+            }
+        })?
+}
 struct WindowsDesktopAuthority {
     cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     sender: SyncSender<OwnerRequest>,
     started: Instant,
     desktop_session: Option<u32>,
     capture_generation: std::sync::atomic::AtomicU64,
+    platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
 }
 impl WindowsDesktopAuthority {
     fn prepare_accessibility_inventory(
@@ -1146,12 +1296,23 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
         action.validate()?;
         permit.with_debug(false, || Ok(()))?;
+        let platform_refresh = match &action {
+            nickel_remote_control::diagnostics::DiagnosticAction::RefreshPlatformStatus {
+                domain,
+            } => Some(prepare_windows_platform_refresh(
+                &permit,
+                self.platform_refresh_worker.clone(),
+                *domain,
+            )?),
+            _ => None,
+        };
         let completion = permit.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::DiagnosticAction {
                 permit,
                 action,
+                platform_refresh,
                 reply,
             })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
@@ -1296,6 +1457,9 @@ pub(crate) struct WindowsRemoteControl {
     resources: crate::windows_resource_owner::Owner,
     resource_lifecycle: Option<crate::platform::remote_observation::Lifecycle>,
     observation_generation: u64,
+    platform_refresh_generation: u64,
+    platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
+    platform_refresh_worker: Arc<WindowsPlatformRefreshWorker>,
     indicators: std::collections::HashMap<String, IndicatorSurface>,
     authority: Arc<WindowsDesktopAuthority>,
     desktop_session: Option<u32>,
@@ -1376,12 +1540,14 @@ impl WindowsRemoteControl {
                 .ok()
                 .map(|identity| identity.session_id());
         let started = Instant::now();
+        let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         let authority = Arc::new(WindowsDesktopAuthority {
             cleanup_wake,
             sender: sender.clone(),
             started,
             desktop_session,
             capture_generation: std::sync::atomic::AtomicU64::new(0),
+            platform_refresh_worker: platform_refresh_worker.clone(),
         });
         let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
             let envelope: nickel_session_protocol::ClientEnvelope =
@@ -1425,6 +1591,9 @@ impl WindowsRemoteControl {
             resources: Default::default(),
             resource_lifecycle: crate::platform::remote_observation::Lifecycle::install().ok(),
             observation_generation: 0,
+            platform_refresh_generation: 0,
+            platform_refreshes: Vec::new(),
+            platform_refresh_worker,
             indicators: Default::default(),
             authority,
             desktop_session,
@@ -1746,11 +1915,14 @@ impl WindowsRemoteControl {
                 OwnerRequest::DiagnosticAction {
                     permit,
                     action,
+                    platform_refresh,
                     reply,
                 } => {
                     let result = shell.as_mut().map_or_else(
                         || Err("Windows presentation owner is unavailable".into()),
-                        |(shell, _)| self.perform_diagnostic_action(shell, permit, action),
+                        |(shell, _)| {
+                            self.perform_diagnostic_action(shell, permit, action, platform_refresh)
+                        },
                     );
                     let _ = reply.try_send(result);
                 }
@@ -3099,7 +3271,11 @@ impl WindowsRemoteControl {
                     isolated_x11_keyboard_initialized: false,
                     native_keyboard_worker_initialized: false,
                 },
-                platform_refreshes: Vec::new(),
+                platform_refreshes: self
+                    .platform_refreshes
+                    .iter()
+                    .map(|refresh| refresh.retained_at(observed_at_us))
+                    .collect(),
                 application_inventory_refresh: None,
                 codex_feature: None,
                 shell_behavior: shell_behavior_diagnostic(
@@ -3110,7 +3286,7 @@ impl WindowsRemoteControl {
                     shell_behavior_state,
                 ),
                 settings_worker: None,
-                diagnostic_worker: None,
+                diagnostic_worker: self.platform_refresh_worker.snapshot(),
                 application_launch: ApplicationLaunchDiagnostic {
                     preparation: None,
                     tracked_children: 0,
@@ -3131,8 +3307,8 @@ impl WindowsRemoteControl {
                     "windows_shell_surfaces_without_production_scene_identity".into(),
                     "windows_renderer_and_shared_presenter_cache_accounting".into(),
                     "windows_preview_state".into(),
-                    "windows_platform_refreshes".into(),
-                    "windows_settings_and_diagnostic_workers".into(),
+                    "windows_maintenance_platform_refresh".into(),
+                    "windows_settings_worker".into(),
                     "windows_application_launch_state".into(),
                     "windows_frame_trace".into(),
                 ],
@@ -3155,6 +3331,7 @@ impl WindowsRemoteControl {
         shell: &mut WinitShell,
         permit: DesktopPermit,
         action: nickel_remote_control::diagnostics::DiagnosticAction,
+        platform_refresh: Option<PreparedWindowsPlatformRefresh>,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticActionOutcome, String> {
         use nickel_remote_control::desktop_events::{
             DesktopEventKind, ProductionEffectKind, ProductionEffectOutcome,
@@ -3168,6 +3345,7 @@ impl WindowsRemoteControl {
                 DiagnosticAction::Repaint
                     | DiagnosticAction::RefreshScene
                     | DiagnosticAction::RefreshApplicationInventory
+                    | DiagnosticAction::RefreshPlatformStatus { .. }
             ) {
                 Ok(())
             } else {
@@ -3186,32 +3364,196 @@ impl WindowsRemoteControl {
             DiagnosticAction::RefreshApplicationInventory => {
                 self.applications.request_refresh();
             }
+            DiagnosticAction::RefreshPlatformStatus { domain } => {
+                let prepared = platform_refresh
+                    .ok_or("Windows platform refresh preparation is unavailable")?;
+                if prepared.domain != *domain {
+                    return Err("Windows platform refresh domain changed before commit".into());
+                }
+                permit.with_debug(!self.desktop_unlocked, || {
+                    self.platform_refresh_generation = self
+                        .platform_refresh_generation
+                        .checked_add(1)
+                        .ok_or("Windows platform refresh generation exhausted")?;
+                    let (
+                        network_available,
+                        bluetooth_available,
+                        audio_available,
+                        printers_available,
+                        volumes_available,
+                        filesystems_available,
+                        printer_count,
+                        volume_count,
+                        filesystem_count,
+                        associations_available,
+                        association_targets_queried,
+                        effective_associations,
+                        directly_writable_associations,
+                        partial,
+                        reconciliation_confirmed,
+                    ) = match prepared.data {
+                        PreparedWindowsPlatformRefreshData::Connectivity(refresh) => (
+                            refresh.network.available,
+                            refresh.bluetooth.available,
+                            false,
+                            false,
+                            false,
+                            false,
+                            0,
+                            0,
+                            0,
+                            false,
+                            0,
+                            0,
+                            0,
+                            refresh.partial,
+                            false,
+                        ),
+                        PreparedWindowsPlatformRefreshData::Audio(refresh) => (
+                            false,
+                            false,
+                            refresh.audio.available,
+                            false,
+                            false,
+                            false,
+                            0,
+                            0,
+                            0,
+                            false,
+                            0,
+                            0,
+                            0,
+                            refresh.partial,
+                            false,
+                        ),
+                        PreparedWindowsPlatformRefreshData::Peripherals(refresh) => (
+                            false,
+                            false,
+                            false,
+                            refresh.printers_available,
+                            refresh.volumes_available,
+                            refresh.filesystems_available,
+                            refresh.printer_count,
+                            refresh.volume_count,
+                            refresh.filesystem_count,
+                            false,
+                            0,
+                            0,
+                            0,
+                            refresh.partial,
+                            false,
+                        ),
+                        PreparedWindowsPlatformRefreshData::DefaultAssociations(refresh) => (
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            false,
+                            0,
+                            0,
+                            0,
+                            refresh.associations_available,
+                            refresh.targets_queried,
+                            refresh.effective_associations,
+                            refresh.directly_writable_associations,
+                            refresh.partial,
+                            false,
+                        ),
+                    };
+                    let outcome = nickel_remote_control::diagnostics::PlatformRefreshOutcome {
+                        domain: *domain,
+                        generation: self.platform_refresh_generation,
+                        observation_started_at_us: prepared
+                            .observation_started
+                            .saturating_duration_since(self.start_time)
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64,
+                        observed_at_us: prepared
+                            .observed
+                            .saturating_duration_since(self.start_time)
+                            .as_micros()
+                            .min(u128::from(u64::MAX))
+                            as u64,
+                        preparation_duration_us: prepared.preparation_duration_us,
+                        stale: false,
+                        network_available,
+                        bluetooth_available,
+                        audio_available,
+                        printers_available,
+                        volumes_available,
+                        filesystems_available,
+                        printer_count,
+                        volume_count,
+                        filesystem_count,
+                        maintenance_available: false,
+                        updates_available: None,
+                        restart_required: None,
+                        firewall_healthy: None,
+                        malware_protection_healthy: None,
+                        known_permission_states: 0,
+                        secure_storage_status_available: false,
+                        associations_available,
+                        association_targets_queried,
+                        effective_associations,
+                        directly_writable_associations,
+                        partial,
+                        reconciliation_confirmed,
+                    };
+                    self.platform_refreshes
+                        .retain(|entry| entry.domain != *domain);
+                    self.platform_refreshes.push(outcome);
+                    self.desktop_events.record(
+                        DesktopEventKind::PlatformRefreshCompleted {
+                            domain: *domain,
+                            generation: self.platform_refresh_generation,
+                            partial,
+                        },
+                        self.start_time
+                            .elapsed()
+                            .as_micros()
+                            .min(u128::from(u64::MAX)) as u64,
+                    );
+                    Ok(())
+                })?;
+            }
             _ => unreachable!("unsupported diagnostic action rejected above"),
         }
-        permit.check_live()?;
-        self.observation_generation = self
-            .observation_generation
-            .checked_add(1)
-            .ok_or("Windows observation generations exhausted")?;
-        let submitted_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
-        if let Some(operation_id) = permit.operation_id() {
-            self.desktop_events.record(
-                DesktopEventKind::ProductionEffectCompleted {
-                    operation_id,
-                    effect: ProductionEffectKind::DiagnosticAction,
-                    outcome: ProductionEffectOutcome::Requested,
-                },
+        permit.with_debug(!self.desktop_unlocked, || {
+            self.observation_generation = self
+                .observation_generation
+                .checked_add(1)
+                .ok_or("Windows observation generations exhausted")?;
+            let submitted_at_us =
+                self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            if let Some(operation_id) = permit.operation_id() {
+                self.desktop_events.record(
+                    DesktopEventKind::ProductionEffectCompleted {
+                        operation_id,
+                        effect: ProductionEffectKind::DiagnosticAction,
+                        outcome: ProductionEffectOutcome::Requested,
+                    },
+                    submitted_at_us,
+                );
+            }
+            let platform_refresh = match &action {
+                DiagnosticAction::RefreshPlatformStatus { domain } => self
+                    .platform_refreshes
+                    .iter()
+                    .find(|entry| entry.domain == *domain)
+                    .cloned(),
+                _ => None,
+            };
+            Ok(DiagnosticActionOutcome {
+                action,
+                observation_generation: self.observation_generation,
                 submitted_at_us,
-            );
-        }
-        Ok(DiagnosticActionOutcome {
-            action,
-            observation_generation: self.observation_generation,
-            submitted_at_us,
-            presentation_confirmed: false,
-            output_identification: None,
-            application_inventory_refresh: None,
-            platform_refresh: None,
+                presentation_confirmed: false,
+                output_identification: None,
+                application_inventory_refresh: None,
+                platform_refresh,
+            })
         })
     }
 
@@ -4453,8 +4795,47 @@ mod tests {
         assert!(windows_key_chord(u32::from('!'), &[]).is_err());
         assert!(windows_key_chord(u32::from('a'), &[0x61]).is_err());
     }
+    #[test]
+    fn timed_out_platform_refresh_retains_single_flight_until_worker_exits() {
+        let worker = Arc::new(WindowsPlatformRefreshWorker::default());
+        let (release, blocked) = mpsc::sync_channel(1);
+        let result = run_windows_platform_refresh_worker(
+            worker.clone(),
+            Duration::from_millis(10),
+            move || {
+                blocked.recv().map_err(|_| "release stopped".to_owned())?;
+                Ok(7_u8)
+            },
+        );
+        assert_eq!(
+            result.unwrap_err(),
+            "Windows platform refresh exceeded its deadline"
+        );
+        assert_eq!(
+            run_windows_platform_refresh_worker(worker.clone(), Duration::from_millis(10), || Ok(
+                8_u8
+            ))
+            .unwrap_err(),
+            "Windows platform refresh worker is already in progress"
+        );
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !matches!(worker.snapshot(), Some(snapshot) if !snapshot.busy) {
+            assert!(
+                Instant::now() < deadline,
+                "worker did not release admission"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            run_windows_platform_refresh_worker(worker, Duration::from_secs(1), || Ok(9_u8))
+                .unwrap(),
+            9
+        );
+    }
     fn owner() -> WindowsRemoteControl {
         let (sender, receiver) = mpsc::sync_channel(16);
+        let platform_refresh_worker = Arc::new(WindowsPlatformRefreshWorker::default());
         WindowsRemoteControl {
             _transport: None,
             receiver,
@@ -4464,6 +4845,9 @@ mod tests {
             resources: Default::default(),
             resource_lifecycle: crate::platform::remote_observation::Lifecycle::install().ok(),
             observation_generation: 0,
+            platform_refresh_generation: 0,
+            platform_refreshes: Vec::new(),
+            platform_refresh_worker: platform_refresh_worker.clone(),
             indicators: Default::default(),
             authority: Arc::new(WindowsDesktopAuthority {
                 sender,
@@ -4471,6 +4855,7 @@ mod tests {
                 started: Instant::now(),
                 desktop_session: None,
                 capture_generation: std::sync::atomic::AtomicU64::new(0),
+                platform_refresh_worker,
             }),
             desktop_session: None,
             desktop_unlocked: false,
