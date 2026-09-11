@@ -65,7 +65,12 @@ pub enum PlatformRefreshDomain {
 pub struct PlatformRefreshOutcome {
     pub domain: PlatformRefreshDomain,
     pub generation: u64,
+    pub observation_started_at_us: u64,
+    pub observed_at_us: u64,
     pub preparation_duration_us: u64,
+    /// True only when a retained snapshot observation has aged beyond its
+    /// bounded freshness interval. Direct action results are always fresh.
+    pub stale: bool,
     pub network_available: bool,
     pub bluetooth_available: bool,
     pub audio_available: bool,
@@ -89,6 +94,16 @@ pub struct PlatformRefreshOutcome {
     pub partial: bool,
     /// The compositor reconciled the returned snapshots; this is not presentation confirmation.
     pub reconciliation_confirmed: bool,
+}
+
+impl PlatformRefreshOutcome {
+    pub const FRESH_FOR_US: u64 = 5_000_000;
+
+    pub fn retained_at(&self, observed_at_us: u64) -> Self {
+        let mut retained = self.clone();
+        retained.stale = observed_at_us.saturating_sub(self.observed_at_us) > Self::FRESH_FOR_US;
+        retained
+    }
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -558,12 +573,16 @@ pub struct DiagnosticSnapshot {
     /// None means the control collector was busy at its independent observation.
     pub lease_metrics: Option<LeaseMetricsDiagnostic>,
     pub platform: PlatformDiagnostic,
+    /// Latest bounded production query for each allowlisted platform domain.
+    pub platform_refreshes: Vec<PlatformRefreshOutcome>,
     /// Current compositor-owned optional-feature projection; no source paths,
     /// account data, project data, or provider diagnostics are retained.
     pub codex_feature: Option<CodexFeatureDiagnostic>,
     pub shell_behavior: ShellBehaviorDiagnostic,
     /// None means the worker-state collector is unavailable.
     pub settings_worker: Option<SettingsWorkerDiagnostic>,
+    /// Shared bounded worker for application and platform diagnostic refreshes.
+    pub diagnostic_worker: Option<SettingsWorkerDiagnostic>,
     pub application_launch: ApplicationLaunchDiagnostic,
     /// Currently ordinary native-window identity, retirement, focus assignments and output membership only.
     pub recent_events: crate::desktop_events::DesktopEventSnapshot,
@@ -798,6 +817,54 @@ mod output_identification_tests {
             serde_json::json!({"refresh_platform_status": {"domain": "connectivity", "path": "/"}}),
         ] {
             assert!(serde_json::from_value::<DiagnosticAction>(value).is_err());
+        }
+    }
+
+    #[test]
+    fn retained_platform_refresh_marks_age_without_adding_provider_payloads() {
+        let refresh = PlatformRefreshOutcome {
+            domain: PlatformRefreshDomain::Connectivity,
+            generation: 3,
+            observation_started_at_us: 10,
+            observed_at_us: 20,
+            preparation_duration_us: 10,
+            stale: false,
+            network_available: true,
+            bluetooth_available: false,
+            audio_available: false,
+            printers_available: false,
+            volumes_available: false,
+            filesystems_available: false,
+            printer_count: 0,
+            volume_count: 0,
+            filesystem_count: 0,
+            maintenance_available: false,
+            updates_available: None,
+            restart_required: None,
+            firewall_healthy: None,
+            malware_protection_healthy: None,
+            known_permission_states: 0,
+            secure_storage_status_available: false,
+            associations_available: false,
+            association_targets_queried: 0,
+            effective_associations: 0,
+            directly_writable_associations: 0,
+            partial: false,
+            reconciliation_confirmed: true,
+        };
+        assert!(
+            !refresh
+                .retained_at(refresh.observed_at_us + PlatformRefreshOutcome::FRESH_FOR_US)
+                .stale
+        );
+        let retained =
+            refresh.retained_at(refresh.observed_at_us + PlatformRefreshOutcome::FRESH_FOR_US + 1);
+        assert!(retained.stale);
+        let value = serde_json::to_value(retained).unwrap();
+        assert_eq!(value["observation_started_at_us"], 10);
+        assert_eq!(value["observed_at_us"], 20);
+        for excluded in ["provider", "path", "error", "ssid", "device_name"] {
+            assert!(value.get(excluded).is_none());
         }
     }
 }

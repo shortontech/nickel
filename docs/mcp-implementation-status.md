@@ -1467,6 +1467,16 @@ X11 fixture invoked the advertised launcher unpin action through MCP, observed a
 confirmed persisted/runtime change, and proved that private recent history was
 preserved; its existing stale-write, scope and revocation matrix also passed.
 
+The coherent snapshot now retains the latest bounded result for each allowlisted
+platform refresh domain. Each record carries its own generation, native worker
+observation interval, explicit five-second freshness state, availability and
+partial/reconciliation status; provider identities, errors and native labels stay
+excluded. The snapshot also exposes the shared diagnostic worker's generation,
+timestamps and busy state so an in-flight query is distinguishable from missing
+data. An owned PipeWire/X11 fixture refreshed real dummy-sink state and correlated
+the retained record and idle worker with the enclosing snapshot observation.
+Unimplemented platform queries remain explicitly unavailable.
+
 Ordinary shell presentation insertions and retirements now enter the same
 bounded event stream with a generation-bearing surface identity, fixed role and
 visibility bit. Lock, trusted-control and unsupported Codex roles never enter

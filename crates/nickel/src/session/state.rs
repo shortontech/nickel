@@ -348,6 +348,8 @@ struct PreparedApplicationDiscovery {
 struct PreparedPlatformRefresh {
     domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
     data: PreparedPlatformRefreshData,
+    observation_started: Instant,
+    observed: Instant,
     preparation_duration_us: u64,
 }
 
@@ -1003,10 +1005,13 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             };
             let preparation_duration_us =
                 started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+            let observed = Instant::now();
             permit.with_debug(false, || Ok(()))?;
             Some(PreparedPlatformRefresh {
                 domain,
                 data,
+                observation_started: started,
+                observed,
                 preparation_duration_us,
             })
         } else {
@@ -2134,9 +2139,11 @@ pub struct NickelSession {
     remote_controller_observer: nickel_ui::ControllerInput,
     remote_cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     remote_settings_staging: Arc<remote_settings::SettingsStaging>,
+    remote_diagnostic_staging: Arc<remote_worker::WorkerStaging>,
     remote_observation_generation: u64,
     remote_application_inventory_generation: u64,
     remote_platform_refresh_generation: u64,
+    remote_platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -3207,7 +3214,18 @@ impl NickelSession {
                                     nickel_remote_control::diagnostics::PlatformRefreshOutcome {
                                         domain,
                                         generation,
+                                        observation_started_at_us: prepared
+                                            .observation_started
+                                            .saturating_duration_since(self.start_time)
+                                            .as_micros()
+                                            .min(u128::from(u64::MAX)) as u64,
+                                        observed_at_us: prepared
+                                            .observed
+                                            .saturating_duration_since(self.start_time)
+                                            .as_micros()
+                                            .min(u128::from(u64::MAX)) as u64,
                                         preparation_duration_us: prepared.preparation_duration_us,
+                                        stale: false,
                                         network_available,
                                         bluetooth_available,
                                         audio_available,
@@ -3232,6 +3250,11 @@ impl NickelSession {
                                         reconciliation_confirmed,
                                     },
                                 );
+                                if let Some(outcome) = platform_refresh_outcome.as_ref() {
+                                    self.remote_platform_refreshes
+                                        .retain(|entry| entry.domain != outcome.domain);
+                                    self.remote_platform_refreshes.push(outcome.clone());
+                                }
                                 self.sync_internal_shell_changes(Some(&changed));
                             }
                         }
@@ -3633,6 +3656,11 @@ impl NickelSession {
                                 self.remote_observation_generation,
                                 observed_at_us,
                             ),
+                            platform_refreshes: self
+                                .remote_platform_refreshes
+                                .iter()
+                                .map(|refresh| refresh.retained_at(observed_at_us))
+                                .collect(),
                             codex_feature: self.remote_codex_feature_diagnostic(
                                 self.remote_observation_generation,
                                 observed_at_us,
@@ -3642,6 +3670,7 @@ impl NickelSession {
                                 observed_at_us,
                             ),
                             settings_worker: self.remote_settings_staging.snapshot(),
+                            diagnostic_worker: self.remote_diagnostic_staging.snapshot(),
                             application_launch: self.remote_application_launch_diagnostic(),
                             recent_events: self.remote_desktop_events.snapshot(),
                             diagnostic_logs: self.remote_diagnostic_logs(),
@@ -3659,7 +3688,7 @@ impl NickelSession {
                                 "shell_gpu_resources_and_external_renderer_resources_and_shared_caches",
                                 "other_compositor_event_categories",
                                 "structured_log_details_and_other_trace_categories",
-                                "platform_queries",
+                                "other_platform_queries",
                             ]
                             .into_iter()
                             .map(str::to_owned)
@@ -5771,7 +5800,7 @@ impl NickelSession {
                 cleanup_wake: remote_cleanup_wake.clone(),
                 sender: remote_desktop_tx,
                 settings_staging: remote_settings_staging.clone(),
-                diagnostic_staging: remote_diagnostic_staging,
+                diagnostic_staging: remote_diagnostic_staging.clone(),
             });
 
         let socket_name = Self::init_wayland_listener(display, event_loop);
@@ -5908,9 +5937,11 @@ impl NickelSession {
             remote_controller_observer: nickel_ui::ControllerInput::new(),
             remote_cleanup_wake,
             remote_settings_staging,
+            remote_diagnostic_staging,
             remote_observation_generation: 0,
             remote_application_inventory_generation: 0,
             remote_platform_refresh_generation: 0,
+            remote_platform_refreshes: Vec::new(),
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),
