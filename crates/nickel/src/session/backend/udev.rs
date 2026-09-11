@@ -2291,10 +2291,12 @@ impl NickelSession {
             .map(|surface| surface.output.name());
         let started = std::time::Instant::now();
         self.render_output_inner(node, crtc, wave);
+        let elapsed = started.elapsed();
+        self.record_native_presentation_dispatch(elapsed);
         // Measure all returns, including inactive outputs and retry paths.
         // This does not assert that a frame was queued or presented.
         if let Some(output) = output {
-            self.record_remote_frame_dispatch(&output, started.elapsed());
+            self.record_remote_frame_dispatch(&output, elapsed);
         }
     }
 

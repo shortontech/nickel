@@ -3252,6 +3252,7 @@ mod tests {
             shell_renderers: Vec::new(),
             shell_image_cache: None,
             shared_presenter_cache: None,
+            native_presentation_dispatch: None,
             projected_resources: d::ProjectedResourceDiagnostic {
                 observation_generation: 1,
                 observed_at_us: 2,

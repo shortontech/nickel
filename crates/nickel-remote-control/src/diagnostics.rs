@@ -765,6 +765,27 @@ pub struct SharedPresenterCacheDiagnostic {
     pub evictions: u64,
     pub invalidations: u64,
     pub recomputation_nanos: u64,
+    /// Host texture-buffer allocations observed by the cache owner. None means
+    /// that owner does not expose an allocation counter.
+    pub host_texture_allocations: Option<u64>,
+    /// Host texture buffers offered for native renderer import. This does not
+    /// confirm a driver allocation or GPU upload completion.
+    pub host_texture_uploads: Option<u64>,
+}
+
+/// Aggregate CPU time spent dispatching production native presentation work.
+/// This is sampled after dispatch returns and never waits for GPU completion.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct NativePresentationDispatchDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    /// Advances after every measured native output dispatch.
+    pub dispatch_generation: u64,
+    pub dispatches: u64,
+    pub dispatch_cpu_us: u64,
+    pub max_dispatch_cpu_us: u64,
+    /// Session-relative monotonic time of the latest completed dispatch.
+    pub last_dispatch_at_us: Option<u64>,
 }
 
 /// Aggregate retained storage derived only from the protected-filtered
@@ -817,6 +838,9 @@ pub struct DiagnosticSnapshot {
     /// shared presenter caches. This process aggregate is never attributed to
     /// the protected-filtered per-surface renderer records.
     pub shared_presenter_cache: Option<SharedPresenterCacheDiagnostic>,
+    /// None means this backend has no synchronous, nonblocking native dispatch
+    /// accounting. Durations here never represent GPU execution or completion.
+    pub native_presentation_dispatch: Option<NativePresentationDispatchDiagnostic>,
     /// Current protected-filtered resource totals from the fields above.
     pub projected_resources: ProjectedResourceDiagnostic,
     /// Pending production effects without their targets or payloads.
@@ -868,8 +892,9 @@ pub struct DiagnosticSnapshot {
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableDiagnosticDomain {
     ShellTransientsWithoutHostOwnedProtectionAndCodexContent,
-    NativeGpuRendererTiming,
-    ShellGpuResourcesAndExternalRendererResourcesAndSharedCaches,
+    NativeGpuCompletionTiming,
+    GpuDriverAndExternalRendererResources,
+    SharedRendererCachePerSurfaceAttribution,
     OtherProductionEffectEventCategories,
     OtherTraceCategories,
     WindowsVirtualWorkspaceCreateSwitchRemove,
@@ -1151,14 +1176,14 @@ mod output_identification_tests {
         );
 
         let unavailable = [
-            UnavailableDiagnosticDomain::NativeGpuRendererTiming,
+            UnavailableDiagnosticDomain::NativeGpuCompletionTiming,
             UnavailableDiagnosticDomain::OtherProductionEffectEventCategories,
             UnavailableDiagnosticDomain::OtherTraceCategories,
         ];
         let json = serde_json::to_string(&unavailable).unwrap();
         assert_eq!(
             json,
-            "[\"native_gpu_renderer_timing\",\"other_production_effect_event_categories\",\"other_trace_categories\"]"
+            "[\"native_gpu_completion_timing\",\"other_production_effect_event_categories\",\"other_trace_categories\"]"
         );
         for excluded in ["payload", "title", "text", "path", "error"] {
             assert!(!json.contains(excluded));
@@ -1460,9 +1485,11 @@ mod output_identification_tests {
             evictions: 1,
             invalidations: 4,
             recomputation_nanos: 50,
+            host_texture_allocations: Some(6),
+            host_texture_uploads: Some(5),
         };
         let value = serde_json::to_value(cache).unwrap();
-        assert_eq!(value.as_object().unwrap().len(), 13);
+        assert_eq!(value.as_object().unwrap().len(), 15);
         for excluded in [
             "surface",
             "role",

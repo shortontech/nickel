@@ -205,8 +205,25 @@ pub struct AggregateInternalUiRendererDiagnostics {
     pub text_private_cache_bytes: usize,
     pub image_cache_entries: usize,
     pub image_cache_bytes: usize,
+    pub image_cache_peak_bytes: usize,
+    pub image_allocations: u64,
+    pub image_uploads: u64,
+    pub image_cache_hits: u64,
+    pub image_cache_misses: u64,
+    pub image_cache_insertions: u64,
+    pub image_cache_evictions: u64,
     pub text_cache_entries: usize,
     pub text_cache_bytes: usize,
+    pub text_cache_peak_bytes: usize,
+    pub text_allocations: u64,
+    pub text_uploads: u64,
+    pub text_cache_hits: u64,
+    pub text_cache_misses: u64,
+    pub text_cache_insertions: u64,
+    pub text_cache_evictions: u64,
+    /// Combined recency clock of both bounded shared caches. It advances on
+    /// every lookup or insertion and never contains a cache key.
+    pub shared_cache_generation: u64,
     pub texture_import_failures: u64,
     pub fallback_import_failures: u64,
 }
@@ -256,7 +273,14 @@ struct TextureCacheEntry {
 struct TextureCache<K> {
     entries: HashMap<K, TextureCacheEntry>,
     bytes: usize,
+    peak_bytes: usize,
     clock: u64,
+    hits: u64,
+    misses: u64,
+    insertions: u64,
+    evictions: u64,
+    host_allocations: u64,
+    host_uploads: u64,
     entry_limit: usize,
     byte_limit: usize,
 }
@@ -266,7 +290,14 @@ impl<K: Clone + Eq + Hash> TextureCache<K> {
         Self {
             entries: HashMap::new(),
             bytes: 0,
+            peak_bytes: 0,
             clock: 0,
+            hits: 0,
+            misses: 0,
+            insertions: 0,
+            evictions: 0,
+            host_allocations: 0,
+            host_uploads: 0,
             entry_limit,
             byte_limit,
         }
@@ -274,7 +305,11 @@ impl<K: Clone + Eq + Hash> TextureCache<K> {
 
     fn get(&mut self, key: &K) -> Option<CachedTexture> {
         self.clock = self.clock.saturating_add(1);
-        let entry = self.entries.get_mut(key)?;
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.misses = self.misses.saturating_add(1);
+            return None;
+        };
+        self.hits = self.hits.saturating_add(1);
         entry.last_used = self.clock;
         Some(entry.texture.clone())
     }
@@ -283,6 +318,8 @@ impl<K: Clone + Eq + Hash> TextureCache<K> {
     /// evicted to honor both resource and byte bounds.
     fn insert(&mut self, key: K, texture: CachedTexture, bytes: usize) -> u64 {
         self.clock = self.clock.saturating_add(1);
+        self.host_allocations = self.host_allocations.saturating_add(1);
+        self.host_uploads = self.host_uploads.saturating_add(1);
         if bytes > self.byte_limit {
             return 0;
         }
@@ -290,6 +327,7 @@ impl<K: Clone + Eq + Hash> TextureCache<K> {
             self.bytes = self.bytes.saturating_sub(replaced.bytes);
         }
         self.bytes = self.bytes.saturating_add(bytes);
+        self.insertions = self.insertions.saturating_add(1);
         self.entries.insert(
             key,
             TextureCacheEntry {
@@ -314,6 +352,8 @@ impl<K: Clone + Eq + Hash> TextureCache<K> {
                 .saturating_sub(removed.map_or(0, |entry| entry.bytes));
             evictions = evictions.saturating_add(1);
         }
+        self.evictions = self.evictions.saturating_add(evictions);
+        self.peak_bytes = self.peak_bytes.max(self.bytes);
         evictions
     }
 }
@@ -2268,9 +2308,25 @@ impl InternalUiRuntime {
         let images = self.texture_caches.images.borrow();
         total.image_cache_entries = images.entries.len();
         total.image_cache_bytes = images.bytes;
+        total.image_cache_peak_bytes = images.peak_bytes;
+        total.image_allocations = images.host_allocations;
+        total.image_uploads = images.host_uploads;
+        total.image_cache_hits = images.hits;
+        total.image_cache_misses = images.misses;
+        total.image_cache_insertions = images.insertions;
+        total.image_cache_evictions = images.evictions;
+        let image_generation = images.clock;
         let text = self.texture_caches.text.borrow();
         total.text_cache_entries = text.entries.len();
         total.text_cache_bytes = text.bytes;
+        total.text_cache_peak_bytes = text.peak_bytes;
+        total.text_allocations = text.host_allocations;
+        total.text_uploads = text.host_uploads;
+        total.text_cache_hits = text.hits;
+        total.text_cache_misses = text.misses;
+        total.text_cache_insertions = text.insertions;
+        total.text_cache_evictions = text.evictions;
+        total.shared_cache_generation = image_generation.saturating_add(text.clock);
         total
     }
 
@@ -4057,6 +4113,13 @@ mod tests {
         assert_eq!(panel.diagnostics().image_uploads, 0);
         assert_eq!(caches.images.borrow().entries.len(), 1);
         assert_eq!(caches.images.borrow().bytes, 4 * 4 * 4);
+        assert_eq!(caches.images.borrow().peak_bytes, 4 * 4 * 4);
+        assert_eq!(caches.images.borrow().clock, 3);
+        assert_eq!(caches.images.borrow().hits, 1);
+        assert_eq!(caches.images.borrow().misses, 1);
+        assert_eq!(caches.images.borrow().insertions, 1);
+        assert_eq!(caches.images.borrow().host_allocations, 1);
+        assert_eq!(caches.images.borrow().host_uploads, 1);
     }
 
     #[test]
@@ -4091,10 +4154,12 @@ mod tests {
         assert!(cache.get(&2).is_none(), "least recently used entry evicted");
         assert_eq!(cache.entries.len(), 2);
         assert_eq!(cache.bytes, 8);
+        assert_eq!(cache.peak_bytes, 8);
 
         assert_eq!(cache.insert(4, texture(2, 1), 8), 2);
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.bytes, 8);
+        assert_eq!(cache.peak_bytes, 8);
         assert!(cache.get(&4).is_some());
 
         // Oversized resources remain usable for the current frame but cannot
@@ -4102,6 +4167,9 @@ mod tests {
         assert_eq!(cache.insert(5, texture(3, 1), 12), 0);
         assert_eq!(cache.entries.len(), 1);
         assert_eq!(cache.bytes, 8);
+        assert_eq!(cache.insertions, 4);
+        assert_eq!(cache.evictions, 3);
+        assert_eq!(cache.host_allocations, 5);
     }
 
     #[test]

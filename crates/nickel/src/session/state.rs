@@ -2546,6 +2546,8 @@ pub struct NickelSession {
     remote_output_event_states: HashMap<u64, RemoteOutputEventState>,
     remote_focus_event_state: Option<RemoteFocusEventState>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
+    #[cfg(feature = "backend-udev")]
+    remote_native_presentation_dispatch: remote_diagnostics::NativePresentationDispatchState,
     remote_event_windows: HashSet<WindowId>,
     remote_launched_children: Vec<std::process::Child>,
     remote_launch_placements: Vec<remote_launch::LaunchPlacement>,
@@ -4332,7 +4334,17 @@ impl NickelSession {
                             internal_renderers,
                             shell_renderers,
                             shell_image_cache,
-                            shared_presenter_cache: None,
+                            shared_presenter_cache: Some(
+                                self.remote_shared_presenter_cache_diagnostic(
+                                    self.remote_observation_generation,
+                                    observed_at_us,
+                                ),
+                            ),
+                            native_presentation_dispatch: self
+                                .remote_native_presentation_dispatch_diagnostic(
+                                    self.remote_observation_generation,
+                                    observed_at_us,
+                                ),
                             projected_resources,
                             pending_effects: self.remote_pending_effects_diagnostic(
                                 self.remote_observation_generation,
@@ -4409,8 +4421,9 @@ impl NickelSession {
                                 use nickel_remote_control::diagnostics::UnavailableDiagnosticDomain as Domain;
                                 [
                                     Domain::ShellTransientsWithoutHostOwnedProtectionAndCodexContent,
-                                    Domain::NativeGpuRendererTiming,
-                                    Domain::ShellGpuResourcesAndExternalRendererResourcesAndSharedCaches,
+                                    Domain::NativeGpuCompletionTiming,
+                                    Domain::GpuDriverAndExternalRendererResources,
+                                    Domain::SharedRendererCachePerSurfaceAttribution,
                                     Domain::OtherProductionEffectEventCategories,
                                     Domain::OtherTraceCategories,
                                 ]
@@ -6703,6 +6716,8 @@ impl NickelSession {
             remote_output_event_states: HashMap::new(),
             remote_focus_event_state: None,
             remote_frame_trace: None,
+            #[cfg(feature = "backend-udev")]
+            remote_native_presentation_dispatch: Default::default(),
             remote_event_windows: HashSet::new(),
             remote_launched_children: Vec::new(),
             remote_launch_placements: Vec::new(),
@@ -12984,11 +12999,27 @@ mod protocol_tests {
                 .and_then(|hit| hit.window.as_deref()),
             Some(application.window.as_str())
         );
-        assert!(
-            pending
-                .unavailable_domains
-                .contains(&UnavailableDiagnosticDomain::NativeGpuRendererTiming)
+        let shared_cache = pending.shared_presenter_cache.as_ref().unwrap();
+        assert_eq!(
+            shared_cache.observation_generation,
+            pending.observation_generation
         );
+        assert_eq!(shared_cache.observed_at_us, pending.observed_at_us);
+        assert_eq!(shared_cache.cache_owners, 1);
+        assert!(shared_cache.host_texture_allocations.is_some());
+        assert!(shared_cache.host_texture_uploads.is_some());
+        let shared_json = serde_json::to_string(shared_cache).unwrap();
+        for excluded in ["PRIVATE", "surface", "path", "pixels", "key"] {
+            assert!(!shared_json.contains(excluded));
+        }
+        assert!(pending.native_presentation_dispatch.is_none());
+        for unavailable in [
+            UnavailableDiagnosticDomain::NativeGpuCompletionTiming,
+            UnavailableDiagnosticDomain::GpuDriverAndExternalRendererResources,
+            UnavailableDiagnosticDomain::SharedRendererCachePerSurfaceAttribution,
+        ] {
+            assert!(pending.unavailable_domains.contains(&unavailable));
+        }
 
         // Lock contention is represented as unavailable instead of waiting on
         // a collector. The snapshot still returns through the production owner.

@@ -281,6 +281,8 @@ pub(crate) fn project_presenter_cache(
         evictions: cache.evictions,
         invalidations: cache.invalidations,
         recomputation_nanos: cache.recomputation_nanos,
+        host_texture_allocations: None,
+        host_texture_uploads: None,
     }
 }
 

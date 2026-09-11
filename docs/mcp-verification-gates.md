@@ -48,8 +48,9 @@ binding; this checklist does not replace them.
 Windows shared software-raster cache accounting is now read synchronously from the production
 `WinitShell` owner with its own mutation generation and the coherent snapshot timestamp. It is a
 process aggregate of bounded counts, retained byte estimates, durable peak bytes, and activity
-counters, with no content or per-surface attribution. The remaining resource gaps are shared-cache
-attribution to individual surfaces, GPU timing/allocation accounting, and DWM pixel readback.
+counters, with no content or per-surface attribution. The remaining Windows resource gaps are
+shared-cache attribution to individual surfaces, GPU completion timing/driver allocation accounting,
+and DWM pixel readback.
 
 Windows application-scale policy read/change now uses the production bounded journal
 and shared toolkit transaction engine. Preparation holds the stable lock and stages
@@ -74,8 +75,9 @@ for one numbered item passes:
   implementation log. Bounded external AT-SPI observation is integrated;
   GTK-shell delayed gesture authority, replacement-menu local input and
   collision with trusted indication pass owned native acceptance.
-- Snapshot `unavailable_domains` uses a fixed vocabulary and currently includes native GPU timing,
-  GPU/shared cache resources, Windows DWM pixel readback, remaining production-effect event
+- Snapshot `unavailable_domains` uses a fixed vocabulary and currently includes native GPU
+  completion timing, driver/external renderer resources, per-surface shared-cache attribution,
+  Windows DWM pixel readback, remaining production-effect event
   categories, and additional trace categories. Implemented desktop events use fixed exhaustive
   categories; diagnostic warnings/errors expose only fixed severity/subsystem values, a numeric
   static-callsite code, and numeric source-line detail. Explicit unavailability is truthful

@@ -6686,6 +6686,7 @@ impl WindowsRemoteControl {
                 shell_renderers,
                 shell_image_cache: Some(shell_image_cache),
                 shared_presenter_cache,
+                native_presentation_dispatch: None,
                 projected_resources,
                 pending_effects: PendingEffectsDiagnostic {
                     observation_generation: generation,
@@ -8348,7 +8349,8 @@ fn windows_unavailable_diagnostic_domains()
 -> Vec<nickel_remote_control::diagnostics::UnavailableDiagnosticDomain> {
     use nickel_remote_control::diagnostics::UnavailableDiagnosticDomain as Domain;
     vec![
-        Domain::NativeGpuRendererTiming,
+        Domain::NativeGpuCompletionTiming,
+        Domain::GpuDriverAndExternalRendererResources,
         Domain::OtherProductionEffectEventCategories,
         Domain::OtherTraceCategories,
         Domain::WindowsVirtualWorkspaceCreateSwitchRemove,

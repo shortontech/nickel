@@ -6,7 +6,126 @@ use nickel_remote_control::diagnostics::{
 use smithay::reexports::wayland_server::Resource;
 use smithay::wayland::seat::WaylandFocus;
 
+#[cfg(feature = "backend-udev")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct NativePresentationDispatchState {
+    generation: u64,
+    dispatches: u64,
+    dispatch_cpu_us: u64,
+    max_dispatch_cpu_us: u64,
+    last_dispatch_at_us: Option<u64>,
+}
+
+#[cfg(feature = "backend-udev")]
+impl NativePresentationDispatchState {
+    pub(super) fn record(&mut self, elapsed: std::time::Duration, observed_at_us: u64) {
+        let elapsed_us = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+        self.generation = self.generation.saturating_add(1);
+        self.dispatches = self.dispatches.saturating_add(1);
+        self.dispatch_cpu_us = self.dispatch_cpu_us.saturating_add(elapsed_us);
+        self.max_dispatch_cpu_us = self.max_dispatch_cpu_us.max(elapsed_us);
+        self.last_dispatch_at_us = Some(observed_at_us);
+    }
+
+    pub(super) fn snapshot(
+        self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::NativePresentationDispatchDiagnostic {
+        nickel_remote_control::diagnostics::NativePresentationDispatchDiagnostic {
+            observation_generation,
+            observed_at_us,
+            dispatch_generation: self.generation,
+            dispatches: self.dispatches,
+            dispatch_cpu_us: self.dispatch_cpu_us,
+            max_dispatch_cpu_us: self.max_dispatch_cpu_us,
+            last_dispatch_at_us: self.last_dispatch_at_us,
+        }
+    }
+}
+
 impl NickelSession {
+    #[cfg(feature = "backend-udev")]
+    pub(crate) fn record_native_presentation_dispatch(&mut self, elapsed: std::time::Duration) {
+        let observed_at_us = self
+            .start_time
+            .elapsed()
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        self.remote_native_presentation_dispatch
+            .record(elapsed, observed_at_us);
+    }
+
+    pub(super) fn remote_native_presentation_dispatch_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> Option<nickel_remote_control::diagnostics::NativePresentationDispatchDiagnostic> {
+        #[cfg(feature = "backend-udev")]
+        if self.native.is_some() {
+            return Some(
+                self.remote_native_presentation_dispatch
+                    .snapshot(observation_generation, observed_at_us),
+            );
+        }
+        #[cfg(not(feature = "backend-udev"))]
+        let _ = (observation_generation, observed_at_us);
+        None
+    }
+
+    pub(super) fn remote_shared_presenter_cache_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> nickel_remote_control::diagnostics::SharedPresenterCacheDiagnostic {
+        use nickel_remote_control::diagnostics::SharedPresenterCacheDiagnostic;
+
+        let cache = self.internal_ui.aggregate_renderer_diagnostics();
+        let bounded = |value: usize| u64::try_from(value).unwrap_or(u64::MAX);
+        SharedPresenterCacheDiagnostic {
+            observation_generation,
+            observed_at_us,
+            cache_generation: cache.shared_cache_generation,
+            // InternalUiRuntime owns exactly one shared image/text cache pair.
+            // Surface count is intentionally not exposed by this process aggregate.
+            cache_owners: 1,
+            live_entries: bounded(
+                cache
+                    .image_cache_entries
+                    .saturating_add(cache.text_cache_entries),
+            ),
+            live_bytes: bounded(
+                cache
+                    .image_cache_bytes
+                    .saturating_add(cache.text_cache_bytes),
+            ),
+            peak_cache_bytes: bounded(
+                cache
+                    .image_cache_peak_bytes
+                    .saturating_add(cache.text_cache_peak_bytes),
+            ),
+            hits: cache.image_cache_hits.saturating_add(cache.text_cache_hits),
+            misses: cache
+                .image_cache_misses
+                .saturating_add(cache.text_cache_misses),
+            insertions: cache
+                .image_cache_insertions
+                .saturating_add(cache.text_cache_insertions),
+            evictions: cache
+                .image_cache_evictions
+                .saturating_add(cache.text_cache_evictions),
+            // This cache has no separate invalidation or timed recomputation path.
+            invalidations: 0,
+            recomputation_nanos: 0,
+            host_texture_allocations: Some(
+                cache
+                    .image_allocations
+                    .saturating_add(cache.text_allocations),
+            ),
+            host_texture_uploads: Some(cache.image_uploads.saturating_add(cache.text_uploads)),
+        }
+    }
+
     pub(super) fn remote_pending_effects_diagnostic(
         &self,
         observation_generation: u64,
@@ -1830,5 +1949,52 @@ mod shortcut_tests {
         let snapshot = shortcut_diagnostic(Some(&adapter), 1, 2);
         assert_eq!(snapshot.registrations.len(), MAX_DIAGNOSTIC_SHORTCUTS);
         assert!(snapshot.truncated);
+    }
+}
+
+#[cfg(all(test, feature = "backend-udev"))]
+mod native_presentation_dispatch_tests {
+    use super::NativePresentationDispatchState;
+    use std::time::Duration;
+
+    #[test]
+    fn dispatch_snapshot_is_fixed_size_cpu_evidence_without_native_identity() {
+        let mut state = NativePresentationDispatchState::default();
+        state.record(Duration::from_micros(7), 100);
+        state.record(Duration::from_micros(11), 120);
+        let snapshot = state.snapshot(9, 130);
+
+        assert_eq!(snapshot.observation_generation, 9);
+        assert_eq!(snapshot.observed_at_us, 130);
+        assert_eq!(snapshot.dispatch_generation, 2);
+        assert_eq!(snapshot.dispatches, 2);
+        assert_eq!(snapshot.dispatch_cpu_us, 18);
+        assert_eq!(snapshot.max_dispatch_cpu_us, 11);
+        assert_eq!(snapshot.last_dispatch_at_us, Some(120));
+
+        let value = serde_json::to_value(snapshot).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        let encoded = value.to_string();
+        for excluded in ["output", "device", "path", "pixels", "key", "gpu_us"] {
+            assert!(!encoded.contains(excluded));
+        }
+    }
+
+    #[test]
+    fn dispatch_snapshot_saturates_counters_instead_of_retaining_samples() {
+        let mut state = NativePresentationDispatchState {
+            generation: u64::MAX,
+            dispatches: u64::MAX,
+            dispatch_cpu_us: u64::MAX,
+            max_dispatch_cpu_us: 5,
+            last_dispatch_at_us: None,
+        };
+        state.record(Duration::from_micros(9), 50);
+        let snapshot = state.snapshot(1, 60);
+        assert_eq!(snapshot.dispatch_generation, u64::MAX);
+        assert_eq!(snapshot.dispatches, u64::MAX);
+        assert_eq!(snapshot.dispatch_cpu_us, u64::MAX);
+        assert_eq!(snapshot.max_dispatch_cpu_us, 9);
+        assert_eq!(snapshot.last_dispatch_at_us, Some(50));
     }
 }
