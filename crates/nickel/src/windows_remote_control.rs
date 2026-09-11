@@ -22,6 +22,9 @@ static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
     crate::windows_emergency_chord::WindowsEmergencyChord::new();
 static LAUNCH_PREPARATION_BUSY: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+const MAX_PENDING_OUTPUT_LAUNCHES: usize = 8;
+const OUTPUT_LAUNCH_PLACEMENT_TTL: Duration = Duration::from_secs(30);
+const OUTPUT_LAUNCH_ROOT_TTL: Duration = Duration::from_secs(2);
 
 struct LaunchPreparationAdmission;
 
@@ -213,6 +216,206 @@ enum ObservationResult {
     Outputs(nickel_remote_control::diagnostics::OutputInventory),
     CaptureSource(crate::windows_resource_owner::Window),
 }
+struct PlannedApplicationLaunch {
+    plan: crate::windows_application_registry::native::LaunchPlan,
+    output: Option<(
+        nickel_remote_control::leases::ResourceId,
+        crate::windows_resource_owner::Output,
+    )>,
+    commit_evidence: Option<Box<crate::platform::remote_observation::Prepared>>,
+}
+struct AuthorizedApplicationLaunch {
+    committed: crate::windows_launch_broker::CommittedLaunch,
+    placement: Option<OutputLaunchPlacementTicket>,
+}
+#[derive(Clone)]
+struct OutputLaunchPlacementTicket {
+    id: u64,
+    output: nickel_remote_control::leases::ResourceId,
+    deadline: Instant,
+}
+struct PendingOutputLaunchPlacement {
+    permit: DesktopPermit,
+    output: nickel_remote_control::leases::ResourceId,
+    native_output: crate::windows_resource_owner::Output,
+    baseline: std::collections::BTreeSet<WindowIncarnation>,
+    root: Option<Arc<nickel_platform::process_identity::WindowsProcessIdentity>>,
+    root_deadline: Instant,
+    deadline: Instant,
+}
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct WindowIncarnation {
+    native: usize,
+    pid: u32,
+    created: u64,
+    thread: u32,
+}
+impl From<&crate::windows_resource_owner::Window> for WindowIncarnation {
+    fn from(window: &crate::windows_resource_owner::Window) -> Self {
+        Self {
+            native: window.native,
+            pid: window.pid,
+            created: window.created,
+            thread: window.thread,
+        }
+    }
+}
+
+fn retain_launch_safe_windows(
+    prepared: &mut crate::platform::remote_observation::Prepared,
+    pending: &std::collections::BTreeMap<u64, PendingOutputLaunchPlacement>,
+) {
+    if pending.is_empty() {
+        return;
+    }
+    let rooted = pending
+        .iter()
+        .filter_map(|(id, placement)| {
+            placement.root.as_ref().map(|root| {
+                (
+                    *id,
+                    crate::platform::remote_observation::LaunchProcessRoot {
+                        pid: root.process_id(),
+                        created: root.created_at(),
+                    },
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let roots = rooted.iter().map(|(_, root)| *root).collect::<Vec<_>>();
+    // Classification failure is ambiguity, never permission to publish a new
+    // window. Baseline windows remain unaffected by native ancestry failures.
+    let ancestry = if roots.is_empty() {
+        Default::default()
+    } else {
+        prepared.classify_launch_window_ancestry(&roots)
+    };
+    let root_indices = rooted
+        .iter()
+        .enumerate()
+        .map(|(index, (id, _))| (*id, index))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let placements = pending
+        .iter()
+        .map(|(id, placement)| {
+            (
+                &placement.baseline,
+                placement
+                    .root
+                    .as_ref()
+                    .and_then(|_| root_indices.get(id).copied()),
+            )
+        })
+        .collect::<Vec<_>>();
+    retain_windows_for_launch_placements(&mut prepared.windows, &placements, &ancestry);
+    let retained = prepared
+        .windows
+        .iter()
+        .map(|window| window.native)
+        .collect::<std::collections::BTreeSet<_>>();
+    prepared
+        .processes
+        .retain(|native, _| retained.contains(native));
+}
+
+fn retain_windows_for_launch_placements(
+    windows: &mut Vec<crate::windows_resource_owner::Window>,
+    placements: &[(
+        &std::collections::BTreeSet<WindowIncarnation>,
+        Option<usize>,
+    )],
+    ancestry: &std::collections::BTreeMap<
+        usize,
+        Vec<crate::platform::remote_observation::LaunchProcessAncestry>,
+    >,
+) {
+    windows.retain(|window| {
+        let incarnation = WindowIncarnation::from(window);
+        placements.iter().all(|(baseline, root_index)| {
+            baseline.contains(&incarnation)
+                || root_index.is_some_and(|root_index| {
+                    ancestry
+                        .get(&window.native)
+                        .and_then(|relations| relations.get(root_index))
+                        .is_some_and(|relation| {
+                            *relation
+                            == crate::platform::remote_observation::LaunchProcessAncestry::Unrelated
+                        })
+                })
+        })
+    });
+}
+
+fn start_output_placement_worker(
+    sender: SyncSender<OwnerRequest>,
+    permit: DesktopPermit,
+    ticket: OutputLaunchPlacementTicket,
+    root: Arc<nickel_platform::process_identity::WindowsProcessIdentity>,
+) -> bool {
+    std::thread::Builder::new()
+        .name("nickel-windows-launch-placement".to_owned())
+        .spawn(move || {
+            let (reply, receiver) = mpsc::sync_channel(1);
+            if sender
+                .try_send(OwnerRequest::BindApplicationPlacementRoot {
+                    permit: permit.clone(),
+                    ticket: ticket.clone(),
+                    root,
+                    reply,
+                })
+                .is_err()
+                || !matches!(
+                    receiver.recv_timeout(Duration::from_millis(250)),
+                    Ok(Ok(()))
+                )
+            {
+                let _ = sender.try_send(OwnerRequest::CancelApplicationPlacement { ticket });
+                return;
+            }
+            loop {
+                if Instant::now() >= ticket.deadline {
+                    let _ = sender.try_send(OwnerRequest::CancelApplicationPlacement { ticket });
+                    return;
+                }
+                let current = match permit.continued_observation() {
+                    Ok(current) => current,
+                    Err(_) => {
+                        let _ =
+                            sender.try_send(OwnerRequest::CancelApplicationPlacement { ticket });
+                        return;
+                    }
+                };
+                let prepared =
+                    match crate::platform::remote_observation::Prepared::prepare(&current) {
+                        Ok(prepared) => prepared,
+                        Err(_) => {
+                            std::thread::sleep(Duration::from_millis(10));
+                            continue;
+                        }
+                    };
+                let (reply, receiver) = mpsc::sync_channel(1);
+                if sender
+                    .try_send(OwnerRequest::AttemptApplicationPlacement {
+                        permit: current,
+                        ticket: ticket.clone(),
+                        prepared: Box::new(prepared),
+                        reply,
+                    })
+                    .is_err()
+                {
+                    // Queue overload cannot authorize publication. Leave the
+                    // quarantine for owner-side expiry/revocation cleanup.
+                    return;
+                }
+                match receiver.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Ok(true)) => return,
+                    Ok(Ok(false)) => std::thread::sleep(Duration::from_millis(10)),
+                    Ok(Err(_)) | Err(_) => return,
+                }
+            }
+        })
+        .is_ok()
+}
 struct PointerOwnerAction {
     id: String,
     generation: u64,
@@ -303,23 +506,40 @@ enum OwnerRequest {
     },
     Applications {
         permit: DesktopPermit,
+        prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
         reply: SyncSender<Result<nickel_remote_control::diagnostics::ApplicationInventory, String>>,
     },
     LaunchApplication {
         permit: DesktopPermit,
         request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+        prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
         deadline: Instant,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        reply: SyncSender<Result<crate::windows_application_registry::native::LaunchPlan, String>>,
+        reply: SyncSender<Result<PlannedApplicationLaunch, String>>,
     },
     CommitApplicationLaunch {
         permit: DesktopPermit,
         request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
-        plan: Box<crate::windows_application_registry::native::LaunchPlan>,
+        plan: Box<PlannedApplicationLaunch>,
         staged: Box<crate::windows_launch_broker::StagedLaunch>,
         deadline: Instant,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        reply: SyncSender<Result<crate::windows_launch_broker::CommittedLaunch, String>>,
+        reply: SyncSender<Result<AuthorizedApplicationLaunch, String>>,
+    },
+    BindApplicationPlacementRoot {
+        permit: DesktopPermit,
+        ticket: OutputLaunchPlacementTicket,
+        root: Arc<nickel_platform::process_identity::WindowsProcessIdentity>,
+        reply: SyncSender<Result<(), String>>,
+    },
+    AttemptApplicationPlacement {
+        permit: DesktopPermit,
+        ticket: OutputLaunchPlacementTicket,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        reply: SyncSender<Result<bool, String>>,
+    },
+    CancelApplicationPlacement {
+        ticket: OutputLaunchPlacementTicket,
     },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
@@ -662,10 +882,20 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         &self,
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::diagnostics::ApplicationInventory, String> {
+        let prepared = match permit.resource_scope()? {
+            nickel_remote_control::leases::ResourceScope::Output(_) => Some(Box::new(
+                crate::platform::remote_observation::Prepared::prepare(&permit)?,
+            )),
+            _ => None,
+        };
         let completion = permit.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
-            .try_send(OwnerRequest::Applications { permit, reply })
+            .try_send(OwnerRequest::Applications {
+                permit,
+                prepared,
+                reply,
+            })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
         let result = receiver
             .recv_timeout(Duration::from_secs(2))
@@ -689,11 +919,18 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let deadline = Instant::now() + Duration::from_secs(2);
         let cancelled = Arc::new(AtomicBool::new(false));
         let _cancel_on_drop = CancelOnDrop(cancelled.clone());
+        let prepared = match permit.resource_scope()? {
+            nickel_remote_control::leases::ResourceScope::Output(_) => Some(Box::new(
+                crate::platform::remote_observation::Prepared::prepare(&permit)?,
+            )),
+            _ => None,
+        };
         let (plan_reply, plan_receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::LaunchApplication {
                 permit: permit.clone(),
                 request: request.clone(),
+                prepared,
                 deadline,
                 cancelled: cancelled.clone(),
                 reply: plan_reply,
@@ -719,10 +956,17 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .name("nickel-windows-launch-prepare".to_owned())
             .spawn(move || {
                 let _admission = admission;
-                let prepared = plan.prepare().and_then(|(plan, capture)| {
+                let prepared = plan.plan.prepare().and_then(|(native_plan, capture)| {
                     let staged =
                         crate::windows_launch_broker::StagedLaunch::new(capture, deadline)?;
-                    Ok((plan, staged))
+                    Ok((
+                        PlannedApplicationLaunch {
+                            plan: native_plan,
+                            output: plan.output,
+                            commit_evidence: None,
+                        },
+                        staged,
+                    ))
                 });
                 // If the caller's bounded receive has expired, dropping the
                 // staged result terminates its still-suspended broker.
@@ -732,7 +976,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("Windows application launch timed out")?;
-        let (plan, staged) =
+        let (mut plan, staged) =
             prepare_receiver
                 .recv_timeout(remaining)
                 .map_err(|error| match error {
@@ -747,12 +991,19 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         if Instant::now() >= deadline {
             return Err("Windows application launch timed out".into());
         }
+        plan.commit_evidence = if plan.output.is_some() {
+            Some(Box::new(
+                crate::platform::remote_observation::Prepared::prepare(&permit)?,
+            ))
+        } else {
+            None
+        };
         let outcome_generation = request.catalog_generation;
         let outcome_application = request.application_id.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::CommitApplicationLaunch {
-                permit,
+                permit: permit.clone(),
                 request,
                 plan: Box::new(plan),
                 staged: Box::new(staged),
@@ -764,20 +1015,40 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("Windows application launch timed out")?;
-        let committed = receiver
+        let authorized = receiver
             .recv_timeout(remaining)
             .map_err(|_| "Windows desktop owner timed out".to_owned())??;
         // ResumeThread was the irreversible, freshly authorized commit. A
         // revocation after that point must not report failure and invite retry.
-        let (process_spawn_confirmed, process_id) = committed.finish(deadline);
+        let launched = authorized.committed.finish(deadline);
+        let output_requested = authorized
+            .placement
+            .as_ref()
+            .map(|placement| placement.output.clone());
+        match (authorized.placement, launched.process.clone()) {
+            (Some(ticket), Some(root)) => {
+                if !start_output_placement_worker(self.sender.clone(), permit, ticket.clone(), root)
+                {
+                    let _ = self
+                        .sender
+                        .try_send(OwnerRequest::CancelApplicationPlacement { ticket });
+                }
+            }
+            (Some(ticket), None) => {
+                let _ = self
+                    .sender
+                    .try_send(OwnerRequest::CancelApplicationPlacement { ticket });
+            }
+            (None, _) => {}
+        }
         Ok(
             nickel_remote_control::diagnostics::LaunchApplicationOutcome {
                 catalog_generation: outcome_generation,
                 application_id: outcome_application,
                 requested: true,
-                process_spawn_confirmed,
-                process_id,
-                output_requested: None,
+                process_spawn_confirmed: launched.process_spawn_confirmed,
+                process_id: launched.process_id,
+                output_requested,
                 output_confirmed: false,
             },
         )
@@ -1040,6 +1311,8 @@ pub(crate) struct WindowsRemoteControl {
     native_action_observations:
         std::collections::VecDeque<crate::windows_external_accessibility::ActionObservation>,
     pending_indicator_activation: std::collections::BTreeSet<u64>,
+    pending_output_launches: std::collections::BTreeMap<u64, PendingOutputLaunchPlacement>,
+    next_output_launch: u64,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
@@ -1147,6 +1420,8 @@ impl WindowsRemoteControl {
             external_accessibility: None,
             native_action_observations: Default::default(),
             pending_indicator_activation: Default::default(),
+            pending_output_launches: Default::default(),
+            next_output_launch: 0,
             start_time: started,
             last_stop: None,
         };
@@ -1319,6 +1594,7 @@ impl WindowsRemoteControl {
             self.pointer_hold.take();
             self.handle(Request::Command(Command::EmergencyStopRemoteControl));
         }
+        self.prune_output_launch_placements();
         self.drain_resource_lifecycle();
         self.reconcile_keyboard_hold();
         self.reconcile_pointer_hold();
@@ -1469,13 +1745,18 @@ impl WindowsRemoteControl {
                     let result = self.read_desktop_events(permit, after);
                     let _ = reply.try_send(result);
                 }
-                OwnerRequest::Applications { permit, reply } => {
-                    let result = self.application_inventory(permit);
+                OwnerRequest::Applications {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = self.application_inventory(permit, prepared.map(|value| *value));
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::LaunchApplication {
                     permit,
                     request,
+                    prepared,
                     deadline,
                     cancelled,
                     reply,
@@ -1485,7 +1766,11 @@ impl WindowsRemoteControl {
                     {
                         Err("Windows application launch timed out".into())
                     } else {
-                        self.plan_application_launch(&permit, &request)
+                        self.plan_application_launch(
+                            &permit,
+                            &request,
+                            prepared.map(|value| *value),
+                        )
                     };
                     let _ = reply.try_send(result);
                 }
@@ -1502,6 +1787,27 @@ impl WindowsRemoteControl {
                         permit, request, *plan, *staged, deadline, &cancelled,
                     );
                     let _ = reply.try_send(result);
+                }
+                OwnerRequest::BindApplicationPlacementRoot {
+                    permit,
+                    ticket,
+                    root,
+                    reply,
+                } => {
+                    let result = self.bind_application_placement_root(permit, &ticket, root);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::AttemptApplicationPlacement {
+                    permit,
+                    ticket,
+                    prepared,
+                    reply,
+                } => {
+                    let result = self.attempt_application_placement(permit, &ticket, &prepared);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::CancelApplicationPlacement { ticket } => {
+                    self.pending_output_launches.remove(&ticket.id);
                 }
                 OwnerRequest::Local(request) => {
                     if Instant::now() >= request.deadline
@@ -2051,6 +2357,7 @@ impl WindowsRemoteControl {
         &mut self,
         prepared: &mut crate::platform::remote_observation::Prepared,
     ) -> Result<(), String> {
+        self.prune_output_launch_placements();
         self.drain_resource_lifecycle();
         self.reconcile_keyboard_hold();
         self.reconcile_pointer_hold();
@@ -2072,12 +2379,125 @@ impl WindowsRemoteControl {
                 .verified_application(process)
                 .map(str::to_owned);
         }
+        // A pending launch never blocks established unrelated resources. Only
+        // post-commit window incarnations are withheld until the exact launch
+        // root is attributed, placed and freshly confirmed on its output.
+        retain_launch_safe_windows(prepared, &self.pending_output_launches);
         let control = self.remote_control.control();
         self.resources
             .reconcile(prepared.windows.clone(), prepared.outputs.clone(), |id| {
                 revoke_native_resource(&control, id)
             })?;
         prepared.revalidate()
+    }
+
+    fn prune_output_launch_placements(&mut self) {
+        use nickel_remote_control::leases::ResourceScope;
+
+        let now = Instant::now();
+        self.pending_output_launches.retain(|_, pending| {
+            self.desktop_unlocked
+                && now < pending.deadline
+                && (pending.root.is_some() || now < pending.root_deadline)
+                && pending.permit.continued_observation().is_ok()
+                && pending
+                    .permit
+                    .resource_scope()
+                    .is_ok_and(|scope| scope == ResourceScope::Output(pending.output.clone()))
+        });
+    }
+
+    fn bind_application_placement_root(
+        &mut self,
+        permit: DesktopPermit,
+        ticket: &OutputLaunchPlacementTicket,
+        root: Arc<nickel_platform::process_identity::WindowsProcessIdentity>,
+    ) -> Result<(), String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
+
+        self.prune_output_launch_placements();
+        let pending = self
+            .pending_output_launches
+            .get_mut(&ticket.id)
+            .ok_or("Windows output launch placement is no longer authorized")?;
+        if ticket.output != pending.output
+            || ticket.deadline != pending.deadline
+            || !pending.permit.same_lease_as(&permit)
+            || permit.resource_scope()? != ResourceScope::Output(pending.output.clone())
+        {
+            return Err("Windows launch root does not match its placement authority".into());
+        }
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: None,
+            output: Some(&pending.output),
+            authorized_surface_ancestors: &[],
+            protected: !self.desktop_unlocked,
+        };
+        permit.with_resource(&evidence, || Ok(()))?;
+        if !root.is_live() {
+            return Err("Windows launch root exited before placement".into());
+        }
+        pending.root = Some(root);
+        Ok(())
+    }
+
+    fn attempt_application_placement(
+        &mut self,
+        permit: DesktopPermit,
+        ticket: &OutputLaunchPlacementTicket,
+        prepared: &crate::platform::remote_observation::Prepared,
+    ) -> Result<bool, String> {
+        use crate::platform::remote_observation::LaunchPlacementResult;
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
+
+        self.prune_output_launch_placements();
+        let Some(pending) = self.pending_output_launches.get(&ticket.id) else {
+            return Err("Windows output launch placement is no longer authorized".into());
+        };
+        let root = pending
+            .root
+            .clone()
+            .ok_or("Windows launch root is not yet attributed")?;
+        if ticket.output != pending.output
+            || ticket.deadline != pending.deadline
+            || permit.resource_scope()? != ResourceScope::Output(pending.output.clone())
+            || prepared
+                .outputs
+                .iter()
+                .filter(|value| *value == &pending.native_output)
+                .count()
+                != 1
+        {
+            self.pending_output_launches.remove(&ticket.id);
+            return Err("Windows launch output changed before placement".into());
+        };
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: None,
+            output: Some(&pending.output),
+            authorized_surface_ancestors: &[],
+            protected: !self.desktop_unlocked,
+        };
+        let result = permit.with_input(&evidence, || {
+            crate::platform::remote_observation::place_first_launch_window(
+                prepared,
+                &root,
+                &pending.native_output,
+            )
+        });
+        match result {
+            Ok(LaunchPlacementResult::Confirmed) => {
+                self.pending_output_launches.remove(&ticket.id);
+                Ok(true)
+            }
+            Ok(LaunchPlacementResult::Waiting | LaunchPlacementResult::Requested) => Ok(false),
+            // Native ambiguity or a transient adapter failure cannot publish
+            // the launched window. Retain quarantine until expiry/revocation.
+            Err(_) => Ok(false),
+        }
     }
 
     /// Refresh native evidence at the trusted local decision boundary. A
@@ -2710,6 +3130,7 @@ impl WindowsRemoteControl {
     fn application_inventory(
         &mut self,
         permit: DesktopPermit,
+        prepared: Option<crate::platform::remote_observation::Prepared>,
     ) -> Result<nickel_remote_control::diagnostics::ApplicationInventory, String> {
         use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
 
@@ -2717,10 +3138,29 @@ impl WindowsRemoteControl {
             return Err("Windows input desktop is protected".into());
         }
         let scope = permit.resource_scope()?;
-        let expected = match &scope {
-            ResourceScope::FullSession => None,
-            ResourceScope::Application(identity) => Some(identity.as_str()),
-            ResourceScope::Surface(_) | ResourceScope::Window(_) | ResourceScope::Output(_) => {
+        let (expected, output) = match &scope {
+            ResourceScope::FullSession => (None, None),
+            ResourceScope::Application(identity) => (Some(identity.as_str()), None),
+            ResourceScope::Output(identity) => {
+                let mut prepared =
+                    prepared.ok_or("Windows output evidence is required for launch inventory")?;
+                self.reconcile_prepared_resources(&permit, &mut prepared)?;
+                let output = self
+                    .resources
+                    .output_resource(identity)
+                    .ok_or("Windows launch output is unavailable")?;
+                if prepared
+                    .outputs
+                    .iter()
+                    .filter(|value| *value == output)
+                    .count()
+                    != 1
+                {
+                    return Err("Windows launch output changed during inventory".into());
+                }
+                (None, Some(identity))
+            }
+            ResourceScope::Surface(_) | ResourceScope::Window(_) => {
                 return Err("this Windows lease cannot enumerate launch targets".into());
             }
         };
@@ -2735,7 +3175,7 @@ impl WindowsRemoteControl {
             surface: None,
             window: None,
             verified_application: expected,
-            output: None,
+            output,
             authorized_surface_ancestors: &[],
             protected: false,
         };
@@ -2743,10 +3183,11 @@ impl WindowsRemoteControl {
     }
 
     fn plan_application_launch(
-        &self,
+        &mut self,
         permit: &DesktopPermit,
         request: &nickel_remote_control::diagnostics::LaunchApplicationRequest,
-    ) -> Result<crate::windows_application_registry::native::LaunchPlan, String> {
+        prepared: Option<crate::platform::remote_observation::Prepared>,
+    ) -> Result<PlannedApplicationLaunch, String> {
         use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
 
         if !self.desktop_unlocked {
@@ -2759,42 +3200,61 @@ impl WindowsRemoteControl {
             .applications
             .plan_launch(request.catalog_generation, &request.application_id)?;
         let scope = permit.resource_scope()?;
-        match &scope {
-            ResourceScope::FullSession => {}
-            ResourceScope::Application(identity) if identity == plan.identity() => {}
+        let output = match &scope {
+            ResourceScope::FullSession => None,
+            ResourceScope::Application(identity) if identity == plan.identity() => None,
             ResourceScope::Application(_) => {
                 return Err("installed launch target is outside the application lease".into());
             }
-            ResourceScope::Output(_) => {
-                return Err(
-                    "Windows output-scoped launch awaits verified placement support".into(),
-                );
+            ResourceScope::Output(identity) => {
+                let mut prepared =
+                    prepared.ok_or("Windows output evidence is required for application launch")?;
+                self.reconcile_prepared_resources(permit, &mut prepared)?;
+                let output = self
+                    .resources
+                    .output_resource(identity)
+                    .cloned()
+                    .ok_or("Windows launch output is unavailable")?;
+                if prepared
+                    .outputs
+                    .iter()
+                    .filter(|value| *value == &output)
+                    .count()
+                    != 1
+                {
+                    return Err("Windows launch output changed during preparation".into());
+                }
+                Some((identity.clone(), output))
             }
             ResourceScope::Surface(_) | ResourceScope::Window(_) => {
                 return Err("this Windows lease cannot launch applications".into());
             }
-        }
+        };
         let evidence = ResourceEvidence {
             surface: None,
             window: None,
-            verified_application: Some(plan.identity()),
-            output: None,
+            verified_application: output.is_none().then_some(plan.identity()),
+            output: output.as_ref().map(|(identity, _)| identity),
             authorized_surface_ancestors: &[],
             protected: false,
         };
         permit.with_resource(&evidence, || Ok(()))?;
-        Ok(plan)
+        Ok(PlannedApplicationLaunch {
+            plan,
+            output,
+            commit_evidence: None,
+        })
     }
 
     fn commit_application_launch(
         &mut self,
         permit: DesktopPermit,
         request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
-        plan: crate::windows_application_registry::native::LaunchPlan,
+        mut plan: PlannedApplicationLaunch,
         staged: crate::windows_launch_broker::StagedLaunch,
         deadline: Instant,
         cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<crate::windows_launch_broker::CommittedLaunch, String> {
+    ) -> Result<AuthorizedApplicationLaunch, String> {
         use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
         use std::sync::atomic::Ordering;
 
@@ -2804,24 +3264,55 @@ impl WindowsRemoteControl {
         if !self.desktop_unlocked {
             return Err("Windows input desktop is protected".into());
         }
-        if request.catalog_generation != plan.catalog_generation()
-            || request.application_id != plan.application_id()
+        if request.catalog_generation != plan.plan.catalog_generation()
+            || request.application_id != plan.plan.application_id()
         {
             return Err("Windows application launch plan does not match its request".into());
         }
-        self.applications.revalidate_launch(&plan)?;
+        self.applications.revalidate_launch(&plan.plan)?;
         let staged_identity = staged.application_identity().to_owned();
-        if staged_identity != plan.identity() {
+        if staged_identity != plan.plan.identity() {
             return Err("installed application changed; enumerate it again".into());
         }
         let scope = permit.resource_scope()?;
-        let expected = match &scope {
-            ResourceScope::FullSession => None,
-            ResourceScope::Application(identity) => Some(identity.as_str()),
-            ResourceScope::Output(_) => {
-                return Err(
-                    "Windows output-scoped launch awaits verified placement support".into(),
-                );
+        let (expected, output, baseline) = match &scope {
+            ResourceScope::FullSession => (None, None, Default::default()),
+            ResourceScope::Application(identity) => {
+                (Some(identity.as_str()), None, Default::default())
+            }
+            ResourceScope::Output(identity) => {
+                let (planned_identity, planned_output) = plan
+                    .output
+                    .as_ref()
+                    .ok_or("Windows launch output plan is unavailable")?;
+                if identity != planned_identity {
+                    return Err("Windows launch output changed before commit".into());
+                }
+                let mut prepared = *plan
+                    .commit_evidence
+                    .take()
+                    .ok_or("Windows output evidence is required at launch commit")?;
+                self.reconcile_prepared_resources(&permit, &mut prepared)?;
+                let current = self
+                    .resources
+                    .output_resource(identity)
+                    .ok_or("Windows launch output is unavailable")?;
+                if current != planned_output
+                    || prepared
+                        .outputs
+                        .iter()
+                        .filter(|value| *value == current)
+                        .count()
+                        != 1
+                {
+                    return Err("Windows launch output changed before commit".into());
+                }
+                let baseline = prepared
+                    .windows
+                    .iter()
+                    .map(WindowIncarnation::from)
+                    .collect();
+                (None, Some((identity.clone(), current.clone())), baseline)
             }
             ResourceScope::Surface(_) | ResourceScope::Window(_) => {
                 return Err("this Windows lease cannot launch applications".into());
@@ -2833,15 +3324,55 @@ impl WindowsRemoteControl {
         let evidence = ResourceEvidence {
             surface: None,
             window: None,
-            verified_application: Some(&staged_identity),
-            output: None,
+            verified_application: expected.map(|_| staged_identity.as_str()),
+            output: output.as_ref().map(|(identity, _)| identity),
             authorized_surface_ancestors: &[],
             protected: false,
         };
         if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
             return Err("Windows application launch timed out".into());
         }
-        staged.commit(&permit, &evidence, Instant::now())
+        let placement = if let Some((output, native_output)) = output.clone() {
+            if self.pending_output_launches.len() == MAX_PENDING_OUTPUT_LAUNCHES {
+                return Err("Windows output launch placement capacity reached".into());
+            }
+            self.next_output_launch = self
+                .next_output_launch
+                .checked_add(1)
+                .ok_or("Windows output launch placement generations exhausted")?;
+            let ticket = OutputLaunchPlacementTicket {
+                id: self.next_output_launch,
+                output: output.clone(),
+                deadline: Instant::now() + OUTPUT_LAUNCH_PLACEMENT_TTL,
+            };
+            self.pending_output_launches.insert(
+                ticket.id,
+                PendingOutputLaunchPlacement {
+                    permit: permit.clone(),
+                    output,
+                    native_output,
+                    baseline,
+                    root: None,
+                    root_deadline: Instant::now() + OUTPUT_LAUNCH_ROOT_TTL,
+                    deadline: ticket.deadline,
+                },
+            );
+            Some(ticket)
+        } else {
+            None
+        };
+        match staged.commit(&permit, &evidence, Instant::now()) {
+            Ok(committed) => Ok(AuthorizedApplicationLaunch {
+                committed,
+                placement,
+            }),
+            Err(error) => {
+                if let Some(placement) = placement {
+                    self.pending_output_launches.remove(&placement.id);
+                }
+                Err(error)
+            }
+        }
     }
 
     fn perform_window_action(
@@ -3708,6 +4239,88 @@ fn control_capability(
 mod tests {
     use super::*;
 
+    fn placement_test_window(
+        native: usize,
+        pid: u32,
+        created: u64,
+        title: &str,
+    ) -> crate::windows_resource_owner::Window {
+        crate::windows_resource_owner::Window {
+            native,
+            pid,
+            created,
+            thread: pid + 100,
+            title: title.into(),
+            label: "ordinary.exe".into(),
+            bounds: crate::windows_resource_owner::Rect {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            active: false,
+            minimized: false,
+            maximized: false,
+            fullscreen: false,
+            protected: false,
+            application: None,
+        }
+    }
+
+    #[test]
+    fn rooted_launch_withholds_descendant_but_publishes_verified_unrelated_window() {
+        use crate::platform::remote_observation::LaunchProcessAncestry;
+        use nickel_remote_control::leases::ResourceScope;
+
+        let existing = placement_test_window(1, 10, 100, "Existing");
+        let unrelated = placement_test_window(2, 20, 200, "Unrelated");
+        let descendant = placement_test_window(3, 30, 300, "Descendant");
+        let baseline = std::collections::BTreeSet::from([WindowIncarnation::from(&existing)]);
+        let mut before_root = vec![existing.clone(), unrelated.clone(), descendant.clone()];
+        retain_windows_for_launch_placements(
+            &mut before_root,
+            &[(&baseline, None)],
+            &Default::default(),
+        );
+        assert_eq!(before_root.as_slice(), std::slice::from_ref(&existing));
+
+        let ancestry = std::collections::BTreeMap::from([
+            (2, vec![LaunchProcessAncestry::Unrelated]),
+            (3, vec![LaunchProcessAncestry::Descendant]),
+        ]);
+        let mut filtered = vec![existing.clone(), unrelated.clone(), descendant.clone()];
+        retain_windows_for_launch_placements(&mut filtered, &[(&baseline, Some(0))], &ancestry);
+
+        let mut resources = crate::windows_resource_owner::Owner::default();
+        resources.reconcile(filtered, Vec::new(), |_| {}).unwrap();
+        let published = resources
+            .windows(&ResourceScope::FullSession)
+            .map(|(window, _)| window)
+            .collect::<Vec<_>>();
+        assert_eq!(published.len(), 2);
+        assert!(published.iter().any(|window| window.title == "Existing"));
+        let unrelated_summary = published
+            .iter()
+            .find(|window| window.title == "Unrelated")
+            .unwrap();
+        assert!(
+            resources
+                .window_resource(
+                    &ResourceScope::FullSession,
+                    &unrelated_summary.id,
+                    unrelated_summary.generation,
+                )
+                .is_some(),
+            "the verified unrelated post-root window remains actionable"
+        );
+        assert!(!published.iter().any(|window| window.title == "Descendant"));
+
+        resources
+            .reconcile(vec![existing, unrelated, descendant], Vec::new(), |_| {})
+            .unwrap();
+        assert_eq!(resources.windows(&ResourceScope::FullSession).count(), 3);
+    }
+
     #[test]
     fn windows_key_chords_are_bounded_and_reject_unmapped_keysyms() {
         assert_eq!(
@@ -3748,6 +4361,8 @@ mod tests {
             external_accessibility: None,
             native_action_observations: Default::default(),
             pending_indicator_activation: Default::default(),
+            pending_output_launches: Default::default(),
+            next_output_launch: 0,
             start_time: Instant::now(),
             last_stop: None,
         }

@@ -169,6 +169,35 @@ protocol tests under Proton, and malformed standalone-invocation rejection passe
 Native Windows launch remains unverified, and output-scoped launch still requires
 verified first-map placement.
 
+Output leases can enumerate and launch that same bounded catalog without receiving
+application authority. The owner reconciles a fresh native output inventory during
+catalog delivery, launch planning and the final commit, and requires the exact
+generation-bearing output plus its unchanged native handle, geometry, work area,
+scale and primary state. Before resuming the broker it installs one of at most eight
+30-second placement quarantines. Each records the complete pre-commit ordinary
+window incarnation set. Established unrelated windows continue through normal
+observation and control; only later window incarnations are withheld from the remote
+registry until the broker's retained launch-process identity is bound back to the
+owner. A missing root is retired within two seconds rather than blocking established
+resources. Each bounded observation worker also snapshots at most 8,192 process
+parent links and probes at most 64 creation-time links per observed window. The
+owner performs only an in-memory classification over that prepared evidence: after
+root binding, positively verified unrelated new windows publish normally while
+root descendants and ambiguous chains remain quarantined. A bounded worker
+repeatedly collects fresh native evidence. The owner accepts only one unprotected
+ordinary window whose live process has an exact, monotonically timed ancestry chain
+to that retained root. It requests nonblocking
+placement inside the authorized work area under current resource authority and
+shared-input arbitration; only a later fresh observation wholly contained by that
+output confirms placement and releases the quarantine. Ambiguous ancestry,
+protected processes, topology or permit changes, cancellation, overload and timeout
+all fail closed for the new candidate without blocking preexisting windows.
+The immediate launch acknowledgement reports the requested output but leaves
+`output_confirmed` false because placement completes asynchronously. A process that
+cannot be attributed is never widened to application identity or an interactive
+remote resource. Windows cross-build and strict cross-Clippy cover the implementation;
+native Windows launch and visual first-window acceptance remain unverified.
+
 Catalog preparation now reads application-scale settings once per request and
 applies that snapshot to every inspected entry, avoiding repeated reads and mixed
 scale policies within one inventory. The supplied-settings command path shares

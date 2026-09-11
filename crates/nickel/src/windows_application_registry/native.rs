@@ -130,6 +130,21 @@ impl LaunchCapture {
         &self.descriptor.identity
     }
 
+    /// A retained handle can describe a process that predated ShellExecute
+    /// (for example a single-instance/DDE target). Such a process is valid
+    /// launch-result evidence only after the existing registry interval check;
+    /// it must never seed first-window placement attribution.
+    pub(crate) fn admits_placement_root(&self, process: &WindowsProcessIdentity) -> bool {
+        self.invoked_at.is_some_and(|started| {
+            let completed = native_filetime();
+            process.process_id() != 0
+                && process.is_live()
+                && completed >= started
+                && process.created_at() > started
+                && process.created_at() <= completed
+        })
+    }
+
     /// Called only with the owned process handle returned by this exact
     /// ShellExecuteEx invocation. Missing/DDE/reused processes receive no receipt.
     pub(crate) fn complete(self, process: OwnedHandle) {

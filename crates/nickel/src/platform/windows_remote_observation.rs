@@ -6,7 +6,7 @@ use crate::windows_resource_owner::{self as policy, Output, Rect, Window};
 use nickel_platform::process_identity::WindowsProcessIdentity;
 use nickel_remote_control::DesktopPermit;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         Arc, OnceLock,
         atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -18,13 +18,17 @@ use windows::Win32::Foundation::LPARAM as MessageLparam;
 use windows::core::BOOL;
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT, WPARAM},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
             DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW,
             HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
         },
         System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
             RemoteDesktop::{
                 WTS_SESSIONSTATE_UNLOCK, WTSActive, WTSFreeMemory, WTSINFOEXW,
                 WTSQuerySessionInformationW, WTSSessionInfoEx,
@@ -46,8 +50,8 @@ use windows::{
                 GetAncestor, GetClientRect, GetForegroundWindow, GetWindowRect,
                 GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
                 MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE,
-                SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
-                ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
+                SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
+                SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
             },
         },
     },
@@ -551,6 +555,313 @@ pub(crate) fn request_window_action(
     Ok(())
 }
 
+const MAX_PROCESS_ANCESTRY: usize = 8_192;
+const MAX_ANCESTRY_DEPTH: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProcessLink {
+    parent: u32,
+    created: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchProcessAncestry {
+    Descendant,
+    Unrelated,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LaunchProcessRoot {
+    pub pid: u32,
+    pub created: u64,
+}
+
+fn bounded_process_parents() -> Result<BTreeMap<u32, u32>, String> {
+    // SAFETY: The returned snapshot handle is closed on every path below and
+    // PROCESSENTRY32W advertises its exact initialized size to Toolhelp.
+    let snapshot =
+        unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.map_err(|_| unavailable())?;
+    let mut parents = BTreeMap::new();
+    let mut entry = PROCESSENTRY32W {
+        dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut result = unsafe { Process32FirstW(snapshot, &raw mut entry) };
+    while result.is_ok() {
+        if parents.len() == MAX_PROCESS_ANCESTRY
+            || parents
+                .insert(entry.th32ProcessID, entry.th32ParentProcessID)
+                .is_some()
+        {
+            // SAFETY: snapshot is the live owned handle returned above.
+            let _ = unsafe { CloseHandle(snapshot) };
+            return Err(unavailable());
+        }
+        result = unsafe { Process32NextW(snapshot, &raw mut entry) };
+    }
+    // SAFETY: snapshot is the live owned handle returned above.
+    let _ = unsafe { CloseHandle(snapshot) };
+    if parents.is_empty() {
+        Err(unavailable())
+    } else {
+        Ok(parents)
+    }
+}
+
+fn prepared_process_links(
+    windows: &[Window],
+    processes: &BTreeMap<usize, Arc<WindowsProcessIdentity>>,
+    parents: &BTreeMap<u32, u32>,
+    check: &mut impl FnMut() -> Result<(), String>,
+) -> Result<BTreeMap<u32, ProcessLink>, String> {
+    let mut identities = BTreeMap::<u32, Arc<WindowsProcessIdentity>>::new();
+    let mut ambiguous = BTreeSet::new();
+    for process in processes.values() {
+        let pid = process.process_id();
+        if identities
+            .get(&pid)
+            .is_some_and(|current| current.created_at() != process.created_at())
+        {
+            identities.remove(&pid);
+            ambiguous.insert(pid);
+        } else if !ambiguous.contains(&pid) {
+            identities.insert(pid, process.clone());
+        }
+    }
+
+    let mut probes = 0usize;
+    let mut links = BTreeMap::new();
+    for window in windows {
+        check()?;
+        let mut current = window.pid;
+        let mut visited = BTreeSet::new();
+        for _ in 0..MAX_ANCESTRY_DEPTH {
+            check()?;
+            if !visited.insert(current) || ambiguous.contains(&current) {
+                break;
+            }
+            if !identities.contains_key(&current) {
+                if probes == MAX_PROCESS_ANCESTRY {
+                    break;
+                }
+                probes += 1;
+                let Ok(identity) = WindowsProcessIdentity::probe(current) else {
+                    ambiguous.insert(current);
+                    break;
+                };
+                let identity = Arc::new(identity);
+                if identities
+                    .get(&current)
+                    .is_some_and(|known| known.created_at() != identity.created_at())
+                {
+                    identities.remove(&current);
+                    ambiguous.insert(current);
+                    break;
+                }
+                identities.insert(current, identity);
+            }
+            let Some(identity) = identities.get(&current) else {
+                break;
+            };
+            let Some(parent) = parents.get(&current).copied() else {
+                break;
+            };
+            links.insert(
+                current,
+                ProcessLink {
+                    parent,
+                    created: identity.created_at(),
+                },
+            );
+            if parent == 0 || parent == current {
+                break;
+            }
+            current = parent;
+        }
+    }
+    Ok(links)
+}
+
+fn process_chain_ancestry(
+    mut candidate: u32,
+    mut child_created: u64,
+    root: LaunchProcessRoot,
+    links: &BTreeMap<u32, ProcessLink>,
+) -> LaunchProcessAncestry {
+    if child_created < root.created {
+        return LaunchProcessAncestry::Unrelated;
+    }
+    for _ in 0..MAX_ANCESTRY_DEPTH {
+        if candidate == root.pid {
+            return if child_created == root.created {
+                LaunchProcessAncestry::Descendant
+            } else {
+                LaunchProcessAncestry::Unrelated
+            };
+        }
+        let Some(link) = links.get(&candidate) else {
+            return LaunchProcessAncestry::Unknown;
+        };
+        if link.created != child_created {
+            return LaunchProcessAncestry::Unknown;
+        }
+        if link.parent == 0 {
+            return LaunchProcessAncestry::Unrelated;
+        }
+        if link.parent == root.pid {
+            return if root.created <= child_created {
+                LaunchProcessAncestry::Descendant
+            } else {
+                LaunchProcessAncestry::Unknown
+            };
+        }
+        let Some(parent) = links.get(&link.parent) else {
+            return LaunchProcessAncestry::Unknown;
+        };
+        if link.parent == candidate || parent.created > child_created {
+            return LaunchProcessAncestry::Unknown;
+        }
+        if parent.created < root.created {
+            return LaunchProcessAncestry::Unrelated;
+        }
+        candidate = link.parent;
+        child_created = parent.created;
+    }
+    LaunchProcessAncestry::Unknown
+}
+
+fn process_chain_matches(
+    candidate: u32,
+    created: u64,
+    root: LaunchProcessRoot,
+    links: &BTreeMap<u32, ProcessLink>,
+) -> bool {
+    process_chain_ancestry(candidate, created, root, links) == LaunchProcessAncestry::Descendant
+}
+
+fn fit_on_output(window: Rect, output: Rect) -> Option<Rect> {
+    if !window.valid() || !output.valid() {
+        return None;
+    }
+    Some(Rect {
+        x: output.x,
+        y: output.y,
+        width: window.width.min(output.width),
+        height: window.height.min(output.height),
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LaunchPlacementResult {
+    Waiting,
+    Requested,
+    Confirmed,
+}
+
+/// Find the one first ordinary window that can be tied to the exact retained
+/// launch process, then request placement on the attested output. A successful
+/// SetWindowPos return is only a request; a later fresh snapshot must observe
+/// containment before the window can enter the ordinary resource registry.
+pub(crate) fn place_first_launch_window(
+    prepared: &Prepared,
+    root: &WindowsProcessIdentity,
+    target: &Output,
+) -> Result<LaunchPlacementResult, String> {
+    prepared.revalidate()?;
+    if !root.is_unprotected_in_session(prepared.session)
+        || root
+            .integrity_level()
+            .map_or(true, |level| level > prepared.integrity)
+        || policy::protected_executable(root.executable_name().ok().as_deref())
+        || prepared
+            .outputs
+            .iter()
+            .filter(|output| *output == target)
+            .count()
+            != 1
+    {
+        return Err(unavailable());
+    }
+    let root = LaunchProcessRoot {
+        pid: root.process_id(),
+        created: root.created_at(),
+    };
+    let mut candidates = Vec::new();
+    for window in &prepared.windows {
+        let process = prepared
+            .processes
+            .get(&window.native)
+            .ok_or_else(unavailable)?;
+        if !process.is_unprotected_in_session(prepared.session)
+            || process
+                .integrity_level()
+                .map_or(true, |level| level > prepared.integrity)
+            || policy::protected_executable(process.executable_name().ok().as_deref())
+        {
+            continue;
+        }
+        if process_chain_matches(
+            process.process_id(),
+            process.created_at(),
+            root,
+            &prepared.process_links,
+        ) {
+            candidates.push(window);
+        }
+    }
+    let window = match candidates.as_slice() {
+        [] => return Ok(LaunchPlacementResult::Waiting),
+        [window] => *window,
+        _ => return Err("Windows launch produced ambiguous first-window attribution".into()),
+    };
+    if target.bounds.contains(window.bounds) {
+        return Ok(LaunchPlacementResult::Confirmed);
+    }
+    let placement = fit_on_output(window.bounds, target.work_area).ok_or_else(unavailable)?;
+    let hwnd = HWND(window.native as *mut std::ffi::c_void);
+    let process = prepared
+        .processes
+        .get(&window.native)
+        .ok_or_else(unavailable)?;
+    let mut pid = 0;
+    let mut bounds = RECT::default();
+    // SAFETY: Every input came from the fresh snapshot above. Native identity,
+    // geometry and visibility are repeated at the request boundary. Async
+    // positioning cannot block the owner on an unresponsive external process.
+    let valid = unsafe {
+        IsWindow(Some(hwnd)).as_bool()
+            && IsWindowVisible(hwnd).as_bool()
+            && GetWindowThreadProcessId(hwnd, Some(&mut pid)) == window.thread
+            && GetWindowRect(hwnd, &mut bounds).is_ok()
+    };
+    if !valid
+        || pid != window.pid
+        || !process.matches_live_process(pid)
+        || process.created_at() != window.created
+        || rect(bounds) != Some(window.bounds)
+        || ordinary_window_metadata(hwnd).is_none()
+        || outputs()? != prepared.outputs
+        || lifecycle_serial()? != prepared.serial
+        || !desktop_is_unlocked(prepared.session)
+    {
+        return Err(unavailable());
+    }
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOP),
+            placement.x,
+            placement.y,
+            placement.width as i32,
+            placement.height as i32,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        )
+    }
+    .map_err(|_| unavailable())?;
+    Ok(LaunchPlacementResult::Requested)
+}
+
 static PREPARATIONS: AtomicUsize = AtomicUsize::new(0);
 pub(crate) struct Admission;
 impl Admission {
@@ -577,8 +888,36 @@ pub(crate) struct Prepared {
     pub windows: Vec<Window>,
     pub outputs: Vec<Output>,
     pub processes: BTreeMap<usize, Arc<WindowsProcessIdentity>>,
+    process_links: BTreeMap<u32, ProcessLink>,
 }
 impl Prepared {
+    /// Pure owner-side projection over ancestry evidence acquired by the
+    /// observation worker. This performs no native calls or process probes.
+    pub(crate) fn classify_launch_window_ancestry(
+        &self,
+        roots: &[LaunchProcessRoot],
+    ) -> BTreeMap<usize, Vec<LaunchProcessAncestry>> {
+        self.windows
+            .iter()
+            .map(|window| {
+                (
+                    window.native,
+                    roots
+                        .iter()
+                        .map(|root| {
+                            process_chain_ancestry(
+                                window.pid,
+                                window.created,
+                                *root,
+                                &self.process_links,
+                            )
+                        })
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
     pub(crate) fn prepare(permit: &DesktopPermit) -> Result<Self, String> {
         Self::prepare_checked(|| permit.check_live())
     }
@@ -657,6 +996,13 @@ impl Prepared {
             windows.push(window);
             processes.insert(native, process);
         }
+        let process_links = match bounded_process_parents() {
+            Ok(parents) => prepared_process_links(&windows, &processes, &parents, &mut check)?,
+            // Parentage is optional evidence. Absence keeps post-baseline
+            // windows conservatively unknown without failing ordinary output
+            // and window observation.
+            Err(_) => Default::default(),
+        };
         if serial != lifecycle_serial()? || !desktop_is_unlocked(session) {
             return Err(unavailable());
         }
@@ -674,6 +1020,7 @@ impl Prepared {
             windows,
             outputs,
             processes,
+            process_links,
         })
     }
     pub(crate) fn revalidate(&self) -> Result<(), String> {
@@ -732,5 +1079,112 @@ impl Prepared {
             return Err(unavailable());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod launch_placement_tests {
+    use super::*;
+
+    fn link(parent: u32, created: u64) -> ProcessLink {
+        ProcessLink { parent, created }
+    }
+
+    fn chain_matches(candidate: u32, root: u32, links: &BTreeMap<u32, ProcessLink>) -> bool {
+        process_chain_matches(
+            candidate,
+            links[&candidate].created,
+            LaunchProcessRoot {
+                pid: root,
+                created: links[&root].created,
+            },
+            links,
+        )
+    }
+
+    #[test]
+    fn ancestry_requires_the_exact_monotonic_process_chain() {
+        let links = BTreeMap::from([(10, link(1, 100)), (11, link(10, 110)), (12, link(11, 120))]);
+        assert!(chain_matches(10, 10, &links));
+        assert!(chain_matches(12, 10, &links));
+
+        let reused_parent =
+            BTreeMap::from([(10, link(1, 100)), (11, link(10, 130)), (12, link(11, 120))]);
+        assert!(!chain_matches(12, 10, &reused_parent));
+    }
+
+    #[test]
+    fn ancestry_rejects_missing_cycles_and_excessive_depth() {
+        assert!(!chain_matches(
+            12,
+            10,
+            &BTreeMap::from([(10, link(1, 100)), (12, link(11, 120))])
+        ));
+        assert!(!chain_matches(
+            12,
+            10,
+            &BTreeMap::from([(10, link(1, 100)), (11, link(12, 110)), (12, link(11, 120)),])
+        ));
+        let mut deep = BTreeMap::from([(1, link(0, 1))]);
+        for pid in 2..=u32::try_from(MAX_ANCESTRY_DEPTH).unwrap() + 2 {
+            deep.insert(pid, link(pid - 1, u64::from(pid)));
+        }
+        assert!(!chain_matches(
+            u32::try_from(MAX_ANCESTRY_DEPTH).unwrap() + 2,
+            1,
+            &deep,
+        ));
+    }
+
+    #[test]
+    fn owner_classifier_reads_only_prepared_ancestry_evidence() {
+        let source = include_str!("windows_remote_observation.rs");
+        let start = source
+            .find("    pub(crate) fn classify_launch_window_ancestry(")
+            .unwrap();
+        let end = source[start..]
+            .find("    pub(crate) fn prepare(")
+            .map(|offset| start + offset)
+            .unwrap();
+        let classifier = &source[start..end];
+        for forbidden in [
+            "CreateToolhelp32Snapshot",
+            "WindowsProcessIdentity::probe",
+            ".revalidate(",
+            ".is_live(",
+            "std::fs",
+            "sleep(",
+            "recv",
+            "wait",
+        ] {
+            assert!(
+                !classifier.contains(forbidden),
+                "owner classifier contains blocking/native operation {forbidden}"
+            );
+        }
+        assert!(classifier.contains("&self.process_links"));
+    }
+
+    #[test]
+    fn placement_contains_oversized_windows_in_the_exact_work_area() {
+        let work = Rect {
+            x: -1920,
+            y: 40,
+            width: 1920,
+            height: 1040,
+        };
+        assert_eq!(
+            fit_on_output(
+                Rect {
+                    x: 200,
+                    y: 100,
+                    width: 3000,
+                    height: 2000,
+                },
+                work,
+            ),
+            Some(work)
+        );
+        assert!(work.contains(fit_on_output(work, work).unwrap()));
     }
 }

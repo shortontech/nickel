@@ -32,7 +32,7 @@ impl Rect {
             && self.width <= i32::MAX as u32
             && self.height <= i32::MAX as u32
     }
-    fn contains(self, other: Self) -> bool {
+    pub(crate) fn contains(self, other: Self) -> bool {
         self.valid()
             && other.valid()
             && other.x >= self.x
@@ -220,6 +220,14 @@ impl Owner {
             .filter(|output| output.value.bounds.contains(bounds));
         let identity = &matches.next()?.identity;
         matches.next().is_none().then_some(identity)
+    }
+    /// Resolve one exact owner-generated output incarnation. Callers must still
+    /// compare it with a fresh native topology before performing an effect.
+    pub(crate) fn output_resource(&self, identity: &ResourceId) -> Option<&Output> {
+        self.outputs
+            .values()
+            .find(|record| record.identity == *identity)
+            .map(|record| &record.value)
     }
     pub(crate) fn window(&self, id: &str, generation: u64) -> Option<&Window> {
         self.windows

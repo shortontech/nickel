@@ -147,6 +147,13 @@ pub(crate) struct CommittedLaunch {
     ack: Handle,
     nonce: u64,
 }
+pub(crate) struct LaunchResult {
+    pub process_spawn_confirmed: bool,
+    pub process_id: Option<u32>,
+    /// Retained incarnation evidence for bounded first-window attribution.
+    /// This is never exposed as application authority or serialized.
+    pub process: Option<std::sync::Arc<nickel_platform::process_identity::WindowsProcessIdentity>>,
+}
 unsafe impl Send for StagedLaunch {}
 unsafe impl Send for CommittedLaunch {}
 
@@ -308,25 +315,30 @@ impl Drop for StagedLaunch {
 }
 
 impl CommittedLaunch {
-    pub(crate) fn finish(mut self, caller_deadline: Instant) -> (bool, Option<u32>) {
+    pub(crate) fn finish(mut self, caller_deadline: Instant) -> LaunchResult {
+        let unavailable = || LaunchResult {
+            process_spawn_confirmed: false,
+            process_id: None,
+            process: None,
+        };
         let deadline = caller_deadline.min(self.deadline);
         let Some(wait) = wait_ms(deadline) else {
-            return (false, None);
+            return unavailable();
         };
         let result =
             unsafe { WaitForMultipleObjects(&[self.ready.raw(), self.process.raw()], false, wait) };
         if result != WAIT_OBJECT_0 {
-            return (false, None);
+            return unavailable();
         }
         let response = match read_record::<Response>(self.response.raw()) {
             Ok(v) => v,
-            Err(_) => return (false, None),
+            Err(_) => return unavailable(),
         };
         // Authenticate the envelope before acknowledging it or interpreting
         // its handle-sized field. Without an ack the broker closes any handle
         // it duplicated into this process after its bounded wait.
         if !authenticated_response(&response, self.nonce) {
-            return (false, None);
+            return unavailable();
         }
         unsafe {
             let _ = SetEvent(self.ack.raw());
@@ -336,16 +348,31 @@ impl CommittedLaunch {
         }
         if response.status != 0 || response.process == 0 {
             close_local(response.process);
-            return (false, None);
+            return unavailable();
         }
         let process = unsafe { Handle::new(HANDLE(response.process as usize as *mut _)) };
         let Ok(process) = process else {
-            return (false, None);
+            return unavailable();
         };
+        let identity =
+            nickel_platform::process_identity::WindowsProcessIdentity::from_retained_process(
+                &process.0,
+            )
+            .ok()
+            .filter(|identity| {
+                self.capture
+                    .as_ref()
+                    .is_some_and(|capture| capture.admits_placement_root(identity))
+            })
+            .map(std::sync::Arc::new);
         if let Some(capture) = self.capture.take() {
             capture.complete(process.owned());
         }
-        (true, (response.pid != 0).then_some(response.pid))
+        LaunchResult {
+            process_spawn_confirmed: true,
+            process_id: (response.pid != 0).then_some(response.pid),
+            process: identity,
+        }
     }
 }
 
