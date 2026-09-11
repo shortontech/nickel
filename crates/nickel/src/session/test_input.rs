@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use nickel_session_protocol::{
     InputState, PointerInteraction, RecoveryTargetAction, ResolvedShellTarget, TestControllerAxis,
-    TestControllerButton, TestInput, TestKey, TestPointerButton,
+    TestControllerButton, TestEmergencyControlSide, TestEmergencyControlSource, TestInput, TestKey,
+    TestPointerButton,
 };
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisRelativeDirection, AxisSource, ButtonState, Device,
@@ -132,8 +133,24 @@ fn controller_axis_code(axis: TestControllerAxis) -> evdev::AbsoluteAxisCode {
 #[derive(Debug)]
 struct SyntheticInputBackend;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct SyntheticInputDevice;
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+struct SyntheticInputDevice {
+    physical_emergency_fixture: bool,
+}
+
+impl SyntheticInputDevice {
+    const fn ordinary() -> Self {
+        Self {
+            physical_emergency_fixture: false,
+        }
+    }
+
+    const fn physical_emergency_fixture() -> Self {
+        Self {
+            physical_emergency_fixture: true,
+        }
+    }
+}
 
 impl Device for SyntheticInputDevice {
     fn id(&self) -> String {
@@ -156,7 +173,11 @@ impl Device for SyntheticInputDevice {
     }
 
     fn syspath(&self) -> Option<PathBuf> {
-        None
+        self.physical_emergency_fixture.then(|| {
+            // The production classifier consumes only this source attribution.
+            // The private test-control endpoint does not open or mutate the path.
+            PathBuf::from("/sys/devices/nickel-test-control/input/input0/event0")
+        })
     }
 }
 
@@ -165,6 +186,7 @@ struct SyntheticKeyEvent {
     time: InputTime,
     key_code: u32,
     state: KeyState,
+    device: SyntheticInputDevice,
 }
 
 impl Event<SyntheticInputBackend> for SyntheticKeyEvent {
@@ -173,7 +195,7 @@ impl Event<SyntheticInputBackend> for SyntheticKeyEvent {
     }
 
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        self.device
     }
 }
 
@@ -204,7 +226,7 @@ impl Event<SyntheticInputBackend> for SyntheticPointerMotionEvent {
     }
 
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        SyntheticInputDevice::ordinary()
     }
 }
 
@@ -240,7 +262,7 @@ impl Event<SyntheticInputBackend> for SyntheticTouchEvent {
         self.time
     }
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        SyntheticInputDevice::ordinary()
     }
 }
 impl AbsolutePositionEvent<SyntheticInputBackend> for SyntheticTouchEvent {
@@ -281,7 +303,7 @@ impl Event<SyntheticInputBackend> for SyntheticPointerRelativeMotionEvent {
     }
 
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        SyntheticInputDevice::ordinary()
     }
 }
 
@@ -346,7 +368,7 @@ impl Event<SyntheticInputBackend> for SyntheticPointerButtonEvent {
     }
 
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        SyntheticInputDevice::ordinary()
     }
 }
 
@@ -373,7 +395,7 @@ impl Event<SyntheticInputBackend> for SyntheticPointerAxisEvent {
     }
 
     fn device(&self) -> SyntheticInputDevice {
-        SyntheticInputDevice
+        SyntheticInputDevice::ordinary()
     }
 }
 
@@ -663,6 +685,27 @@ impl NickelSession {
                     time,
                     key_code: linux_key_code(key),
                     state: key_state(state),
+                    device: SyntheticInputDevice::ordinary(),
+                },
+            },
+            TestInput::EmergencyControl {
+                source,
+                side,
+                state,
+            } => InputEvent::Keyboard {
+                event: SyntheticKeyEvent {
+                    time,
+                    key_code: match side {
+                        TestEmergencyControlSide::Left => 29,
+                        TestEmergencyControlSide::Right => 97,
+                    },
+                    state: key_state(state),
+                    device: match source {
+                        TestEmergencyControlSource::Synthetic => SyntheticInputDevice::ordinary(),
+                        TestEmergencyControlSource::PhysicalFixture => {
+                            SyntheticInputDevice::physical_emergency_fixture()
+                        }
+                    },
                 },
             },
             TestInput::PointerMove { x, y } => {

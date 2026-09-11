@@ -3,7 +3,8 @@ use std::ffi::OsString;
 use nickel_session_protocol::{
     InputState, PointerInteraction, PreviewTargetAction, RecoveryTargetAction,
     ScreenshotTargetAction, ShellSemanticTarget, TestControllerAxis, TestControllerButton,
-    TestInput, TestKey, TestPointerButton, WindowMenuTargetAction,
+    TestEmergencyControlSide, TestEmergencyControlSource, TestInput, TestKey, TestPointerButton,
+    WindowMenuTargetAction,
 };
 
 const HELP: &str = "\
@@ -54,6 +55,7 @@ Usage:
   nickel-test-input move-relative DX DY
   nickel-test-input wheel HORIZONTAL_V120 VERTICAL_V120
   nickel-test-input button left|right pressed|released
+  nickel-test-input emergency-control synthetic|physical-fixture left|right pressed|released
   nickel-test-input key a|c|p|v|x|enter|escape|tab|alt|shift|control|meta|left|right|up|down|space|backspace|delete|f11|print-screen|volume-up|volume-down|volume-mute|media-play-pause|media-play|media-pause|media-stop|media-next|media-previous|media-fast-forward|media-rewind pressed|released
 ";
 
@@ -391,6 +393,21 @@ fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Parsed, String> {
                     "left" => TestPointerButton::Left,
                     "right" => TestPointerButton::Right,
                     _ => return Err(format!("unknown pointer button {button:?}")),
+                },
+                state: parse_state(state)?,
+            }))
+        }
+        [command, source, side, state] if command == "emergency-control" => {
+            Ok(Parsed::Input(TestInput::EmergencyControl {
+                source: match source.as_str() {
+                    "synthetic" => TestEmergencyControlSource::Synthetic,
+                    "physical-fixture" => TestEmergencyControlSource::PhysicalFixture,
+                    _ => return Err(format!("unknown emergency-control source {source:?}")),
+                },
+                side: match side.as_str() {
+                    "left" => TestEmergencyControlSide::Left,
+                    "right" => TestEmergencyControlSide::Right,
+                    _ => return Err(format!("unknown emergency-control side {side:?}")),
                 },
                 state: parse_state(state)?,
             }))
@@ -1354,6 +1371,19 @@ mod tests {
             Ok(Parsed::Input(TestInput::Key {
                 key: TestKey::V,
                 state: InputState::Pressed
+            }))
+        ));
+        assert!(matches!(
+            parse([
+                "emergency-control".into(),
+                "physical-fixture".into(),
+                "right".into(),
+                "pressed".into()
+            ]),
+            Ok(Parsed::Input(TestInput::EmergencyControl {
+                source: TestEmergencyControlSource::PhysicalFixture,
+                side: TestEmergencyControlSide::Right,
+                state: InputState::Pressed,
             }))
         ));
         assert!(matches!(

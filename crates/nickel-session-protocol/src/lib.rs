@@ -3,7 +3,7 @@ pub mod client;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 26;
+pub const PROTOCOL_VERSION: u16 = 27;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -295,6 +295,14 @@ pub enum TestInput {
         key: TestKey,
         state: InputState,
     },
+    /// Exercise the emergency-key path with explicit source attribution. This
+    /// is accepted only by a session started with its private test-control
+    /// capability and never creates or reads a host input device.
+    EmergencyControl {
+        source: TestEmergencyControlSource,
+        side: TestEmergencyControlSide,
+        state: InputState,
+    },
     PointerMove {
         x: i32,
         y: i32,
@@ -328,6 +336,23 @@ pub enum TestInput {
         window: WindowId,
         interaction: PointerInteraction,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestEmergencyControlSource {
+    /// No syspath, matching remote and ordinary test input.
+    Synthetic,
+    /// A non-virtual `/sys/devices` attribution fixture delivered through the
+    /// production compositor input handler. This does not access hardware.
+    PhysicalFixture,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TestEmergencyControlSide {
+    Left,
+    Right,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

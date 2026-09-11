@@ -83,11 +83,23 @@ This timing case has deterministic owner coverage; it is not claimed as a native
 scheduling test.
 
 Pending approval cards now carry a checked monotonic `pending_generation` through
-session protocol version 26, Settings semantic messages, and Linux/Windows local
+session protocol version 27, Settings semantic messages, and Linux/Windows local
 decision handlers. Equivalent still-pending requests coalesce without changing
 the generation. Replacement or cancellation followed by an identical new request
 cannot reuse an earlier card. Approval and denial check both generation and payload;
 generation exhaustion rejects replacement while preserving the existing card.
+
+A private nested Linux run now drives explicitly attributed emergency Control
+events through the production compositor input reducer. A synthetic-source
+Left+Right Control chord was a negative control. A nonvirtual `/sys/devices`
+attribution fixture then proved right-first recognition, an ignored repeated first
+press, exactly one revocation, native key and pointer release, and denial of stale
+hold/drag continuations. A combined run stopped an open trace and event stream,
+cancelled a pending capture and blocked AT-SPI inspection, and discarded a queued
+GTK right-click continuation without showing its menu after the fixture resumed.
+The test-control source fixture opens no input device and does not claim an evdev,
+libinput, udev, or physical-keyboard path. Real hardware/seat validation, DRM,
+Windows, and cross-machine acceptance remain open.
 
 The protocol suite, Settings recovery/semantic-action regression and Linux Nickel
 all-target check passed (`pending-approval-generation-results.txt` and
