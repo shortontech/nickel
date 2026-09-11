@@ -3883,7 +3883,7 @@ impl WindowsRemoteControl {
                 windows,
                 outputs,
                 workspaces: Vec::new(),
-                internal_applications: Vec::new(),
+                internal_applications: windows_internal_application_diagnostics(),
                 internal_renderers: Vec::new(),
                 shell_renderers,
                 shell_image_cache: Some(shell_image_cache),
@@ -3961,13 +3961,7 @@ impl WindowsRemoteControl {
                     .map(|trace| trace.snapshot()),
                 trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
                 truncated: shell_surfaces_truncated,
-                unavailable_domains: vec![
-                    "windows_virtual_workspaces".into(),
-                    "windows_internal_applications".into(),
-                    "windows_shared_renderer_and_presenter_cache_accounting".into(),
-                    "windows_preview_pixel_readback".into(),
-                    "windows_settings_worker".into(),
-                ],
+                unavailable_domains: windows_unavailable_diagnostic_domains(),
             })
         })?;
         prepared.revalidate()?;
@@ -5393,6 +5387,26 @@ impl WindowsRemoteControl {
         })
     }
 }
+
+fn windows_unavailable_diagnostic_domains() -> Vec<String> {
+    vec![
+        "windows_virtual_workspaces".into(),
+        "windows_shared_renderer_and_presenter_cache_accounting".into(),
+        "windows_preview_pixel_readback".into(),
+        "windows_settings_worker".into(),
+    ]
+}
+
+/// Windows does not embed ordinary application clients in the compositor.
+/// Nickel File, Settings, and other native tools are projected through the
+/// scoped `windows` inventory; Winit-owned chrome is projected through scoped
+/// `shell_surfaces`. The only application-class Winit surface is Codex and is
+/// protected. Returning an empty inventory while omitting this domain from
+/// `unavailable_domains` is the protocol's explicit supported-empty evidence.
+fn windows_internal_application_diagnostics()
+-> Vec<nickel_remote_control::diagnostics::InternalApplicationDiagnostic> {
+    Vec::new()
+}
 impl Drop for WindowsRemoteControl {
     fn drop(&mut self) {
         CHORD.set_enabled(false);
@@ -5776,6 +5790,19 @@ mod tests {
             start_time: Instant::now(),
             last_stop: None,
         }
+    }
+    #[test]
+    fn windows_internal_application_inventory_is_supported_and_empty() {
+        // Winit does not host ordinary application clients. Native Nickel
+        // tools belong to the native window inventory and Winit chrome belongs
+        // to the shell-surface inventory. In particular, this domain must not
+        // become an alias that exposes the protected Codex surface.
+        assert!(windows_internal_application_diagnostics().is_empty());
+        assert!(
+            !windows_unavailable_diagnostic_domains()
+                .iter()
+                .any(|domain| domain == "windows_internal_applications")
+        );
     }
     #[test]
     fn windows_owner_preserves_pending_request_when_trusted_chrome_is_unavailable() {
