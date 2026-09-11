@@ -245,6 +245,20 @@ enum RemoteDesktopRequest {
             Result<nickel_remote_control::capture::CapturedWindow, String>,
         >,
     },
+    ValidateOutputCapture {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<Result<(), String>>,
+    },
+    CaptureOutput {
+        permit: nickel_remote_control::DesktopPermit,
+        id: String,
+        generation: u64,
+        reply: std::sync::mpsc::SyncSender<
+            Result<nickel_remote_control::capture::CapturedWindow, String>,
+        >,
+    },
     ValidateCapture {
         permit: nickel_remote_control::DesktopPermit,
         id: String,
@@ -1107,6 +1121,46 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         response
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "capture validation timed out".to_owned())?
+    }
+
+    fn validate_output_capture(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::ValidateOutputCapture {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "output capture validation queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "output capture validation timed out".to_owned())?
+    }
+
+    fn capture_output(
+        &self,
+        permit: nickel_remote_control::DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        let (reply, response) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .try_send(RemoteDesktopRequest::CaptureOutput {
+                permit,
+                id: id.into(),
+                generation,
+                reply,
+            })
+            .map_err(|_| "output capture queue is busy or unavailable")?;
+        response
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "output capture timed out".to_owned())?
     }
 
     fn capture_window(
@@ -3465,6 +3519,45 @@ impl NickelSession {
                 {
                     let _ = (permit, id, generation);
                     let _ = reply.try_send(Err("capture renderer is unavailable".into()));
+                }
+            }
+            RemoteDesktopRequest::ValidateOutputCapture {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                let result = self.with_output_capture_authority(
+                    &nickel_remote_control::leases::ResourceId { id, generation },
+                    &permit,
+                    || Ok(()),
+                );
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                let result = {
+                    let _ = (permit, id, generation);
+                    Err("output capture renderer is unavailable".into())
+                };
+                let _ = reply.try_send(result);
+            }
+            RemoteDesktopRequest::CaptureOutput {
+                permit,
+                id,
+                generation,
+                reply,
+            } => {
+                #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+                self.enqueue_remote_capture(
+                    permit,
+                    remote_capture::CaptureTarget::Output(
+                        nickel_remote_control::leases::ResourceId { id, generation },
+                    ),
+                    reply,
+                );
+                #[cfg(not(any(feature = "backend-udev", feature = "backend-winit")))]
+                {
+                    let _ = (permit, id, generation);
+                    let _ = reply.try_send(Err("output capture renderer is unavailable".into()));
                 }
             }
             RemoteDesktopRequest::ValidateCapture {
@@ -11534,6 +11627,22 @@ mod protocol_tests {
         let (_event_loop, mut session) = internal_shell_test_session();
         session.refresh_remote_output_identities();
         let (output, generation) = session.remote_output_generations["file-test"].clone();
+        let capture_identity = ResourceId {
+            id: "file-test".into(),
+            generation,
+        };
+        assert_eq!(
+            session.output_capture_evidence(&capture_identity).unwrap(),
+            output
+        );
+        assert!(
+            session
+                .output_capture_evidence(&ResourceId {
+                    id: "file-test".into(),
+                    generation: generation.saturating_add(1),
+                })
+                .is_err()
+        );
         let initial_history = session.remote_desktop_events.snapshot();
         let control = session.remote_control.control();
         let lease = control
@@ -11556,6 +11665,7 @@ mod protocol_tests {
         session.refresh_remote_output_identities();
         session.flush_remote_resource_retirement();
         assert_eq!(session.remote_output_generations["file-test"].1, generation);
+        assert!(session.output_capture_evidence(&capture_identity).is_ok());
         assert_eq!(
             session.remote_desktop_events.snapshot().generation,
             initial_history.generation,
@@ -11570,6 +11680,7 @@ mod protocol_tests {
                 .any(|candidate| candidate.id == lease)
         );
         session.space.unmap_output(&output);
+        assert!(session.output_capture_evidence(&capture_identity).is_err());
         session.refresh_remote_output_identities();
         session.flush_remote_resource_retirement();
         assert!(control.lock().unwrap().leases().iter().next().is_none());
@@ -11595,6 +11706,15 @@ mod protocol_tests {
         session.refresh_remote_output_identities();
         let replacement_generation = session.remote_output_generations["file-test"].1;
         assert_ne!(replacement_generation, generation);
+        assert!(session.output_capture_evidence(&capture_identity).is_err());
+        assert!(
+            session
+                .output_capture_evidence(&ResourceId {
+                    id: "file-test".into(),
+                    generation: replacement_generation,
+                })
+                .is_ok()
+        );
         let restored_history = session
             .remote_desktop_events
             .since(removed_history.generation)
@@ -11609,6 +11729,40 @@ mod protocol_tests {
         );
         assert!(
             restored_history.events[0].observed_at_us >= removed_history.events[0].observed_at_us
+        );
+    }
+
+    #[test]
+    fn output_capture_rejects_excessive_physical_pixel_bounds() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let output = Output::new(
+            "capture-too-large".into(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Nickel".into(),
+                model: "Capture bounds".into(),
+                serial_number: "capture-too-large".into(),
+            },
+        );
+        output.change_current_state(
+            Some(smithay::output::Mode {
+                size: (8192, 8192).into(),
+                refresh: 60_000,
+            }),
+            None,
+            None,
+            None,
+        );
+        session.space.map_output(&output, (1280, 0));
+        session.refresh_remote_output_identities();
+        let identity = session
+            .remote_output_identity("capture-too-large".into())
+            .unwrap();
+        assert_eq!(
+            session.output_capture_evidence(&identity).unwrap_err(),
+            "output capture dimensions exceed limit"
         );
     }
 

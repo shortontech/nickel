@@ -18,6 +18,7 @@ pub(crate) enum Method {
     ListWindows,
     FocusWindow,
     Capture,
+    CaptureOutput,
     CaptureSurface,
     ListSurfaces,
     WindowAction,
@@ -60,7 +61,7 @@ pub(crate) enum Method {
 
 impl Method {
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 46] = [
+    pub(crate) const ALL: [Self; 47] = [
         Self::RequestLease,
         Self::ListLeases,
         Self::Snapshot,
@@ -69,6 +70,7 @@ impl Method {
         Self::ListWindows,
         Self::FocusWindow,
         Self::Capture,
+        Self::CaptureOutput,
         Self::CaptureSurface,
         Self::ListSurfaces,
         Self::WindowAction,
@@ -114,7 +116,7 @@ impl Method {
     }
 }
 
-const METHODS: [&str; 46] = [
+const METHODS: [&str; 47] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -123,6 +125,7 @@ const METHODS: [&str; 46] = [
     "list_windows",
     "focus_window",
     "capture_window",
+    "capture_output",
     "capture_surface",
     "list_surfaces",
     "window_action",

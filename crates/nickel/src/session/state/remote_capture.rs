@@ -3,7 +3,21 @@ use crate::session::window_capture::{
     SubmittedWindowCapture, submit_elements_capture, submit_window_capture,
 };
 use nickel_remote_control::{DesktopPermit, capture::CapturedWindow};
-use smithay::backend::renderer::{ExportMem, gles::GlesRenderer};
+use smithay::{
+    backend::renderer::{
+        ExportMem, ImportAll, ImportMem, element::surface::WaylandSurfaceRenderElement,
+        gles::GlesRenderer,
+    },
+    desktop::{Window, space::space_render_elements},
+};
+
+smithay::backend::renderer::element::render_elements! {
+    OutputCaptureElement<R, E> where R: ImportAll + ImportMem;
+    Space=smithay::desktop::space::SpaceRenderElements<R, E>,
+    Internal=crate::session::internal_ui::InternalUiRenderElement<R>,
+}
+type OutputCaptureRenderElement =
+    OutputCaptureElement<GlesRenderer, WaylandSurfaceRenderElement<GlesRenderer>>;
 
 type CaptureReply = std::sync::mpsc::SyncSender<Result<CapturedWindow, String>>;
 
@@ -11,6 +25,7 @@ type CaptureReply = std::sync::mpsc::SyncSender<Result<CapturedWindow, String>>;
 pub(super) enum CaptureTarget {
     Window(WindowId),
     Surface(nickel_remote_control::leases::ResourceId),
+    Output(nickel_remote_control::leases::ResourceId),
 }
 
 impl CaptureTarget {
@@ -18,6 +33,7 @@ impl CaptureTarget {
         match self {
             Self::Window(id) => (id.0.to_string(), id.0),
             Self::Surface(id) => (id.id.clone(), id.generation),
+            Self::Output(id) => (id.id.clone(), id.generation),
         }
     }
 }
@@ -34,6 +50,56 @@ pub(super) struct RemoteCaptureWork {
 }
 
 impl NickelSession {
+    pub(super) fn output_capture_evidence(
+        &self,
+        identity: &nickel_remote_control::leases::ResourceId,
+    ) -> Result<smithay::output::Output, String> {
+        if self.locked || self.shell_recovery_visible() {
+            return Err("output capture is protected".into());
+        }
+        let (output, generation) = self
+            .remote_output_generations
+            .get(&identity.id)
+            .ok_or("output generation has retired")?;
+        if *generation != identity.generation
+            || !self.space.outputs().any(|current| current == output)
+        {
+            return Err("output generation has retired".into());
+        }
+        let mode = output.current_mode().ok_or("output mode is unavailable")?;
+        let width = u32::try_from(mode.size.w).map_err(|_| "output width exceeds limit")?;
+        let height = u32::try_from(mode.size.h).map_err(|_| "output height exceeds limit")?;
+        if width == 0
+            || height == 0
+            || width > 8192
+            || height > 8192
+            || width.saturating_mul(height) > 16_777_216
+        {
+            return Err("output capture dimensions exceed limit".into());
+        }
+        Ok(output.clone())
+    }
+
+    pub(super) fn with_output_capture_authority<T>(
+        &self,
+        identity: &nickel_remote_control::leases::ResourceId,
+        permit: &DesktopPermit,
+        effect: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.output_capture_evidence(identity)?;
+        permit.with_resource(
+            &nickel_remote_control::leases::ResourceEvidence {
+                window: None,
+                surface: None,
+                output: Some(identity),
+                verified_application: None,
+                authorized_surface_ancestors: &[],
+                protected: false,
+            },
+            effect,
+        )
+    }
+
     pub(super) fn surface_capture_evidence(
         &self,
         identity: &nickel_remote_control::leases::ResourceId,
@@ -117,6 +183,7 @@ impl NickelSession {
         match target {
             CaptureTarget::Window(id) => self.with_capture_authority(*id, permit, effect),
             CaptureTarget::Surface(id) => self.with_surface_capture_authority(id, permit, effect),
+            CaptureTarget::Output(id) => self.with_output_capture_authority(id, permit, effect),
         }
     }
 
@@ -353,6 +420,86 @@ impl NickelSession {
                                 .ok_or_else(|| "surface capture submission unavailable".to_owned())
                             },
                         )?
+                    }
+                    CaptureTarget::Output(identity) => {
+                        let output = self.output_capture_evidence(identity)?;
+                        let mode = output.current_mode().ok_or("output mode is unavailable")?;
+                        let dimensions = (
+                            u16::try_from(mode.size.w)
+                                .map_err(|_| "output capture width exceeds limit")?,
+                            u16::try_from(mode.size.h)
+                                .map_err(|_| "output capture height exceeds limit")?,
+                        );
+                        let scale = output.current_scale().fractional_scale();
+                        let output_geometry = self
+                            .space
+                            .output_geometry(&output)
+                            .ok_or("output geometry is unavailable")?;
+                        let mut elements = self
+                            .internal_ui
+                            .render_elements_without_trusted(
+                                renderer,
+                                &output.name(),
+                                output_geometry.loc,
+                                Some(crate::session::InternalSurfaceLayer::Overlay),
+                            )
+                            .into_iter()
+                            .map(OutputCaptureRenderElement::from)
+                            .collect::<Vec<_>>();
+                        if self.internal_applications_are_foremost() {
+                            elements.extend(
+                                self.internal_ui
+                                    .render_elements_for_layer(
+                                        renderer,
+                                        &output.name(),
+                                        output_geometry.loc,
+                                        Some(crate::session::InternalSurfaceLayer::Application),
+                                    )
+                                    .into_iter()
+                                    .map(OutputCaptureRenderElement::from),
+                            );
+                        }
+                        elements.extend(
+                            space_render_elements::<GlesRenderer, Window, _>(
+                                renderer,
+                                [&self.space],
+                                &output,
+                                scale as f32,
+                            )
+                            .map_err(|_| "output scene capture is unavailable")?
+                            .into_iter()
+                            .map(OutputCaptureRenderElement::from),
+                        );
+                        if !self.internal_applications_are_foremost() {
+                            elements.extend(
+                                self.internal_ui
+                                    .render_elements_for_layer(
+                                        renderer,
+                                        &output.name(),
+                                        output_geometry.loc,
+                                        Some(crate::session::InternalSurfaceLayer::Application),
+                                    )
+                                    .into_iter()
+                                    .map(OutputCaptureRenderElement::from),
+                            );
+                        }
+                        elements.extend(
+                            self.internal_ui
+                                .render_elements_for_layer(
+                                    renderer,
+                                    &output.name(),
+                                    output_geometry.loc,
+                                    Some(crate::session::InternalSurfaceLayer::Background),
+                                )
+                                .into_iter()
+                                .map(OutputCaptureRenderElement::from),
+                        );
+                        // `render_elements_without_trusted` is the production compositor
+                        // boundary that excludes TrustedControl and protected overlay pixels.
+                        self.with_output_capture_authority(identity, &work.permit, || {
+                            submit_elements_capture(renderer, &elements, dimensions, scale)
+                                .ok_or_else(|| "output capture submission unavailable".to_owned())
+                        })?
                     }
                 });
                 self.remote_observation_generation =

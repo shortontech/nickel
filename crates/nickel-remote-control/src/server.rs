@@ -317,6 +317,22 @@ pub trait DesktopAuthority: Send + Sync + 'static {
     ) -> Result<crate::capture::CapturedWindow, String> {
         Err("shell surface capture is unavailable on this backend".into())
     }
+    fn validate_output_capture(
+        &self,
+        _permit: crate::DesktopPermit,
+        _id: &str,
+        _generation: u64,
+    ) -> Result<(), String> {
+        Err("output capture validation is unavailable on this backend".into())
+    }
+    fn capture_output(
+        &self,
+        _permit: crate::DesktopPermit,
+        _id: &str,
+        _generation: u64,
+    ) -> Result<crate::capture::CapturedWindow, String> {
+        Err("output capture is unavailable on this backend".into())
+    }
     fn validate_window_capture(
         &self,
         _permit: crate::DesktopPermit,
@@ -723,7 +739,7 @@ async fn bounded_http(
                 request["method"] == "tools/call"
                     && matches!(
                         request["params"]["name"].as_str(),
-                        Some("capture_window" | "capture_surface")
+                        Some("capture_window" | "capture_output" | "capture_surface")
                     )
             });
         let reservation = if capture {
@@ -1076,6 +1092,14 @@ struct InspectSurfaceRequest {
 struct CaptureRequest {
     lease_id: u64,
     window_id: String,
+    generation: u64,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+struct CaptureOutputRequest {
+    lease_id: u64,
+    output_id: String,
     generation: u64,
 }
 
@@ -2281,6 +2305,48 @@ impl McpHandler {
     }
 
     #[tool(
+        description = "Capture exactly one leased output generation as PNG; content from other outputs and trusted protected controls is excluded"
+    )]
+    async fn capture_output(
+        &self,
+        Parameters(request): Parameters<CaptureOutputRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CallToolResult, String> {
+        self.metrics
+            .measure(crate::operation_metrics::Method::CaptureOutput, async {
+                let reservation = context
+                    .extensions
+                    .get::<http::request::Parts>()
+                    .and_then(|parts| parts.extensions.get::<CaptureReservation>())
+                    .cloned()
+                    .ok_or("capture admission is unavailable")?;
+                if request.output_id.len() > 128 {
+                    return Err("output identity exceeds limit".into());
+                }
+                let permit = self.permit(&context, request.lease_id)?;
+                let final_permit = permit.clone();
+                let id = request.output_id.clone();
+                let expected_generation = request.generation;
+                let frame = desktop_call(self.desktop.clone(), move |desktop| {
+                    desktop.capture_output(permit, &request.output_id, request.generation)
+                })
+                .await?;
+                let image = queue_capture_encoding(frame, final_permit.clone(), reservation)
+                    .await
+                    .map_err(|_| "capture encoder stopped")??;
+                if image.window_id != id || image.generation != expected_generation {
+                    return Err("capture returned a different resource identity".into());
+                }
+                desktop_call(self.desktop.clone(), move |desktop| {
+                    desktop.validate_output_capture(final_permit, &id, expected_generation)
+                })
+                .await?;
+                Ok(image.into_output_mcp())
+            })
+            .await
+    }
+
+    #[tool(
         description = "Capture one visible ordinary shell surface under a current surface, output, or full-session lease; protected chrome and transients are excluded"
     )]
     async fn capture_surface(
@@ -2821,6 +2887,29 @@ mod tests {
     }
 
     #[test]
+    fn capture_output_contract_requires_exact_typed_identity_fields() {
+        let request: CaptureOutputRequest = serde_json::from_value(serde_json::json!({
+            "lease_id": 7,
+            "output_id": "DP-1",
+            "generation": 11
+        }))
+        .unwrap();
+        assert_eq!(
+            (request.lease_id, request.output_id, request.generation),
+            (7, "DP-1".into(), 11)
+        );
+        assert!(
+            serde_json::from_value::<CaptureOutputRequest>(serde_json::json!({
+                "lease_id": 7,
+                "output_id": "DP-1",
+                "generation": 11,
+                "cached": true
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
     fn listener_is_absent_until_enabled_and_releases_the_fixed_port_on_stop() {
         let _port = PORT_TEST.lock().unwrap_or_else(|error| error.into_inner());
         let control = Arc::new(Mutex::new(ControlPlane::default()));
@@ -3194,6 +3283,13 @@ mod tests {
                     "lease_id":1,"window_id":"private-window-id","generation":1,
                     "action":{"kind":"text","text":"private-typed-canary"}
                 })
+            )
+            .contains("isError")
+        );
+        assert!(
+            call(
+                "capture_output",
+                serde_json::json!({"lease_id":1,"output_id":"private-output-id","generation":1})
             )
             .contains("isError")
         );

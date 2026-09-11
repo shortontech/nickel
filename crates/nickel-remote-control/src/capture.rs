@@ -34,6 +34,10 @@ impl WindowImage {
         self.into_mcp_resource("surface_id")
     }
 
+    pub fn into_output_mcp(self) -> rmcp::model::CallToolResult {
+        self.into_mcp_resource("output_id")
+    }
+
     fn into_mcp_resource(self, identity_key: &str) -> rmcp::model::CallToolResult {
         let metadata = serde_json::json!({
             (identity_key): self.window_id, "generation": self.generation,
@@ -133,6 +137,19 @@ mod tests {
                 .is_none()
         );
         assert_eq!(response.structured_content.as_ref().unwrap()["width"], 2);
+        let output = frame(vec![0; 8]).encode().unwrap().into_output_mcp();
+        assert_eq!(
+            output.structured_content.as_ref().unwrap()["output_id"],
+            "1"
+        );
+        assert!(
+            output
+                .structured_content
+                .as_ref()
+                .unwrap()
+                .get("window_id")
+                .is_none()
+        );
         assert!(frame(vec![0; 7]).encode().is_err());
         assert!(frame(vec![0; 9]).encode().is_err());
     }

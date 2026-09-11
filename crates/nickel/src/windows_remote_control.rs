@@ -2248,6 +2248,22 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             rgba: image.into_raw(),
         })
     }
+    fn validate_output_capture(
+        &self,
+        _permit: DesktopPermit,
+        _id: &str,
+        _generation: u64,
+    ) -> Result<(), String> {
+        Err("Windows output pixel capture is unavailable".into())
+    }
+    fn capture_output(
+        &self,
+        _permit: DesktopPermit,
+        _id: &str,
+        _generation: u64,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        Err("Windows output pixel capture is unavailable".into())
+    }
     fn window_action(
         &self,
         permit: DesktopPermit,
@@ -7512,6 +7528,7 @@ fn windows_unavailable_diagnostic_domains() -> Vec<String> {
         "windows_virtual_workspace_create_switch_remove".into(),
         "windows_per_surface_renderer_cache_attribution".into(),
         "windows_preview_pixel_readback".into(),
+        "windows_output_pixel_capture".into(),
         "windows_settings_worker".into(),
     ]
 }
