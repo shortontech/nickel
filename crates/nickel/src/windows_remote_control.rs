@@ -625,6 +625,19 @@ enum OwnerRequest {
         deadline: Instant,
         reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
     },
+    ReadWallpaper {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedWallpaperRead,
+        reply: SyncSender<Result<nickel_remote_control::wallpaper::Snapshot, String>>,
+    },
+    WallpaperTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::wallpaper::Transaction,
+        prepared: crate::windows_remote_settings::PreparedWallpaperChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::wallpaper::Snapshot, String>>,
+    },
     ReadTerminalPresentation {
         permit: DesktopPermit,
         prepared: crate::windows_remote_terminal_presentation::PreparedRead,
@@ -1392,6 +1405,60 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .ok_or("Windows file icon transaction expired before dispatch")?;
         receiver.recv_timeout(remaining).map_err(|_| {
             "Windows file icon result uncertain; read current state before retrying".to_owned()
+        })?
+    }
+    fn read_wallpaper(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedWallpaperRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadWallpaper {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows wallpaper observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn wallpaper_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::wallpaper::Transaction,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_settings::PreparedWallpaperChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        if Instant::now() >= deadline {
+            return Err("Windows wallpaper preparation timed out".into());
+        }
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::WallpaperTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows wallpaper transaction expired before dispatch")?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows wallpaper result uncertain; read current wallpaper before retrying".to_owned()
         })?
     }
     fn read_terminal_presentation(
@@ -2465,6 +2532,7 @@ pub(crate) struct WindowsRemoteControl {
     appearance: crate::windows_remote_settings::AppearanceState,
     application_scale: crate::windows_remote_application_scale::State,
     file_icons: crate::windows_remote_settings::FileIconState,
+    wallpaper: crate::windows_remote_settings::WallpaperState,
     terminal_presentation: crate::windows_remote_terminal_presentation::State,
     idle_preferences: crate::windows_remote_settings::IdleState,
     launcher_favorites: crate::windows_remote_launcher_favorites::FavoritesState,
@@ -2649,6 +2717,7 @@ impl WindowsRemoteControl {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            wallpaper: Default::default(),
             terminal_presentation: Default::default(),
             idle_preferences: Default::default(),
             launcher_favorites: Default::default(),
@@ -3173,6 +3242,41 @@ impl WindowsRemoteControl {
                                 transaction,
                                 prepared,
                                 deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadWallpaper {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_wallpaper(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::WallpaperTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_wallpaper(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
                             )
                         },
                     );
@@ -3748,6 +3852,97 @@ impl WindowsRemoteControl {
             return Err("file icon settings changed; read current state before retrying".into());
         }
         self.file_icons.observe(
+            &read,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            true,
+        )
+    }
+
+    fn read_wallpaper(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedWallpaperRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            self.wallpaper.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                false,
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_wallpaper(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::wallpaper::Transaction,
+        prepared: crate::windows_remote_settings::PreparedWallpaperChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("wallpaper transaction expired before commit".into());
+            }
+            if input_busy
+                || local_input_epoch() != expected_local_input_epoch
+                || !crate::windows_remote_input::physical_input_idle()
+            {
+                return Err("shared input or physical local input is busy".into());
+            }
+            self.wallpaper.validate(&prepared, &transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err("physical input interrupted the wallpaper transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            self.wallpaper.invalidate();
+            Ok(())
+        });
+        let requested = match committed {
+            Some(requested) => requested,
+            None => {
+                authorization?;
+                return Err("wallpaper unavailable; read current state before retrying".into());
+            }
+        };
+        state.apply_wallpaper_settings(requested.clone());
+        authorization?;
+        let read = crate::windows_remote_settings::PreparedWallpaperRead::prepare()?;
+        if read.settings() != &requested {
+            state.apply_wallpaper_settings(read.settings().clone());
+            return Err("wallpaper changed; read current wallpaper before retrying".into());
+        }
+        self.wallpaper.observe(
             &read,
             self.start_time
                 .elapsed()
@@ -7671,6 +7866,7 @@ mod tests {
             appearance: Default::default(),
             application_scale: Default::default(),
             file_icons: Default::default(),
+            wallpaper: Default::default(),
             terminal_presentation: Default::default(),
             idle_preferences: Default::default(),
             launcher_favorites: Default::default(),

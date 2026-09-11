@@ -1528,6 +1528,15 @@ impl LiveShell {
     }
 
     #[cfg(target_os = "windows")]
+    pub(crate) fn apply_wallpaper_settings(&mut self, settings: WallpaperSettings) {
+        self.refresh_configured_wallpaper(settings.image);
+        // Position is persisted by the production wallpaper owner. Request a
+        // new desktop frame even when the image source itself did not change;
+        // the response still does not claim that pixels were presented.
+        self.desktop_application_dirty = true;
+    }
+
+    #[cfg(target_os = "windows")]
     pub(crate) fn remote_shell_behavior_state(&self) -> (bool, u8, usize) {
         (
             self.all_windows_on_every_bar,

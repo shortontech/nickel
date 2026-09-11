@@ -813,6 +813,225 @@ impl FileIconState {
     }
 }
 
+const WALLPAPER_STALE: &str = "wallpaper changed; read current wallpaper before retrying";
+const WALLPAPER_UNAVAILABLE: &str = "wallpaper unavailable; read current state before retrying";
+
+fn wallpaper_position(
+    value: nickel_core::wallpaper_settings::WallpaperPosition,
+) -> nickel_remote_control::wallpaper::Position {
+    use nickel_core::wallpaper_settings::WallpaperPosition as Source;
+    use nickel_remote_control::wallpaper::Position as Target;
+    match value {
+        Source::Center => Target::Center,
+        Source::Tile => Target::Tile,
+        Source::Stretch => Target::Stretch,
+        Source::Fit => Target::Fit,
+        Source::Span => Target::Span,
+        Source::Fill => Target::Fill,
+    }
+}
+
+fn core_wallpaper_position(
+    value: nickel_remote_control::wallpaper::Position,
+) -> nickel_core::wallpaper_settings::WallpaperPosition {
+    use nickel_core::wallpaper_settings::WallpaperPosition as Target;
+    use nickel_remote_control::wallpaper::Position as Source;
+    match value {
+        Source::Center => Target::Center,
+        Source::Tile => Target::Tile,
+        Source::Stretch => Target::Stretch,
+        Source::Fit => Target::Fit,
+        Source::Span => Target::Span,
+        Source::Fill => Target::Fill,
+    }
+}
+
+fn wallpaper_preferences(
+    settings: &nickel_core::wallpaper_settings::WallpaperSettings,
+) -> nickel_remote_control::wallpaper::Preferences {
+    nickel_remote_control::wallpaper::Preferences {
+        custom_image_configured: settings.image.is_some(),
+        position: wallpaper_position(settings.position),
+    }
+}
+
+pub(crate) struct PreparedWallpaperRead {
+    path: PathBuf,
+    revision: Option<RegularFileRevision>,
+    settings: nickel_core::wallpaper_settings::WallpaperSettings,
+}
+
+impl PreparedWallpaperRead {
+    pub(crate) fn prepare() -> Result<Self, String> {
+        Self::at(
+            nickel_core::wallpaper_settings::settings_path().map_err(|_| WALLPAPER_UNAVAILABLE)?,
+        )
+    }
+
+    fn at(path: PathBuf) -> Result<Self, String> {
+        let revision = regular_file_revision(&path).map_err(|_| WALLPAPER_UNAVAILABLE)?;
+        let settings = match nickel_core::wallpaper_settings::WallpaperSettings::load(&path) {
+            Ok(settings) => settings,
+            Err(error) if error.kind() == io::ErrorKind::NotFound && revision.is_none() => {
+                nickel_core::wallpaper_settings::WallpaperSettings::default()
+            }
+            Err(_) => return Err(WALLPAPER_UNAVAILABLE.into()),
+        };
+        if regular_file_revision(&path).map_err(|_| WALLPAPER_UNAVAILABLE)? != revision {
+            return Err(WALLPAPER_STALE.into());
+        }
+        Ok(Self {
+            path,
+            revision,
+            settings,
+        })
+    }
+
+    pub(crate) fn ensure_current(&self) -> Result<(), String> {
+        if regular_file_revision(&self.path).map_err(|_| WALLPAPER_UNAVAILABLE)? != self.revision {
+            return Err(WALLPAPER_STALE.into());
+        }
+        Ok(())
+    }
+
+    fn configured(&self) -> nickel_remote_control::wallpaper::Preferences {
+        wallpaper_preferences(&self.settings)
+    }
+
+    pub(crate) fn settings(&self) -> &nickel_core::wallpaper_settings::WallpaperSettings {
+        &self.settings
+    }
+}
+
+pub(crate) struct PreparedWallpaperChange {
+    prior: PreparedWallpaperRead,
+    requested: nickel_core::wallpaper_settings::WallpaperSettings,
+    staged: nickel_core::wallpaper_settings::PreparedWallpaperSettings,
+}
+
+impl PreparedWallpaperChange {
+    pub(crate) fn prepare(
+        transaction: &nickel_remote_control::wallpaper::Transaction,
+    ) -> Result<Self, String> {
+        Self::from_read(PreparedWallpaperRead::prepare()?, transaction)
+    }
+
+    fn from_read(
+        prior: PreparedWallpaperRead,
+        transaction: &nickel_remote_control::wallpaper::Transaction,
+    ) -> Result<Self, String> {
+        use nickel_remote_control::wallpaper::Change;
+        if transaction.generation == 0 || prior.configured() != transaction.prior {
+            return Err(WALLPAPER_STALE.into());
+        }
+        let mut requested = prior.settings.clone();
+        match transaction.change {
+            Change::SetPosition { position } => {
+                requested.position = core_wallpaper_position(position)
+            }
+            Change::ResetCustomImage {} => requested.image = None,
+        }
+        let staged = nickel_core::wallpaper_settings::PreparedWallpaperSettings::prepare(
+            prior.path.clone(),
+            &prior.settings,
+            requested.clone(),
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::InvalidData {
+                WALLPAPER_STALE
+            } else {
+                WALLPAPER_UNAVAILABLE
+            }
+            .to_owned()
+        })?;
+        Ok(Self {
+            prior,
+            requested,
+            staged,
+        })
+    }
+
+    pub(crate) fn commit(
+        self,
+        deadline: Instant,
+        check_boundary: impl FnOnce() -> Result<(), String>,
+    ) -> Result<nickel_core::wallpaper_settings::WallpaperSettings, String> {
+        self.staged
+            .commit(|| {
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "wallpaper commit expired",
+                    ));
+                }
+                check_boundary().map_err(io::Error::other)
+            })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    WALLPAPER_STALE
+                } else {
+                    WALLPAPER_UNAVAILABLE
+                }
+                .to_owned()
+            })?;
+        Ok(self.requested)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct WallpaperState {
+    generation: u64,
+    observed: Option<(
+        Option<RegularFileRevision>,
+        nickel_remote_control::wallpaper::Preferences,
+    )>,
+}
+
+impl WallpaperState {
+    pub(crate) fn observe(
+        &mut self,
+        prepared: &PreparedWallpaperRead,
+        observed_at_us: u64,
+        runtime_reload_requested: bool,
+    ) -> Result<nickel_remote_control::wallpaper::Snapshot, String> {
+        let configured = prepared.configured();
+        let value = (prepared.revision.clone(), configured.clone());
+        if self.observed.as_ref() != Some(&value) {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or("wallpaper generation exhausted")?;
+            self.observed = Some(value);
+        }
+        Ok(nickel_remote_control::wallpaper::Snapshot {
+            generation: self.generation,
+            observed_at_us,
+            configured,
+            runtime_reload_requested,
+        })
+    }
+
+    pub(crate) fn validate(
+        &self,
+        prepared: &PreparedWallpaperChange,
+        transaction: &nickel_remote_control::wallpaper::Transaction,
+    ) -> Result<(), String> {
+        if self.generation == u64::MAX
+            || self.generation != transaction.generation
+            || self.observed.as_ref().is_none_or(|(revision, configured)| {
+                revision != &prepared.prior.revision || configured != &transaction.prior
+            })
+        {
+            return Err(WALLPAPER_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn invalidate(&mut self) {
+        self.observed = None;
+    }
+}
+
 fn apply(settings: &mut ShellSettings, requested: &Preferences) -> Result<(), String> {
     use nickel_core::shell_settings::{AnimationLevel as A, ThemePreference as T};
     if !requested.valid() {
@@ -1295,6 +1514,133 @@ mod tests {
             actual.preferred_terminal.as_deref(),
             Some("private-terminal")
         );
+    }
+
+    #[test]
+    fn wallpaper_commit_preserves_hidden_image_and_checks_boundary() {
+        use nickel_core::wallpaper_settings::{WallpaperPosition, WallpaperSettings};
+        use nickel_remote_control::wallpaper::{Change, Position, Transaction};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("wallpaper-settings");
+        let original = WallpaperSettings {
+            image: Some("C:\\Users\\owner\\private-wallpaper.png".into()),
+            position: WallpaperPosition::Fill,
+        };
+        original.save(&path).unwrap();
+        let mut state = WallpaperState::default();
+        let read = PreparedWallpaperRead::at(path.clone()).unwrap();
+        let snapshot = state.observe(&read, 10, false).unwrap();
+        assert_eq!(snapshot.generation, 1);
+        assert!(snapshot.configured.custom_image_configured);
+        assert!(!snapshot.runtime_reload_requested);
+        let transaction = Transaction {
+            generation: snapshot.generation,
+            prior: snapshot.configured,
+            change: Change::SetPosition {
+                position: Position::Fit,
+            },
+        };
+
+        let denied = PreparedWallpaperChange::from_read(read, &transaction).unwrap();
+        state.validate(&denied, &transaction).unwrap();
+        assert!(
+            denied
+                .commit(Instant::now() + Duration::from_secs(1), || Err(
+                    "revoked".into()
+                ))
+                .is_err()
+        );
+        assert_eq!(WallpaperSettings::load(&path).unwrap(), original);
+
+        let staged = PreparedWallpaperChange::from_read(
+            PreparedWallpaperRead::at(path.clone()).unwrap(),
+            &transaction,
+        )
+        .unwrap();
+        state.validate(&staged, &transaction).unwrap();
+        let requested = staged
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        assert_eq!(requested.image, original.image);
+        assert_eq!(requested.position, WallpaperPosition::Fit);
+        let read = PreparedWallpaperRead::at(path.clone()).unwrap();
+        let committed = state.observe(&read, 20, true).unwrap();
+        assert_eq!(committed.generation, 2);
+        assert!(committed.runtime_reload_requested);
+        assert_eq!(WallpaperSettings::load(&path).unwrap(), requested);
+
+        let reset_transaction = Transaction {
+            generation: committed.generation,
+            prior: committed.configured,
+            change: Change::ResetCustomImage {},
+        };
+        let reset = PreparedWallpaperChange::from_read(read, &reset_transaction).unwrap();
+        state.validate(&reset, &reset_transaction).unwrap();
+        let reset = reset
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        assert_eq!(reset.image, None);
+        assert_eq!(reset.position, WallpaperPosition::Fit);
+    }
+
+    #[test]
+    fn wallpaper_transaction_rejects_deadline_file_aba_and_stale_generation() {
+        use nickel_core::wallpaper_settings::{WallpaperPosition, WallpaperSettings};
+        use nickel_remote_control::wallpaper::{Change, Position, Transaction};
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("wallpaper-settings");
+        let original = WallpaperSettings {
+            image: Some("C:\\Users\\owner\\private-wallpaper.png".into()),
+            position: WallpaperPosition::Fill,
+        };
+        original.save(&path).unwrap();
+        let mut state = WallpaperState::default();
+        let read = PreparedWallpaperRead::at(path.clone()).unwrap();
+        let snapshot = state.observe(&read, 1, false).unwrap();
+        let transaction = Transaction {
+            generation: snapshot.generation,
+            prior: snapshot.configured,
+            change: Change::SetPosition {
+                position: Position::Center,
+            },
+        };
+
+        let expired = PreparedWallpaperChange::from_read(read, &transaction).unwrap();
+        assert!(expired.commit(Instant::now(), || Ok(())).is_err());
+        assert_eq!(WallpaperSettings::load(&path).unwrap(), original);
+
+        let replaced = PreparedWallpaperChange::from_read(
+            PreparedWallpaperRead::at(path.clone()).unwrap(),
+            &transaction,
+        )
+        .unwrap();
+        std::fs::write(
+            &path,
+            "image=C:\\Users\\owner\\private-wallpaper.png\nposition=tile\n",
+        )
+        .unwrap();
+        assert!(
+            replaced
+                .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+                .is_err()
+        );
+        assert_eq!(
+            WallpaperSettings::load(&path).unwrap().position,
+            WallpaperPosition::Tile
+        );
+
+        let changed = PreparedWallpaperRead::at(path).unwrap();
+        let changed_snapshot = state.observe(&changed, 2, false).unwrap();
+        assert_eq!(changed_snapshot.generation, 2);
+        let stale_transaction = Transaction {
+            generation: 1,
+            prior: changed_snapshot.configured,
+            change: Change::ResetCustomImage {},
+        };
+        let stale = PreparedWallpaperChange::from_read(changed, &stale_transaction).unwrap();
+        assert!(state.validate(&stale, &stale_transaction).is_err());
     }
 
     #[test]

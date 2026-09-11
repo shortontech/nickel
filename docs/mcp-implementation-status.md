@@ -1854,9 +1854,19 @@ revisions. Commit repeats the appearance transaction's protected-focus,
 shared-input, physical-input epoch, deadline and permit checks before replacement,
 then advances the production launcher icon generation and requests a live cache
 refresh. The response claims that refresh request, not decoded or presented pixels.
-Wallpaper trait methods remain unavailable on the Windows authority;
-`windows_settings_worker` therefore remains an explicit diagnostic gap. Native
 Windows cache and presented-icon acceptance remain open.
+
+Windows now implements typed wallpaper reads and transactions through the
+production `WallpaperSettings` file and `LiveShell` wallpaper/cache owner. The
+path-free projection reports only position and whether a custom image is
+configured; transactions accept position changes and custom-image reset. The
+owner uses a bounded staged replacement with revision CAS, then rechecks the
+permit, deadline, protected focus, shared and physical input, and local-input
+epoch at commit. A durable change is reconciled into the production cache even
+when revocation races afterward. Results report a reload request without claiming
+decoded or presented pixels. Host and Wine tests cover the transaction boundary;
+native Windows persistence, cache reload, and multi-output presentation remain
+open.
 
 Windows now implements typed terminal-presentation reads and transactions against
 the production `TerminalSettings` file consumed by `nickel-terminal` at process
