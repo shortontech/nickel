@@ -2546,6 +2546,7 @@ pub(crate) struct WindowsRemoteControl {
     next_output_launch: u64,
     start_time: Instant,
     last_stop: Option<Instant>,
+    stop_confirmation_until: Option<Instant>,
 }
 struct WindowsKeyboardHold {
     authority: nickel_remote_control::HeldInput,
@@ -2729,6 +2730,7 @@ impl WindowsRemoteControl {
             next_output_launch: 0,
             start_time: started,
             last_stop: None,
+            stop_confirmation_until: None,
         };
         // Publish the lock-free cancellation handle before any listener starts.
         // A second owner in the same process must not activate with a stale hook.
@@ -2941,6 +2943,19 @@ impl WindowsRemoteControl {
             self.keyboard_hold.take();
             self.pointer_hold.take();
             self.handle(Request::Command(Command::EmergencyStopRemoteControl));
+            if let Some((shell, state)) = shell.as_mut() {
+                let theme = state.semantic_theme();
+                let _ = self.sync_indicators(shell, theme);
+            }
+        }
+        if self
+            .stop_confirmation_until
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.stop_confirmation_until = None;
+            if let Some((shell, _)) = shell.as_mut() {
+                self.clear_indicators(shell);
+            }
         }
         self.prune_output_launch_placements();
         self.drain_resource_lifecycle();
@@ -6743,7 +6758,14 @@ impl WindowsRemoteControl {
         // Cancel permits before native teardown, including a partial create/show.
         self.remote_control.emergency_stop_handle().trigger();
         self.handle(Request::Command(Command::EmergencyStopRemoteControl));
-        self.clear_indicators(shell);
+        let theme = self
+            .indicators
+            .values()
+            .next()
+            .map(|indicator| indicator.host.host.application().theme);
+        if theme.is_none_or(|theme| self.sync_indicators(shell, theme).is_err()) {
+            self.clear_indicators(shell);
+        }
     }
 
     fn sync_indicators(
@@ -6810,7 +6832,10 @@ impl WindowsRemoteControl {
             .collect::<Vec<_>>();
         authority_revision.sort_unstable();
         drop(control);
-        if grants.is_empty() {
+        let stopped_confirmation = self
+            .stop_confirmation_until
+            .is_some_and(|deadline| now < deadline);
+        if grants.is_empty() && !stopped_confirmation {
             self.clear_indicators(shell);
             return Ok(());
         }
@@ -6836,7 +6861,7 @@ impl WindowsRemoteControl {
         }
         for (name, geometry) in outputs {
             if !self.indicators.contains_key(&name) {
-                let id = shell.create_trusted_control_surface(&name, grants.len())?;
+                let id = shell.create_trusted_control_surface(&name, grants.len().max(1))?;
                 let (width, height) = shell
                     .surface(id)
                     .ok_or("trusted surface disappeared")?
@@ -6848,6 +6873,7 @@ impl WindowsRemoteControl {
                         transport: transport.to_owned(),
                         grants: grants.clone(),
                         stop_requested: false,
+                        stopped_confirmation,
                     },
                     width,
                     height,
@@ -6879,17 +6905,21 @@ impl WindowsRemoteControl {
                 );
             }
             let indicator = self.indicators.get_mut(&name).expect("indicator inserted");
-            shell.resize_trusted_control_surface(indicator.id, grants.len())?;
+            shell.resize_trusted_control_surface(indicator.id, grants.len().max(1))?;
             let (width, height) = shell
                 .surface(indicator.id)
                 .ok_or("trusted surface disappeared")?
                 .window()
                 .size();
             let app = indicator.host.application_mut();
-            let changed = app.grants != grants || app.theme != theme || app.transport != transport;
+            let changed = app.grants != grants
+                || app.theme != theme
+                || app.transport != transport
+                || app.stopped_confirmation != stopped_confirmation;
             app.transport = transport.to_owned();
             app.grants = grants.clone();
             app.theme = theme;
+            app.stopped_confirmation = stopped_confirmation;
             indicator.host.step(nickel_ui::HostBatch {
                 surface_size: Some((width, height)),
                 application_changed: changed,
@@ -7051,9 +7081,16 @@ impl WindowsRemoteControl {
                 self.pointer_hold.take();
                 self.pending_indicator_activation.clear();
                 self.last_stop = Some(Instant::now());
+                self.remote_frame_trace = None;
+                self.pending_output_launches.clear();
+                self.stop_confirmation_until = Some(Instant::now() + Duration::from_secs(3));
                 let mut settings = RemoteAiControlSettings::load_default().unwrap_or_default();
                 settings.set_requested(false);
                 self.remote_control.emergency_stop_at(settings.generation);
+                if let Ok(control) = self.remote_control.control().lock() {
+                    self.local_cues
+                        .emergency_confirmation(control.leases(), Instant::now());
+                }
                 if RemoteAiControlSettings::default_path()
                     .and_then(|path| settings.save(path))
                     .is_err()
@@ -7878,6 +7915,7 @@ mod tests {
             next_output_launch: 0,
             start_time: Instant::now(),
             last_stop: None,
+            stop_confirmation_until: None,
         }
     }
     #[test]

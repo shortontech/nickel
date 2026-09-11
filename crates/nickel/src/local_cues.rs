@@ -62,6 +62,17 @@ impl LocalCues {
             }
         }
     }
+
+    /// Queue the fixed stop sound independently of lease-audit collection. Emergency
+    /// acknowledgement must still occur when authority disappears before the normal UI poll.
+    pub(crate) fn emergency_confirmation(&mut self, leases: &LeaseAuthority, now: Instant) {
+        // Consume the same revocation audit batch that the next ordinary update
+        // would observe, so one emergency produces one fixed acknowledgement.
+        let _ = self.tracker.collect(leases, now);
+        if let Some(sender) = &self.sender {
+            let _ = sender.try_send((LifecycleCue::Stop, now));
+        }
+    }
 }
 
 fn samples(cue: LifecycleCue) -> Vec<u8> {
@@ -230,6 +241,21 @@ fn play(_cue: LifecycleCue) -> Result<(), ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn emergency_confirmation_is_fixed_and_nonblocking_when_queue_is_full() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let cues = LocalCues {
+            tracker: LifecycleCues::default(),
+            sender: Some(sender),
+        };
+        let now = Instant::now();
+        let leases = LeaseAuthority::default();
+        let mut cues = cues;
+        cues.emergency_confirmation(&leases, now);
+        cues.emergency_confirmation(&leases, now);
+        assert_eq!(receiver.try_recv(), Ok((LifecycleCue::Stop, now)));
+        assert!(receiver.try_recv().is_err());
+    }
     #[cfg(target_os = "linux")]
     #[test]
     #[ignore = "requires an explicitly owned dummy PulseAudio socket"]

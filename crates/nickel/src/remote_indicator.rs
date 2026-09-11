@@ -4,7 +4,7 @@
 //! module supplies the semantic tree; the Windows owner projects it through a
 //! dedicated AccessKit UI Automation adapter on its trusted indicator window.
 use nickel_ui::{
-    Application, Button, ButtonPresentation, Column, Insets, Row, SemanticTheme, Text,
+    Application, Button, ButtonPresentation, Column, Component, Insets, Row, SemanticTheme, Text,
     VerticalScroll, View, ViewContext,
 };
 
@@ -60,6 +60,8 @@ pub(crate) struct RemoteIndicator {
     pub transport: String,
     pub grants: Vec<IndicatorGrant>,
     pub stop_requested: bool,
+    /// Fixed local-only acknowledgement shown after emergency revocation.
+    pub stopped_confirmation: bool,
 }
 
 #[derive(Clone)]
@@ -76,6 +78,20 @@ impl Application for RemoteIndicator {
         }
     }
     fn view(&self, context: ViewContext) -> impl View<Message> {
+        if self.stopped_confirmation {
+            return Column::new()
+                .fill_width()
+                .padding(Insets::all(14.0))
+                .gap(6.0)
+                .background(self.theme.surfaces.raised)
+                .child(Text::new("Remote control stopped").color(self.theme.text.primary))
+                .child(
+                    Text::new("All remote access and input were released")
+                        .color(self.theme.text.secondary)
+                        .wrap(true),
+                )
+                .into_element();
+        }
         let mut grants = Column::new().fill_width().gap(12.0);
         for grant in &self.grants {
             grants = grants.child(
@@ -159,6 +175,7 @@ impl Application for RemoteIndicator {
                     .color(self.theme.text.primary)
                     .wrap(true),
             )
+            .into_element()
     }
 }
 
@@ -214,6 +231,7 @@ mod host_tests {
                     peer: "127.0.0.1".into(),
                 }],
                 stop_requested: false,
+                stopped_confirmation: false,
             },
             420,
             indicator_height(1, 1080),
@@ -260,6 +278,25 @@ mod host_tests {
         });
         assert!(outcome.semantic_failures.is_empty());
         assert!(host.application().stop_requested);
+    }
+
+    #[test]
+    fn emergency_confirmation_is_fixed_visible_local_state_without_a_stale_stop_action() {
+        let mut host = host();
+        host.application_mut().grants.clear();
+        host.application_mut().stopped_confirmation = true;
+        host.step(HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&"Remote control stopped"));
+        assert!(labels.contains(&"All remote access and input were released"));
+        assert!(!labels.contains(&"Stop"));
     }
 
     #[test]

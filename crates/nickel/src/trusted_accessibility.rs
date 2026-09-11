@@ -301,6 +301,7 @@ mod tests {
                     peer: "127.0.0.1 TLS".to_owned(),
                 }],
                 stop_requested: false,
+                stopped_confirmation: false,
             },
             420,
             260,

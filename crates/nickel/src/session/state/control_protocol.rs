@@ -111,7 +111,11 @@ impl NickelSession {
             })
             .collect::<Vec<_>>();
         drop(control);
-        if self.locked || grants.is_empty() {
+        let stopped_confirmation = self
+            .remote_stop_confirmation_until
+            .is_some_and(|deadline| now < deadline);
+        if self.locked || (grants.is_empty() && !stopped_confirmation) {
+            self.remote_stop_confirmation_until = None;
             for id in self
                 .remote_indicator_surfaces
                 .drain()
@@ -176,6 +180,7 @@ impl NickelSession {
                     app.transport = transport.to_owned();
                     app.grants = grants.clone();
                     app.theme = theme;
+                    app.stopped_confirmation = stopped_confirmation;
                 }
                 self.internal_ui.step(
                     id,
@@ -191,6 +196,7 @@ impl NickelSession {
                         transport: transport.to_owned(),
                         grants: grants.clone(),
                         stop_requested: false,
+                        stopped_confirmation,
                     },
                     placement,
                     scale,
@@ -203,6 +209,20 @@ impl NickelSession {
     }
 
     pub(crate) fn emergency_stop_remote_control(&mut self) {
+        use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
+
+        // Invalidate detached workers before any fallible persistence or listener teardown,
+        // then synchronously release all compositor-owned synthesized state.
+        self.remote_control.emergency_stop_handle().trigger();
+        self.cancel_remote_pointer();
+        self.cancel_remote_keyboard();
+        #[cfg(any(feature = "backend-udev", feature = "backend-winit"))]
+        self.cancel_remote_capture("emergency stop cancelled capture");
+        self.remote_frame_trace = None;
+        self.remote_native_press = None;
+        self.take_over_remote_gtk_menu();
+        self.invalidate_remote_shell_actions();
+        self.pending_launch_observations.clear();
         let mut settings =
             nickel_remote_control::RemoteAiControlSettings::load_default().unwrap_or_default();
         settings.set_requested(false);
@@ -214,7 +234,23 @@ impl NickelSession {
                 "Remote control stopped, but Disabled could not be saved: {error}"
             ));
         }
+        let confirmation_until = Instant::now() + Duration::from_secs(3);
+        self.remote_stop_confirmation_until = Some(confirmation_until);
+        if let Ok(control) = self.remote_control.control().lock() {
+            self.local_cues
+                .emergency_confirmation(control.leases(), Instant::now());
+        }
         self.sync_remote_control_indicators();
+        let _ = self.event_loop_handle.insert_source(
+            Timer::from_duration(Duration::from_secs(3)),
+            move |_, _, state| {
+                if state.remote_stop_confirmation_until == Some(confirmation_until) {
+                    state.remote_stop_confirmation_until = None;
+                    state.sync_remote_control_indicators();
+                }
+                TimeoutAction::Drop
+            },
+        );
         self.request_output_redraw();
     }
 
