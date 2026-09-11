@@ -375,6 +375,7 @@ pub(in crate::session) fn observe<F: Fn() -> Result<(), String>>(
                 bounds,
                 enabled: state(&states, 8),
                 focused: state(&states, 12),
+                actions: Vec::new(),
             });
             evidence.push((path.clone(), role, parent_path));
             let count = i32::try_from(query.property(&bus, &path, "ChildCount").await?)

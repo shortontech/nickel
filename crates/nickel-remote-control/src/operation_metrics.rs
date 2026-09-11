@@ -43,6 +43,7 @@ pub(crate) enum Method {
     LauncherFavoritesTransaction,
     NativeSemantics,
     NativeApplicationSemantics,
+    NativeSemanticAction,
     ReadWallpaper,
     WallpaperTransaction,
     ReadTerminalPresentation,
@@ -57,7 +58,7 @@ pub(crate) enum Method {
     IdlePreferencesTransaction,
 }
 
-const METHODS: [&str; 45] = [
+const METHODS: [&str; 46] = [
     "request_control_lease",
     "list_control_leases",
     "diagnostic_snapshot",
@@ -91,6 +92,7 @@ const METHODS: [&str; 45] = [
     "launcher_favorites_transaction",
     "inspect_native_window",
     "inspect_native_application",
+    "native_semantic_action",
     "read_wallpaper",
     "wallpaper_transaction",
     "read_terminal_presentation",

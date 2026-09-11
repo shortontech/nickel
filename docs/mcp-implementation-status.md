@@ -8,7 +8,7 @@ native checks alone do not establish completion.
 
 | Requirement | Current state | Remaining work |
 | --- | --- | --- |
-| Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. The owner continuously samples the current input desktop and WTS session state, revokes runtime authority on a protected-desktop transition, and rechecks that state when activating a connection watch. Trusted local approval, custom-duration approval, and resume now obtain a fresh bounded native inventory and require the exact live window/output incarnation or attested application identity; surface and protected/unavailable scopes fail closed. New or resumed authority remains suspended until trusted indication is exposed on every output. The dedicated indicator window publishes its bounded semantic tree and Stop action through AccessKit's Windows UI Automation adapter. Generation-bearing window actions request activate, minimize, maximize, restore, close, move and resize through a freshly revalidated owner boundary and return a separate fresh observed outcome. Authorized client-area capture resolves its native source on the owner, acquires bounded pixels off the UI thread, excludes composed trusted chrome by reading the window DC, and revalidates before publication. External inspection traverses at most 128 UI Automation control-view nodes to depth 16 across at most 16 windows on a single-flight one-second worker, omits all provider strings and values, and clips each geometry to its owning window in anchor-relative coordinates. Window scope requires exact HWND/process/creation/thread/bounds validation before and after traversal. Application scope additionally requires the anchor's verified application identity and includes the complete bounded set of current ordinary, unprotected matching windows, failing closed when membership or any root proof changes. The owner exposes the production Start Menu catalog with stable generations and a 512-entry wire bound. | Complete external UIA actions, launch output placement and remaining operations, then validate approval, trusted indication, secure-desktop transitions, capture fidelity, local accessibility and control natively on Windows and across machines. |
+| Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. The owner continuously samples the current input desktop and WTS session state, revokes runtime authority on a protected-desktop transition, and rechecks that state when activating a connection watch. Trusted local approval, custom-duration approval, and resume now obtain a fresh bounded native inventory and require the exact live window/output incarnation or attested application identity; surface and protected/unavailable scopes fail closed. New or resumed authority remains suspended until trusted indication is exposed on every output. The dedicated indicator window publishes its bounded semantic tree and Stop action through AccessKit's Windows UI Automation adapter. Generation-bearing window actions request activate, minimize, maximize, restore, close, move and resize through a freshly revalidated owner boundary and return a separate fresh observed outcome. Authorized client-area capture resolves its native source on the owner, acquires bounded pixels off the UI thread, excludes composed trusted chrome by reading the window DC, and revalidates before publication. External inspection traverses at most 128 UI Automation control-view nodes to depth 16 across at most 16 windows on a single-flight one-second worker, omits all provider strings and values, and clips each geometry to its owning window in anchor-relative coordinates. Window scope requires exact HWND/process/creation/thread/bounds validation before and after traversal. Application scope additionally requires the anchor's verified application identity and includes the complete bounded set of current ordinary, unprotected matching windows, failing closed when membership or any root proof changes. Safe UIA Invoke actions are advertised with generation-bound node identities and dispatched only after a fresh bounded traversal, exact root proof, lease/protection check, physical-input epoch check, and shared-input reservation. The owner exposes the production Start Menu catalog with stable generations and a 512-entry wire bound. | Complete launch output placement and remaining operations, then validate approval, trusted indication, secure-desktop transitions, capture fidelity, local accessibility and control natively on Windows and across machines. |
 
 Windows low-level key and pointer hooks now distinguish OS-attributed injected
 events from physical activity. Physical activity advances only a lock-free epoch;
@@ -30,9 +30,11 @@ unavailable, so these paths do not open approval.
 | Physical DRM trace acceptance | Production DRM render dispatch is instrumented. The active seat is shared with the user's compositor. | Test on an isolated seat or machine; primary-GPU selection does not isolate the current udev backend's device enumeration. |
 | Full native acceptance | Recent native work uses a separate Xvfb-backed compositor with its own Xwayland and Wayland clients. | Complete the specifications' physical emergency-stop, assistive workflow, mixed-DPI/multi-output, Windows, and cross-machine gates. |
 
-The Windows UIA geometry-clipping regression passed under Proton. No live UIA
-provider traversal was claimed from that compatibility-layer run; native Windows
-observation, cancellation, identity-change and protected-window checks remain open.
+The Windows UIA geometry-clipping, application-coordinate, exact-root-set and
+generation-bound action-selection regressions passed under Proton. No live UIA
+provider traversal or Invoke was claimed from that compatibility-layer run; native
+Windows observation, action, cancellation, identity-change and protected-window
+checks remain open.
 
 This table records confirmed gaps, not an exhaustive completion audit. Each
 specification's full verification list remains authoritative.
@@ -1655,6 +1657,23 @@ tests. Its mapped filesystem could not create the volume-GUID-backed
 fixture preparation. This compatibility-layer evidence does not verify native
 ShellExecute, handle inheritance, parent-death or revocation execution; no native
 Windows host is available here.
+
+Windows external accessibility snapshots now advertise only enabled UIA Invoke
+patterns whose numeric runtime identity fits a 32-part bound. The action identity
+combines the exact inspected scope, anchor window generation, observation generation,
+node ordinal and advertised action. The owner retains at most eight such bounded
+observations, containing no COM objects, names, descriptions, text or values. Action
+dispatch performs a fresh 128-node/depth-16 traversal on the existing single-flight
+one-second worker and requires exactly one matching runtime identity and process.
+Immediately before Invoke, a second fresh native inventory must reproduce the anchor,
+application identity and complete application root set, remain inside the current
+unprotected lease, and acquire shared-input ownership. Physical input, cancellation,
+expiry, revocation, connection loss or root change prevents dispatch; input ownership
+remains reserved until the provider call returns. The result reports committed native
+dispatch separately from application-state confirmation and marks a failed or timed-out
+committed call uncertain, so clients cannot safely retry it. Cross-compilation and pure
+Proton identity tests do not replace native Windows provider/Invoke acceptance, which
+remains open.
 
 The Windows winit owner now contributes ordinary shell visibility and keyboard-focus
 transitions to the bounded desktop event stream. Each event is projected from the

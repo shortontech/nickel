@@ -271,6 +271,14 @@ pub trait DesktopAuthority: Send + Sync + 'static {
         Err("native accessibility association is unavailable on this backend".into())
     }
 
+    fn native_semantic_action(
+        &self,
+        _permit: crate::DesktopPermit,
+        _request: crate::native_semantics::NativeSemanticActionRequest,
+    ) -> Result<crate::native_semantics::NativeSemanticActionOutcome, String> {
+        Err("native accessibility actions are unavailable on this backend".into())
+    }
+
     fn inspect_surface(
         &self,
         _permit: crate::DesktopPermit,
@@ -2094,6 +2102,30 @@ impl McpHandler {
                             &request.window_id,
                             request.generation,
                         )
+                    })
+                    .await
+                    .map(Json)
+                },
+            )
+            .await
+    }
+
+    #[tool(
+        description = "Invoke a safe action advertised by inspect_native_window or inspect_native_application. The snapshot resource, observation generation, node ordinal and action form one identity; Nickel freshly traverses the bounded native tree and requires the same provider runtime identity, exact window/process/application/root-set proof, current unprotected lease scope, idle shared input and live cancellation/deadline immediately before dispatch. Returns requested separately from confirmed and uncertain. UI Automation cannot confirm resulting application state; reinspect before continuing and never automatically retry an uncertain outcome. Currently implemented on Windows for UIA Invoke only."
+    )]
+    async fn native_semantic_action(
+        &self,
+        Parameters(request): Parameters<crate::native_semantics::NativeSemanticActionRequest>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<Json<crate::native_semantics::NativeSemanticActionOutcome>, String> {
+        self.metrics
+            .measure(
+                crate::operation_metrics::Method::NativeSemanticAction,
+                async {
+                    let permit = self.permit(&context, request.lease_id)?;
+                    request.validate().map_err(str::to_owned)?;
+                    desktop_call(self.desktop.clone(), move |desktop| {
+                        desktop.native_semantic_action(permit, request)
                     })
                     .await
                     .map(Json)
