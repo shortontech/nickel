@@ -625,6 +625,29 @@ enum OwnerRequest {
         deadline: Instant,
         reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
     },
+    ReadCodexPreference {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_codex::PreparedRead,
+        deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::codex_preference::Snapshot, String>>,
+    },
+    CodexPreferenceTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::codex_preference::Transaction,
+        prepared: crate::windows_remote_codex::PreparedChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::codex_preference::Snapshot, String>>,
+    },
+    ShellBehaviorTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_session_protocol::ShellBehaviorTransaction,
+        prepared: crate::windows_remote_settings::PreparedShellBehaviorChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply:
+            SyncSender<Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String>>,
+    },
     LauncherFavoritesCatalog {
         permit: DesktopPermit,
         deadline: Instant,
@@ -1332,6 +1355,91 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             "Windows file icon result uncertain; read current state before retrying".to_owned()
         })?
     }
+    fn read_codex_preference(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_codex::PreparedRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows Codex preference observation expired before dispatch")?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadCodexPreference {
+                permit,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows Codex preference observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn codex_preference_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::codex_preference::Transaction,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_codex::PreparedChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows Codex preference transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::CodexPreferenceTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows Codex preference result uncertain; read current state before retrying"
+                .to_owned()
+        })?
+    }
+    fn shell_behavior_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_session_protocol::ShellBehaviorTransaction,
+    ) -> Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_settings::PreparedShellBehaviorChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows shell behavior transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ShellBehaviorTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows shell behavior result uncertain; read diagnostics before retrying".to_owned()
+        })?
+    }
     fn read_launcher_favorites(
         &self,
         permit: DesktopPermit,
@@ -2019,6 +2127,37 @@ fn shell_behavior_diagnostic(
     }
 }
 
+fn codex_feature_diagnostic(
+    observation_generation: u64,
+    observed_at_us: u64,
+    state: &crate::live_shell::LiveShell,
+) -> Option<nickel_remote_control::diagnostics::CodexFeatureDiagnostic> {
+    use nickel_core::optional_features::{FeatureHealth, FeatureInstallation, FeatureSupport};
+    use nickel_remote_control::diagnostics::{
+        CodexFeatureDiagnostic, FeatureHealthDiagnostic, FeatureInstallationDiagnostic,
+    };
+    let projection = state.codex_projection()?;
+    Some(CodexFeatureDiagnostic {
+        observation_generation,
+        observed_at_us,
+        supported: projection.support == FeatureSupport::Supported,
+        installation: match projection.installation {
+            FeatureInstallation::Installed => FeatureInstallationDiagnostic::Installed,
+            FeatureInstallation::Missing => FeatureInstallationDiagnostic::Missing,
+            FeatureInstallation::Incompatible => FeatureInstallationDiagnostic::Incompatible,
+        },
+        enabled: projection.enabled,
+        health: match projection.health {
+            FeatureHealth::Unknown => FeatureHealthDiagnostic::Unknown,
+            FeatureHealth::Loading => FeatureHealthDiagnostic::Loading,
+            FeatureHealth::SignedOut => FeatureHealthDiagnostic::SignedOut,
+            FeatureHealth::Ready => FeatureHealthDiagnostic::Ready,
+            FeatureHealth::Failed => FeatureHealthDiagnostic::Failed,
+        },
+        configuration_generation: projection.generation,
+    })
+}
+
 impl WindowsRemoteControl {
     fn application_launch_diagnostic(
         &self,
@@ -2153,9 +2292,11 @@ impl WindowsRemoteControl {
         &mut self,
         shell: &mut WinitShell,
         state: &mut crate::live_shell::LiveShell,
+        codex: &mut crate::CodexSurfaces,
+        feature_settings: &mut nickel_core::optional_features::OptionalFeatureSettings,
     ) {
         self.collect_frame_dispatches(shell, state);
-        self.poll_with_shell(Some((shell, state)));
+        self.poll_with_shell(Some((shell, state)), Some((codex, feature_settings)));
     }
 
     fn collect_frame_dispatches(
@@ -2298,6 +2439,10 @@ impl WindowsRemoteControl {
     fn poll_with_shell(
         &mut self,
         mut shell: Option<(&mut WinitShell, &mut crate::live_shell::LiveShell)>,
+        mut codex: Option<(
+            &mut crate::CodexSurfaces,
+            &mut nickel_core::optional_features::OptionalFeatureSettings,
+        )>,
     ) {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
@@ -2623,6 +2768,76 @@ impl WindowsRemoteControl {
                                 transaction,
                                 prepared,
                                 deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadCodexPreference {
+                    permit,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = match (shell.as_mut(), codex.as_mut()) {
+                        (Some((shell, state)), Some((codex, feature_settings))) => self
+                            .read_codex_preference(
+                                shell,
+                                state,
+                                codex,
+                                feature_settings,
+                                &permit,
+                                prepared,
+                                deadline,
+                            ),
+                        _ => Err("Windows Codex owner is unavailable".into()),
+                    };
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::CodexPreferenceTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = match (shell.as_mut(), codex.as_mut()) {
+                        (Some((shell, state)), Some((codex, feature_settings))) => self
+                            .change_codex_preference(
+                                shell,
+                                state,
+                                codex,
+                                feature_settings,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
+                            ),
+                        _ => Err("Windows Codex owner is unavailable".into()),
+                    };
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ShellBehaviorTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_shell_behavior(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
                             )
                         },
                     );
@@ -3028,6 +3243,243 @@ impl WindowsRemoteControl {
                 .min(u128::from(u64::MAX)) as u64,
             true,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn read_codex_preference(
+        &mut self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        codex: &crate::CodexSurfaces,
+        feature_settings: &nickel_core::optional_features::OptionalFeatureSettings,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_codex::PreparedRead,
+        request_deadline: Instant,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        if Instant::now() >= request_deadline {
+            return Err("Windows Codex preference observation expired".into());
+        }
+        prepared.ensure_current()?;
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        permit.with_debug(protected, || {
+            if Instant::now() >= request_deadline {
+                return Err("Windows Codex preference observation expired".into());
+            }
+            prepared.ensure_current()?;
+            Ok(prepared.snapshot(
+                codex.remote_runtime_state(feature_settings.codex_generation),
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            ))
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_codex_preference(
+        &mut self,
+        shell: &mut WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        codex: &mut crate::CodexSurfaces,
+        feature_settings: &mut nickel_core::optional_features::OptionalFeatureSettings,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::codex_preference::Transaction,
+        prepared: crate::windows_remote_codex::PreparedChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::codex_preference::Snapshot, String> {
+        use nickel_core::optional_features::{
+            CodexAvailabilityProjection, FeatureHealth, FeatureSupport,
+        };
+
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("Codex preference transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            if !prepared.requested_enabled() && codex.active_chat_count() > 0 {
+                return Err("close active Codex chat windows before disabling Codex".into());
+            }
+            prepared.ensure_current(&transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err(
+                            "local input interrupted the Codex preference transaction".into()
+                        );
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            Ok(())
+        });
+        let mut settings = match committed {
+            Some(settings) => settings,
+            None => {
+                authorization?;
+                return Err(
+                    "Codex preference unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+
+        // The write is now authoritative. Reconcile it with the actual winit
+        // Codex owner before propagating any post-commit failure.
+        settings.codex_enabled = settings.effective_codex_enabled();
+        *feature_settings = settings.clone();
+        codex.apply_settings(shell, &settings);
+        let runtime_error = if settings.codex_enabled {
+            match codex.ensure_project_menu(shell) {
+                Ok(()) => {
+                    state.apply_codex_projection(CodexAvailabilityProjection::new(
+                        FeatureSupport::Supported,
+                        codex.installation(),
+                        true,
+                        FeatureHealth::Loading,
+                        settings.codex_generation,
+                        Some("Checking the selected Codex backend…".into()),
+                    ));
+                    None
+                }
+                Err(_) => {
+                    state.apply_codex_projection(CodexAvailabilityProjection::new(
+                        FeatureSupport::Supported,
+                        codex.installation(),
+                        true,
+                        FeatureHealth::Failed,
+                        settings.codex_generation,
+                        Some("Codex integration could not be enabled".into()),
+                    ));
+                    Some("Codex preference committed but its runtime could not start".to_owned())
+                }
+            }
+        } else {
+            state.apply_codex_projection(CodexAvailabilityProjection::new(
+                FeatureSupport::Supported,
+                codex.installation(),
+                false,
+                FeatureHealth::Unknown,
+                settings.codex_generation,
+                Some("Codex integration is disabled".into()),
+            ));
+            None
+        };
+        crate::sync_visibility(shell, state);
+        let render_result = crate::render_all(shell, state);
+        authorization?;
+        if let Some(error) = runtime_error {
+            return Err(error);
+        }
+        render_result?;
+        let read = crate::windows_remote_codex::PreparedRead::prepare()?;
+        read.ensure_current()?;
+        Ok(read.snapshot(
+            codex.remote_runtime_state(feature_settings.codex_generation),
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_shell_behavior(
+        &mut self,
+        shell: &mut WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_session_protocol::ShellBehaviorTransaction,
+        prepared: crate::windows_remote_settings::PreparedShellBehaviorChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::diagnostics::ShellBehaviorDiagnostic, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("shell behavior transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            if transaction.topology_generation != self.resources.output_topology_generation() {
+                return Err("shell behavior transaction has a stale output topology".into());
+            }
+            prepared.ensure_current(&transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err("local input interrupted the shell behavior transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            Ok(())
+        });
+        let requested = match committed {
+            Some(settings) => settings,
+            None => {
+                authorization?;
+                return Err(
+                    "shell behavior unavailable; read current diagnostics before retrying".into(),
+                );
+            }
+        };
+
+        // Persistence has committed, so the production owners must observe it
+        // before any later presentation or authority error is returned.
+        state.apply_shell_settings(requested.clone());
+        let shell_result = shell.set_bar_on_all_displays(requested.bar_on_all_displays);
+        crate::sync_visibility(shell, state);
+        let render_result = shell_result.and_then(|_| crate::render_all(shell, state));
+        authorization?;
+        render_result?;
+        self.observation_generation = self
+            .observation_generation
+            .checked_add(1)
+            .ok_or("Windows observation generations exhausted")?;
+        Ok(shell_behavior_diagnostic(
+            self.observation_generation,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            self.resources.output_topology_generation(),
+            shell.bar_on_all_displays(),
+            state.remote_shell_behavior_state(),
+        ))
     }
 
     fn launcher_favorites_catalog(
@@ -4667,7 +5119,7 @@ impl WindowsRemoteControl {
                     .map(|refresh| refresh.retained_at(observed_at_us))
                     .collect(),
                 application_inventory_refresh: None,
-                codex_feature: None,
+                codex_feature: codex_feature_diagnostic(generation, observed_at_us, state),
                 shell_behavior: shell_behavior_diagnostic(
                     generation,
                     observed_at_us,
@@ -6835,7 +7287,7 @@ mod tests {
             }))
             .ok()
             .unwrap();
-        owner.poll_with_shell(None);
+        owner.poll_with_shell(None, None);
         assert_eq!(owner.remote_control.status().generation, 0);
         assert!(receiver.try_recv().is_err());
     }

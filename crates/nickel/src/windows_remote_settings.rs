@@ -8,6 +8,7 @@ use nickel_core::shell_settings::ShellSettings;
 use nickel_remote_control::appearance::{
     Animations, Preferences, Snapshot, ThemePreference, Transaction,
 };
+use nickel_session_protocol::{ShellBehaviorSetting, ShellBehaviorTransaction, ShellBehaviorValue};
 use nickel_storage::{RegularFileRevision, regular_file_revision};
 use std::{io, path::PathBuf, time::Instant};
 
@@ -38,6 +39,141 @@ const FILE_ICONS_UNAVAILABLE: &str =
     "file icon settings unavailable; read current state before retrying";
 const MAX_THEME_ID_BYTES: usize = 128;
 const MAX_THEMES: usize = 256;
+
+const SHELL_BEHAVIOR_STALE: &str =
+    "shell behavior changed; read current diagnostics before retrying";
+const SHELL_BEHAVIOR_UNAVAILABLE: &str =
+    "shell behavior unavailable; read current diagnostics before retrying";
+
+fn shell_behavior_value(
+    settings: &ShellSettings,
+    setting: ShellBehaviorSetting,
+) -> ShellBehaviorValue {
+    match setting {
+        ShellBehaviorSetting::BarDisplayScope => {
+            ShellBehaviorValue::Toggle(settings.bar_on_all_displays)
+        }
+        ShellBehaviorSetting::BarWindowScope => {
+            ShellBehaviorValue::Toggle(settings.all_windows_on_every_bar)
+        }
+        ShellBehaviorSetting::DesktopCount => ShellBehaviorValue::Count(settings.desktop_count),
+    }
+}
+
+fn apply_shell_behavior_value(
+    settings: &mut ShellSettings,
+    setting: ShellBehaviorSetting,
+    value: ShellBehaviorValue,
+) -> Result<(), String> {
+    match (setting, value) {
+        (ShellBehaviorSetting::BarDisplayScope, ShellBehaviorValue::Toggle(value)) => {
+            settings.bar_on_all_displays = value;
+        }
+        (ShellBehaviorSetting::BarWindowScope, ShellBehaviorValue::Toggle(value)) => {
+            settings.all_windows_on_every_bar = value;
+        }
+        (ShellBehaviorSetting::DesktopCount, ShellBehaviorValue::Count(value))
+            if (1..=nickel_core::shell_settings::MAX_CONFIGURED_WORKSPACES).contains(&value) =>
+        {
+            settings.desktop_count = value;
+        }
+        (ShellBehaviorSetting::DesktopCount, ShellBehaviorValue::Count(_)) => {
+            return Err("desktop count is outside the supported range".into());
+        }
+        _ => return Err("shell behavior setting and value types do not match".into()),
+    }
+    Ok(())
+}
+
+pub(crate) struct PreparedShellBehaviorChange {
+    path: PathBuf,
+    revision: Option<RegularFileRevision>,
+    previous: ShellSettings,
+    requested: ShellSettings,
+    staged: nickel_storage::StagedWrite,
+    _lock: nickel_storage::TransactionLock,
+}
+
+impl PreparedShellBehaviorChange {
+    pub(crate) fn prepare(transaction: &ShellBehaviorTransaction) -> Result<Self, String> {
+        Self::prepare_at(
+            nickel_core::shell_settings::settings_path().map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?,
+            transaction,
+        )
+    }
+
+    fn prepare_at(path: PathBuf, transaction: &ShellBehaviorTransaction) -> Result<Self, String> {
+        let lock = nickel_storage::TransactionLock::try_acquire(&path)
+            .map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?;
+        let revision = regular_file_revision(&path).map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?;
+        let previous =
+            ShellSettings::load_for_update(&path).map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?;
+        if regular_file_revision(&path).map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)? != revision
+            || shell_behavior_value(&previous, transaction.setting) != transaction.prior
+        {
+            return Err(SHELL_BEHAVIOR_STALE.into());
+        }
+        let mut requested = previous.clone();
+        apply_shell_behavior_value(&mut requested, transaction.setting, transaction.requested)?;
+        let staged = requested
+            .stage(&path)
+            .map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?;
+        Ok(Self {
+            path,
+            revision,
+            previous,
+            requested,
+            staged,
+            _lock: lock,
+        })
+    }
+
+    pub(crate) fn ensure_current(
+        &self,
+        transaction: &ShellBehaviorTransaction,
+    ) -> Result<(), String> {
+        if regular_file_revision(&self.path).map_err(|_| SHELL_BEHAVIOR_UNAVAILABLE)?
+            != self.revision
+            || shell_behavior_value(&self.previous, transaction.setting) != transaction.prior
+            || shell_behavior_value(&self.requested, transaction.setting) != transaction.requested
+        {
+            return Err(SHELL_BEHAVIOR_STALE.into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn commit(
+        self,
+        deadline: Instant,
+        check_boundary: impl FnOnce() -> Result<(), String>,
+    ) -> Result<ShellSettings, String> {
+        self.staged
+            .commit(|| {
+                if regular_file_revision(&self.path)? != self.revision {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        SHELL_BEHAVIOR_STALE,
+                    ));
+                }
+                if Instant::now() >= deadline {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "shell behavior commit expired",
+                    ));
+                }
+                check_boundary().map_err(io::Error::other)
+            })
+            .map_err(|error| {
+                if error.kind() == io::ErrorKind::InvalidData {
+                    SHELL_BEHAVIOR_STALE
+                } else {
+                    SHELL_BEHAVIOR_UNAVAILABLE
+                }
+                .to_owned()
+            })?;
+        Ok(self.requested)
+    }
+}
 
 fn valid_theme_id(value: &str) -> bool {
     !value.is_empty()
@@ -506,6 +642,87 @@ impl AppearanceState {
 mod tests {
     use super::*;
     use std::{fs, time::Duration};
+
+    #[test]
+    fn shell_behavior_commit_preserves_security_and_unrelated_settings() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shell.conf");
+        let settings = ShellSettings {
+            desktop_count: 4,
+            idle_lock_seconds: Some(731),
+            preferred_terminal: Some("private-terminal".into()),
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let transaction = ShellBehaviorTransaction {
+            setting: ShellBehaviorSetting::DesktopCount,
+            prior: ShellBehaviorValue::Count(4),
+            requested: ShellBehaviorValue::Count(6),
+            topology_generation: 12,
+        };
+        let prepared = PreparedShellBehaviorChange::prepare_at(path.clone(), &transaction).unwrap();
+        let accepted = prepared
+            .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+            .unwrap();
+        assert_eq!(accepted.desktop_count, 6);
+        assert_eq!(accepted.idle_lock_seconds, Some(731));
+        assert_eq!(
+            accepted.preferred_terminal.as_deref(),
+            Some("private-terminal")
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), accepted);
+    }
+
+    #[test]
+    fn shell_behavior_commit_rejects_wrong_types_aba_expiry_and_cancellation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("shell.conf");
+        let settings = ShellSettings {
+            desktop_count: 4,
+            idle_lock_seconds: Some(731),
+            ..Default::default()
+        };
+        settings.save(&path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let wrong_type = ShellBehaviorTransaction {
+            setting: ShellBehaviorSetting::DesktopCount,
+            prior: ShellBehaviorValue::Count(4),
+            requested: ShellBehaviorValue::Toggle(true),
+            topology_generation: 12,
+        };
+        assert!(PreparedShellBehaviorChange::prepare_at(path.clone(), &wrong_type).is_err());
+
+        let transaction = ShellBehaviorTransaction {
+            setting: ShellBehaviorSetting::DesktopCount,
+            prior: ShellBehaviorValue::Count(4),
+            requested: ShellBehaviorValue::Count(6),
+            topology_generation: 12,
+        };
+        let prepared = PreparedShellBehaviorChange::prepare_at(path.clone(), &transaction).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::write(&path, original).unwrap();
+        assert!(
+            prepared
+                .commit(Instant::now() + Duration::from_secs(1), || Ok(()))
+                .is_err()
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+
+        let expired = PreparedShellBehaviorChange::prepare_at(path.clone(), &transaction).unwrap();
+        assert!(expired.commit(Instant::now(), || Ok(())).is_err());
+        assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+
+        let cancelled =
+            PreparedShellBehaviorChange::prepare_at(path.clone(), &transaction).unwrap();
+        assert!(
+            cancelled
+                .commit(Instant::now() + Duration::from_secs(1), || {
+                    Err("revoked".into())
+                })
+                .is_err()
+        );
+        assert_eq!(ShellSettings::load(&path).unwrap(), settings);
+    }
 
     fn fixture() -> (tempfile::TempDir, PathBuf, Transaction) {
         let root = tempfile::tempdir().unwrap();

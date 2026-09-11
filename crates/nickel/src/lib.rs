@@ -9,6 +9,8 @@ mod windows_emergency_chord;
 mod windows_external_accessibility;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_remote_application_scale;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_remote_codex;
 #[cfg(target_os = "windows")]
 mod windows_remote_control;
 #[cfg(target_os = "windows")]
@@ -627,6 +629,25 @@ fn codex_project_application_id(project_id: Option<&str>, root: &Path) -> String
 }
 
 impl CodexSurfaces {
+    #[cfg(target_os = "windows")]
+    fn remote_runtime_state(&self, generation: u64) -> crate::windows_remote_codex::RuntimeState {
+        crate::windows_remote_codex::RuntimeState {
+            generation,
+            enabled: self.enabled && self.project_menu_host.is_some(),
+            active_chat_windows: self.chats.len() as u32,
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn active_chat_count(&self) -> usize {
+        self.chats.len()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn installation(&self) -> FeatureInstallation {
+        self.installation
+    }
+
     fn set_theme(&mut self, theme: nickel_ui::SemanticTheme) -> bool {
         if self.theme == theme {
             return false;
@@ -2317,7 +2338,7 @@ pub fn run() -> Result<(), String> {
     loop {
         #[cfg(target_os = "windows")]
         if let Some(owner) = &mut remote_control {
-            owner.poll(&mut shell, &mut state);
+            owner.poll(&mut shell, &mut state, &mut codex, &mut feature_settings);
             owner.reconcile_indicators(&mut shell, state.semantic_theme());
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
