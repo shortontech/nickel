@@ -3243,6 +3243,32 @@ impl NickelSession {
                 } else {
                     permit.with_debug(protected, effect)
                 };
+                if let Ok(outcome) = &result {
+                    use nickel_remote_control::desktop_events::ProductionEffectOutcome;
+                    let completion = if outcome.output_identification.is_some()
+                        || outcome
+                            .application_inventory_refresh
+                            .as_ref()
+                            .is_some_and(|refresh| refresh.reconciliation_confirmed)
+                        || outcome
+                            .platform_refresh
+                            .as_ref()
+                            .is_some_and(|refresh| refresh.reconciliation_confirmed)
+                    {
+                        ProductionEffectOutcome::UiUpdated
+                    } else if matches!(
+                        outcome.action,
+                        nickel_remote_control::diagnostics::DiagnosticAction::Repaint
+                    ) {
+                        ProductionEffectOutcome::Requested
+                    } else {
+                        ProductionEffectOutcome::Confirmed
+                    };
+                    self.record_remote_production_effect_outcome(
+                        nickel_remote_control::desktop_events::ProductionEffectKind::DiagnosticAction,
+                        completion,
+                    );
+                }
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ListSurfaces { permit, reply } => {
