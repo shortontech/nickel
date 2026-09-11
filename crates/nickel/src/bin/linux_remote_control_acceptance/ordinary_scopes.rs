@@ -5,6 +5,14 @@ pub(super) fn movement_enabled() -> bool {
     env::args().any(|argument| argument == "--movement")
 }
 
+fn xwayland_enabled() -> bool {
+    env::args().any(|argument| argument == "--xwayland-ordinary-scopes")
+}
+
+fn hold_receipts_enabled() -> bool {
+    movement_enabled() || xwayland_enabled()
+}
+
 const COUNTER_CATALOG_ID: &str = "nickel-native-movement-counter";
 const MOVEMENT_OUTPUT: &str = "native-movement-secondary";
 
@@ -36,7 +44,7 @@ pub(super) fn exercise(
     identity: &Identity,
     bootstrap: u64,
 ) -> Result<u64, String> {
-    let backend = if env::args().any(|argument| argument == "--xwayland-ordinary-scopes") {
+    let backend = if xwayland_enabled() {
         FixtureBackend::Xwayland
     } else {
         FixtureBackend::Wayland
@@ -118,6 +126,9 @@ pub(super) fn exercise(
         "PASS: native ordinary window scope, one approval, client-confirmed key and pointer input, identity-bound PNG capture, unrelated window denied"
     );
     revoke_scope(environment, lease)?;
+    if matches!(backend, FixtureBackend::Xwayland) {
+        xwayland_held_input(environment, address, identity, &first, &mut recipient)?;
+    }
 
     let scope = RemoteResourceScope::Application(application.clone());
     let lease = approve_scope(environment, address, identity, scope.clone(), false)?;
@@ -196,6 +207,261 @@ pub(super) fn exercise(
         RemoteResourceScope::FullSession,
         true,
     )
+}
+
+fn xwayland_held_input(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    window: &Value,
+    client: &mut OrdinaryClient,
+) -> Result<(), String> {
+    let contender = connect_identity(address, "native-xwayland-held-contender")?;
+    let watch = ConnectionWatch::start(address, &contender)?;
+    let scope = RemoteResourceScope::Window(native_resource(window, "id")?);
+    let result = (|| {
+        for kind in [HeldKind::Key, HeldKind::Drag] {
+            let owner_lease = approve_scope(environment, address, identity, scope.clone(), false)?;
+            let contender_lease = approve_overlapping_window(
+                environment,
+                address,
+                &contender,
+                owner_lease,
+                native_resource(window, "id")?,
+            )?;
+            scope_call(
+                address,
+                identity,
+                "focus_window",
+                window_arguments(owner_lease, window),
+            )?;
+
+            let mut receipts = client.hold_receipts(kind)?;
+            if receipts.0 != receipts.1 {
+                return Err("X11 fixture already has unbalanced held input".into());
+            }
+            start_hold(address, identity, owner_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_contender_denied(address, &contender, contender_lease, window, kind)?;
+            require_non_owner_release_denied(address, &contender, contender_lease, window, kind)?;
+            client.wait_hold_receipts(kind, receipts)?;
+            finish_hold(address, identity, owner_lease, window, kind, HoldStep::End)?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+
+            start_hold(address, identity, owner_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_non_owner_release_denied(address, &contender, contender_lease, window, kind)?;
+            client.wait_hold_receipts(kind, receipts)?;
+            finish_hold(
+                address,
+                identity,
+                owner_lease,
+                window,
+                kind,
+                HoldStep::Cancel,
+            )?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+
+            start_hold(address, identity, owner_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            session_message(
+                environment,
+                Request::Command(Command::ManageRemoteLease {
+                    lease_id: owner_lease,
+                    action: RemoteLeaseAction::Revoke,
+                }),
+            )?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_retired_lease(
+                environment,
+                owner_lease,
+                contender_lease,
+                RemoteLeaseTransition::Revoked,
+            )?;
+            require_stale_owner_denied(address, identity, owner_lease, window, kind)?;
+
+            scope_call(
+                address,
+                &contender,
+                "focus_window",
+                window_arguments(contender_lease, window),
+            )?;
+            start_hold(address, &contender, contender_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_stale_owner_denied(address, identity, owner_lease, window, kind)?;
+            client.wait_hold_receipts(kind, receipts)?;
+            keep_alive_hold(address, &contender, contender_lease, window, kind)?;
+            finish_hold(
+                address,
+                &contender,
+                contender_lease,
+                window,
+                kind,
+                HoldStep::End,
+            )?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+
+            let expiring_lease = approve_overlapping_window_for(
+                environment,
+                address,
+                identity,
+                contender_lease,
+                native_resource(window, "id")?,
+                1,
+            )?;
+            scope_call(
+                address,
+                identity,
+                "focus_window",
+                window_arguments(expiring_lease, window),
+            )?;
+            start_hold(address, identity, expiring_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            wait_for_lease_retirement(
+                environment,
+                address,
+                expiring_lease,
+                RemoteLeaseTransition::Expired,
+                contender_lease,
+                Instant::now() + Duration::from_secs(5),
+            )?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_stale_owner_denied(address, identity, expiring_lease, window, kind)?;
+
+            scope_call(
+                address,
+                &contender,
+                "focus_window",
+                window_arguments(contender_lease, window),
+            )?;
+            start_hold(address, &contender, contender_lease, window, kind)?;
+            receipts.0 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            require_stale_owner_denied(address, identity, expiring_lease, window, kind)?;
+            client.wait_hold_receipts(kind, receipts)?;
+            keep_alive_hold(address, &contender, contender_lease, window, kind)?;
+            finish_hold(
+                address,
+                &contender,
+                contender_lease,
+                window,
+                kind,
+                HoldStep::End,
+            )?;
+            receipts.1 += 1;
+            client.wait_hold_receipts(kind, receipts)?;
+            revoke_scope(environment, contender_lease)?;
+            println!(
+                "PASS: native X11 {} hold has client-confirmed owner release/cancel, overlapping key/drag/focus denial, revocation and expiry release, and stale-owner isolation",
+                kind.marker()
+            );
+        }
+        Ok(())
+    })();
+    let watch_result = watch.finish();
+    result.and(watch_result)
+}
+
+fn start_hold(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    window: &Value,
+    kind: HeldKind,
+) -> Result<(), String> {
+    let (method, request) = kind.request(lease, window, HoldStep::Start)?;
+    scope_call(address, identity, method, request).map(|_| ())
+}
+
+fn keep_alive_hold(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    window: &Value,
+    kind: HeldKind,
+) -> Result<(), String> {
+    let (method, request) = kind.request(lease, window, HoldStep::Continue)?;
+    scope_call(address, identity, method, request).map(|_| ())
+}
+
+fn finish_hold(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    window: &Value,
+    kind: HeldKind,
+    step: HoldStep,
+) -> Result<(), String> {
+    let (method, request) = kind.request(lease, window, step)?;
+    scope_call(address, identity, method, request).map(|_| ())
+}
+
+fn require_non_owner_release_denied(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    window: &Value,
+    kind: HeldKind,
+) -> Result<(), String> {
+    for step in [HoldStep::End, HoldStep::Cancel] {
+        let (method, request) = kind.request(lease, window, step)?;
+        let response = mcp_call(address, identity, method, request)?;
+        require_tool_error("non-owner held-input release", &response)?;
+    }
+    Ok(())
+}
+
+fn require_stale_owner_denied(
+    address: SocketAddr,
+    identity: &Identity,
+    lease: u64,
+    window: &Value,
+    kind: HeldKind,
+) -> Result<(), String> {
+    for step in [HoldStep::Continue, HoldStep::End, HoldStep::Cancel] {
+        let (method, request) = kind.request(lease, window, step)?;
+        let response = mcp_call(address, identity, method, request)?;
+        require_tool_error("retired held-input owner", &response)?;
+    }
+    Ok(())
+}
+
+fn require_retired_lease(
+    environment: &SessionEnvironment,
+    retired_lease: u64,
+    retained_lease: u64,
+    transition: RemoteLeaseTransition,
+) -> Result<(), String> {
+    let snapshot = remote_snapshot(environment)?;
+    let retired = !snapshot
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == retired_lease);
+    let retained = snapshot
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == retained_lease);
+    let audited = snapshot
+        .lease_audit
+        .iter()
+        .any(|event| event.lease_id == retired_lease && event.transition == transition);
+    if retired && retained && audited {
+        Ok(())
+    } else {
+        Err(format!(
+            "held-input lease retirement incomplete: retired={retired} retained={retained} audited={audited}"
+        ))
+    }
 }
 
 struct Movement {
@@ -1135,13 +1401,24 @@ fn approve_overlapping_window(
     existing: u64,
     resource: nickel_session_protocol::RemoteResourceId,
 ) -> Result<u64, String> {
+    approve_overlapping_window_for(environment, address, identity, existing, resource, 1200)
+}
+
+fn approve_overlapping_window_for(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    existing: u64,
+    resource: nickel_session_protocol::RemoteResourceId,
+    duration_seconds: u64,
+) -> Result<u64, String> {
     let scope = RemoteResourceScope::Window(resource);
     let requested = mcp_call(
         address,
         identity,
         "request_control_lease",
         json!({
-            "scope": scope, "duration_seconds": 1200, "allow_resumption": false, "full_debug": false
+            "scope": scope, "duration_seconds": duration_seconds, "allow_resumption": false, "full_debug": false
         }),
     )?;
     require_tool_success("overlapping client lease request", &requested)?;
@@ -1570,7 +1847,7 @@ impl OrdinaryClient {
         let child = command
             .env(
                 "NICKEL_NATIVE_HOLD_RECEIPTS",
-                if movement_enabled() { "1" } else { "0" },
+                if hold_receipts_enabled() { "1" } else { "0" },
             )
             .env("XDG_RUNTIME_DIR", &environment.runtime)
             .env("XDG_CONFIG_HOME", environment.runtime.join("config"))

@@ -181,6 +181,15 @@ window approval, repeats them under one application approval, admits a later
 window from the same executable, and denies focus, capture, and keyboard access
 to the unrelated example.
 
+The Xwayland option also enables fixed ShiftLeft and left-button receipts in the
+real keyboard-recipient client. For each input kind, two overlapping
+window-scoped leases prove that the first owner excludes the contender's key,
+drag, focus, end and cancel requests. The owning lease then ends and cancels its
+own holds with matching client releases. Separate holds release when that lease
+is explicitly revoked and when a one-second lease expires. Retired owners cannot
+continue, end or cancel the surviving contender's later hold; the contender can
+keep it alive and end it with its own matching X11 release.
+
 Native acceptance passed September 11, 2026, with the outer nested compositor on
 the host Xwayland display (`DISPLAY=:0`, with host Wayland removed). The complete
 earlier shell/privacy/stress/emergency suite passed in the same run. The ordinary
@@ -189,10 +198,31 @@ control additionally caught and fixed a reply-ordering bug where an uncommitted
 native keyboard plan could mask the correct resource-boundary denial with a
 cancellation error.
 
+The same native suite also passed with both options, including the existing
+virtual output and workspace movement matrix:
+
+```sh
+target/debug/nickel-linux-remote-control-acceptance \
+  --xwayland-ordinary-scopes --movement
+```
+
+This combined run covers window and application scope through output/workspace
+movement, application-held continuation, output-boundary release, overlapping
+focus denial, and client-confirmed X11 key/button edges. The additional output
+is a compositor authority and geometry fixture without an independent physical
+presenter.
+
+Native Xwayland acceptance passed September 11, 2026, on `7d0809a` plus this
+increment in both direct and combined movement modes. Six focused harness tests
+and strict harness Clippy passed. The combined stress check completed 27
+requests in 3.086 seconds with a 718 ms maximum response and 672 KiB RSS growth.
+The harness removed the virtual workspace/output and reaped all client and
+compositor processes afterward.
+
 This remains bounded synthetic-input acceptance with two repository clients. It
 does not cover PID reuse, sandbox brokers, shared runtimes, transient ownership,
-physical input, assistive workflows, multiple outputs/workspaces, or native
-Windows behavior.
+physical input, assistive workflows, physical multi-monitor presentation, or
+native Windows behavior.
 
 ## Held-input movement and arbitration
 
@@ -252,8 +282,9 @@ move-and-follow fixture is one capability-gated local session command backed by
 the production workspace owner; it does not prove a physical shortcut or
 Settings UI workflow.
 The remote input remains synthetic. Physical multi-monitor presentation,
-physical local-input takeover, more complex workspace sequences, held-input
-movement on Xwayland and native Windows remain open.
+physical local-input takeover, more complex workspace sequences and native
+Windows remain open. The combined Xwayland command above exercises this same
+virtual movement matrix with real X11 client receipts.
 
 Native Wayland acceptance passed September 11, 2026, on `c0f1878` plus this
 increment: all four held-input cases and the complete preceding movement/scope
