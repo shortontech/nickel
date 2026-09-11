@@ -155,6 +155,11 @@ path = "src/bin/nickel-nested-acceptance.rs"
 required-features = ["backend-winit"]
 
 [[bin]]
+name = "nickel-linux-remote-control-acceptance"
+path = "src/bin/nickel-linux-remote-control-acceptance.rs"
+required-features = ["backend-winit"]
+
+[[bin]]
 name = "nickel-test-notification"
 path = "src/bin/nickel-test-notification.rs"
 
