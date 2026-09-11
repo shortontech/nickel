@@ -1416,6 +1416,16 @@ impl<A: Application> UiHost<A> {
         self.tree.message_for_id(target)
     }
 
+    /// Returns the typed callback used by a specific semantic invocation.
+    /// Activation and context-menu actions can dispatch different messages.
+    pub fn message_for_semantic_action(
+        &self,
+        target: &UiId,
+        action: ActionKind,
+    ) -> Option<&A::Message> {
+        self.tree.message_for_semantic_action(target, action)
+    }
+
     pub fn unique_semantic_target_for_message(
         &self,
         message: &A::Message,

@@ -5590,7 +5590,7 @@ impl WindowsRemoteControl {
                     .elapsed()
                     .as_micros()
                     .min(u128::from(u64::MAX)) as u64,
-                nodes: windows_semantic_projection(nodes)?,
+                nodes: windows_semantic_projection(observation.role, nodes)?,
             })
         })
     }
@@ -5621,7 +5621,10 @@ impl WindowsRemoteControl {
         // Text edits in the launcher/run field and volume-OSD actions update
         // only their production UiHost. Actions that can emit a platform effect
         // stay closed until Windows has an authority-preserving continuation.
-        if !windows_semantic_action_is_effect_free(observation.role, &request.action) {
+        if !windows_semantic_action_has_guarded_disposition(
+            observation.role,
+            windows_semantic_mutation_kind(&request.action),
+        ) {
             return Err(
                 "semantic mutation effects are unavailable for this Windows shell role".into(),
             );
@@ -7645,9 +7648,15 @@ fn control_capability(
 }
 
 fn windows_semantic_projection(
-    projection: Vec<nickel_ui::SemanticNodeSnapshot>,
+    role: crate::winit_shell::SurfaceRole,
+    mut projection: Vec<nickel_ui::SemanticNodeSnapshot>,
 ) -> Result<Vec<nickel_remote_control::semantics::SemanticNode>, String> {
     use nickel_remote_control::semantics::{SemanticNode, SemanticValue};
+    for node in &mut projection {
+        node.actions
+            .retain(|action| windows_semantic_action_has_guarded_disposition(role, *action));
+        node.enabled = !node.actions.is_empty();
+    }
     projection
         .into_iter()
         .enumerate()
@@ -7742,16 +7751,38 @@ fn windows_semantic_mutation(
     }
 }
 
-fn windows_semantic_action_is_effect_free(
+fn windows_semantic_action_has_guarded_disposition(
     role: crate::winit_shell::SurfaceRole,
-    action: &nickel_remote_control::semantics::SemanticMutation,
+    action: nickel_ui::ActionKind,
 ) -> bool {
     role == crate::winit_shell::SurfaceRole::VolumeOsd
         || (role == crate::winit_shell::SurfaceRole::Launcher
-            && matches!(
-                action,
-                nickel_remote_control::semantics::SemanticMutation::SetText(_)
-            ))
+            && action == nickel_ui::ActionKind::SetValue)
+}
+
+fn windows_semantic_mutation_kind(
+    action: &nickel_remote_control::semantics::SemanticMutation,
+) -> nickel_ui::ActionKind {
+    use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
+    match action {
+        SemanticMutation::SetBoolean(_)
+        | SemanticMutation::SetNumber(_)
+        | SemanticMutation::SetText(_) => nickel_ui::ActionKind::SetValue,
+        SemanticMutation::Invoke(invocation) => match invocation {
+            SemanticInvocation::Activate => nickel_ui::ActionKind::Activate,
+            SemanticInvocation::Cancel => nickel_ui::ActionKind::Cancel,
+            SemanticInvocation::ContextMenu => nickel_ui::ActionKind::ContextMenu,
+            SemanticInvocation::Increment => nickel_ui::ActionKind::Increment,
+            SemanticInvocation::Decrement => nickel_ui::ActionKind::Decrement,
+            SemanticInvocation::Expand => nickel_ui::ActionKind::Expand,
+            SemanticInvocation::Collapse => nickel_ui::ActionKind::Collapse,
+            SemanticInvocation::Select => nickel_ui::ActionKind::Select,
+            SemanticInvocation::Dismiss => nickel_ui::ActionKind::Dismiss,
+            SemanticInvocation::Scroll => nickel_ui::ActionKind::Scroll,
+            SemanticInvocation::EnterNavigation => nickel_ui::ActionKind::EnterNavigation,
+            SemanticInvocation::ExitNavigation => nickel_ui::ActionKind::ExitNavigation,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -7759,24 +7790,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shell_semantic_policy_admits_only_effect_free_windows_actions() {
-        use nickel_remote_control::semantics::{SemanticInvocation, SemanticMutation};
-
-        assert!(windows_semantic_action_is_effect_free(
+    fn shell_semantic_policy_admits_only_guarded_windows_actions() {
+        assert!(windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::Launcher,
-            &SemanticMutation::SetText("query".into()),
+            nickel_ui::ActionKind::SetValue,
         ));
-        assert!(windows_semantic_action_is_effect_free(
+        assert!(windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::VolumeOsd,
-            &SemanticMutation::SetNumber(0.5),
+            nickel_ui::ActionKind::SetValue,
         ));
-        assert!(!windows_semantic_action_is_effect_free(
+        assert!(!windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::Launcher,
-            &SemanticMutation::Invoke(SemanticInvocation::Activate),
+            nickel_ui::ActionKind::Activate,
         ));
-        assert!(!windows_semantic_action_is_effect_free(
+        assert!(!windows_semantic_action_has_guarded_disposition(
             crate::winit_shell::SurfaceRole::ControlCenter,
-            &SemanticMutation::SetBoolean(true),
+            nickel_ui::ActionKind::SetValue,
         ));
     }
 

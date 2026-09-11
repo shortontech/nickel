@@ -618,7 +618,13 @@ impl<Message: Clone> UiFrame<Message> {
             accessibility_controls: Some(surface.anchor.id().clone()),
             accessibility_hidden: false,
             semantic_role: role,
-            semantic_actions: vec![ActionKind::Dismiss, ActionKind::Cancel],
+            semantic_actions: [
+                surface.dismiss.action.then_some(ActionKind::Dismiss),
+                surface.dismiss.cancel.then_some(ActionKind::Cancel),
+            ]
+            .into_iter()
+            .flatten()
+            .collect(),
             semantic_value: None,
             children: Vec::new(),
         });
@@ -1735,6 +1741,29 @@ impl<Message: Clone> UiFrame<Message> {
                         invalidation: state.set_dropdown_open(target, true),
                         ..EventOutcome::default()
                     }
+                } else if let SemanticAction::Invoke(
+                    action @ (ActionKind::Dismiss | ActionKind::Cancel),
+                ) = action
+                    && self
+                        .active_overlay
+                        .as_ref()
+                        .is_some_and(|(overlay, _)| overlay.as_ui_id() == &target)
+                    && self
+                        .active_overlay_dismiss
+                        .is_some_and(|policy| match action {
+                            ActionKind::Dismiss => policy.action,
+                            ActionKind::Cancel => policy.cancel,
+                            _ => false,
+                        })
+                {
+                    EventOutcome {
+                        invalidation: state.dismiss_overlay(match action {
+                            ActionKind::Dismiss => crate::DismissReason::Action,
+                            ActionKind::Cancel => crate::DismissReason::Cancel,
+                            _ => unreachable!(),
+                        }),
+                        ..EventOutcome::default()
+                    }
                 } else {
                     let dismisses = matches!(action, SemanticAction::Invoke(ActionKind::Activate))
                         && self
@@ -2047,6 +2076,20 @@ impl<Message: Clone> UiFrame<Message> {
             .rev()
             .find(|region| &region.id == id)
             .map(|region| &region.message)
+    }
+
+    /// Returns the application message bound to an invocation on `id`.
+    ///
+    /// Activation and context-menu callbacks are distinct production routes.
+    /// Callers inspecting action availability must classify the callback for
+    /// the specific advertised action instead of assuming activation's message
+    /// also describes a context-menu invocation.
+    pub fn message_for_semantic_action(&self, id: &UiId, action: ActionKind) -> Option<&Message> {
+        match action {
+            ActionKind::Activate => self.message_for_id(id),
+            ActionKind::ContextMenu => self.context_message_for_id(id),
+            _ => None,
+        }
     }
 
     /// Returns every semantic target that dispatches `message`. Duplicate

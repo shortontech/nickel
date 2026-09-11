@@ -674,6 +674,76 @@ mod tests {
     }
 
     #[test]
+    fn every_advertised_transient_dismissal_has_a_production_transition() {
+        for (action, reason) in [
+            (ActionKind::Dismiss, DismissReason::Action),
+            (ActionKind::Cancel, DismissReason::Cancel),
+        ] {
+            let mut state = UiStateStore::default();
+            let mut closed = frame(&mut state);
+            let anchor = anchor_id(&closed);
+            let style = OverlayStyle::from_theme(&SemanticTheme::from_tokens(
+                crate::SemanticTokenSet::standard(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+            ));
+            closed
+                .present_transient_surface(
+                    &mut state,
+                    TransientSurface::dialog(
+                        "dialog",
+                        OverlayAnchor::Node(anchor.clone()),
+                        Size::new(120.0, 80.0),
+                        style,
+                    ),
+                )
+                .unwrap();
+            closed
+                .transition(
+                    &mut state,
+                    crate::InputSource::Programmatic,
+                    crate::InteractionIntent::Invoke {
+                        target: anchor,
+                        action: crate::SemanticAction::Invoke(ActionKind::Activate),
+                    },
+                )
+                .unwrap();
+
+            let mut open = frame(&mut state);
+            let rebuilt_anchor = anchor_id(&open);
+            open.present_transient_surface(
+                &mut state,
+                TransientSurface::dialog(
+                    "dialog",
+                    OverlayAnchor::Node(rebuilt_anchor),
+                    Size::new(120.0, 80.0),
+                    style,
+                ),
+            )
+            .unwrap();
+            let overlay = OverlayId::new("dialog");
+            let node = open
+                .semantic_nodes()
+                .into_iter()
+                .find(|node| node.id == *overlay.as_ui_id())
+                .expect("open transient root is projected");
+            assert!(node.actions.contains(&action));
+
+            let outcome = open
+                .transition(
+                    &mut state,
+                    crate::InputSource::Programmatic,
+                    crate::InteractionIntent::Invoke {
+                        target: node.id,
+                        action: crate::SemanticAction::Invoke(action),
+                    },
+                )
+                .expect("advertised dismissal has a production disposition");
+            assert_eq!(outcome.invalidation, crate::Invalidation::Layout);
+            assert!(state.open_overlay_id().is_none());
+            assert_eq!(state.take_focus_return().unwrap().reason, reason);
+        }
+    }
+
+    #[test]
     fn always_open_menu_surface_uses_the_same_transition_and_stable_item_focus() {
         let mut state = UiStateStore::default();
         let mut frame = frame(&mut state);

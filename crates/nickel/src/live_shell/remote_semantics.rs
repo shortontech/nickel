@@ -4,12 +4,130 @@ use nickel_remote_control::semantics::{MAX_PAYLOAD_BYTES, MAX_RESOLVED_NODES};
 
 type Projection = (u64, Vec<nickel_ui::SemanticNodeSnapshot>);
 
-fn project<A: UiApplication>(host: &nickel_ui::UiHost<A>) -> Result<Projection, String> {
-    Ok((
-        host.resolved_frame_generation(),
-        host.bounded_semantic_nodes(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
-            .map_err(|_| "shell semantics are protected or exceed budget")?,
-    ))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteActionDisposition {
+    Guarded,
+    Unavailable,
+}
+
+fn action_disposition(
+    action: nickel_ui::ActionKind,
+    callback: RemoteActionDisposition,
+) -> RemoteActionDisposition {
+    use nickel_ui::ActionKind;
+    match action {
+        ActionKind::Activate | ActionKind::ContextMenu => callback,
+        ActionKind::Increment
+        | ActionKind::Decrement
+        | ActionKind::SetValue
+        | ActionKind::Dismiss
+        | ActionKind::Cancel
+        | ActionKind::Scroll => RemoteActionDisposition::Guarded,
+        ActionKind::Expand
+        | ActionKind::Collapse
+        | ActionKind::Select
+        | ActionKind::EnterNavigation
+        | ActionKind::ExitNavigation => RemoteActionDisposition::Unavailable,
+    }
+}
+
+fn project<A: UiApplication>(
+    host: &nickel_ui::UiHost<A>,
+    activate: impl Fn(&A::Message) -> RemoteActionDisposition,
+) -> Result<Projection, String> {
+    let mut nodes = host
+        .bounded_semantic_nodes(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+        .map_err(|_| "shell semantics are protected or exceed budget")?;
+    for node in &mut nodes {
+        node.actions.retain(|action| {
+            let callback = host
+                .message_for_semantic_action(&node.id, *action)
+                .map(&activate)
+                .unwrap_or(RemoteActionDisposition::Unavailable);
+            action_disposition(*action, callback) == RemoteActionDisposition::Guarded
+        });
+        node.enabled = !node.actions.is_empty();
+    }
+    Ok((host.resolved_frame_generation(), nodes))
+}
+
+fn observe_only(mut projection: Projection) -> Projection {
+    for node in &mut projection.1 {
+        node.actions.clear();
+        node.enabled = false;
+    }
+    projection
+}
+
+fn launcher_activate(action: &LauncherAction) -> RemoteActionDisposition {
+    match action {
+        LauncherAction::SetView(_)
+        | LauncherAction::ActivateResult(_)
+        | LauncherAction::TogglePin(_)
+        | LauncherAction::LaunchApplication(_)
+        | LauncherAction::ShowNarrowPrimary
+        | LauncherAction::SetQuery(_)
+        | LauncherAction::SearchScroll
+        | LauncherAction::DashboardScroll
+        | LauncherAction::Dismiss => RemoteActionDisposition::Guarded,
+        LauncherAction::RetryPreferencePersistence
+        | LauncherAction::OpenProject(_)
+        | LauncherAction::SeeAllProjects
+        | LauncherAction::OpenSettings(_)
+        | LauncherAction::OpenAccount
+        | LauncherAction::RequestLogout => RemoteActionDisposition::Unavailable,
+    }
+}
+
+fn run_activate(action: &RunAction) -> RemoteActionDisposition {
+    match action {
+        RunAction::SetCommand(_) | RunAction::Dismiss => RemoteActionDisposition::Guarded,
+        RunAction::Submit => RemoteActionDisposition::Unavailable,
+    }
+}
+
+fn control_activate(action: &ControlAction) -> RemoteActionDisposition {
+    match action {
+        ControlAction::ToggleWifiSection
+        | ControlAction::SetWifiEnabled(_)
+        | ControlAction::ActivateWifi { .. }
+        | ControlAction::ToggleBluetoothSection
+        | ControlAction::SetBluetoothPowered(_)
+        | ControlAction::SetBluetoothDiscovery(_)
+        | ControlAction::ToggleBluetoothDevice { .. }
+        | ControlAction::ToggleAudioSection
+        | ControlAction::SetAudioVolume(_)
+        | ControlAction::SelectAudioDevice { .. }
+        | ControlAction::RequestSessionAction(_)
+        | ControlAction::CancelSessionAction => RemoteActionDisposition::Guarded,
+        ControlAction::SwitchWorkspace(_)
+        | ControlAction::CreateWorkspace
+        | ControlAction::ToggleShowDesktop
+        | ControlAction::ShowNotifications
+        | ControlAction::RemoveWorkspace(_)
+        | ControlAction::PreviewProjection(_)
+        | ControlAction::ConfirmProjection
+        | ControlAction::CancelProjection
+        | ControlAction::ConfirmSessionAction
+        | ControlAction::SessionAction(_) => RemoteActionDisposition::Unavailable,
+    }
+}
+
+fn panel_activate(action: &PanelAction) -> RemoteActionDisposition {
+    match action {
+        PanelAction::Launcher
+        | PanelAction::ToggleTaskPin(_)
+        | PanelAction::MoveTaskPinLeft(_)
+        | PanelAction::MoveTaskPinRight(_)
+        | PanelAction::Control => RemoteActionDisposition::Guarded,
+        PanelAction::OnScreenKeyboard
+        | PanelAction::Task(_)
+        | PanelAction::TaskContext(_)
+        | PanelAction::TaskDrag(_, _)
+        | PanelAction::Codex
+        | PanelAction::Tray(_)
+        | PanelAction::TrayContext(_) => RemoteActionDisposition::Unavailable,
+    }
 }
 
 impl LiveShell {
@@ -26,63 +144,81 @@ impl LiveShell {
             SurfaceRole::Desktop => {
                 let output = output.ok_or("desktop output is unavailable")?;
                 if output == self.desktop_active_viewport {
-                    project(&self.desktop_host)
+                    Ok(observe_only(project(&self.desktop_host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })?))
                 } else {
                     self.desktop_viewports
                         .get(output)
                         .ok_or("desktop viewport is unavailable")?
                         .host
                         .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+                        .map(observe_only)
                         .map_err(|_| "shell semantics are protected or exceed budget".into())
                 }
             }
             SurfaceRole::Panel => {
                 if output == self.panel_output.as_deref() {
-                    project(&self.panel_host)
+                    project(&self.panel_host, panel_activate)
                 } else {
                     let key = output.map(str::to_owned);
                     project(
                         self.panel_hosts
                             .get(&key)
                             .ok_or("panel viewport is unavailable")?,
+                        panel_activate,
                     )
                 }
             }
-            SurfaceRole::Launcher if self.run_visible => project(&self.run_host),
-            SurfaceRole::Launcher => project(&self.launcher_host),
-            SurfaceRole::ControlCenter => project(&self.control_host),
-            SurfaceRole::Notification => project(&self.notification_host),
-            SurfaceRole::VolumeOsd => project(&self.volume_osd_host),
+            SurfaceRole::Launcher if self.run_visible => project(&self.run_host, run_activate),
+            SurfaceRole::Launcher => project(&self.launcher_host, launcher_activate),
+            SurfaceRole::ControlCenter => project(&self.control_host, control_activate),
+            SurfaceRole::Notification => {
+                Ok(observe_only(project(&self.notification_host, |_| {
+                    RemoteActionDisposition::Unavailable
+                })?))
+            }
+            SurfaceRole::VolumeOsd => project(&self.volume_osd_host, |_| {
+                RemoteActionDisposition::Unavailable
+            }),
             SurfaceRole::WindowPreview => self
                 .preview_frame
                 .as_ref()
                 .ok_or_else(|| "window preview is unavailable".to_owned())
                 .and_then(|frame| {
-                    Ok((
+                    Ok(observe_only((
                         frame.change_token().semantic_generation,
                         frame
                             .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
                             .map_err(|_| {
                                 "shell semantics are protected or exceed budget".to_owned()
                             })?,
-                    ))
+                    )))
                 }),
             SurfaceRole::WindowContextMenu => {
                 if let Some(host) = self.window_menu_host.as_ref() {
-                    project(host)
+                    Ok(observe_only(project(host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })?))
                 } else if let Some(host) = self.application_menu_host.as_ref() {
-                    project(host)
+                    Ok(observe_only(project(host, |_| {
+                        RemoteActionDisposition::Unavailable
+                    })?))
                 } else {
                     Err("window menu is unavailable".into())
                 }
             }
-            SurfaceRole::Screenshot => Ok((
+            SurfaceRole::Screenshot => Ok(observe_only((
                 self.screenshot.change_token().semantic_generation,
                 self.screenshot
                     .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
                     .map_err(|_| "shell semantics are protected or exceed budget")?,
-            )),
-            SurfaceRole::OnScreenKeyboard => project(&self.keyboard_host),
+            ))),
+            SurfaceRole::OnScreenKeyboard => {
+                Ok(observe_only(project(&self.keyboard_host, |_| {
+                    RemoteActionDisposition::Unavailable
+                })?))
+            }
             _ => Err("shell semantics are unavailable for this role".into()),
         }
     }
@@ -143,6 +279,17 @@ impl LiveShell {
     ) -> Result<RemoteShellOutcome, String> {
         if self.bounded_shell_semantics(role, output)?.0 != generation {
             return Err("stale semantic tree".into());
+        }
+        let kind = match &action {
+            nickel_ui::SemanticAction::Invoke(kind) => *kind,
+            nickel_ui::SemanticAction::SetValue(_) => nickel_ui::ActionKind::SetValue,
+        };
+        let projection = self.bounded_shell_semantics(role, output)?.1;
+        if projection
+            .get(node)
+            .is_none_or(|target| !target.actions.contains(&kind))
+        {
+            return Err("semantic action has no guarded production disposition".into());
         }
         if self.pointer_interaction_active() {
             return Err("local surface input is held".into());
@@ -240,6 +387,57 @@ impl LiveShell {
         };
         self.host_runtime_samples.record(host.telemetry);
         Ok(RemoteShellOutcome { host, effects })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_advertised_actions_are_guarded<A: UiApplication>(
+        host: &nickel_ui::UiHost<A>,
+        classify: impl Fn(&A::Message) -> RemoteActionDisposition,
+    ) {
+        let (_, nodes) = project(host, &classify).expect("bounded production semantics");
+        for node in nodes {
+            for action in node.actions {
+                let callback = host
+                    .message_for_semantic_action(&node.id, action)
+                    .map(&classify)
+                    .unwrap_or(RemoteActionDisposition::Unavailable);
+                assert_eq!(
+                    action_disposition(action, callback),
+                    RemoteActionDisposition::Guarded,
+                    "{:?} advertises {action:?} without a guarded callback",
+                    node.id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_advertised_production_shell_action_has_a_dispatch_disposition() {
+        let shell = LiveShell::new().expect("live shell");
+
+        assert_advertised_actions_are_guarded(&shell.launcher_host, launcher_activate);
+        assert_advertised_actions_are_guarded(&shell.run_host, run_activate);
+        assert_advertised_actions_are_guarded(&shell.control_host, control_activate);
+        assert_advertised_actions_are_guarded(&shell.panel_host, panel_activate);
+        assert_advertised_actions_are_guarded(&shell.volume_osd_host, |_| {
+            RemoteActionDisposition::Unavailable
+        });
+
+        let submit = shell
+            .run_host
+            .unique_semantic_target_for_message(&RunAction::Submit)
+            .expect("run submit target");
+        let (_, projected) = project(&shell.run_host, run_activate).expect("run semantics");
+        let submit = projected
+            .iter()
+            .find(|node| node.id == submit.id)
+            .expect("projected submit node");
+        assert!(!submit.actions.contains(&nickel_ui::ActionKind::Activate));
+        assert!(!submit.enabled);
     }
 }
 
