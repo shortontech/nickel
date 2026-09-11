@@ -473,11 +473,72 @@ fn start_output_placement_worker(
         .is_ok()
 }
 struct PointerOwnerAction {
-    id: String,
-    generation: u64,
+    target: nickel_remote_control::pointer::PointerTarget,
     x: i32,
     y: i32,
     action: nickel_remote_control::pointer::PointerAction,
+}
+
+fn resolve_windows_pointer_point<'a>(
+    resources: &'a crate::windows_resource_owner::Owner,
+    scope: &'a nickel_remote_control::leases::ResourceScope,
+    target: &nickel_remote_control::pointer::PointerTarget,
+    x: i32,
+    y: i32,
+) -> Result<
+    (
+        (i32, i32),
+        crate::windows_resource_owner::PointerTargetResource<'a>,
+    ),
+    String,
+> {
+    use crate::windows_resource_owner::PointerTargetResource;
+
+    let resource = resources
+        .pointer_target_resource(scope, target, x, y)
+        .ok_or("Windows pointer target is unavailable or outside its authority")?;
+    let point = match &resource {
+        PointerTargetResource::Window { native, .. } => {
+            crate::windows_remote_input::target_point(*native, x, y)?
+        }
+        PointerTargetResource::Global {
+            x,
+            y,
+            confined_output,
+            ..
+        } => {
+            use crate::windows_remote_input::GlobalPointerHit;
+            let hit = match crate::windows_remote_input::global_pointer_hit(*x, *y)? {
+                GlobalPointerHit::Desktop => None,
+                GlobalPointerHit::Window(native) => Some(native),
+            };
+            if !resources.pointer_hit_allowed(scope, *confined_output, hit) {
+                return Err(
+                    "Windows pointer target is obscured, protected, or out of scope".into(),
+                );
+            }
+            (*x, *y)
+        }
+    };
+    Ok((point, resource))
+}
+
+fn move_to_windows_pointer_target(
+    resources: &crate::windows_resource_owner::Owner,
+    prepared: &crate::platform::remote_observation::Prepared,
+    scope: &nickel_remote_control::leases::ResourceScope,
+    target: &nickel_remote_control::pointer::PointerTarget,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    let (point, _) = resolve_windows_pointer_point(resources, scope, target, x, y)?;
+    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+    prepared.revalidate()?;
+    let (confirmed, _) = resolve_windows_pointer_point(resources, scope, target, x, y)?;
+    if confirmed != point {
+        return Err("Windows pointer target changed during movement".into());
+    }
+    Ok(())
 }
 enum OwnerRequest {
     Local(LocalRequest),
@@ -2160,13 +2221,12 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         y: i32,
         action: nickel_remote_control::pointer::PointerAction,
     ) -> Result<(), String> {
-        let nickel_remote_control::pointer::PointerTarget::Window {
-            window_id: id,
-            generation,
-        } = target
-        else {
-            return Err("non-window pointer targets are unavailable on Windows".into());
-        };
+        if matches!(
+            target,
+            nickel_remote_control::pointer::PointerTarget::Surface { .. }
+        ) {
+            return Err("Nickel-surface pointer targets are unavailable on Windows".into());
+        }
         let _admission = crate::platform::remote_observation::Admission::acquire()?;
         let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
             &permit,
@@ -2178,8 +2238,7 @@ impl DesktopAuthority for WindowsDesktopAuthority {
                 permit,
                 prepared,
                 request: PointerOwnerAction {
-                    id,
-                    generation,
+                    target,
                     x,
                     y,
                     action,
@@ -2849,9 +2908,7 @@ struct WindowsKeyboardHold {
 struct WindowsPointerHold {
     authority: nickel_remote_control::HeldInput,
     button: nickel_remote_control::pointer::PointerButton,
-    window_id: String,
-    generation: u64,
-    native: usize,
+    target: nickel_remote_control::pointer::PointerTarget,
     deadline: Instant,
 }
 struct IndicatorSurface {
@@ -4932,10 +4989,7 @@ impl WindowsRemoteControl {
         let expired = self.pointer_hold.as_ref().is_some_and(|held| {
             Instant::now() >= held.deadline
                 || held.authority.check_live().is_err()
-                || self
-                    .resources
-                    .window(&held.window_id, held.generation)
-                    .is_none_or(|window| window.native != held.native)
+                || !self.resources.pointer_target_identity_is_live(&held.target)
         });
         if expired {
             crate::windows_remote_input::release_all();
@@ -5858,19 +5912,15 @@ impl WindowsRemoteControl {
         request: PointerOwnerAction,
     ) -> Result<(), String> {
         let PointerOwnerAction {
-            id,
-            generation,
+            target,
             x,
             y,
             action,
         } = request;
         self.reconcile_prepared_resources(&permit, &mut prepared)?;
         let scope = permit.resource_scope()?;
-        let (window, evidence) = self
-            .resources
-            .window_resource(&scope, &id, generation)
-            .ok_or("Windows resource is unavailable")?;
-        let native = window.native;
+        let (_, target_resource) =
+            resolve_windows_pointer_point(&self.resources, &scope, &target, x, y)?;
 
         match action {
             nickel_remote_control::pointer::PointerAction::Move
@@ -5884,32 +5934,42 @@ impl WindowsRemoteControl {
                     return Err("local or remote input is already active".into());
                 }
                 let input_epoch = local_input_epoch();
-                permit.with_input(&evidence, || {
+                permit.with_input(target_resource.evidence(), || {
                     if local_input_epoch() != input_epoch {
                         return Err("local input cancelled the pointer transaction".into());
                     }
-                    let point = crate::windows_remote_input::target_point(native, x, y)?;
-                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    move_to_windows_pointer_target(
+                        &self.resources,
+                        &prepared,
+                        &scope,
+                        &target,
+                        x,
+                        y,
+                    )?;
                     if local_input_epoch() != input_epoch {
                         return Err("local input interrupted the pointer transaction".into());
                     }
                     match action {
                         nickel_remote_control::pointer::PointerAction::Move => Ok(()),
                         nickel_remote_control::pointer::PointerAction::Click { button } => {
-                            crate::windows_remote_input::target_point(native, x, y)?;
                             crate::windows_remote_input::click(button, 1)
                         }
                         nickel_remote_control::pointer::PointerAction::DoubleClick { button } => {
-                            crate::windows_remote_input::target_point(native, x, y)?;
-                            crate::windows_remote_input::click(button, 2)
+                            crate::windows_remote_input::click(button, 1)?;
+                            move_to_windows_pointer_target(
+                                &self.resources,
+                                &prepared,
+                                &scope,
+                                &target,
+                                x,
+                                y,
+                            )?;
+                            crate::windows_remote_input::click(button, 1)
                         }
                         nickel_remote_control::pointer::PointerAction::Scroll {
                             horizontal_v120,
                             vertical_v120,
-                        } => {
-                            crate::windows_remote_input::target_point(native, x, y)?;
-                            crate::windows_remote_input::scroll(horizontal_v120, vertical_v120)
-                        }
+                        } => crate::windows_remote_input::scroll(horizontal_v120, vertical_v120),
                         _ => unreachable!("held pointer actions use the other owner branch"),
                     }?;
                     if local_input_epoch() != input_epoch {
@@ -5927,12 +5987,18 @@ impl WindowsRemoteControl {
                     return Err("local or remote input is already active".into());
                 }
                 let input_epoch = local_input_epoch();
-                let authority = permit.begin_input(&evidence, || {
+                let authority = permit.begin_input(target_resource.evidence(), || {
                     if local_input_epoch() != input_epoch {
                         return Err("local input cancelled the pointer gesture".into());
                     }
-                    let point = crate::windows_remote_input::target_point(native, x, y)?;
-                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    move_to_windows_pointer_target(
+                        &self.resources,
+                        &prepared,
+                        &scope,
+                        &target,
+                        x,
+                        y,
+                    )?;
                     if local_input_epoch() != input_epoch {
                         return Err("local input interrupted the pointer gesture".into());
                     }
@@ -5946,9 +6012,7 @@ impl WindowsRemoteControl {
                 self.pointer_hold = Some(WindowsPointerHold {
                     authority,
                     button,
-                    window_id: id.clone(),
-                    generation,
-                    native,
+                    target,
                     deadline: Instant::now() + Duration::from_secs(30),
                 });
                 Ok(())
@@ -5958,20 +6022,22 @@ impl WindowsRemoteControl {
                     .pointer_hold
                     .as_mut()
                     .ok_or("no Windows pointer gesture is active")?;
-                if held.window_id != id
-                    || held.generation != generation
-                    || held.native != native
-                    || !held.authority.owned_by(&permit)
-                {
+                if held.target != target || !held.authority.owned_by(&permit) {
                     return Err("request does not own this input gesture".into());
                 }
                 let input_epoch = local_input_epoch();
-                permit.continue_input(&held.authority, &evidence, || {
+                permit.continue_input(&held.authority, target_resource.evidence(), || {
                     if local_input_epoch() != input_epoch {
                         return Err("local input cancelled the pointer gesture".into());
                     }
-                    let point = crate::windows_remote_input::target_point(native, x, y)?;
-                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    move_to_windows_pointer_target(
+                        &self.resources,
+                        &prepared,
+                        &scope,
+                        &target,
+                        x,
+                        y,
+                    )?;
                     if local_input_epoch() != input_epoch {
                         crate::windows_remote_input::release_all();
                         return Err("local input interrupted the pointer gesture".into());
@@ -5983,12 +6049,10 @@ impl WindowsRemoteControl {
             }
             nickel_remote_control::pointer::PointerAction::DragEnd
             | nickel_remote_control::pointer::PointerAction::DragCancel => {
-                let owned = self.pointer_hold.as_ref().is_some_and(|held| {
-                    held.window_id == id
-                        && held.generation == generation
-                        && held.native == native
-                        && held.authority.owned_by(&permit)
-                });
+                let owned = self
+                    .pointer_hold
+                    .as_ref()
+                    .is_some_and(|held| held.target == target && held.authority.owned_by(&permit));
                 if !owned {
                     return Err("request does not own this input gesture".into());
                 }
@@ -5998,21 +6062,28 @@ impl WindowsRemoteControl {
                     nickel_remote_control::pointer::PointerAction::DragCancel
                 );
                 let input_epoch = local_input_epoch();
-                let result = permit.continue_input(&held.authority, &evidence, || {
-                    if !cancelled {
-                        if local_input_epoch() != input_epoch {
-                            return Err("local input cancelled the pointer gesture".into());
+                let result =
+                    permit.continue_input(&held.authority, target_resource.evidence(), || {
+                        if !cancelled {
+                            if local_input_epoch() != input_epoch {
+                                return Err("local input cancelled the pointer gesture".into());
+                            }
+                            move_to_windows_pointer_target(
+                                &self.resources,
+                                &prepared,
+                                &scope,
+                                &target,
+                                x,
+                                y,
+                            )?;
                         }
-                        let point = crate::windows_remote_input::target_point(native, x, y)?;
-                        crate::windows_remote_input::move_pointer(point.0, point.1)?;
-                    }
-                    let released = crate::windows_remote_input::release_button(held.button);
-                    if !cancelled && local_input_epoch() != input_epoch {
-                        crate::windows_remote_input::release_all();
-                        return Err("local input interrupted the pointer gesture".into());
-                    }
-                    released
-                });
+                        let released = crate::windows_remote_input::release_button(held.button);
+                        if !cancelled && local_input_epoch() != input_epoch {
+                            crate::windows_remote_input::release_all();
+                            return Err("local input interrupted the pointer gesture".into());
+                        }
+                        released
+                    });
                 if result.is_err() {
                     crate::windows_remote_input::release_all();
                 }
@@ -8190,7 +8261,6 @@ fn windows_unavailable_diagnostic_domains()
         Domain::WindowsPerSurfaceRendererCacheAttribution,
         Domain::WindowsPreviewPixelReadback,
         Domain::WindowsOutputPixelCapture,
-        Domain::WindowsNonWindowPointerTargets,
         Domain::WindowsSettingsWorker,
     ]
 }

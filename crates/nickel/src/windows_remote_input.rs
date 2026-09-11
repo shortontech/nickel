@@ -16,8 +16,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEINPUT, SendInput, VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GA_ROOT, GetAncestor, GetClientRect, GetForegroundWindow, GetSystemMetrics, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WindowFromPoint,
+    GA_ROOT, GetAncestor, GetClientRect, GetCursorPos, GetDesktopWindow, GetForegroundWindow,
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    WindowFromPoint,
 };
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
@@ -168,11 +169,32 @@ pub(crate) fn foreground_is(native: usize) -> bool {
     unsafe { GetForegroundWindow().0 as usize == native }
 }
 
-fn absolute_axis(value: i32, origin: i32, length: i32) -> Result<i32, String> {
-    if length <= 1 || value < origin || i64::from(value) >= i64::from(origin) + i64::from(length) {
-        return Err("Windows pointer coordinate is outside the virtual desktop".into());
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GlobalPointerHit {
+    Desktop,
+    Window(usize),
+}
+
+pub(crate) fn global_pointer_hit(screen_x: i32, screen_y: i32) -> Result<GlobalPointerHit, String> {
+    let point = POINT {
+        x: screen_x,
+        y: screen_y,
+    };
+    // SAFETY: WindowFromPoint, GetAncestor, and GetDesktopWindow are read-only
+    // queries using a fully initialized physical virtual-desktop point.
+    let hit = unsafe { WindowFromPoint(point) };
+    if hit.0.is_null() {
+        return Err("Windows pointer target is unavailable or changed".into());
     }
-    Ok(((i64::from(value - origin) * 65_535) / i64::from(length - 1)) as i32)
+    let root = unsafe { GetAncestor(hit, GA_ROOT) };
+    if root.0.is_null() {
+        return Err("Windows pointer target is unavailable or changed".into());
+    }
+    if root == unsafe { GetDesktopWindow() } {
+        Ok(GlobalPointerHit::Desktop)
+    } else {
+        Ok(GlobalPointerHit::Window(root.0 as usize))
+    }
 }
 
 pub(crate) fn target_point(native: usize, x: i32, y: i32) -> Result<(i32, i32), String> {
@@ -213,8 +235,8 @@ pub(crate) fn move_pointer(screen_x: i32, screen_y: i32) -> Result<(), String> {
             GetSystemMetrics(SM_CYVIRTUALSCREEN),
         )
     };
-    let x = absolute_axis(screen_x, left, width)?;
-    let y = absolute_axis(screen_y, top, height)?;
+    let x = crate::windows_resource_owner::absolute_pointer_axis(screen_x, left, width)?;
+    let y = crate::windows_resource_owner::absolute_pointer_axis(screen_y, top, height)?;
     let input = mouse_input(
         x,
         y,
@@ -223,6 +245,14 @@ pub(crate) fn move_pointer(screen_x: i32, screen_y: i32) -> Result<(), String> {
     );
     if send(&[input]) != 1 {
         return Err("Windows rejected pointer movement".into());
+    }
+    let mut observed = POINT::default();
+    // SAFETY: GetCursorPos writes the current physical virtual-desktop point to
+    // initialized storage. Equality confirms the requested movement settled.
+    unsafe { GetCursorPos(&mut observed) }
+        .map_err(|_| "Windows pointer movement could not be confirmed")?;
+    if (observed.x, observed.y) != (screen_x, screen_y) {
+        return Err("Windows pointer movement was not confirmed".into());
     }
     Ok(())
 }
@@ -337,19 +367,5 @@ pub(crate) fn release_all() {
     let sent_buttons = send(&releases[key_count..]);
     for bit in button_ids.into_iter().take(sent_buttons) {
         HELD_BUTTONS.fetch_and(!bit, Ordering::AcqRel);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::absolute_axis;
-
-    #[test]
-    fn absolute_pointer_axis_handles_negative_virtual_desktops_and_edges() {
-        assert_eq!(absolute_axis(-1920, -1920, 3840).unwrap(), 0);
-        assert_eq!(absolute_axis(1919, -1920, 3840).unwrap(), 65_535);
-        assert!(absolute_axis(-1921, -1920, 3840).is_err());
-        assert!(absolute_axis(1920, -1920, 3840).is_err());
-        assert!(absolute_axis(0, 0, 1).is_err());
     }
 }

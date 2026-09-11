@@ -5,6 +5,7 @@ use nickel_remote_control::{
     WindowSummary,
     diagnostics::{MAX_DIAGNOSTIC_OUTPUTS, MAX_DIAGNOSTIC_WINDOWS, OutputDiagnostic},
     leases::{ResourceEvidence, ResourceId, ResourceScope, ResourceScopeAuthority},
+    pointer::PointerTarget,
     window_actions::WindowAction,
 };
 use std::collections::BTreeMap;
@@ -78,8 +79,46 @@ impl Rect {
             && i64::from(self.y) < i64::from(other.y) + i64::from(other.height)
             && i64::from(other.y) < i64::from(self.y) + i64::from(self.height)
     }
+    fn contains_point(self, x: i32, y: i32) -> bool {
+        self.valid()
+            && i64::from(x) >= i64::from(self.x)
+            && i64::from(x) < i64::from(self.x) + i64::from(self.width)
+            && i64::from(y) >= i64::from(self.y)
+            && i64::from(y) < i64::from(self.y) + i64::from(self.height)
+    }
     fn array(self) -> [i32; 4] {
         [self.x, self.y, self.width as i32, self.height as i32]
+    }
+}
+
+/// Convert one physical virtual-desktop axis to the normalized coordinate
+/// accepted by an absolute `SendInput` mouse event. Kept in owner policy so
+/// negative-origin and edge behavior remains portable-testable.
+pub(crate) fn absolute_pointer_axis(value: i32, origin: i32, length: i32) -> Result<i32, String> {
+    if length <= 1 || value < origin || i64::from(value) >= i64::from(origin) + i64::from(length) {
+        return Err("Windows pointer coordinate is outside the virtual desktop".into());
+    }
+    Ok((((i64::from(value) - i64::from(origin)) * 65_535) / i64::from(length - 1)) as i32)
+}
+
+pub(crate) enum PointerTargetResource<'a> {
+    Window {
+        native: usize,
+        evidence: ResourceEvidence<'a>,
+    },
+    Global {
+        x: i32,
+        y: i32,
+        confined_output: Option<&'a ResourceId>,
+        evidence: ResourceEvidence<'a>,
+    },
+}
+
+impl PointerTargetResource<'_> {
+    pub(crate) fn evidence(&self) -> &ResourceEvidence<'_> {
+        match self {
+            Self::Window { evidence, .. } | Self::Global { evidence, .. } => evidence,
+        }
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -424,6 +463,129 @@ impl Owner {
             protected: window.protected,
         };
         scope.covers(&evidence).then_some((window, evidence))
+    }
+
+    /// Resolve the caller's coordinate space through exact owner identities.
+    /// Native hit testing remains a separate final check because stacking can
+    /// change after this pure policy decision.
+    pub(crate) fn pointer_target_resource<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+        target: &PointerTarget,
+        x: i32,
+        y: i32,
+    ) -> Option<PointerTargetResource<'a>> {
+        match target {
+            PointerTarget::Window {
+                window_id,
+                generation,
+            } => {
+                let (window, evidence) = self.window_resource(scope, window_id, *generation)?;
+                Some(PointerTargetResource::Window {
+                    native: window.native,
+                    evidence,
+                })
+            }
+            PointerTarget::Surface { .. } => None,
+            PointerTarget::Output {
+                output_id,
+                generation,
+            } => {
+                let record = self.outputs.values().find(|record| {
+                    record.identity.id == *output_id
+                        && record.identity.generation == *generation
+                        && record.value.bounds.contains_point(x, y)
+                })?;
+                let evidence = ResourceEvidence {
+                    surface: None,
+                    window: None,
+                    verified_application: None,
+                    output: Some(&record.identity),
+                    authorized_surface_ancestors: &[],
+                    protected: false,
+                };
+                scope
+                    .covers(&evidence)
+                    .then_some(PointerTargetResource::Global {
+                        x,
+                        y,
+                        confined_output: Some(&record.identity),
+                        evidence,
+                    })
+            }
+            PointerTarget::Desktop => {
+                if scope != &ResourceScope::FullSession {
+                    return None;
+                }
+                let mut outputs = self
+                    .outputs
+                    .values()
+                    .filter(|record| record.value.bounds.contains_point(x, y));
+                let output = outputs.next()?;
+                if outputs.next().is_some() {
+                    return None;
+                }
+                Some(PointerTargetResource::Global {
+                    x,
+                    y,
+                    confined_output: None,
+                    evidence: ResourceEvidence {
+                        surface: None,
+                        window: None,
+                        verified_application: None,
+                        output: Some(&output.identity),
+                        authorized_surface_ancestors: &[],
+                        protected: false,
+                    },
+                })
+            }
+        }
+    }
+
+    pub(crate) fn pointer_target_identity_is_live(&self, target: &PointerTarget) -> bool {
+        match target {
+            PointerTarget::Window {
+                window_id,
+                generation,
+            } => self.window(window_id, *generation).is_some(),
+            PointerTarget::Surface { .. } => false,
+            PointerTarget::Output {
+                output_id,
+                generation,
+            } => self.outputs.values().any(|record| {
+                record.identity.id == *output_id && record.identity.generation == *generation
+            }),
+            PointerTarget::Desktop => true,
+        }
+    }
+
+    /// Accept a final native hit only when it is desktop background or an
+    /// exact, ordinary, unprotected window covered by the live scope. Unknown
+    /// HWNDs include Nickel trusted chrome and protected/excluded processes.
+    pub(crate) fn pointer_hit_allowed(
+        &self,
+        scope: &ResourceScope,
+        confined_output: Option<&ResourceId>,
+        hit_window: Option<usize>,
+    ) -> bool {
+        let Some(native) = hit_window else {
+            return true;
+        };
+        let Some(record) = self.windows.get(&native) else {
+            return false;
+        };
+        let output = self.output_for(record.value.bounds);
+        if confined_output.is_some() && output != confined_output {
+            return false;
+        }
+        scope.covers(&ResourceEvidence {
+            surface: None,
+            window: Some(&record.identity),
+            verified_application: record.value.application.as_deref(),
+            output,
+            authorized_surface_ancestors: &[],
+            protected: record.value.protected,
+        })
     }
     pub(crate) fn windows<'a>(
         &'a self,
@@ -1324,5 +1486,126 @@ mod tests {
                 ..ordinary
             },
         ]));
+    }
+
+    #[test]
+    fn absolute_pointer_axis_handles_negative_virtual_desktops_and_edges() {
+        assert_eq!(absolute_pointer_axis(-1920, -1920, 3840).unwrap(), 0);
+        assert_eq!(absolute_pointer_axis(1919, -1920, 3840).unwrap(), 65_535);
+        assert_eq!(absolute_pointer_axis(0, -1920, 3840).unwrap(), 32_776);
+        assert_eq!(
+            absolute_pointer_axis(-2, i32::MIN, i32::MAX).unwrap(),
+            65_535
+        );
+        assert!(absolute_pointer_axis(-1921, -1920, 3840).is_err());
+        assert!(absolute_pointer_axis(1920, -1920, 3840).is_err());
+        assert!(absolute_pointer_axis(0, 0, 1).is_err());
+    }
+
+    #[test]
+    fn output_pointer_target_requires_exact_generation_and_global_membership() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(11, -500), window(22, 100)],
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let left = owner
+            .outputs(&ResourceScope::FullSession)
+            .find(|(output, _)| output.name == "left")
+            .unwrap()
+            .0;
+        let scope = ResourceScope::Output(ResourceId {
+            id: left.name.clone(),
+            generation: left.generation,
+        });
+        let exact = PointerTarget::Output {
+            output_id: left.name.clone(),
+            generation: left.generation,
+        };
+
+        assert!(matches!(
+            owner.pointer_target_resource(&scope, &exact, -1000, 0),
+            Some(PointerTargetResource::Global { x: -1000, y: 0, .. })
+        ));
+        assert!(
+            owner
+                .pointer_target_resource(&scope, &exact, -1, 999)
+                .is_some()
+        );
+        assert!(
+            owner
+                .pointer_target_resource(&scope, &exact, 0, 10)
+                .is_none()
+        );
+        assert!(
+            owner
+                .pointer_target_resource(
+                    &scope,
+                    &PointerTarget::Output {
+                        output_id: left.name,
+                        generation: left.generation + 1,
+                    },
+                    -500,
+                    10,
+                )
+                .is_none()
+        );
+        assert!(owner.pointer_target_identity_is_live(&exact));
+        owner
+            .reconcile(
+                vec![window(11, -500), window(22, 100)],
+                vec![output(3, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        assert!(!owner.pointer_target_identity_is_live(&exact));
+    }
+
+    #[test]
+    fn global_pointer_hits_fail_closed_for_unknown_protected_or_cross_output_windows() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(11, -500), window(22, 100)],
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let outputs: Vec<_> = owner
+            .outputs(&ResourceScope::FullSession)
+            .map(|(output, _)| output)
+            .collect();
+        let left = outputs.iter().find(|output| output.name == "left").unwrap();
+        let left_id = ResourceId {
+            id: left.name.clone(),
+            generation: left.generation,
+        };
+        let left_scope = ResourceScope::Output(left_id.clone());
+
+        assert!(owner.pointer_hit_allowed(&left_scope, Some(&left_id), None));
+        assert!(owner.pointer_hit_allowed(&left_scope, Some(&left_id), Some(11)));
+        assert!(!owner.pointer_hit_allowed(&left_scope, Some(&left_id), Some(22)));
+        assert!(!owner.pointer_hit_allowed(&left_scope, Some(&left_id), Some(999)));
+        assert!(owner.pointer_hit_allowed(&ResourceScope::FullSession, None, Some(22)));
+
+        let desktop = PointerTarget::Desktop;
+        assert!(
+            owner
+                .pointer_target_resource(&ResourceScope::FullSession, &desktop, 100, 10)
+                .is_some()
+        );
+        assert!(
+            owner
+                .pointer_target_resource(&left_scope, &desktop, -500, 10)
+                .is_none()
+        );
+        assert!(
+            owner
+                .pointer_target_resource(&ResourceScope::FullSession, &desktop, 2000, 10)
+                .is_none()
+        );
     }
 }
