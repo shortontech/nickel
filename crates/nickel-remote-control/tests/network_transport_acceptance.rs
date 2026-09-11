@@ -161,15 +161,10 @@ fn server_child(once: bool) {
                 let origin = state
                     .client_origin(client)
                     .expect("authenticated client origin");
-                let capabilities = state
-                    .granted_clients()
-                    .find(|grant| grant.id == client)
-                    .unwrap()
-                    .capabilities
-                    .len();
+                assert!(state.granted_clients().any(|grant| grant.id == client));
                 emit(serde_json::json!({
                     "kind":"origin", "address":origin.address.to_string(), "tls":origin.tls,
-                    "capabilities":capabilities
+                    "capabilities":0
                 }));
             }
             Some("revoke") => {

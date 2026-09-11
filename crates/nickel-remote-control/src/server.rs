@@ -754,14 +754,16 @@ async fn pair_status(
             capabilities: issued.capabilities,
         }));
     }
-    if let Some(grant) = control
+    if control
         .granted_clients()
-        .find(|client| client.id == request.client_id)
+        .any(|client| client.id == request.client_id)
     {
         return Ok(AxumJson(PairStatusResponse {
             state: "approved",
             token: None,
-            capabilities: grant.capabilities,
+            // Retained for pairing-protocol compatibility. Authentication grants identity only;
+            // desktop authority is represented exclusively by resource leases.
+            capabilities: Vec::new(),
         }));
     }
     Ok(AxumJson(PairStatusResponse {
@@ -4298,10 +4300,12 @@ mod tests {
         let status_body = serde_json::json!({ "client_id": client_id }).to_string();
         let approved = response_json(&post_json("/pair/status", &status_body));
         assert_eq!(approved["state"], "approved");
+        assert_eq!(approved["capabilities"], serde_json::json!([]));
         let token = approved["token"].as_str().unwrap();
         assert_eq!(token.len(), 64);
+        assert!(control.lock().unwrap().authenticate(client_id, token));
         assert!(
-            control
+            !control
                 .lock()
                 .unwrap()
                 .authorize(client_id, token, Capability::Observe)
@@ -4310,6 +4314,7 @@ mod tests {
         let claimed_again = response_json(&post_json("/pair/status", &status_body));
         assert_eq!(claimed_again["state"], "approved");
         assert!(claimed_again["token"].is_null());
+        assert_eq!(claimed_again["capabilities"], serde_json::json!([]));
         server.stop();
     }
 }

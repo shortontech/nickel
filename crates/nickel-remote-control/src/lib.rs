@@ -1,7 +1,8 @@
 //! Security authority for Nickel's optional remote-control service.
 //!
 //! Transport adapters may present pairing challenges and MCP requests, but only this state
-//! machine can turn a locally approved client into a scoped capability.
+//! machine can authenticate a locally approved client and issue a separately approved resource
+//! lease. Client credentials never carry desktop authority.
 
 pub mod device_settings;
 
@@ -1013,7 +1014,6 @@ pub struct PendingClient {
 pub struct GrantedClient {
     pub id: String,
     pub label: String,
-    pub capabilities: Vec<Capability>,
     pub remembered: bool,
     token: [u8; TOKEN_BYTES],
     token_claimable: bool,
@@ -1044,7 +1044,6 @@ pub struct ConnectionAuditEvent {
 pub struct GrantedClientSummary {
     pub id: String,
     pub label: String,
-    pub capabilities: Vec<Capability>,
     pub remembered: bool,
 }
 
@@ -1200,7 +1199,6 @@ impl ControlPlane {
             GrantedClient {
                 id: id.clone(),
                 label: label.to_owned(),
-                capabilities: Vec::new(),
                 remembered: false,
                 token,
                 token_claimable: false,
@@ -1621,7 +1619,6 @@ impl ControlPlane {
         self.granted.values().map(|client| GrantedClientSummary {
             id: client.id.clone(),
             label: client.label.clone(),
-            capabilities: client.capabilities.clone(),
             remembered: client.remembered,
         })
     }
@@ -1713,10 +1710,14 @@ impl ControlPlane {
         if approval == Approval::Remember {
             return Err(ControlError::PersistentApprovalUnavailable);
         }
-        let mut capabilities = locally_confirmed_capabilities;
-        capabilities.sort();
-        capabilities.dedup();
-        if capabilities
+        // Older local-control clients supplied a capability selection with identity approval.
+        // Keep validating that compatibility field so an old approval cannot broaden what the
+        // peer requested, but never retain it or turn it into desktop authority. Resource leases
+        // are the sole authority for every desktop operation.
+        let mut legacy_capabilities = locally_confirmed_capabilities;
+        legacy_capabilities.sort();
+        legacy_capabilities.dedup();
+        if legacy_capabilities
             .iter()
             .any(|capability| !pending.requested.contains(capability))
         {
@@ -1728,14 +1729,15 @@ impl ControlPlane {
         let issued = IssuedCapability {
             client_id: pending.id.clone(),
             token: hex(&token),
-            capabilities: capabilities.clone(),
+            // Kept on the wire for older pairing clients. Identity approval grants no desktop
+            // capabilities; the field is therefore always empty.
+            capabilities: Vec::new(),
         };
         self.granted.insert(
             pending.id.clone(),
             GrantedClient {
                 id: pending.id,
                 label: pending.label,
-                capabilities,
                 remembered: false,
                 token,
                 token_claimable: true,
@@ -1756,18 +1758,16 @@ impl ControlPlane {
         Some(IssuedCapability {
             client_id: grant.id.clone(),
             token: hex(&grant.token),
-            capabilities: grant.capabilities.clone(),
+            capabilities: Vec::new(),
         })
     }
 
-    pub fn authorize(&self, client_id: &str, token_hex: &str, capability: Capability) -> bool {
-        if !self.enabled() {
-            return false;
-        }
-        let candidate = decode_hex::<TOKEN_BYTES>(token_hex).unwrap_or([0; TOKEN_BYTES]);
-        self.granted.get(client_id).is_some_and(|grant| {
-            bool::from(grant.token.ct_eq(&candidate)) && grant.capabilities.contains(&capability)
-        })
+    /// Compatibility check for the capability-vector API that predated resource leases.
+    ///
+    /// Authentication alone never authorizes a desktop operation. Callers must use a
+    /// [`DesktopPermit`] backed by an active resource lease instead.
+    pub fn authorize(&self, _client_id: &str, _token_hex: &str, _capability: Capability) -> bool {
+        false
     }
 
     pub fn authenticate(&self, client_id: &str, token_hex: &str) -> bool {
@@ -3636,7 +3636,7 @@ mod tests {
     }
 
     #[test]
-    fn defaults_disabled_and_pairing_never_grants_before_local_approval() {
+    fn pairing_approves_identity_without_granting_legacy_desktop_capabilities() {
         let mut plane = ControlPlane::default();
         assert_eq!(plane.start_pairing(10), Err(ControlError::Disabled));
         plane.set_enabled(true);
@@ -3656,7 +3656,14 @@ mod tests {
             .approve(&pending.id, Approval::AllowOnce, vec![Capability::Observe])
             .unwrap()
             .unwrap();
-        assert!(plane.authorize(&pending.id, &issued.token, Capability::Observe));
+        assert!(issued.capabilities.is_empty());
+        assert!(plane.authenticate(&pending.id, &issued.token));
+        assert!(
+            plane
+                .granted_clients()
+                .all(|client| client.id != pending.id || !client.remembered)
+        );
+        assert!(!plane.authorize(&pending.id, &issued.token, Capability::Observe));
         assert!(!plane.authorize(&pending.id, &issued.token, Capability::PointerInput));
     }
 

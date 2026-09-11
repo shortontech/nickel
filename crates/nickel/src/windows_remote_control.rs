@@ -7779,11 +7779,9 @@ impl WindowsRemoteControl {
                     blocked: control.lease_requests().is_blocked(&client.id),
                     id: client.id,
                     label: client.label,
-                    capabilities: client
-                        .capabilities
-                        .into_iter()
-                        .map(remote_capability)
-                        .collect(),
+                    // Kept empty for compatibility with older Settings/session protocol peers.
+                    // Resource leases are the only desktop authority.
+                    capabilities: Vec::new(),
                     remembered: client.remembered,
                 },
             )

@@ -123,6 +123,8 @@ pub enum Command {
     DecideRemoteClient {
         client_id: String,
         decision: RemoteClientDecision,
+        /// Legacy compatibility field. Identity approval grants no desktop authority; current
+        /// clients send an empty vector and resource access requires a separate lease.
         capabilities: Vec<RemoteCapability>,
     },
     RevokeRemoteClient {
@@ -1205,6 +1207,9 @@ pub struct RemoteClientOrigin {
 pub struct RemoteGrantedClientSnapshot {
     pub id: String,
     pub label: String,
+    /// Legacy compatibility field, always empty. See the active and pending lease collections
+    /// for desktop authority.
+    #[serde(default)]
     pub capabilities: Vec<RemoteCapability>,
     pub remembered: bool,
     #[serde(default)]

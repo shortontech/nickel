@@ -1527,17 +1527,13 @@ impl SettingsApp {
                 client_id,
                 decision,
             } => {
-                let capabilities =
-                    if decision == nickel_session_protocol::RemoteClientDecision::Deny {
-                        Vec::new()
-                    } else {
-                        vec![nickel_session_protocol::RemoteCapability::Observe]
-                    };
                 match session_request(SessionRequest::Command(
                     SessionCommand::DecideRemoteClient {
                         client_id,
                         decision,
-                        capabilities,
+                        // Protocol compatibility only. Pairing approves an authenticated identity;
+                        // every desktop operation needs a separately approved resource lease.
+                        capabilities: Vec::new(),
                     },
                 )) {
                     Ok(ServerMessage::RemoteControl(runtime)) => {
@@ -5834,9 +5830,19 @@ mod tests {
                 .is_empty()
         );
         assert!(frame.semantic_nodes().iter().all(|node| {
-            node.name.as_deref() != Some("Allow once (Keyboard Input)")
+            node.name.as_deref() != Some("Allow once (Observe)")
+                && node.name.as_deref() != Some("Allow once (Keyboard Input)")
                 && node.name.as_deref() != Some("Remember (Keyboard Input)")
+                && node.name.as_deref() != Some("Requested")
         }));
+        assert_eq!(
+            frame
+                .semantic_nodes()
+                .iter()
+                .filter(|node| node.name.as_deref() == Some("Allow client"))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -905,20 +905,11 @@ impl SettingsApp {
         let pending_clients = self.remote_control_runtime.pending_clients.iter().fold(
             Column::new().fill_width().gap(12.0),
             |column, client| {
-                let requested = client
-                    .requested
-                    .iter()
-                    .map(|capability| format!("{capability:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let can_observe = client
-                    .requested
-                    .contains(&nickel_session_protocol::RemoteCapability::Observe);
                 column.child(
                     SettingsCard::titled(
                         theme,
                         format!("{} wants to connect", client.label),
-                        "Unverified client identity - local approval required",
+                        "Approve this client identity locally. Desktop control requires a separate resource lease.",
                     )
                     .child(SettingsRow::new(
                         theme,
@@ -930,7 +921,6 @@ impl SettingsApp {
                         "Verified client identity",
                         "Unavailable until this connection is approved",
                     ))
-                    .child(SettingsRow::new(theme, "Requested", requested))
                     .child(ui! { <Row gap={8.0}>
                         {Button::semantic(
                             theme,
@@ -947,9 +937,9 @@ impl SettingsApp {
                                 client_id: client.id.clone(),
                                 decision: nickel_session_protocol::RemoteClientDecision::AllowOnce,
                             },
-                            "Allow once (Observe)",
+                            "Allow client",
                             ButtonPresentation::Primary,
-                        ).width(180.0).enabled(can_observe)}
+                        ).width(180.0)}
                     </Row> }),
                 )
             },
@@ -1099,12 +1089,6 @@ impl SettingsApp {
         let granted_clients = self.remote_control_runtime.granted_clients.iter().fold(
             Column::new().fill_width().gap(12.0),
             |column, client| {
-                let granted = client
-                    .capabilities
-                    .iter()
-                    .map(|capability| format!("{capability:?}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
                 column.child(
                     SettingsCard::titled(
                         theme,
@@ -1122,7 +1106,6 @@ impl SettingsApp {
                         "Verified client identity",
                         client.id.clone(),
                     ))
-                    .child(SettingsRow::new(theme, "Granted", granted))
                     .child(SettingsRow::new(
                         theme,
                         "Last authenticated peer",
