@@ -7,9 +7,10 @@
 //! production source classification but is not evidence from a physical keyboard.
 
 use nickel_session_protocol::{
-    ClientEnvelope, Command, InputState, Query, RemoteControlEffectiveState, RemoteLeaseTransition,
-    RemoteOperationOutcome, Request, ServerEnvelope, ServerMessage, TestEmergencyControlSide,
-    TestEmergencyControlSource, TestInput, decode, encode,
+    ClientEnvelope, Command, InputState, Query, RemoteControlEffectiveState, RemoteControlSnapshot,
+    RemoteLeaseAction, RemoteLeaseTransition, RemoteOperationOutcome, RemoteResourceScope, Request,
+    ServerEnvelope, ServerMessage, TestEmergencyControlSide, TestEmergencyControlSource, TestInput,
+    decode, encode,
 };
 use serde_json::{Value, json};
 use std::{
@@ -118,7 +119,7 @@ fn run() -> Result<Outcome, String> {
     }
     result?;
     println!(
-        "PASS: production pre-lease metrics, complete desktop-tool denial, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
+        "PASS: production pre-lease metrics, complete desktop-tool denial, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
     );
     Ok(Outcome::Passed)
 }
@@ -216,55 +217,14 @@ fn exercise(
         desktop_tools.keys().map(String::as_str),
     )?;
 
-    let request_result = mcp_call(
+    let bootstrap = approve_scope(
+        &environment,
         address,
         &identity,
-        "request_control_lease",
-        json!({
-            "scope": {"kind": "full_session"},
-            "duration_seconds": 1200,
-            "allow_resumption": false,
-            "full_debug": true
-        }),
+        RemoteResourceScope::FullSession,
+        true,
     )?;
-    require_tool_success("request_control_lease", &request_result)?;
-    if !request_result
-        .to_string()
-        .contains("pending_local_approval")
-    {
-        return Err(format!(
-            "lease request did not reach local approval: {request_result}"
-        ));
-    }
-
-    let deadline = Instant::now() + DEADLINE;
-    let pending = loop {
-        let snapshot = remote_snapshot(&environment)?;
-        if let Some(pending) = snapshot.pending_leases.first().cloned() {
-            break pending;
-        }
-        if Instant::now() >= deadline {
-            return Err("lease request did not appear in trusted local state".into());
-        }
-        thread::sleep(POLL);
-    };
-    let approved = session_message(
-        &environment,
-        Request::Command(Command::DecideRemoteLease {
-            pending_generation: pending.pending_generation,
-            client_id: pending.client_id,
-            request: pending.request,
-            allow: true,
-        }),
-    )?;
-    let ServerMessage::RemoteControl(approved) = approved else {
-        return Err(format!("local lease approval returned {approved:?}"));
-    };
-    let lease = approved
-        .active_leases
-        .first()
-        .ok_or("local approval did not create an active lease")?;
-    let lease_id = lease.lease_id;
+    let lease_id = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
 
     let trace_started = mcp_call(
         address,
@@ -383,6 +343,306 @@ fn exercise(
     Ok(())
 }
 
+/// The nested shell is a real production resource, not an ordinary application
+/// window. Do not fabricate window or executable identity to fill those scopes.
+fn exercise_scope_matrix(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    bootstrap: u64,
+) -> Result<u64, String> {
+    let response = session_message(
+        environment,
+        Request::Command(Command::SetLauncherVisible { visible: true }),
+    )?;
+    if response != ServerMessage::Ack {
+        return Err(format!("local launcher setup failed: {response:?}"));
+    }
+    let deadline = Instant::now() + DEADLINE;
+    let (launcher, panel) = loop {
+        let response = scope_call(
+            address,
+            identity,
+            "list_surfaces",
+            json!({"lease_id": bootstrap}),
+        )?;
+        let surfaces = response
+            .as_array()
+            .ok_or("surface inventory is not an array")?;
+        let launcher = surfaces
+            .iter()
+            .find(|surface| surface["role"] == "launcher");
+        let panel = surfaces.iter().find(|surface| surface["role"] == "panel");
+        if let (Some(launcher), Some(panel)) = (launcher, panel) {
+            break (launcher.clone(), panel.clone());
+        }
+        if Instant::now() >= deadline {
+            return Err("native launcher and panel did not become visible".into());
+        }
+        thread::sleep(POLL);
+    };
+    let surface = native_resource(&launcher, "id")?;
+    let outputs = scope_call(
+        address,
+        identity,
+        "list_outputs",
+        json!({"lease_id": bootstrap}),
+    )?;
+    let output = outputs["outputs"]
+        .as_array()
+        .and_then(|outputs| {
+            outputs
+                .iter()
+                .find(|output| output["name"] == launcher["output"])
+        })
+        .ok_or("launcher has no native output identity")?;
+    let output = native_resource(output, "name")?;
+    revoke_scope(environment, bootstrap)?;
+
+    let scopes = [
+        ("surface", RemoteResourceScope::Surface(surface.clone())),
+        ("output", RemoteResourceScope::Output(output)),
+        ("full_session", RemoteResourceScope::FullSession),
+    ];
+    let mut last_lease = None;
+    for (label, scope) in scopes {
+        let lease_id = approve_scope(
+            environment,
+            address,
+            identity,
+            scope.clone(),
+            label == "full_session",
+        )?;
+        let approval = remote_snapshot(environment)?;
+        require_unchanged_scope_approval(&approval, &approval, lease_id, &scope)?;
+        for iteration in 0..3 {
+            let inventory = scope_call(
+                address,
+                identity,
+                "list_surfaces",
+                json!({"lease_id": lease_id}),
+            )?;
+            let surfaces = inventory
+                .as_array()
+                .ok_or("scope inventory is not an array")?;
+            if !surfaces
+                .iter()
+                .any(|entry| entry["id"] == surface.id && entry["generation"] == surface.generation)
+            {
+                return Err(format!("{label} lost its authorized launcher"));
+            }
+            if label == "surface" && (surfaces.len() != 1 || surfaces[0]["id"] != surface.id) {
+                return Err("exact surface lease exposed another shell surface".into());
+            }
+            let inspect = json!({"lease_id": lease_id, "surface_id": surface.id, "generation": surface.generation});
+            let before = scope_call(address, identity, "inspect_surface", inspect.clone())?;
+            if before["surface"] != surface.id
+                || before["surface_generation"] != surface.generation
+                || before["tree_generation"].as_u64().is_none()
+            {
+                return Err("semantic observation returned a different native surface".into());
+            }
+            let field = search_field(&before)?;
+            let text = format!("native scope {label} query {iteration}");
+            let action = json!({
+                "lease_id": lease_id, "surface_id": surface.id,
+                "surface_generation": surface.generation,
+                "tree_generation": before["tree_generation"], "node": field["id"],
+                "action": {"kind": "set_text", "value": text}
+            });
+            let outcome = scope_call(address, identity, "surface_semantic_action", action)?;
+            if outcome["changed"] != true
+                || outcome["partial"] != false
+                || !matches!(
+                    outcome["completion"].as_str(),
+                    Some("ui_updated" | "confirmed")
+                )
+            {
+                return Err(format!(
+                    "{label} semantic input was not a completed UI update: {outcome}"
+                ));
+            }
+            // Fresh production observation proves application of the input;
+            // the setter's response alone is only delivery evidence.
+            let after = scope_call(address, identity, "inspect_surface", inspect)?;
+            if search_field(&after)?["value"] != json!({"kind": "text", "value": text}) {
+                return Err(format!("{label} search did not retain the delivered text"));
+            }
+            require_unchanged_scope_approval(
+                &approval,
+                &remote_snapshot(environment)?,
+                lease_id,
+                &scope,
+            )?;
+        }
+        if label == "surface" {
+            let denial = mcp_call(
+                address,
+                identity,
+                "inspect_surface",
+                json!({
+                    "lease_id": lease_id, "surface_id": panel["id"], "generation": panel["generation"]
+                }),
+            )?;
+            require_tool_error("surface lease observing unrelated panel", &denial)?;
+            require_unchanged_scope_approval(
+                &approval,
+                &remote_snapshot(environment)?,
+                lease_id,
+                &scope,
+            )?;
+        }
+        println!(
+            "PASS: {label} scope, one local approval, three observed search edits, no new permission request or lease"
+        );
+        if label == "full_session" {
+            last_lease = Some(lease_id);
+        } else {
+            revoke_scope(environment, lease_id)?;
+        }
+    }
+    println!(
+        "UNCOVERED: ordinary window/application scopes, cross-output movement, physical input and assistive workflow; this fixture owns shell resources only"
+    );
+    last_lease.ok_or_else(|| "scope matrix did not retain its final debug lease".into())
+}
+
+fn native_resource(
+    value: &Value,
+    id: &str,
+) -> Result<nickel_session_protocol::RemoteResourceId, String> {
+    let id = value[id]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("native resource identity missing")?;
+    let generation = value["generation"]
+        .as_u64()
+        .filter(|generation| *generation != 0)
+        .ok_or("native resource generation missing")?;
+    Ok(nickel_session_protocol::RemoteResourceId {
+        id: id.into(),
+        generation,
+    })
+}
+
+fn search_field(tree: &Value) -> Result<&Value, String> {
+    let mut fields = tree["nodes"]
+        .as_array()
+        .ok_or("semantic tree omitted nodes")?
+        .iter()
+        .filter(|node| node["role"] == "TextField" && node["enabled"] == true);
+    let field = fields
+        .next()
+        .ok_or("launcher omitted its editable search field")?;
+    if fields.next().is_some() || field["id"].as_u64().is_none() {
+        return Err("launcher search field is ambiguous".into());
+    }
+    Ok(field)
+}
+
+fn scope_call(
+    address: SocketAddr,
+    identity: &Identity,
+    operation: &str,
+    arguments: Value,
+) -> Result<Value, String> {
+    thread::sleep(MATRIX_PACING);
+    let response = mcp_call(address, identity, operation, arguments)?;
+    require_tool_success(operation, &response)?;
+    let content = response
+        .pointer("/result/structuredContent")
+        .ok_or_else(|| format!("{operation} omitted structured content"))?;
+    // rmcp wraps non-object JSON results in a result field.
+    Ok(content.get("result").unwrap_or(content).clone())
+}
+
+fn approve_scope(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    scope: RemoteResourceScope,
+    full_debug: bool,
+) -> Result<u64, String> {
+    let before = remote_snapshot(environment)?;
+    if !before.active_leases.is_empty() || !before.pending_leases.is_empty() {
+        return Err("scope approval started with existing desktop authority or request".into());
+    }
+    let response = mcp_call(
+        address,
+        identity,
+        "request_control_lease",
+        json!({
+            "scope": scope, "duration_seconds": 1200, "allow_resumption": false, "full_debug": full_debug
+        }),
+    )?;
+    require_tool_success("request_control_lease", &response)?;
+    let pending = remote_snapshot(environment)?;
+    if pending.pending_leases.len() != 1 {
+        return Err("scope request did not create exactly one local approval".into());
+    }
+    let pending = &pending.pending_leases[0];
+    if pending.client_id != identity.client_id || pending.request.scope != scope {
+        return Err("local approval identifies a different client or scope".into());
+    }
+    let approved = session_message(
+        environment,
+        Request::Command(Command::DecideRemoteLease {
+            pending_generation: pending.pending_generation,
+            client_id: pending.client_id.clone(),
+            request: pending.request.clone(),
+            allow: true,
+        }),
+    )?;
+    let ServerMessage::RemoteControl(approved) = approved else {
+        return Err("scope approval omitted its authoritative snapshot".into());
+    };
+    let lease = approved
+        .active_leases
+        .first()
+        .ok_or("approval did not create a lease")?;
+    require_unchanged_scope_approval(&approved, &approved, lease.lease_id, &scope)?;
+    Ok(lease.lease_id)
+}
+
+fn revoke_scope(environment: &SessionEnvironment, lease_id: u64) -> Result<(), String> {
+    session_message(
+        environment,
+        Request::Command(Command::ManageRemoteLease {
+            lease_id,
+            action: RemoteLeaseAction::Revoke,
+        }),
+    )?;
+    let snapshot = remote_snapshot(environment)?;
+    if !snapshot.active_leases.is_empty() || !snapshot.pending_leases.is_empty() {
+        return Err("scope revocation left desktop authority or a pending request".into());
+    }
+    Ok(())
+}
+
+fn require_unchanged_scope_approval(
+    approved: &RemoteControlSnapshot,
+    current: &RemoteControlSnapshot,
+    lease_id: u64,
+    scope: &RemoteResourceScope,
+) -> Result<(), String> {
+    if !current.pending_leases.is_empty()
+        || current.effective != RemoteControlEffectiveState::Enabled
+        || current.active_leases.len() != 1
+        || current.active_leases[0].lease_id != lease_id
+        || &current.active_leases[0].scope != scope
+        || current.active_leases[0].suspended
+        || current.active_leases[0].full_debug != approved.active_leases[0].full_debug
+        || current.permission_audit != approved.permission_audit
+        || current.permission_audit_evicted != approved.permission_audit_evicted
+        || current.lease_audit != approved.lease_audit
+        || current.lease_audit_evicted != approved.lease_audit_evicted
+    {
+        return Err(
+            "ordinary scoped action changed authority or requested another approval".into(),
+        );
+    }
+    Ok(())
+}
 fn emergency_chord(
     environment: &SessionEnvironment,
     source: TestEmergencyControlSource,
@@ -1381,6 +1641,73 @@ mod tests {
         process::Command,
         time::{Duration, Instant},
     };
+
+    #[test]
+    fn scope_proof_detects_transient_permission_requests_and_extra_authority() {
+        use nickel_session_protocol::{RemoteControlSnapshot, RemoteResourceScope};
+        use serde_json::json;
+        let approved: RemoteControlSnapshot = serde_json::from_value(json!({
+            "requested_enabled": true, "effective": "enabled", "generation": 1,
+            "acknowledged_generation": 1, "endpoint": "http://127.0.0.1:1/mcp",
+            "diagnostic": null, "pending_clients": [], "granted_clients": [],
+            "active_leases": [{"lease_id": 7, "client_label": "fixture",
+                "scope": {"kind": "full_session"}, "remaining_seconds": 1200,
+                "suspended": false, "full_debug": true}]
+        }))
+        .unwrap();
+        let verify = |current: &RemoteControlSnapshot| {
+            super::require_unchanged_scope_approval(
+                &approved,
+                current,
+                7,
+                &RemoteResourceScope::FullSession,
+            )
+        };
+        let mut countdown = approved.clone();
+        countdown.active_leases[0].remaining_seconds = Some(1199);
+        assert!(
+            verify(&countdown).is_ok(),
+            "ordinary elapsed time is not a new approval"
+        );
+        let mut transient = approved.clone();
+        transient.permission_audit.push(
+            serde_json::from_value(json!({
+                "generation": 1, "observed_at_us": 2, "client_id": 3, "outcome": "denied"
+            }))
+            .unwrap(),
+        );
+        assert!(
+            verify(&transient).is_err(),
+            "a request that disappeared must still fail proof"
+        );
+        let mut widened = approved.clone();
+        widened
+            .active_leases
+            .push(approved.active_leases[0].clone());
+        assert!(verify(&widened).is_err());
+        let mut replaced = approved.clone();
+        replaced.active_leases[0].lease_id = 8;
+        assert!(verify(&replaced).is_err());
+        let mut overflow = approved.clone();
+        overflow.permission_audit_evicted = 1;
+        assert!(
+            verify(&overflow).is_err(),
+            "audit eviction cannot conceal an extra prompt"
+        );
+    }
+
+    #[test]
+    fn scope_fixture_refuses_invented_identity_or_ambiguous_search() {
+        use serde_json::json;
+        assert!(super::native_resource(&json!({"id": "internal:4"}), "id").is_err());
+        assert!(
+            super::native_resource(&json!({"id": "internal:4", "generation": 0}), "id").is_err()
+        );
+        let field = json!({"id": 0, "role": "TextField", "enabled": true});
+        assert!(super::search_field(&json!({"nodes": [field.clone()]})).is_ok());
+        assert!(super::search_field(&json!({"nodes": [field.clone(), field]})).is_err());
+        assert!(super::search_field(&json!({"nodes": []})).is_err());
+    }
 
     #[test]
     fn wayland_software_renderer_disables_mesa_vblank_without_changing_x11() {
