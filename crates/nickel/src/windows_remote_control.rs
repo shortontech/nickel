@@ -758,11 +758,14 @@ impl WindowsRemoteControl {
             STOP_REQUESTED.store(true, Ordering::Release);
         }
     }
-    pub(crate) fn poll(&mut self, shell: &mut WinitShell) {
-        self.poll_with_shell(Some(shell));
+    pub(crate) fn poll(&mut self, shell: &mut WinitShell, state: &crate::live_shell::LiveShell) {
+        self.poll_with_shell(Some((shell, state)));
     }
 
-    fn poll_with_shell(&mut self, mut shell: Option<&mut WinitShell>) {
+    fn poll_with_shell(
+        &mut self,
+        mut shell: Option<(&mut WinitShell, &crate::live_shell::LiveShell)>,
+    ) {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
         self.reconcile_keyboard_hold();
@@ -849,7 +852,12 @@ impl WindowsRemoteControl {
                     prepared,
                     reply,
                 } => {
-                    let result = self.perform_diagnostic_snapshot(permit, *prepared);
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.perform_diagnostic_snapshot(shell, state, permit, *prepared)
+                        },
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::DiagnosticAction {
@@ -857,9 +865,9 @@ impl WindowsRemoteControl {
                     action,
                     reply,
                 } => {
-                    let result = shell.as_deref_mut().map_or_else(
+                    let result = shell.as_mut().map_or_else(
                         || Err("Windows presentation owner is unavailable".into()),
-                        |shell| self.perform_diagnostic_action(shell, permit, action),
+                        |(shell, _)| self.perform_diagnostic_action(shell, permit, action),
                     );
                     let _ = reply.try_send(result);
                 }
@@ -1472,6 +1480,8 @@ impl WindowsRemoteControl {
 
     fn perform_diagnostic_snapshot(
         &mut self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
         permit: DesktopPermit,
         mut prepared: crate::platform::remote_observation::Prepared,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String> {
@@ -1502,6 +1512,12 @@ impl WindowsRemoteControl {
             let focused_window = active.next().is_none().then_some(focused_window).flatten();
             let keyboard_held = self.keyboard_hold.is_some();
             let pointer_held = self.pointer_hold.is_some();
+            let (shell_surfaces, shell_surfaces_truncated) =
+                crate::windows_shell_diagnostics::project(
+                    !self.desktop_unlocked
+                        || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
+                    shell.remote_shell_surface_observations(state),
+                );
             let keyboard = focused_window.as_ref().map(|window| InputDeviceDiagnostic {
                 focused_window: Some(window.clone()),
                 focused_surface: None,
@@ -1546,7 +1562,7 @@ impl WindowsRemoteControl {
                     output_retirements: 0,
                     shell_focus_pending: false,
                 },
-                shell_surfaces: Vec::new(),
+                shell_surfaces,
                 focused_window,
                 input: InputDiagnostic {
                     observation_generation: generation,
@@ -1609,10 +1625,11 @@ impl WindowsRemoteControl {
                 diagnostic_logs: windows_diagnostic_logs(),
                 frame_trace: None,
                 trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
-                truncated: false,
+                truncated: shell_surfaces_truncated,
                 unavailable_domains: vec![
                     "windows_virtual_workspaces".into(),
-                    "windows_internal_application_and_shell_surfaces".into(),
+                    "windows_internal_applications".into(),
+                    "windows_shell_surfaces_without_production_scene_identity".into(),
                     "windows_renderer_and_resource_accounting".into(),
                     "windows_pointer_recipient_and_hit_testing".into(),
                     "windows_shortcut_inventory".into(),

@@ -438,6 +438,9 @@ pub struct ShellSurface {
     presenter: Option<SoftbufferPresenter>,
     last_host_change_token: Option<HostChangeToken>,
     visible: bool,
+    /// Monotonic identity for this native surface incarnation. It changes when
+    /// a native window is replaced even if its logical shell role is retained.
+    diagnostic_generation: u64,
     window: Window,
 }
 
@@ -490,6 +493,7 @@ pub struct WinitShell {
     options: ShellOptions,
     primary_output_name: Option<String>,
     active_output_name: Option<String>,
+    next_surface_diagnostic_generation: u64,
 }
 
 impl WinitShell {
@@ -534,7 +538,16 @@ impl WinitShell {
             options,
             primary_output_name: None,
             active_output_name: None,
+            next_surface_diagnostic_generation: 0,
         })
+    }
+
+    fn next_surface_diagnostic_generation(&mut self) -> Result<u64, String> {
+        self.next_surface_diagnostic_generation = self
+            .next_surface_diagnostic_generation
+            .checked_add(1)
+            .ok_or("shell surface diagnostic generations exhausted")?;
+        Ok(self.next_surface_diagnostic_generation)
     }
 
     /// Payload-free wake for coalesced remote cleanup; never locks the event queue.
@@ -969,6 +982,43 @@ impl WinitShell {
             .filter(|surface| surface.display_connected)
     }
 
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_shell_surface_observations(
+        &self,
+        state: &crate::live_shell::LiveShell,
+    ) -> Vec<crate::windows_shell_diagnostics::SurfaceObservation> {
+        self.surfaces()
+            .map(|surface| {
+                let scale = surface.window.scale_factor();
+                let geometry = surface.window.outer_position().ok().map(|position| {
+                    let position = position.to_logical::<i32>(scale);
+                    let size = surface.window.inner_size().to_logical::<u32>(scale);
+                    [
+                        i64::from(position.x),
+                        i64::from(position.y),
+                        i64::from(size.width),
+                        i64::from(size.height),
+                    ]
+                });
+                let scene = state.scene_change_token(surface.role);
+                crate::windows_shell_diagnostics::SurfaceObservation {
+                    role: surface.role,
+                    generation: surface.diagnostic_generation,
+                    native_visible: surface.visible,
+                    canonical_visible: state.surface_visible(surface.role),
+                    protected: state.surface_remote_access_protected(surface.role),
+                    geometry,
+                    output: Some(surface.output_name.clone()),
+                    scene_generation: scene.map(|token| token.frame_generation),
+                    scale_factor: scale as f32,
+                    redraw_pending: scene
+                        .is_some_and(|token| surface.last_host_change_token != Some(token)),
+                    keyboard_focused: surface.window.has_focus(),
+                }
+            })
+            .collect()
+    }
+
     pub fn surface(&self, id: SurfaceId) -> Option<&ShellSurface> {
         self.surface_indices
             .get(&id.0)
@@ -1024,6 +1074,7 @@ impl WinitShell {
         window.set_ime_allowed(true);
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
@@ -1037,6 +1088,7 @@ impl WinitShell {
             presenter: None,
             last_host_change_token: None,
             visible: true,
+            diagnostic_generation,
             window,
         });
         Ok(id)
@@ -1085,6 +1137,7 @@ impl WinitShell {
         crate::platform::prepare_trusted_control_window(&window)?;
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
@@ -1098,6 +1151,7 @@ impl WinitShell {
             presenter: None,
             last_host_change_token: None,
             visible: false,
+            diagnostic_generation,
             window,
         });
         Ok(id)
@@ -1469,10 +1523,12 @@ impl WinitShell {
             replacement.set_min_inner_size(Some(LogicalSize::new(720, 480)));
         }
         let retired_native_id = surface.window.id();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
         self.native_surface_indices.remove(&retired_native_id);
         self.input_adapters.remove(&retired_native_id);
         let surface = &mut self.surfaces[index];
         surface.window = replacement;
+        surface.diagnostic_generation = diagnostic_generation;
         surface.initial_exposed = false;
         surface.last_host_change_token = None;
         self.native_surface_indices
@@ -1817,6 +1873,7 @@ impl WinitShell {
         }
         let id = SurfaceId(window.id());
         let index = self.surfaces.len();
+        let diagnostic_generation = self.next_surface_diagnostic_generation()?;
         self.surface_indices.insert(id.0, index);
         self.native_surface_indices.insert(window.id(), index);
         self.surfaces.push(ShellSurface {
@@ -1834,6 +1891,7 @@ impl WinitShell {
             // platform hide transition. This matters on Wayland, where the
             // winit visibility hint itself is intentionally a no-op.
             visible: true,
+            diagnostic_generation,
             window,
         });
         Ok(())

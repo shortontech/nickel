@@ -11,6 +11,8 @@ mod windows_remote_control;
 mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_resource_owner;
+#[cfg(any(test, target_os = "windows"))]
+mod windows_shell_diagnostics;
 use nickel_codex::ThreadId;
 use nickel_codex_ui::{
     ChatApplication, ConnectionStatus, ShellRequest, shell_application_with_backend,
@@ -2298,7 +2300,7 @@ pub fn run() -> Result<(), String> {
     loop {
         #[cfg(target_os = "windows")]
         if let Some(owner) = &mut remote_control {
-            owner.poll(&mut shell);
+            owner.poll(&mut shell, &state);
             owner.reconcile_indicators(&mut shell, state.semantic_theme());
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
