@@ -280,6 +280,7 @@ impl NickelSession {
                 drop(held);
             }
         }
+        self.record_remote_input_ownership();
     }
 
     pub(crate) fn remote_keyboard_source_focus_cancelled(&mut self, source: KeyboardSource) {
@@ -295,6 +296,7 @@ impl NickelSession {
             // Smithay already cleared this source while holding its keyboard
             // lock. Do not call release_source again from this callback.
             drop(held);
+            self.record_remote_input_ownership();
         }
     }
 
@@ -315,6 +317,7 @@ impl NickelSession {
             }
             self.release_remote_keyboard_source(held.source);
             drop(held);
+            self.record_remote_input_ownership();
         }
     }
 
@@ -625,6 +628,7 @@ impl NickelSession {
                             idle_deadline: Instant::now() + Duration::from_secs(30),
                             native_x11,
                         });
+                        self.record_remote_input_ownership();
                         if self
                             .remote_held_keyboard
                             .as_ref()
@@ -662,6 +666,7 @@ impl NickelSession {
                     held.idle_deadline = Instant::now() + Duration::from_secs(30);
                     self.remote_held_keyboard = Some(held);
                 }
+                self.record_remote_input_ownership();
                 result
             } else {
                 permit.with_input(&evidence, || self.inject_controlled_keyboard(id, action))

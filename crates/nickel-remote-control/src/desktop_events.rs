@@ -83,6 +83,12 @@ pub enum DesktopEventKind {
         maximized: bool,
         fullscreen: bool,
     },
+    /// Coarse ownership of shared compositor input. Deliberately excludes the
+    /// controller, recipient, pressed keys, buttons, text, and coordinates.
+    RemoteInputOwnershipChanged {
+        keyboard_held: bool,
+        pointer_held: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -125,6 +131,7 @@ pub struct DesktopEvents {
     generation: u64,
     evicted: u64,
     events: VecDeque<DesktopEvent>,
+    remote_input_ownership: (bool, bool),
 }
 
 impl DesktopEvents {
@@ -164,6 +171,27 @@ impl DesktopEvents {
             observed_at_us,
         );
     }
+
+    pub fn record_remote_input_ownership(
+        &mut self,
+        keyboard_held: bool,
+        pointer_held: bool,
+        observed_at_us: u64,
+    ) {
+        let state = (keyboard_held, pointer_held);
+        if self.remote_input_ownership == state {
+            return;
+        }
+        self.remote_input_ownership = state;
+        self.record(
+            DesktopEventKind::RemoteInputOwnershipChanged {
+                keyboard_held,
+                pointer_held,
+            },
+            observed_at_us,
+        );
+    }
+
     pub fn since(&self, after: u64) -> Result<DesktopEventBatch, String> {
         if after > self.generation {
             return Err("event cursor is ahead of this session; take a fresh snapshot".into());
@@ -322,5 +350,32 @@ mod tests {
         for excluded in ["title", "application_id", "client", "text"] {
             assert!(!json.contains(excluded));
         }
+    }
+
+    #[test]
+    fn remote_input_ownership_events_are_coalesced_and_payload_free() {
+        let mut events = DesktopEvents::default();
+        events.record_remote_input_ownership(false, false, 1);
+        events.record_remote_input_ownership(true, false, 2);
+        events.record_remote_input_ownership(true, false, 3);
+        events.record_remote_input_ownership(true, true, 4);
+        events.record_remote_input_ownership(false, false, 5);
+
+        let snapshot = events.snapshot();
+        assert_eq!(snapshot.events.len(), 3);
+        assert_eq!(snapshot.events[0].observed_at_us, 2);
+        assert_eq!(
+            snapshot.events[1].event,
+            DesktopEventKind::RemoteInputOwnershipChanged {
+                keyboard_held: true,
+                pointer_held: true,
+            }
+        );
+        let json = serde_json::to_value(&snapshot).unwrap();
+        let fields = json["events"][0]["event"].as_object().unwrap();
+        assert_eq!(fields.len(), 3);
+        assert!(fields.contains_key("kind"));
+        assert!(fields.contains_key("keyboard_held"));
+        assert!(fields.contains_key("pointer_held"));
     }
 }

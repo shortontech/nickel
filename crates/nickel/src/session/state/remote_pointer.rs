@@ -58,6 +58,7 @@ impl NickelSession {
         if let Some(held) = self.remote_held_pointer.take() {
             self.release_controlled_pointer(held.button);
             drop(held);
+            self.record_remote_input_ownership();
         }
     }
 
@@ -224,6 +225,7 @@ impl NickelSession {
                             y,
                             idle_deadline: Instant::now() + Duration::from_secs(30),
                         });
+                        self.record_remote_input_ownership();
                         Ok(())
                     }
                     Err(error) => {
@@ -247,6 +249,7 @@ impl NickelSession {
                     held.idle_deadline = Instant::now() + Duration::from_secs(30);
                     self.remote_held_pointer = Some(held);
                 }
+                self.record_remote_input_ownership();
                 delivered
             } else {
                 permit.with_input(&evidence, || {

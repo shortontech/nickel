@@ -7193,6 +7193,15 @@ impl NickelSession {
             .retain(|path| socket.send_to(&event, path).is_ok());
     }
 
+    pub(crate) fn record_remote_input_ownership(&mut self) {
+        let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        self.remote_desktop_events.record_remote_input_ownership(
+            self.remote_held_keyboard.is_some(),
+            self.remote_held_pointer.is_some(),
+            observed_at_us,
+        );
+    }
+
     fn record_remote_window_state_events(&mut self) {
         use nickel_remote_control::desktop_events::DesktopEventKind;
         let current = self
