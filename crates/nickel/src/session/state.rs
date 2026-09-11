@@ -3571,7 +3571,7 @@ impl NickelSession {
                                 .map(|trace| trace.snapshot()),
                             truncated,
                             unavailable_domains: [
-                                "shell_transients_and_content",
+                                "shell_transients_without_host_owned_protection_and_codex_content",
                                 "internal_hit_testing",
                                 "external_accessibility_not_embedded_in_snapshot",
                                 "effects",
@@ -14001,6 +14001,24 @@ mod protocol_tests {
         session.sync_internal_shell();
         let runtime = session.internal_shell_surfaces[&screenshot];
         assert_eq!(session.internal_ui.focused(), Some(runtime));
+        let record = session
+            .remote_shell_surface_diagnostics()
+            .0
+            .into_iter()
+            .find(|record| record.generation == runtime.snapshot_token())
+            .expect("ordinary screenshot transient is projected");
+        assert!(matches!(
+            record.role,
+            nickel_remote_control::diagnostics::ShellDiagnosticRole::Screenshot
+        ));
+        let (tree_generation, nodes) = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .bounded_shell_semantics(screenshot)
+            .expect("bounded screenshot semantics");
+        assert!(tree_generation > 0);
+        assert!(nodes.len() <= nickel_remote_control::semantics::MAX_RESOLVED_NODES);
         for state in [InputState::Pressed, InputState::Released] {
             session
                 .inject_test_input(TestInput::Key {

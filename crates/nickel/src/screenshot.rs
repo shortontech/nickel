@@ -352,6 +352,18 @@ impl ScreenshotTool {
     pub(crate) fn pointer_interaction_active(&self) -> bool {
         self.host.pointer_interaction_active() || self.host.application().drag_start.is_some()
     }
+
+    pub(crate) fn remote_access_protected(&self) -> bool {
+        self.host.remote_access_protected()
+    }
+
+    pub(crate) fn bounded_semantics(
+        &self,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<nickel_ui::SemanticNodeSnapshot>, nickel_ui::BoundedSemanticError> {
+        self.host.bounded_semantic_nodes(max_nodes, max_bytes)
+    }
 }
 
 impl Default for ScreenshotTool {

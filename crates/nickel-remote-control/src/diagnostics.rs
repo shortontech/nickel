@@ -303,7 +303,12 @@ pub enum ShellDiagnosticRole {
     Panel,
     Launcher,
     ControlCenter,
+    Notification,
     VolumeOsd,
+    WindowPreview,
+    WindowContextMenu,
+    Screenshot,
+    OnScreenKeyboard,
 }
 
 /// Geometry/scene metadata only; never includes shell text, pixels or semantic values.

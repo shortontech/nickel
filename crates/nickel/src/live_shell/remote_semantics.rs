@@ -51,7 +51,38 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => project(&self.run_host),
             SurfaceRole::Launcher => project(&self.launcher_host),
             SurfaceRole::ControlCenter => project(&self.control_host),
+            SurfaceRole::Notification => project(&self.notification_host),
             SurfaceRole::VolumeOsd => project(&self.volume_osd_host),
+            SurfaceRole::WindowPreview => self
+                .preview_frame
+                .as_ref()
+                .ok_or_else(|| "window preview is unavailable".to_owned())
+                .and_then(|frame| {
+                    Ok((
+                        frame.change_token().semantic_generation,
+                        frame
+                            .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+                            .map_err(|_| {
+                                "shell semantics are protected or exceed budget".to_owned()
+                            })?,
+                    ))
+                }),
+            SurfaceRole::WindowContextMenu => {
+                if let Some(host) = self.window_menu_host.as_ref() {
+                    project(host)
+                } else if let Some(host) = self.application_menu_host.as_ref() {
+                    project(host)
+                } else {
+                    Err("window menu is unavailable".into())
+                }
+            }
+            SurfaceRole::Screenshot => Ok((
+                self.screenshot.change_token().semantic_generation,
+                self.screenshot
+                    .bounded_semantics(MAX_RESOLVED_NODES, MAX_PAYLOAD_BYTES)
+                    .map_err(|_| "shell semantics are protected or exceed budget")?,
+            )),
+            SurfaceRole::OnScreenKeyboard => project(&self.keyboard_host),
             _ => Err("shell semantics are unavailable for this role".into()),
         }
     }

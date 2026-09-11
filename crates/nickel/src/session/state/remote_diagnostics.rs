@@ -1094,15 +1094,15 @@ impl NickelSession {
                 SurfaceRole::Panel => ShellDiagnosticRole::Panel,
                 SurfaceRole::Launcher => ShellDiagnosticRole::Launcher,
                 SurfaceRole::ControlCenter => ShellDiagnosticRole::ControlCenter,
+                SurfaceRole::Notification => ShellDiagnosticRole::Notification,
                 SurfaceRole::VolumeOsd => ShellDiagnosticRole::VolumeOsd,
-                SurfaceRole::Lock
-                | SurfaceRole::Notification
-                | SurfaceRole::WindowPreview
-                | SurfaceRole::WindowContextMenu
-                | SurfaceRole::CodexProjectMenu
-                | SurfaceRole::Screenshot
-                | SurfaceRole::OnScreenKeyboard
-                | SurfaceRole::CodexChat => return None,
+                SurfaceRole::WindowPreview => ShellDiagnosticRole::WindowPreview,
+                SurfaceRole::WindowContextMenu => ShellDiagnosticRole::WindowContextMenu,
+                SurfaceRole::Screenshot => ShellDiagnosticRole::Screenshot,
+                SurfaceRole::OnScreenKeyboard => ShellDiagnosticRole::OnScreenKeyboard,
+                SurfaceRole::Lock | SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat => {
+                    return None;
+                }
             };
             let runtime = *self.internal_shell_surfaces.get(&entry.id)?;
             if shell.remote_access_protected(entry.id)

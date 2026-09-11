@@ -1519,7 +1519,23 @@ impl LiveShell {
             SurfaceRole::Launcher if self.run_visible => self.run_host.remote_access_protected(),
             SurfaceRole::Launcher => self.launcher_host.remote_access_protected(),
             SurfaceRole::ControlCenter => self.control_host.remote_access_protected(),
+            SurfaceRole::Notification => self.notification_host.remote_access_protected(),
             SurfaceRole::VolumeOsd => self.volume_osd_host.remote_access_protected(),
+            SurfaceRole::WindowPreview => self
+                .preview_frame
+                .as_ref()
+                .is_none_or(WindowPreviewFrame::remote_access_protected),
+            SurfaceRole::WindowContextMenu => {
+                if let Some(host) = self.window_menu_host.as_ref() {
+                    host.remote_access_protected()
+                } else if let Some(host) = self.application_menu_host.as_ref() {
+                    host.remote_access_protected()
+                } else {
+                    true
+                }
+            }
+            SurfaceRole::Screenshot => self.screenshot.remote_access_protected(),
+            SurfaceRole::OnScreenKeyboard => self.keyboard_host.remote_access_protected(),
             _ => true,
         }
     }

@@ -612,6 +612,18 @@ impl WindowPreviewApp {
 }
 
 impl WindowPreviewFrame {
+    pub(crate) fn remote_access_protected(&self) -> bool {
+        self.host.remote_access_protected()
+    }
+
+    pub(crate) fn bounded_semantics(
+        &self,
+        max_nodes: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<nickel_ui::SemanticNodeSnapshot>, nickel_ui::BoundedSemanticError> {
+        self.host.bounded_semantic_nodes(max_nodes, max_bytes)
+    }
+
     pub fn ensure_controller_selection(&mut self) -> bool {
         if self.host.inspect().controller_target.is_none() {
             return self

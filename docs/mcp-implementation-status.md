@@ -11,7 +11,7 @@ native checks alone do not establish completion.
 | Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. Lease approval and resumption remain denied. | Complete trusted indication, synchronous cancellation, secure-desktop observation, native operations and local accessibility; validate on Windows and across machines. |
 | Logical client disconnect/resumption | Lease requests, local approvals, reconnects and desktop permits now require an unexpired owner-ready watch. Last-watch loss invalidates authority and triggers native cleanup; overlapping watches preserve connection continuity. | The stdio client adapter and saturation/cancellation fixes are integrated; complete broader native lifecycle acceptance. See `mcp-connection-watch.md`. |
 | Launch under an output lease | Verified Wayland/X11 launch ancestry now drives output placement before scene insertion, under the original lease and output incarnation. Nested native success/cancellation/replacement tests passed. | Complete broker/daemon attribution and broader physical, overload, deadline and cancellation acceptance. |
-| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. | Complete shell transient/content, shell semantic actions and external accessibility, complete internal hit testing, external accessibility, effects, GPU timing, shared renderer resources/caches, remaining event and trace categories, and platform queries. |
+| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary notifications, previews, menus, screenshot UI and on-screen keyboard transients now use their production host's visibility and protected-tree evidence for bounded inventory and semantic inspection. | Complete unsupported Codex transient/content projection, shell semantic actions and external accessibility, complete internal hit testing, effects, GPU timing, shared renderer resources/caches, remaining event and trace categories, and platform queries. |
 | Physical DRM trace acceptance | Production DRM render dispatch is instrumented. The active seat is shared with the user's compositor. | Test on an isolated seat or machine; primary-GPU selection does not isolate the current udev backend's device enumeration. |
 | Full native acceptance | Recent native work uses a separate Xvfb-backed compositor with its own Xwayland and Wayland clients. | Complete the specifications' physical emergency-stop, assistive workflow, mixed-DPI/multi-output, Windows, and cross-machine gates. |
 
@@ -1426,3 +1426,11 @@ domain remains explicitly unavailable. Completed remote shell-command, guarded
 device-control, and application-launch commits now enter the bounded event stream
 in production order with fixed coarse outcomes. Native platform acknowledgement
 coverage and non-shell effect categories remain to be projected and exercised.
+
+Ordinary transient shell surfaces are now admitted to bounded inventory and
+on-demand semantic inspection only when their production host is visible and its
+live application/tree protection state is clear. This covers notifications,
+window previews, window/application context menus, screenshot UI and the
+on-screen keyboard. Hidden or protected variants remain absent. Lock, Codex
+project/chat placeholders and trusted-control surfaces remain excluded because
+they do not provide this exact host-owned evidence through the shell projection.
