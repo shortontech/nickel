@@ -629,6 +629,20 @@ pub struct ShellImageCacheDiagnostic {
     pub preview_bytes: u64,
 }
 
+/// Aggregate retained storage derived only from the protected-filtered
+/// renderers and shell caches published in this same snapshot. Shared GPU
+/// caches and external client renderer allocations remain unavailable.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ProjectedResourceDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    pub renderer_surfaces: u64,
+    pub software_frame_bytes: u64,
+    pub fallback_raster_bytes: u64,
+    pub shell_image_entries: u64,
+    pub shell_image_bytes: u64,
+}
+
 /// Payload-free compositor work awaiting reconciliation. Counts describe
 /// production-owned queues at one observation point; they expose neither
 /// clipboard contents, launch commands, output identities, nor shell targets.
@@ -661,6 +675,8 @@ pub struct DiagnosticSnapshot {
     pub shell_renderers: Vec<InternalRendererDiagnostic>,
     /// None means the in-process shell is unavailable.
     pub shell_image_cache: Option<ShellImageCacheDiagnostic>,
+    /// Current protected-filtered resource totals from the fields above.
+    pub projected_resources: ProjectedResourceDiagnostic,
     /// Pending production effects without their targets or payloads.
     pub pending_effects: PendingEffectsDiagnostic,
     pub shell_surfaces: Vec<ShellSurfaceDiagnostic>,
@@ -1071,6 +1087,33 @@ mod output_identification_tests {
             "actions",
             "client_id",
             "lease_id",
+        ] {
+            assert!(value.get(excluded).is_none());
+        }
+    }
+
+    #[test]
+    fn projected_resources_contain_only_bounded_counts_and_bytes() {
+        let resources = ProjectedResourceDiagnostic {
+            observation_generation: 7,
+            observed_at_us: 11,
+            renderer_surfaces: 3,
+            software_frame_bytes: 100,
+            fallback_raster_bytes: 200,
+            shell_image_entries: 4,
+            shell_image_bytes: 300,
+        };
+        let value = serde_json::to_value(resources).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 7);
+        for excluded in [
+            "surface",
+            "window",
+            "application",
+            "title",
+            "path",
+            "client_id",
+            "lease_id",
+            "gpu_allocation",
         ] {
             assert!(value.get(excluded).is_none());
         }

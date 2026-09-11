@@ -1572,3 +1572,12 @@ enters the bounded desktop event stream. The event uses the same operation
 number as the retained observation and server completion plus only the fixed
 scope, node count and truncation bit. Native GTK acceptance correlated all three
 records before completing the broader AT-SPI lifecycle matrix.
+
+The coherent snapshot now includes an explicit protected-filtered resource
+summary. It aggregates current renderer-surface count, software frame bytes,
+fallback raster bytes, and retained shell image entries/bytes exclusively from
+the per-surface and cache records already admitted into that same snapshot.
+Shared GPU caches and external client allocations remain explicitly unavailable
+because their ownership cannot yet exclude trusted surfaces. Native nested
+acceptance recomputed every total from the published source records and matched
+them exactly without resource identities or paths.

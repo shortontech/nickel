@@ -3637,6 +3637,59 @@ impl NickelSession {
                             &internal_applications,
                             observed_at_us,
                         );
+                        let shell_renderers =
+                            self.remote_shell_renderer_diagnostics(observed_at_us);
+                        let shell_image_cache = self.internal_shell.as_ref().map(|shell| {
+                            let cache = shell.image_cache_diagnostics_for_previews(|id| {
+                                windows.iter().any(|window| window.generation == id.0)
+                            });
+                            ShellImageCacheDiagnostic {
+                                observation_generation: self.remote_observation_generation,
+                                observed_at_us,
+                                launcher_icon_entries: cache.launcher_icon_entries as u64,
+                                launcher_icon_bytes: cache.launcher_icon_bytes as u64,
+                                wallpaper_entries: cache.wallpaper_entries as u64,
+                                wallpaper_bytes: cache.wallpaper_bytes as u64,
+                                tray_entries: cache.tray_entries as u64,
+                                tray_bytes: cache.tray_bytes as u64,
+                                preview_entries: cache.preview_entries as u64,
+                                preview_bytes: cache.preview_bytes as u64,
+                            }
+                        });
+                        let projected_resources = ProjectedResourceDiagnostic {
+                            observation_generation: self.remote_observation_generation,
+                            observed_at_us,
+                            renderer_surfaces: internal_renderers
+                                .len()
+                                .saturating_add(shell_renderers.len())
+                                as u64,
+                            software_frame_bytes: internal_renderers
+                                .iter()
+                                .chain(&shell_renderers)
+                                .fold(0_u64, |total, renderer| {
+                                    total.saturating_add(renderer.software_frame_bytes)
+                                }),
+                            fallback_raster_bytes: internal_renderers
+                                .iter()
+                                .chain(&shell_renderers)
+                                .fold(0_u64, |total, renderer| {
+                                    total.saturating_add(renderer.fallback_raster_bytes)
+                                }),
+                            shell_image_entries: shell_image_cache.as_ref().map_or(0, |cache| {
+                                cache
+                                    .launcher_icon_entries
+                                    .saturating_add(cache.wallpaper_entries)
+                                    .saturating_add(cache.tray_entries)
+                                    .saturating_add(cache.preview_entries)
+                            }),
+                            shell_image_bytes: shell_image_cache.as_ref().map_or(0, |cache| {
+                                cache
+                                    .launcher_icon_bytes
+                                    .saturating_add(cache.wallpaper_bytes)
+                                    .saturating_add(cache.tray_bytes)
+                                    .saturating_add(cache.preview_bytes)
+                            }),
+                        };
                         let input = self.remote_input_diagnostic(
                             &windows,
                             &internal_applications,
@@ -3659,24 +3712,9 @@ impl NickelSession {
                                 .collect(),
                             internal_applications,
                             internal_renderers,
-                            shell_renderers: self.remote_shell_renderer_diagnostics(observed_at_us),
-                            shell_image_cache: self.internal_shell.as_ref().map(|shell| {
-                                let cache = shell.image_cache_diagnostics_for_previews(|id| {
-                                    windows.iter().any(|window| window.generation == id.0)
-                                });
-                                ShellImageCacheDiagnostic {
-                                    observation_generation: self.remote_observation_generation,
-                                    observed_at_us,
-                                    launcher_icon_entries: cache.launcher_icon_entries as u64,
-                                    launcher_icon_bytes: cache.launcher_icon_bytes as u64,
-                                    wallpaper_entries: cache.wallpaper_entries as u64,
-                                    wallpaper_bytes: cache.wallpaper_bytes as u64,
-                                    tray_entries: cache.tray_entries as u64,
-                                    tray_bytes: cache.tray_bytes as u64,
-                                    preview_entries: cache.preview_entries as u64,
-                                    preview_bytes: cache.preview_bytes as u64,
-                                }
-                            }),
+                            shell_renderers,
+                            shell_image_cache,
+                            projected_resources,
                             pending_effects: self.remote_pending_effects_diagnostic(
                                 self.remote_observation_generation,
                                 observed_at_us,
