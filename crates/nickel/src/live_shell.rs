@@ -564,6 +564,8 @@ pub struct LiveShell {
     launcher_icons: LauncherIconCache,
     launcher_host: nickel_ui::UiHost<LauncherApplication>,
     launcher_status: Option<String>,
+    #[cfg(target_os = "windows")]
+    launcher_catalog_generation: u64,
     launcher_preference_persistence: preference_persistence::PreferencePersistence,
     launcher_preference_deadline: Option<Instant>,
     shortcut_action_status: Option<String>,
@@ -1011,6 +1013,8 @@ impl LiveShell {
             launcher_icons,
             launcher_host,
             launcher_status: application_status.map(str::to_owned),
+            #[cfg(target_os = "windows")]
+            launcher_catalog_generation: 1,
             launcher_preference_persistence,
             launcher_preference_deadline: None,
             shortcut_action_status: None,
@@ -1371,6 +1375,12 @@ impl LiveShell {
         &mut self,
         discovery: crate::model::ApplicationDiscovery,
     ) -> (usize, bool) {
+        #[cfg(target_os = "windows")]
+        let previous_ids = self
+            .launcher
+            .discovered_applications()
+            .map(|application| application.id().to_owned())
+            .collect::<Vec<_>>();
         let applications = discovery.applications().len();
         let partial = matches!(
             discovery.status(),
@@ -1380,6 +1390,17 @@ impl LiveShell {
             application_discovery_status_label(discovery.status()).map(str::to_owned);
         self.launcher
             .replace_discovered_applications(discovery.into_applications());
+        #[cfg(target_os = "windows")]
+        if previous_ids
+            != self
+                .launcher
+                .discovered_applications()
+                .map(|application| application.id().to_owned())
+                .collect::<Vec<_>>()
+        {
+            self.launcher_catalog_generation =
+                self.launcher_catalog_generation.checked_add(1).unwrap_or(0);
+        }
         self.launcher_icons.invalidate_application_inventory();
         let status = self.launcher_status_text();
         self.launcher_host
@@ -5660,6 +5681,18 @@ impl LiveShell {
 
     pub(crate) fn launcher_favorites_match(&self, preferences: &LauncherPreferences) -> bool {
         self.launcher.preferences().favorites() == preferences.favorites()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn launcher_favorite_catalog(
+        &self,
+    ) -> Result<crate::windows_remote_launcher_favorites::Catalog, String> {
+        crate::windows_remote_launcher_favorites::Catalog::current(
+            self.launcher_catalog_generation,
+            self.launcher
+                .discovered_applications()
+                .map(|application| application.id().to_owned()),
+        )
     }
 
     pub(crate) fn launcher_preferences_busy(&self) -> bool {

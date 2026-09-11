@@ -382,6 +382,12 @@ impl Launcher {
         self.applications.iter()
     }
 
+    pub(crate) fn discovered_applications(&self) -> impl Iterator<Item = &Application> {
+        self.applications
+            .iter()
+            .filter(|application| !self.place_ids.contains(application.id()))
+    }
+
     pub fn favorite_applications(&self) -> Vec<&Application> {
         self.preferences
             .favorites()

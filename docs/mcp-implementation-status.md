@@ -1854,10 +1854,28 @@ revisions. Commit repeats the appearance transaction's protected-focus,
 shared-input, physical-input epoch, deadline and permit checks before replacement,
 then advances the production launcher icon generation and requests a live cache
 refresh. The response claims that refresh request, not decoded or presented pixels.
-Application scale, launcher favorites, wallpaper, Codex, idle, terminal,
-on-screen-keyboard and shell-behavior trait methods remain unavailable on the
-Windows authority; `windows_settings_worker` therefore remains an explicit
-diagnostic gap. Native Windows cache and presented-icon acceptance remain open.
+Application scale, wallpaper, Codex, idle, terminal, on-screen-keyboard and
+shell-behavior trait methods remain unavailable on the Windows authority;
+`windows_settings_worker` therefore remains an explicit diagnostic gap. Native
+Windows cache and presented-icon acceptance remain open.
+
+Windows now implements typed launcher-favorites reads and transactions against
+the production `LiveShell` launcher model and launcher-preferences file. The
+owner supplies a bounded current installed-application ID catalog with a
+monotonic ID-set generation; preparation exposes only canonical installed IDs,
+counts unavailable stored favorites, and preserves those hidden entries and all
+recent history. A write holds the preferences file's cooperative transaction
+lock and stages the complete bounded replacement off-owner. The final owner
+boundary requires the same catalog generation and IDs, opaque file revision,
+observed favorites generation and prior projection, then repeats full-debug,
+protected-focus, shared-input, physical-input epoch, deadline and live-permit
+checks before atomic replacement. An accepted replacement is reconciled into the
+production launcher before any post-commit error is returned, and caller-side
+timeouts are explicitly uncertain. Portable storage and transaction tests cover
+hidden data preservation, lock exclusion, boundary denial, catalog drift and
+file ABA. Windows compilation and compatibility-layer execution are recorded
+separately; native Windows focus arbitration, persistence and visible launcher
+acceptance remain open.
 
 The Windows desktop authority now enumerates and inspects ordinary Nickel shell
 surfaces through their production winit incarnation and `LiveShell` semantic

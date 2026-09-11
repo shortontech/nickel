@@ -12,6 +12,8 @@ mod windows_remote_control;
 #[cfg(target_os = "windows")]
 mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
+mod windows_remote_launcher_favorites;
+#[cfg(any(test, target_os = "windows"))]
 mod windows_remote_settings;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_resource_owner;

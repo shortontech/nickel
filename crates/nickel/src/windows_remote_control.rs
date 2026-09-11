@@ -611,6 +611,25 @@ enum OwnerRequest {
         deadline: Instant,
         reply: SyncSender<Result<nickel_remote_control::file_icons::Snapshot, String>>,
     },
+    LauncherFavoritesCatalog {
+        permit: DesktopPermit,
+        deadline: Instant,
+        reply: SyncSender<Result<crate::windows_remote_launcher_favorites::Catalog, String>>,
+    },
+    ReadLauncherFavorites {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_launcher_favorites::PreparedRead,
+        deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::launcher_favorites::Snapshot, String>>,
+    },
+    LauncherFavoritesTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::launcher_favorites::Transaction,
+        prepared: crate::windows_remote_launcher_favorites::PreparedChange,
+        deadline: Instant,
+        expected_local_input_epoch: u64,
+        reply: SyncSender<Result<nickel_remote_control::launcher_favorites::Snapshot, String>>,
+    },
     Applications {
         permit: DesktopPermit,
         prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
@@ -1246,6 +1265,67 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             "Windows file icon result uncertain; read current state before retrying".to_owned()
         })?
     }
+    fn read_launcher_favorites(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let catalog = self.launcher_favorites_catalog(permit.clone(), deadline)?;
+        let prepared = crate::windows_remote_launcher_favorites::PreparedRead::prepare(catalog)?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows launcher favorites observation expired before dispatch")?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadLauncherFavorites {
+                permit,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows launcher favorites observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn launcher_favorites_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::launcher_favorites::Transaction,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let expected_local_input_epoch = local_input_epoch();
+        permit.with_debug(false, || Ok(()))?;
+        let catalog = self.launcher_favorites_catalog(permit.clone(), deadline)?;
+        let prepared = crate::windows_remote_launcher_favorites::PreparedChange::prepare(
+            catalog,
+            &transaction,
+        )?;
+        permit.with_debug(false, || Ok(()))?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows launcher favorites transaction expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::LauncherFavoritesTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                expected_local_input_epoch,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows launcher favorites result uncertain; read current launcher favorites before retrying"
+                .to_owned()
+        })?
+    }
     fn inspect_native_window(
         &self,
         permit: DesktopPermit,
@@ -1761,6 +1841,29 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
 }
 
+impl WindowsDesktopAuthority {
+    fn launcher_favorites_catalog(
+        &self,
+        permit: DesktopPermit,
+        deadline: Instant,
+    ) -> Result<crate::windows_remote_launcher_favorites::Catalog, String> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows launcher catalog observation expired before dispatch")?;
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::LauncherFavoritesCatalog {
+                permit,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows launcher catalog observation timed out".to_owned())?
+    }
+}
+
 pub(crate) struct WindowsRemoteControl {
     _transport: Option<nickel_platform::local_control::LocalControlServer>,
     receiver: Receiver<OwnerRequest>,
@@ -1785,6 +1888,7 @@ pub(crate) struct WindowsRemoteControl {
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     appearance: crate::windows_remote_settings::AppearanceState,
     file_icons: crate::windows_remote_settings::FileIconState,
+    launcher_favorites: crate::windows_remote_launcher_favorites::FavoritesState,
     shell_focus: Option<ShellFocusState>,
     external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
@@ -1934,6 +2038,7 @@ impl WindowsRemoteControl {
             desktop_events: Default::default(),
             appearance: Default::default(),
             file_icons: Default::default(),
+            launcher_favorites: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),
@@ -2421,6 +2526,55 @@ impl WindowsRemoteControl {
                     );
                     let _ = reply.try_send(result);
                 }
+                OwnerRequest::LauncherFavoritesCatalog {
+                    permit,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.launcher_favorites_catalog(&permit, state, deadline),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::ReadLauncherFavorites {
+                    permit,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| {
+                            self.read_launcher_favorites(&permit, prepared, state, deadline)
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::LauncherFavoritesTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    expected_local_input_epoch,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_launcher_favorites(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                                expected_local_input_epoch,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
                 OwnerRequest::Applications {
                     permit,
                     prepared,
@@ -2685,6 +2839,124 @@ impl WindowsRemoteControl {
                 .as_micros()
                 .min(u128::from(u64::MAX)) as u64,
             true,
+        )
+    }
+
+    fn launcher_favorites_catalog(
+        &self,
+        permit: &DesktopPermit,
+        state: &crate::live_shell::LiveShell,
+        request_deadline: Instant,
+    ) -> Result<crate::windows_remote_launcher_favorites::Catalog, String> {
+        if Instant::now() >= request_deadline {
+            return Err("Windows launcher catalog observation expired".into());
+        }
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            if state.launcher_preferences_busy() {
+                return Err("local launcher preference action is pending".into());
+            }
+            state.launcher_favorite_catalog()
+        })
+    }
+
+    fn read_launcher_favorites(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_launcher_favorites::PreparedRead,
+        state: &crate::live_shell::LiveShell,
+        request_deadline: Instant,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        if Instant::now() >= request_deadline {
+            return Err("Windows launcher favorites observation expired".into());
+        }
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            if state.launcher_preferences_busy() {
+                return Err("local launcher preference action is pending".into());
+            }
+            let catalog = state.launcher_favorite_catalog()?;
+            prepared.ensure_current(&catalog)?;
+            self.launcher_favorites.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+                state.launcher_favorites_match(prepared.preferences()),
+            )
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn change_launcher_favorites(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::launcher_favorites::Transaction,
+        prepared: crate::windows_remote_launcher_favorites::PreparedChange,
+        request_deadline: Instant,
+        expected_local_input_epoch: u64,
+    ) -> Result<nickel_remote_control::launcher_favorites::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |boundary| {
+            if Instant::now() >= request_deadline {
+                return Err("launcher favorites transaction expired before commit".into());
+            }
+            if input_busy || state.launcher_preferences_busy() {
+                return Err("shared input or local launcher preferences are busy".into());
+            }
+            let catalog = state.launcher_favorite_catalog()?;
+            prepared.ensure_current(&catalog)?;
+            self.launcher_favorites.validate(&prepared, &transaction)?;
+            committed = Some(
+                prepared.commit(boundary.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_local_input_epoch
+                        || !crate::windows_remote_input::physical_input_idle()
+                    {
+                        return Err("local input interrupted the favorites transaction".into());
+                    }
+                    permit.check_commit_boundary(boundary)
+                })?,
+            );
+            self.launcher_favorites.invalidate();
+            Ok(())
+        });
+        let committed = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err(
+                    "launcher favorites unavailable; read current state before retrying".into(),
+                );
+            }
+        };
+        // Once the replacement succeeds, reconcile the accepted state even if
+        // authority changes before a response can be returned.
+        state.apply_committed_launcher_preferences(committed.preferences().clone())?;
+        authorization?;
+        let observation = committed.into_observation()?;
+        let runtime_applied = state.launcher_favorites_match(observation.preferences());
+        self.launcher_favorites.observe(
+            &observation,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            runtime_applied,
         )
     }
 
@@ -6153,6 +6425,7 @@ mod tests {
             desktop_events: Default::default(),
             appearance: Default::default(),
             file_icons: Default::default(),
+            launcher_favorites: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),
