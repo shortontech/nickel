@@ -286,6 +286,12 @@ enum InputReservation {
 }
 
 impl DesktopPermit {
+    /// Stable request correlation for bounded diagnostic records. This carries
+    /// no client, lease, resource, or payload identity.
+    pub fn operation_id(&self) -> Option<u64> {
+        self.operation_id
+    }
+
     /// Compare standing effect ownership without exposing authority credentials.
     pub fn same_lease_as(&self, request: &Self) -> bool {
         std::sync::Arc::ptr_eq(&self.control, &request.control)

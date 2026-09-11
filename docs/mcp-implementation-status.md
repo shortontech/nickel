@@ -1526,3 +1526,12 @@ cleared focus produces the same payload-free cleared state. Unchanged focus is
 coalesced. An owned nested X11 fixture opened the launcher and correlated its
 native keyboard focus with the exact launcher surface generation in the event
 stream before passing the existing persistence, scope and revocation matrix.
+
+Production-effect events now carry the session-local operation number assigned
+to the authorized MCP request. This lets a full-debug observer correlate shell
+owner completion with the existing bounded operation record without putting a
+client, lease, application, target, command or path in the event. Direct
+installed-application launches now emit the previously missing confirmed launch
+effect. Native nested acceptance launched a real catalog entry and matched its
+effect to the successful server operation; the existing launcher persistence,
+semantic, stale-write, scope and revocation matrix then passed unchanged.

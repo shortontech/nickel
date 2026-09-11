@@ -150,6 +150,7 @@ impl RemoteDesktopBridge {
 impl NickelSession {
     fn record_remote_production_effect(
         &mut self,
+        permit: &DesktopPermit,
         effect: nickel_remote_control::desktop_events::ProductionEffectKind,
         completion: Completion,
     ) {
@@ -162,10 +163,16 @@ impl NickelSession {
             Completion::Unavailable => ProductionEffectOutcome::Unavailable,
             Completion::Uncertain => ProductionEffectOutcome::Uncertain,
         };
-        self.remote_desktop_events.record(
-            DesktopEventKind::ProductionEffectCompleted { effect, outcome },
-            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
-        );
+        if let Some(operation_id) = permit.operation_id() {
+            self.remote_desktop_events.record(
+                DesktopEventKind::ProductionEffectCompleted {
+                    operation_id,
+                    effect,
+                    outcome,
+                },
+                self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            );
+        }
     }
 
     pub(super) fn commit_shell_semantic_step(
@@ -232,6 +239,7 @@ impl NickelSession {
                 _ => Completion::Uncertain,
             });
             self.record_remote_production_effect(
+                permit,
                 nickel_remote_control::desktop_events::ProductionEffectKind::DeviceControl,
                 completion,
             );
@@ -276,7 +284,7 @@ impl NickelSession {
                     )
                 }),
         }?;
-        self.record_remote_production_effect(effect, result);
+        self.record_remote_production_effect(permit, effect, result);
         Ok(result)
     }
 }

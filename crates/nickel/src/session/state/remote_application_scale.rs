@@ -503,7 +503,7 @@ impl NickelSession {
                     self.remote_application_scale.observed = None;
                     Ok((revision(&path).map_err(|_| UNAVAILABLE)?, receipt))
                 });
-                self.record_remote_settings_transaction(&result);
+                self.record_remote_settings_transaction(&permit, &result);
                 let _ = reply.send(result);
             }
             Request::Write {

@@ -78,6 +78,7 @@ pub enum DesktopEventKind {
     /// A production owner committed a typed shell continuation. Fixed enums
     /// deliberately exclude the command, target, client and application.
     ProductionEffectCompleted {
+        operation_id: u64,
         effect: ProductionEffectKind,
         outcome: ProductionEffectOutcome,
     },
@@ -311,6 +312,7 @@ mod tests {
         let mut events = DesktopEvents::default();
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 41,
                 effect: ProductionEffectKind::ApplicationLaunch,
                 outcome: ProductionEffectOutcome::Confirmed,
             },
@@ -324,6 +326,7 @@ mod tests {
 
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 42,
                 effect: ProductionEffectKind::WindowAction,
                 outcome: ProductionEffectOutcome::Requested,
             },
@@ -331,6 +334,7 @@ mod tests {
         );
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 43,
                 effect: ProductionEffectKind::WorkspaceAction,
                 outcome: ProductionEffectOutcome::Confirmed,
             },
@@ -338,6 +342,7 @@ mod tests {
         );
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 44,
                 effect: ProductionEffectKind::DiagnosticAction,
                 outcome: ProductionEffectOutcome::UiUpdated,
             },
@@ -345,6 +350,7 @@ mod tests {
         );
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 45,
                 effect: ProductionEffectKind::SemanticAction,
                 outcome: ProductionEffectOutcome::UiUpdated,
             },
@@ -352,6 +358,7 @@ mod tests {
         );
         events.record(
             DesktopEventKind::ProductionEffectCompleted {
+                operation_id: 46,
                 effect: ProductionEffectKind::SettingsTransaction,
                 outcome: ProductionEffectOutcome::Confirmed,
             },
