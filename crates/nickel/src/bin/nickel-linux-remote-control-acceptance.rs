@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, net::UnixDatagram},
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, ExitCode, Stdio},
@@ -37,11 +37,20 @@ const POLL: Duration = Duration::from_millis(100);
 const MATRIX_PACING: Duration = Duration::from_millis(75);
 const SESSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_VERSION: &str = "2025-06-18";
+const SUBSCRIPTION_MCP_VERSION: &str = "2026-07-28";
+const STRESS_ROUNDS: usize = 4;
+const MAX_STRESS_RESPONSE_LATENCY: Duration = Duration::from_secs(10);
+const MAX_STRESS_WALL_TIME: Duration = Duration::from_secs(45);
+const MAX_STRESS_RSS_KIB: u64 = 2 * 1024 * 1024;
+const MAX_STRESS_RSS_GROWTH_KIB: u64 = 512 * 1024;
 const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
 const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
 const MESA_VBLANK_MODE: &str = "vblank_mode";
 const TYPED_CANARY: &str = "native-typed-password-DO-NOT-RETAIN";
 const CREDENTIAL_CANARY: &str = "native-credential-DO-NOT-RETAIN";
+const STRESS_INPUT_CANARY: &str = "native-stress-input-DO-NOT-RETAIN";
+const DENIAL_CANARY: &str = "native-denial-client-DO-NOT-RETAIN";
+const EXPIRY_CANARY: &str = "native-expiry-client-DO-NOT-RETAIN";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn main() -> ExitCode {
@@ -121,7 +130,7 @@ fn run() -> Result<Outcome, String> {
     }
     result?;
     println!(
-        "PASS: production pre-lease metrics, complete desktop-tool denial, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
+        "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, denial/expiry/revocation, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
     );
     Ok(Outcome::Passed)
 }
@@ -218,6 +227,7 @@ fn exercise(
         audit_baseline,
         desktop_tools.keys().map(String::as_str),
     )?;
+    let denied_identity = exercise_permission_denial(&environment, address)?;
 
     let bootstrap = approve_scope(
         &environment,
@@ -226,12 +236,13 @@ fn exercise(
         RemoteResourceScope::FullSession,
         true,
     )?;
-    let lease_id = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
+    let mut stress = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
     let lease_id = if env::args().any(|argument| argument == "--ordinary-scopes") {
-        ordinary_scopes::exercise(&environment, address, &identity, lease_id)?
+        ordinary_scopes::exercise(&environment, address, &identity, stress.lease_id)?
     } else {
-        lease_id
+        stress.lease_id
     };
+    stress.lease_id = lease_id;
 
     let trace_started = mcp_call(
         address,
@@ -298,6 +309,37 @@ fn exercise(
         ],
     )?;
 
+    let known_methods = published_metric_methods(desktop_tools.keys().map(String::as_str));
+    exercise_native_stress(
+        session,
+        address,
+        &identity,
+        &stress,
+        &known_methods,
+        &[&denied_identity.client_id, &denied_identity.token],
+    )?;
+    let expiry_identity = exercise_expiry_and_revocation(&environment, address, lease_id)?;
+    let final_metrics = metrics(address)?;
+    require_metric(&final_metrics, "nickel_mcp_active_leases 1")?;
+    validate_fixed_metrics(&final_metrics, &known_methods)?;
+    require_no_canaries(
+        "post-expiry and revocation metrics",
+        &final_metrics,
+        &[
+            TYPED_CANARY,
+            CREDENTIAL_CANARY,
+            STRESS_INPUT_CANARY,
+            DENIAL_CANARY,
+            EXPIRY_CANARY,
+            &identity.client_id,
+            &identity.token,
+            &denied_identity.client_id,
+            &denied_identity.token,
+            &expiry_identity.client_id,
+            &expiry_identity.token,
+        ],
+    )?;
+
     let before = mcp_call(
         address,
         &identity,
@@ -352,12 +394,18 @@ fn exercise(
 
 /// The nested shell is a real production resource, not an ordinary application
 /// window. Do not fabricate window or executable identity to fill those scopes.
+struct StressResources {
+    lease_id: u64,
+    surface: nickel_session_protocol::RemoteResourceId,
+    output: nickel_session_protocol::RemoteResourceId,
+}
+
 fn exercise_scope_matrix(
     environment: &SessionEnvironment,
     address: SocketAddr,
     identity: &Identity,
     bootstrap: u64,
-) -> Result<u64, String> {
+) -> Result<StressResources, String> {
     let response = session_message(
         environment,
         Request::Command(Command::SetLauncherVisible { visible: true }),
@@ -408,7 +456,7 @@ fn exercise_scope_matrix(
 
     let scopes = [
         ("surface", RemoteResourceScope::Surface(surface.clone())),
-        ("output", RemoteResourceScope::Output(output)),
+        ("output", RemoteResourceScope::Output(output.clone())),
         ("full_session", RemoteResourceScope::FullSession),
     ];
     let mut last_lease = None;
@@ -511,7 +559,624 @@ fn exercise_scope_matrix(
     println!(
         "SHELL MATRIX LIMIT: ordinary window/application scopes require --ordinary-scopes; cross-output movement, physical input and assistive workflow remain separate acceptance"
     );
-    last_lease.ok_or_else(|| "scope matrix did not retain its final debug lease".into())
+    Ok(StressResources {
+        lease_id: last_lease.ok_or("scope matrix did not retain its final debug lease")?,
+        surface,
+        output,
+    })
+}
+
+fn exercise_permission_denial(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+) -> Result<Identity, String> {
+    let identity = connect_identity(address, DENIAL_CANARY)?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let response = mcp_call(
+        address,
+        &identity,
+        "request_control_lease",
+        json!({
+            "scope": {"kind": "full_session"},
+            "duration_seconds": 30,
+            "allow_resumption": false,
+            "full_debug": true
+        }),
+    )?;
+    require_tool_success("request_control_lease for denial", &response)?;
+    let pending = remote_snapshot(environment)?
+        .pending_leases
+        .into_iter()
+        .find(|request| request.client_id == identity.client_id)
+        .ok_or("denial fixture did not reach trusted local approval")?;
+    let denied = session_message(
+        environment,
+        Request::Command(Command::DecideRemoteLease {
+            pending_generation: pending.pending_generation,
+            client_id: pending.client_id,
+            request: pending.request,
+            allow: false,
+        }),
+    )?;
+    let ServerMessage::RemoteControl(denied) = denied else {
+        return Err("local denial omitted its authoritative snapshot".into());
+    };
+    if !denied.pending_leases.is_empty() || !denied.active_leases.is_empty() {
+        return Err("local denial left desktop authority or a pending request".into());
+    }
+    let response = mcp_call(
+        address,
+        &identity,
+        "diagnostic_snapshot",
+        json!({"lease_id": 9_000_001_u64}),
+    )?;
+    require_tool_error("diagnostic_snapshot after local denial", &response)?;
+    let exposed = metrics(address)?;
+    require_metric(
+        &exposed,
+        "nickel_mcp_permission_requests_total{outcome=\"denied\"} 1",
+    )?;
+    require_no_canaries(
+        "metrics after local denial",
+        &exposed,
+        &[DENIAL_CANARY, &identity.client_id, &identity.token],
+    )?;
+    watch.finish()?;
+    Ok(identity)
+}
+
+fn exercise_native_stress(
+    session: &SessionProcess,
+    address: SocketAddr,
+    identity: &Identity,
+    resources: &StressResources,
+    known_methods: &BTreeSet<String>,
+    extra_canaries: &[&str],
+) -> Result<(), String> {
+    let started = Instant::now();
+    let rss_before = session.rss_kib()?;
+    if rss_before > MAX_STRESS_RSS_KIB {
+        return Err(format!(
+            "nested compositor RSS exceeded the stress correctness ceiling before load: {rss_before} KiB"
+        ));
+    }
+    let baseline = metrics(address)?;
+    validate_fixed_metrics(&baseline, known_methods)?;
+
+    let mut control_timing = StressTiming::new("trace and final snapshot");
+    let (trace_started, latency) = timed_tool_call(
+        address,
+        identity,
+        "diagnostic_action",
+        json!({
+            "lease_id": resources.lease_id,
+            "action": {"start_frame_trace": {"duration_seconds": 30}}
+        }),
+    )?;
+    require_tool_success("stress frame trace start", &trace_started)?;
+    control_timing.observe(latency)?;
+    let subscription = EventSubscription::start(address, identity, resources.lease_id)?;
+
+    // The production admission limit permits four concurrent requests per client.
+    // The mandatory watch and event subscription occupy two slots, so these two
+    // lanes exercise concurrent owner work without turning the fixture into a
+    // rate-limit benchmark.
+    let lease_id = resources.lease_id;
+    let diagnostic_identity = identity.clone();
+    let diagnostic = thread::spawn(move || {
+        let mut timing = StressTiming::new("diagnostic snapshot and event polling");
+        for _ in 0..STRESS_ROUNDS {
+            let (response, elapsed) = timed_tool_call(
+                address,
+                &diagnostic_identity,
+                "diagnostic_snapshot",
+                json!({"lease_id": lease_id}),
+            )?;
+            require_tool_success("diagnostic_snapshot under stress", &response)?;
+            require_diagnostic_privacy(&response, &diagnostic_identity)?;
+            require_no_canaries(
+                "diagnostic_snapshot under native stress",
+                &response.to_string(),
+                &[STRESS_INPUT_CANARY],
+            )?;
+            timing.observe(elapsed)?;
+
+            let (response, elapsed) = timed_tool_call(
+                address,
+                &diagnostic_identity,
+                "read_desktop_events",
+                json!({"lease_id": lease_id, "after_generation": 0}),
+            )?;
+            require_tool_success("read_desktop_events under stress", &response)?;
+            require_no_canaries(
+                "desktop events under native stress",
+                &response.to_string(),
+                &[STRESS_INPUT_CANARY, TYPED_CANARY, CREDENTIAL_CANARY],
+            )?;
+            timing.observe(elapsed)?;
+        }
+        Ok::<_, String>(timing)
+    });
+
+    let action_identity = identity.clone();
+    let surface = resources.surface.clone();
+    let output = resources.output.clone();
+    let action = thread::spawn(move || {
+        let mut timing = StressTiming::new("capture, semantic input, and repaint");
+        for round in 0..STRESS_ROUNDS {
+            let (capture, elapsed) = if round % 2 == 0 {
+                timed_tool_call(
+                    address,
+                    &action_identity,
+                    "capture_surface",
+                    json!({
+                        "lease_id": lease_id,
+                        "surface_id": surface.id,
+                        "generation": surface.generation
+                    }),
+                )?
+            } else {
+                timed_tool_call(
+                    address,
+                    &action_identity,
+                    "capture_output",
+                    json!({
+                        "lease_id": lease_id,
+                        "output_id": output.id,
+                        "generation": output.generation
+                    }),
+                )?
+            };
+            require_tool_success("capture under stress", &capture)?;
+            timing.observe(elapsed)?;
+
+            let (tree, elapsed) = timed_tool_call(
+                address,
+                &action_identity,
+                "inspect_surface",
+                json!({
+                    "lease_id": lease_id,
+                    "surface_id": surface.id,
+                    "generation": surface.generation
+                }),
+            )?;
+            require_tool_success("inspect_surface for stress input", &tree)?;
+            timing.observe(elapsed)?;
+            let tree = structured_content("inspect_surface for stress input", &tree)?;
+            let field = search_field(&tree)?;
+            let (input, elapsed) = timed_tool_call(
+                address,
+                &action_identity,
+                "surface_semantic_action",
+                json!({
+                    "lease_id": lease_id,
+                    "surface_id": surface.id,
+                    "surface_generation": surface.generation,
+                    "tree_generation": tree["tree_generation"],
+                    "node": field["id"],
+                    "action": {
+                        "kind": "set_text",
+                        "value": format!("{STRESS_INPUT_CANARY}-{round}")
+                    }
+                }),
+            )?;
+            require_tool_success("surface_semantic_action under stress", &input)?;
+            require_no_canaries(
+                "semantic input result under native stress",
+                &input.to_string(),
+                &[STRESS_INPUT_CANARY],
+            )?;
+            timing.observe(elapsed)?;
+
+            let (repaint, elapsed) = timed_tool_call(
+                address,
+                &action_identity,
+                "diagnostic_action",
+                json!({"lease_id": lease_id, "action": "repaint"}),
+            )?;
+            require_tool_success("repaint under stress", &repaint)?;
+            timing.observe(elapsed)?;
+        }
+        Ok::<_, String>(timing)
+    });
+
+    let diagnostic = diagnostic
+        .join()
+        .map_err(|_| "diagnostic stress lane panicked".to_owned())??;
+    let action = action
+        .join()
+        .map_err(|_| "capture/input stress lane panicked".to_owned())??;
+    let subscription_transcript = subscription.finish()?;
+    require_no_canaries(
+        "event subscription transport",
+        &subscription_transcript,
+        &[STRESS_INPUT_CANARY, TYPED_CANARY, CREDENTIAL_CANARY],
+    )?;
+
+    let (trace_stopped, latency) = timed_tool_call(
+        address,
+        identity,
+        "diagnostic_action",
+        json!({"lease_id": resources.lease_id, "action": "stop_frame_trace"}),
+    )?;
+    require_tool_success("stress frame trace stop", &trace_stopped)?;
+    control_timing.observe(latency)?;
+    let (final_snapshot, latency) = timed_tool_call(
+        address,
+        identity,
+        "diagnostic_snapshot",
+        json!({"lease_id": resources.lease_id}),
+    )?;
+    require_tool_success("post-stress diagnostic_snapshot", &final_snapshot)?;
+    require_diagnostic_privacy(&final_snapshot, identity)?;
+    require_no_canaries(
+        "post-stress diagnostics",
+        &final_snapshot.to_string(),
+        &[STRESS_INPUT_CANARY],
+    )?;
+    control_timing.observe(latency)?;
+
+    let expected_increments = [
+        ("diagnostic_snapshot", STRESS_ROUNDS as u64 + 1),
+        ("read_desktop_events", STRESS_ROUNDS as u64),
+        ("capture_surface", STRESS_ROUNDS.div_ceil(2) as u64),
+        ("capture_output", (STRESS_ROUNDS / 2) as u64),
+        ("inspect_surface", STRESS_ROUNDS as u64),
+        ("surface_semantic_action", STRESS_ROUNDS as u64),
+        ("diagnostic_action", STRESS_ROUNDS as u64 + 2),
+        ("event_subscription", 1),
+    ];
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let exposed = loop {
+        let exposed = metrics(address)?;
+        if expected_increments.iter().all(|(method, expected)| {
+            request_total(&exposed, method)
+                >= request_total(&baseline, method).saturating_add(*expected)
+        }) {
+            break exposed;
+        }
+        if Instant::now() >= deadline {
+            return Err("native stress metrics did not observe every completed operation".into());
+        }
+        thread::sleep(POLL);
+    };
+    validate_fixed_metrics(&exposed, known_methods)?;
+    let mut canaries = vec![
+        TYPED_CANARY,
+        CREDENTIAL_CANARY,
+        STRESS_INPUT_CANARY,
+        &identity.client_id,
+        &identity.token,
+    ];
+    canaries.extend_from_slice(extra_canaries);
+    require_no_canaries("metrics after native stress", &exposed, &canaries)?;
+
+    thread::sleep(Duration::from_millis(250));
+    let rss_after = session.rss_kib()?;
+    let rss_growth = rss_after.saturating_sub(rss_before);
+    if rss_after > MAX_STRESS_RSS_KIB || rss_growth > MAX_STRESS_RSS_GROWTH_KIB {
+        return Err(format!(
+            "nested compositor RSS exceeded the stress correctness ceiling: before={rss_before} KiB after={rss_after} KiB growth={rss_growth} KiB"
+        ));
+    }
+    if started.elapsed() > MAX_STRESS_WALL_TIME {
+        return Err(format!(
+            "native stress exceeded its correctness deadline of {MAX_STRESS_WALL_TIME:?}"
+        ));
+    }
+    let max_latency = [
+        diagnostic.max_latency,
+        action.max_latency,
+        control_timing.max_latency,
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or_default();
+    println!(
+        "PASS: bounded native MCP stress: {} requests in {:?}, max response {:?}, RSS {} -> {} KiB (+{} KiB)",
+        diagnostic.calls + action.calls + control_timing.calls,
+        started.elapsed(),
+        max_latency,
+        rss_before,
+        rss_after,
+        rss_growth
+    );
+    Ok(())
+}
+
+fn exercise_expiry_and_revocation(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    retained_lease: u64,
+) -> Result<Identity, String> {
+    let identity = connect_identity(address, EXPIRY_CANARY)?;
+    let watch = ConnectionWatch::start(address, &identity)?;
+    let expired_lease = approve_additional_lease(environment, address, &identity, 1)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let expired = loop {
+        let _ = metrics(address)?;
+        let snapshot = remote_snapshot(environment)?;
+        let retired = !snapshot
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == expired_lease);
+        let audited = snapshot.lease_audit.iter().any(|event| {
+            event.lease_id == expired_lease && event.transition == RemoteLeaseTransition::Expired
+        });
+        if retired && audited {
+            break snapshot;
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "one-second native stress lease did not fully project expiry: retired={retired} audited={audited}"
+            ));
+        }
+        thread::sleep(POLL);
+    };
+    let retained_authority = expired
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == retained_lease);
+    if !retained_authority {
+        return Err("lease expiry changed unrelated authority".into());
+    }
+    let response = mcp_call(
+        address,
+        &identity,
+        "diagnostic_snapshot",
+        json!({"lease_id": expired_lease}),
+    )?;
+    require_tool_error("diagnostic_snapshot after lease expiry", &response)?;
+
+    let revoked_lease = approve_additional_lease(environment, address, &identity, 30)?;
+    session_message(
+        environment,
+        Request::Command(Command::ManageRemoteLease {
+            lease_id: revoked_lease,
+            action: RemoteLeaseAction::Revoke,
+        }),
+    )?;
+    let revoked = remote_snapshot(environment)?;
+    if revoked
+        .active_leases
+        .iter()
+        .any(|lease| lease.lease_id == revoked_lease)
+        || !revoked
+            .active_leases
+            .iter()
+            .any(|lease| lease.lease_id == retained_lease)
+        || !revoked.lease_audit.iter().any(|event| {
+            event.lease_id == revoked_lease && event.transition == RemoteLeaseTransition::Revoked
+        })
+    {
+        return Err(
+            "explicit revocation changed unrelated authority or omitted its audit event".into(),
+        );
+    }
+    let response = mcp_call(
+        address,
+        &identity,
+        "diagnostic_snapshot",
+        json!({"lease_id": revoked_lease}),
+    )?;
+    require_tool_error("diagnostic_snapshot after explicit revocation", &response)?;
+    watch.finish()?;
+    Ok(identity)
+}
+
+fn approve_additional_lease(
+    environment: &SessionEnvironment,
+    address: SocketAddr,
+    identity: &Identity,
+    duration_seconds: u64,
+) -> Result<u64, String> {
+    let before = remote_snapshot(environment)?;
+    let prior = before
+        .active_leases
+        .iter()
+        .map(|lease| lease.lease_id)
+        .collect::<BTreeSet<_>>();
+    let response = mcp_call(
+        address,
+        identity,
+        "request_control_lease",
+        json!({
+            "scope": {"kind": "full_session"},
+            "duration_seconds": duration_seconds,
+            "allow_resumption": false,
+            "full_debug": true
+        }),
+    )?;
+    require_tool_success("request_control_lease for lifecycle stress", &response)?;
+    let pending = remote_snapshot(environment)?
+        .pending_leases
+        .into_iter()
+        .find(|request| request.client_id == identity.client_id)
+        .ok_or("lifecycle stress request did not reach local approval")?;
+    let approved = session_message(
+        environment,
+        Request::Command(Command::DecideRemoteLease {
+            pending_generation: pending.pending_generation,
+            client_id: pending.client_id,
+            request: pending.request,
+            allow: true,
+        }),
+    )?;
+    let ServerMessage::RemoteControl(approved) = approved else {
+        return Err("lifecycle stress approval omitted its authoritative snapshot".into());
+    };
+    approved
+        .active_leases
+        .iter()
+        .find(|lease| !prior.contains(&lease.lease_id))
+        .map(|lease| lease.lease_id)
+        .ok_or("lifecycle stress approval did not create a distinct lease".into())
+}
+
+#[derive(Debug)]
+struct StressTiming {
+    name: &'static str,
+    calls: usize,
+    max_latency: Duration,
+}
+
+impl StressTiming {
+    fn new(name: &'static str) -> Self {
+        Self {
+            name,
+            calls: 0,
+            max_latency: Duration::ZERO,
+        }
+    }
+
+    fn observe(&mut self, latency: Duration) -> Result<(), String> {
+        self.calls += 1;
+        self.max_latency = self.max_latency.max(latency);
+        if latency > MAX_STRESS_RESPONSE_LATENCY {
+            return Err(format!(
+                "{} exceeded the {:?} response correctness ceiling: {latency:?}",
+                self.name, MAX_STRESS_RESPONSE_LATENCY
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn timed_tool_call(
+    address: SocketAddr,
+    identity: &Identity,
+    name: &str,
+    arguments: Value,
+) -> Result<(Value, Duration), String> {
+    let started = Instant::now();
+    let response = mcp_call(address, identity, name, arguments)?;
+    Ok((response, started.elapsed()))
+}
+
+fn structured_content(operation: &str, response: &Value) -> Result<Value, String> {
+    let content = response
+        .pointer("/result/structuredContent")
+        .ok_or_else(|| format!("{operation} omitted structured content"))?;
+    Ok(content.get("result").unwrap_or(content).clone())
+}
+
+fn published_metric_methods<'a>(desktop: impl Iterator<Item = &'a str>) -> BTreeSet<String> {
+    desktop
+        .chain([
+            "client_connection",
+            "request_control_lease",
+            "list_control_leases",
+            "get_control_status",
+            "event_subscription",
+        ])
+        .map(str::to_owned)
+        .collect()
+}
+
+fn request_total(metrics: &str, method: &str) -> u64 {
+    let needle = format!("method=\"{method}\"");
+    metrics
+        .lines()
+        .filter(|line| line.starts_with("nickel_mcp_requests_total{") && line.contains(&needle))
+        .filter_map(|line| line.rsplit_once(' ')?.1.parse::<u64>().ok())
+        .fold(0, u64::saturating_add)
+}
+
+fn validate_fixed_metrics(metrics: &str, known_methods: &BTreeSet<String>) -> Result<(), String> {
+    if metrics.len() > 128 * 1024 {
+        return Err("public metrics exceeded the native acceptance bound".into());
+    }
+    let mut observed_methods = BTreeSet::new();
+    let scopes = ["surface", "window", "application", "output", "full_session"];
+    let outcomes = ["success", "error", "cancelled"];
+    let permission_outcomes = [
+        "submitted",
+        "coalesced",
+        "approved",
+        "denied",
+        "cancelled",
+        "blocked",
+        "invalid",
+        "capacity",
+        "cooldown",
+        "blocked_request",
+        "unauthorized",
+    ];
+    let duration_bounds = ["0.001", "0.01", "0.1", "1", "5", "+Inf"];
+    for line in metrics.lines().filter(|line| !line.starts_with('#')) {
+        let Some((metric, labelled)) = line.split_once('{') else {
+            continue;
+        };
+        let labels = labelled
+            .split_once('}')
+            .map(|(labels, _)| labels)
+            .ok_or("public metrics contained malformed labels")?;
+        let values = labels
+            .split(',')
+            .map(|label| {
+                let (key, value) = label
+                    .split_once('=')
+                    .ok_or("public metrics contained a malformed label")?;
+                Ok((key, value.trim_matches('"')))
+            })
+            .collect::<Result<BTreeMap<_, _>, String>>()?;
+        match metric {
+            "nickel_mcp_requests_total" => {
+                if values.len() != 2
+                    || !outcomes.contains(&values.get("outcome").copied().unwrap_or_default())
+                {
+                    return Err("request metrics exposed non-fixed outcome labels".into());
+                }
+                let method = values
+                    .get("method")
+                    .ok_or("request metrics omitted the method label")?;
+                if !known_methods.contains(*method) {
+                    return Err("request metrics exposed a non-published method label".into());
+                }
+                observed_methods.insert((*method).to_owned());
+            }
+            "nickel_mcp_request_duration_seconds_bucket" => {
+                if values.len() != 2
+                    || !known_methods.contains(*values.get("method").unwrap_or(&""))
+                    || !duration_bounds.contains(&values.get("le").copied().unwrap_or_default())
+                {
+                    return Err("duration metrics exposed non-fixed labels".into());
+                }
+            }
+            "nickel_mcp_request_duration_seconds_count"
+            | "nickel_mcp_request_duration_seconds_sum" => {
+                if values.len() != 1
+                    || !known_methods.contains(*values.get("method").unwrap_or(&""))
+                {
+                    return Err("duration metrics exposed a non-published method label".into());
+                }
+            }
+            "nickel_mcp_active_leases_by_scope" => {
+                if values.len() != 1
+                    || !scopes.contains(&values.get("scope").copied().unwrap_or_default())
+                {
+                    return Err("lease metrics exposed a non-fixed scope label".into());
+                }
+            }
+            "nickel_mcp_permission_requests_total" => {
+                if values.len() != 1
+                    || !permission_outcomes
+                        .contains(&values.get("outcome").copied().unwrap_or_default())
+                {
+                    return Err("permission metrics exposed a non-fixed outcome label".into());
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "public metrics exposed unexpected labelled family {metric}"
+                ));
+            }
+        }
+    }
+    if observed_methods != *known_methods {
+        return Err("public metrics omitted a published fixed method label".into());
+    }
+    Ok(())
 }
 
 fn native_resource(
@@ -937,7 +1602,7 @@ fn require_no_trusted_indicator_data(response: &Value) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Identity {
     client_id: String,
     token: String,
@@ -1147,9 +1812,13 @@ fn schema_fixture(schema: &Value, root: &Value) -> Result<Value, String> {
 }
 
 fn client_metadata(progress: u64) -> Value {
+    client_metadata_for(progress, MCP_VERSION)
+}
+
+fn client_metadata_for(progress: u64, protocol: &str) -> Value {
     json!({
         "progressToken": progress,
-        "io.modelcontextprotocol/protocolVersion": MCP_VERSION,
+        "io.modelcontextprotocol/protocolVersion": protocol,
         "io.modelcontextprotocol/clientInfo": {
             "name": "nickel-linux-remote-control-acceptance",
             "version": env!("CARGO_PKG_VERSION")
@@ -1215,6 +1884,127 @@ fn metrics(address: SocketAddr) -> Result<String, String> {
         .split_once("\r\n\r\n")
         .map(|(_, body)| body.to_owned())
         .ok_or("metrics response omitted a body".into())
+}
+
+struct EventSubscription {
+    stop: mpsc::SyncSender<()>,
+    worker: thread::JoinHandle<Result<String, String>>,
+}
+
+impl EventSubscription {
+    fn start(address: SocketAddr, identity: &Identity, lease_id: u64) -> Result<Self, String> {
+        let client_id = identity.client_id.clone();
+        let token = identity.token.clone();
+        let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+        let (stop, stopped) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            open_event_subscription(address, &client_id, &token, lease_id, ready_tx, stopped)
+        });
+        match ready_rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(Ok(())) => Ok(Self { stop, worker }),
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                Err(error)
+            }
+            Err(_) => {
+                let _ = stop.send(());
+                let _ = worker.join();
+                Err("desktop event subscription did not become ready".into())
+            }
+        }
+    }
+
+    fn finish(self) -> Result<String, String> {
+        let _ = self.stop.send(());
+        self.worker
+            .join()
+            .map_err(|_| "desktop event subscription thread panicked".to_owned())?
+    }
+}
+
+fn open_event_subscription(
+    address: SocketAddr,
+    client_id: &str,
+    token: &str,
+    lease_id: u64,
+    ready: mpsc::SyncSender<Result<(), String>>,
+    stop: mpsc::Receiver<()>,
+) -> Result<String, String> {
+    let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    let uri = format!("nickel://desktop-events/{lease_id}");
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "subscriptions/listen",
+        "params": {
+            "notifications": {"resourceSubscriptions": [&uri]},
+            "_meta": client_metadata_for(id, SUBSCRIPTION_MCP_VERSION)
+        }
+    })
+    .to_string();
+    let result = (|| {
+        let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+            .map_err(|error| format!("could not open desktop event subscription: {error}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .map_err(|error| error.to_string())?;
+        write!(
+            stream,
+            "POST /mcp HTTP/1.1\r\nHost: {address}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: {SUBSCRIPTION_MCP_VERSION}\r\nMcp-Method: subscriptions/listen\r\nX-Nickel-Client: {client_id}\r\nAuthorization: Bearer {token}\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .map_err(|error| error.to_string())?;
+        let mut transcript = String::new();
+        let mut acknowledged = false;
+        loop {
+            if stop.try_recv().is_ok() {
+                let _ = stream.shutdown(Shutdown::Both);
+                return Ok(transcript);
+            }
+            let mut chunk = [0; 4096];
+            match stream.read(&mut chunk) {
+                Ok(0) => {
+                    return Err(
+                        "desktop event subscription ended before the stress load completed".into(),
+                    );
+                }
+                Ok(count) => {
+                    transcript.push_str(&String::from_utf8_lossy(&chunk[..count]));
+                    if transcript.len() > 128 * 1024 {
+                        return Err(
+                            "desktop event subscription transcript exceeded its bound".into()
+                        );
+                    }
+                    if transcript.contains("\r\n\r\n") && !transcript.starts_with("HTTP/1.1 200") {
+                        return Err("desktop event subscription HTTP request failed".into());
+                    }
+                    if !acknowledged
+                        && transcript.contains("notifications/subscriptions/acknowledged")
+                        && transcript.contains("notifications/resources/updated")
+                        && transcript.contains(&uri)
+                    {
+                        acknowledged = true;
+                        let _ = ready.send(Ok(()));
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) => {}
+                Err(error) => return Err(format!("desktop event subscription failed: {error}")),
+            }
+        }
+    })();
+    if result.is_err() {
+        let message = result
+            .as_ref()
+            .err()
+            .cloned()
+            .unwrap_or_else(|| "desktop event subscription failed".into());
+        let _ = ready.send(Err(message));
+    }
+    result
 }
 
 struct ConnectionWatch {
@@ -1543,6 +2333,17 @@ impl SessionProcess {
         .into_iter()
         .find(|message| stderr.contains(message))
         .map(|message| format!("nested compositor prerequisite unavailable: {message}"))
+    }
+
+    fn rss_kib(&self) -> Result<u64, String> {
+        let status = fs::read_to_string(format!("/proc/{}/status", self.child.id()))
+            .map_err(|error| format!("could not read nested compositor RSS: {error}"))?;
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))
+            .and_then(|value| value.split_whitespace().next())
+            .and_then(|value| value.parse().ok())
+            .ok_or("nested compositor status omitted VmRSS".into())
     }
 
     fn shutdown(&mut self) {
