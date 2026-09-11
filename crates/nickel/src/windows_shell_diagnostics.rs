@@ -1,4 +1,5 @@
 use crate::winit_shell::SurfaceRole;
+use nickel_remote_control::desktop_events::ShellEventRole;
 use nickel_remote_control::diagnostics::{
     MAX_DIAGNOSTIC_SHELL_SURFACES, ProjectedResourceDiagnostic, ShellDiagnosticRole,
     ShellImageCacheDiagnostic, ShellSurfaceDiagnostic,
@@ -35,6 +36,61 @@ fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
         #[cfg(target_os = "windows")]
         SurfaceRole::TrustedControl => return None,
     })
+}
+
+fn event_role(role: SurfaceRole) -> Option<ShellEventRole> {
+    Some(match role {
+        SurfaceRole::Desktop => ShellEventRole::Desktop,
+        SurfaceRole::Panel => ShellEventRole::Panel,
+        SurfaceRole::Launcher => ShellEventRole::Launcher,
+        SurfaceRole::ControlCenter => ShellEventRole::ControlCenter,
+        SurfaceRole::Notification => ShellEventRole::Notification,
+        SurfaceRole::VolumeOsd => ShellEventRole::VolumeOsd,
+        SurfaceRole::WindowPreview => ShellEventRole::WindowPreview,
+        SurfaceRole::WindowContextMenu => ShellEventRole::WindowContextMenu,
+        SurfaceRole::Screenshot => ShellEventRole::Screenshot,
+        SurfaceRole::OnScreenKeyboard => ShellEventRole::OnScreenKeyboard,
+        SurfaceRole::CodexProjectMenu | SurfaceRole::Lock | SurfaceRole::CodexChat => return None,
+        #[cfg(target_os = "windows")]
+        SurfaceRole::TrustedControl => return None,
+    })
+}
+
+/// Project one exact native/canonical visibility transition. The event stream
+/// never retains protected shell identities, and a stale queued winit event is
+/// ignored when current native and production visibility no longer agree with it.
+pub(crate) fn project_visibility_event(
+    protected_desktop: bool,
+    observation: &SurfaceObservation,
+    visible: bool,
+) -> Option<(u64, ShellEventRole)> {
+    if protected_desktop
+        || observation.protected
+        || observation.generation == 0
+        || observation.native_visible != visible
+        || observation.canonical_visible != visible
+    {
+        return None;
+    }
+    Some((observation.generation, event_role(observation.role)?))
+}
+
+/// Project current ordinary keyboard focus. Absence deliberately represents
+/// protected, hidden, stale and unsupported recipients alike.
+pub(crate) fn project_focus_event(
+    protected_desktop: bool,
+    observation: &SurfaceObservation,
+) -> Option<(u64, ShellEventRole)> {
+    if protected_desktop
+        || observation.protected
+        || observation.generation == 0
+        || !observation.native_visible
+        || !observation.canonical_visible
+        || !observation.keyboard_focused
+    {
+        return None;
+    }
+    Some((observation.generation, event_role(observation.role)?))
 }
 
 pub(crate) fn project(
@@ -237,5 +293,60 @@ mod tests {
         assert_eq!(projected.renderer_surfaces, 0);
         assert_eq!(projected.software_frame_bytes, 0);
         assert_eq!(projected.fallback_raster_bytes, 0);
+    }
+
+    #[test]
+    fn shell_event_projection_requires_current_ordinary_unprotected_evidence() {
+        let visible = observation(SurfaceRole::Launcher, 17);
+        assert_eq!(
+            project_visibility_event(false, &visible, true),
+            Some((17, ShellEventRole::Launcher))
+        );
+        assert_eq!(
+            project_focus_event(false, &visible),
+            Some((17, ShellEventRole::Launcher))
+        );
+
+        let mut hidden = visible.clone();
+        hidden.native_visible = false;
+        hidden.canonical_visible = false;
+        hidden.keyboard_focused = false;
+        assert_eq!(
+            project_visibility_event(false, &hidden, false),
+            Some((17, ShellEventRole::Launcher))
+        );
+        assert!(project_visibility_event(false, &hidden, true).is_none());
+        assert!(project_focus_event(false, &hidden).is_none());
+
+        let mut protected = visible.clone();
+        protected.protected = true;
+        assert!(project_visibility_event(false, &protected, true).is_none());
+        assert!(project_focus_event(false, &protected).is_none());
+        assert!(project_visibility_event(true, &visible, true).is_none());
+        assert!(project_focus_event(true, &visible).is_none());
+
+        let codex = observation(SurfaceRole::CodexChat, 18);
+        assert!(project_visibility_event(false, &codex, true).is_none());
+        assert!(project_focus_event(false, &codex).is_none());
+        #[cfg(target_os = "windows")]
+        let trusted = observation(SurfaceRole::TrustedControl, 19);
+        #[cfg(target_os = "windows")]
+        assert!(project_visibility_event(false, &trusted, true).is_none());
+        #[cfg(target_os = "windows")]
+        assert!(project_focus_event(false, &trusted).is_none());
+    }
+
+    #[test]
+    fn stale_visibility_and_focus_events_fail_closed() {
+        let mut stale = observation(SurfaceRole::Screenshot, 23);
+        stale.canonical_visible = false;
+        assert!(project_visibility_event(false, &stale, true).is_none());
+        assert!(project_visibility_event(false, &stale, false).is_none());
+        assert!(project_focus_event(false, &stale).is_none());
+
+        stale.generation = 0;
+        stale.native_visible = false;
+        stale.keyboard_focused = false;
+        assert!(project_visibility_event(false, &stale, false).is_none());
     }
 }

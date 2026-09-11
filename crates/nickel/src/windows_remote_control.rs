@@ -909,6 +909,7 @@ pub(crate) struct WindowsRemoteControl {
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    shell_focus: Option<ShellFocusState>,
     external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
     pending_indicator_activation: std::collections::BTreeSet<u64>,
@@ -937,6 +938,15 @@ struct IndicatorSurface {
     host: crate::EmbeddedUiSurface<RemoteIndicator>,
     accessibility: crate::trusted_accessibility::native::IndicatorAccessibility,
     authority_revision: Vec<(u64, u64, u64)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellFocusState {
+    Cleared,
+    Surface {
+        generation: u64,
+        role: nickel_remote_control::desktop_events::ShellEventRole,
+    },
 }
 
 impl WindowsRemoteControl {
@@ -1006,6 +1016,7 @@ impl WindowsRemoteControl {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            shell_focus: None,
             external_accessibility: None,
             pending_indicator_activation: Default::default(),
             start_time: started,
@@ -1045,6 +1056,111 @@ impl WindowsRemoteControl {
     }
     pub(crate) fn poll(&mut self, shell: &mut WinitShell, state: &crate::live_shell::LiveShell) {
         self.poll_with_shell(Some((shell, state)));
+    }
+
+    /// Retain only fixed, production-owned shell visibility and keyboard-focus
+    /// transitions. Input payloads, geometry, output names and protected shell
+    /// identities never enter the event history.
+    pub(crate) fn observe_shell_event(
+        &mut self,
+        shell: &WinitShell,
+        state: &crate::live_shell::LiveShell,
+        event: &ShellEvent,
+    ) {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+
+        let (surface, visibility, focus) = match event {
+            ShellEvent::Shown(surface) => (*surface, Some(true), None),
+            ShellEvent::Hidden(surface) => (*surface, Some(false), None),
+            ShellEvent::FocusChanged { surface, focused } => (*surface, None, Some(*focused)),
+            _ => return,
+        };
+        let Some(observation) = shell.remote_shell_surface_observation(surface, state) else {
+            return;
+        };
+        let native_desktop_unlocked = self.desktop_unlocked
+            && self
+                .desktop_session
+                .is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
+        let protected_desktop = !native_desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+
+        if let Some(visible) = visibility {
+            if let Some((surface_generation, role)) =
+                crate::windows_shell_diagnostics::project_visibility_event(
+                    protected_desktop,
+                    &observation,
+                    visible,
+                )
+            {
+                self.desktop_events.record(
+                    DesktopEventKind::ShellSurfaceVisibilityChanged {
+                        surface_generation,
+                        role,
+                        visible,
+                    },
+                    observed_at_us,
+                );
+            }
+            if !visible
+                && !observation.keyboard_focused
+                && matches!(
+                    self.shell_focus,
+                    Some(ShellFocusState::Surface { generation, .. })
+                        if generation == observation.generation
+                )
+            {
+                self.record_shell_focus(ShellFocusState::Cleared, observed_at_us);
+            }
+            return;
+        }
+
+        let Some(focused) = focus else {
+            return;
+        };
+        if focused {
+            // Ignore an obsolete queued focus event. If the current native
+            // recipient is protected or unsupported, expose only a clear.
+            if !observation.keyboard_focused {
+                return;
+            }
+            let next = crate::windows_shell_diagnostics::project_focus_event(
+                protected_desktop,
+                &observation,
+            )
+            .map_or(ShellFocusState::Cleared, |(generation, role)| {
+                ShellFocusState::Surface { generation, role }
+            });
+            self.record_shell_focus(next, observed_at_us);
+        } else if !observation.keyboard_focused
+            && matches!(
+                self.shell_focus,
+                Some(ShellFocusState::Surface { generation, .. })
+                    if generation == observation.generation
+            )
+        {
+            self.record_shell_focus(ShellFocusState::Cleared, observed_at_us);
+        }
+    }
+
+    fn record_shell_focus(&mut self, next: ShellFocusState, observed_at_us: u64) {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+
+        if self.shell_focus == Some(next) {
+            return;
+        }
+        self.shell_focus = Some(next);
+        let event = match next {
+            ShellFocusState::Cleared => DesktopEventKind::KeyboardFocusCleared,
+            ShellFocusState::Surface { generation, role } => {
+                DesktopEventKind::ShellKeyboardFocusChanged {
+                    surface_generation: generation,
+                    role,
+                }
+            }
+        };
+        self.desktop_events.record(event, observed_at_us);
     }
 
     fn poll_with_shell(
@@ -3317,6 +3433,7 @@ mod tests {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            shell_focus: None,
             external_accessibility: None,
             pending_indicator_activation: Default::default(),
             start_time: Instant::now(),
@@ -3391,6 +3508,33 @@ mod tests {
         assert!(snapshot.pending_leases.is_empty());
         drop(owner);
         assert!(!control.lock().unwrap().enabled());
+    }
+    #[test]
+    fn shell_focus_events_coalesce_and_retain_only_fixed_identity() {
+        let mut owner = owner();
+        let launcher = ShellFocusState::Surface {
+            generation: 41,
+            role: nickel_remote_control::desktop_events::ShellEventRole::Launcher,
+        };
+        owner.record_shell_focus(launcher, 10);
+        owner.record_shell_focus(launcher, 11);
+        owner.record_shell_focus(ShellFocusState::Cleared, 12);
+        owner.record_shell_focus(ShellFocusState::Cleared, 13);
+
+        let snapshot = owner.desktop_events.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(snapshot.events[0].observed_at_us, 10);
+        assert!(matches!(
+            snapshot.events[0].event,
+            nickel_remote_control::desktop_events::DesktopEventKind::ShellKeyboardFocusChanged {
+                surface_generation: 41,
+                role: nickel_remote_control::desktop_events::ShellEventRole::Launcher,
+            }
+        ));
+        assert!(matches!(
+            snapshot.events[1].event,
+            nickel_remote_control::desktop_events::DesktopEventKind::KeyboardFocusCleared
+        ));
     }
     #[test]
     fn protected_desktop_transition_revokes_runtime_authority_before_owner_work() {

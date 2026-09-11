@@ -988,35 +988,52 @@ impl WinitShell {
         state: &crate::live_shell::LiveShell,
     ) -> Vec<crate::windows_shell_diagnostics::SurfaceObservation> {
         self.surfaces()
-            .map(|surface| {
-                let scale = surface.window.scale_factor();
-                let geometry = surface.window.outer_position().ok().map(|position| {
-                    let position = position.to_logical::<i32>(scale);
-                    let size = surface.window.inner_size().to_logical::<u32>(scale);
-                    [
-                        i64::from(position.x),
-                        i64::from(position.y),
-                        i64::from(size.width),
-                        i64::from(size.height),
-                    ]
-                });
-                let scene = state.scene_change_token(surface.role);
-                crate::windows_shell_diagnostics::SurfaceObservation {
-                    role: surface.role,
-                    generation: surface.diagnostic_generation,
-                    native_visible: surface.visible,
-                    canonical_visible: state.surface_visible(surface.role),
-                    protected: state.surface_remote_access_protected(surface.role),
-                    geometry,
-                    output: Some(surface.output_name.clone()),
-                    scene_generation: scene.map(|token| token.frame_generation),
-                    scale_factor: scale as f32,
-                    redraw_pending: scene
-                        .is_some_and(|token| surface.last_host_change_token != Some(token)),
-                    keyboard_focused: surface.window.has_focus(),
-                }
-            })
+            .map(|surface| self.remote_shell_surface_observation_for(surface, state))
             .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn remote_shell_surface_observation(
+        &self,
+        id: SurfaceId,
+        state: &crate::live_shell::LiveShell,
+    ) -> Option<crate::windows_shell_diagnostics::SurfaceObservation> {
+        self.surface(id)
+            .map(|surface| self.remote_shell_surface_observation_for(surface, state))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn remote_shell_surface_observation_for(
+        &self,
+        surface: &ShellSurface,
+        state: &crate::live_shell::LiveShell,
+    ) -> crate::windows_shell_diagnostics::SurfaceObservation {
+        let scale = surface.window.scale_factor();
+        let geometry = surface.window.outer_position().ok().map(|position| {
+            let position = position.to_logical::<i32>(scale);
+            let size = surface.window.inner_size().to_logical::<u32>(scale);
+            [
+                i64::from(position.x),
+                i64::from(position.y),
+                i64::from(size.width),
+                i64::from(size.height),
+            ]
+        });
+        let scene = state.scene_change_token(surface.role);
+        crate::windows_shell_diagnostics::SurfaceObservation {
+            role: surface.role,
+            generation: surface.diagnostic_generation,
+            native_visible: surface.visible,
+            canonical_visible: state.surface_visible(surface.role),
+            protected: state.surface_remote_access_protected(surface.role),
+            geometry,
+            output: Some(surface.output_name.clone()),
+            scene_generation: scene.map(|token| token.frame_generation),
+            scale_factor: scale as f32,
+            redraw_pending: scene
+                .is_some_and(|token| surface.last_host_change_token != Some(token)),
+            keyboard_focused: surface.window.has_focus(),
+        }
     }
 
     pub fn surface(&self, id: SurfaceId) -> Option<&ShellSurface> {

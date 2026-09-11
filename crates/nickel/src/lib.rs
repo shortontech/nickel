@@ -2388,6 +2388,12 @@ pub fn run() -> Result<(), String> {
         }
         #[cfg(target_os = "windows")]
         if let Some(ref event) = event
+            && let Some(owner) = remote_control.as_mut()
+        {
+            owner.observe_shell_event(&shell, &state, event);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(ref event) = event
             && remote_control
                 .as_mut()
                 .is_some_and(|owner| owner.indicator_event(&mut shell, event))
