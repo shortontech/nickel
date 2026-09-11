@@ -1566,3 +1566,9 @@ names, text, values and actions are excluded at collection. The full native GTK
 AT-SPI matrix correlated a real traversal with its operation record, then passed
 password/editable subtree exclusion, scope, output movement, focus, transient,
 provider-timeout, revocation, input-ownership, retirement and lock checks.
+
+Each successfully owner-validated external accessibility traversal now also
+enters the bounded desktop event stream. The event uses the same operation
+number as the retained observation and server completion plus only the fixed
+scope, node count and truncation bit. Native GTK acceptance correlated all three
+records before completing the broader AT-SPI lifecycle matrix.

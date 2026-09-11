@@ -16,7 +16,7 @@ pub struct NativeSemanticNode {
     pub focused: bool,
 }
 
-#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeSemanticScope {
     Window,

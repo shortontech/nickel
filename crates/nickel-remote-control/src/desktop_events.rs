@@ -90,6 +90,14 @@ pub enum DesktopEventKind {
         generation: u64,
         partial: bool,
     },
+    /// A bounded external accessibility traversal passed final production-owner
+    /// validation. Tree content and resource identity are not retained here.
+    ExternalAccessibilityCompleted {
+        operation_id: u64,
+        scope: crate::native_semantics::NativeSemanticScope,
+        nodes: u32,
+        truncated: bool,
+    },
     /// Production workspace owner state after create, remove, or selection.
     /// Window membership is available only through the protected snapshot.
     WorkspaceStateChanged {
@@ -545,5 +553,38 @@ mod tests {
         assert_eq!(inventory.len(), 3);
         assert_eq!(platform.len(), 4);
         assert_eq!(platform["domain"], "audio");
+    }
+
+    #[test]
+    fn external_accessibility_event_excludes_resource_and_tree_payloads() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::ExternalAccessibilityCompleted {
+                operation_id: 19,
+                scope: crate::native_semantics::NativeSemanticScope::Window,
+                nodes: 23,
+                truncated: false,
+            },
+            31,
+        );
+        let value = serde_json::to_value(events.snapshot()).unwrap();
+        let event = value["events"][0]["event"].as_object().unwrap();
+        assert_eq!(event.len(), 5);
+        assert_eq!(event["operation_id"], 19);
+        assert_eq!(event["scope"], "window");
+        assert_eq!(event["nodes"], 23);
+        for excluded in [
+            "window",
+            "application",
+            "provider",
+            "name",
+            "text",
+            "value",
+            "actions",
+            "client_id",
+            "lease_id",
+        ] {
+            assert!(!event.contains_key(excluded));
+        }
     }
 }

@@ -127,18 +127,27 @@ impl NickelSession {
         {
             let result = self.with_capture_authority(WindowId(proof.id), permit, || Ok(result))?;
             if let Some(operation_id) = permit.operation_id() {
-                self.remote_external_accessibility = Some(
+                let diagnostic =
                     nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic {
                         operation_id,
-                        scope: result.scope.clone(),
+                        scope: result.scope,
                         observation_started_at_us: result.observation_started_at_us,
                         observed_at_us: result.observed_at_us,
                         owner_validated_at_us: result.owner_validated_at_us,
                         nodes: result.nodes.len().min(u32::MAX as usize) as u32,
                         truncated: result.truncated,
                         stale: false,
+                    };
+                self.remote_desktop_events.record(
+                    nickel_remote_control::desktop_events::DesktopEventKind::ExternalAccessibilityCompleted {
+                        operation_id,
+                        scope: diagnostic.scope,
+                        nodes: diagnostic.nodes,
+                        truncated: diagnostic.truncated,
                     },
+                    diagnostic.owner_validated_at_us,
                 );
+                self.remote_external_accessibility = Some(diagnostic);
             }
             Ok(result)
         }
