@@ -11,7 +11,7 @@ native checks alone do not establish completion.
 | Windows desktop control and local approval | Winit now owns listener lifecycle and bounded private Settings IPC with process-image, user/session/integrity checks. Lease approval and resumption remain denied. | Complete trusted indication, synchronous cancellation, secure-desktop observation, native operations and local accessibility; validate on Windows and across machines. |
 | Logical client disconnect/resumption | Lease requests, local approvals, reconnects and desktop permits now require an unexpired owner-ready watch. Last-watch loss invalidates authority and triggers native cleanup; overlapping watches preserve connection continuity. | The stdio client adapter and saturation/cancellation fixes are integrated; complete broader native lifecycle acceptance. See `mcp-connection-watch.md`. |
 | Launch under an output lease | Verified Wayland/X11 launch ancestry now drives output placement before scene insertion, under the original lease and output incarnation. Nested native success/cancellation/replacement tests passed. | Complete broker/daemon attribution and broader physical, overload, deadline and cancellation acceptance. |
-| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary notifications, previews, menus, screenshot UI and on-screen keyboard transients use their production host's visibility and protected-tree evidence. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation/node ordinal or a fixed Nickel frame role. | Complete unsupported Codex transient/content projection, shell semantic actions and external accessibility, effects, GPU timing, shared renderer resources/caches, remaining event and trace categories, and platform queries. |
+| Full diagnostic coverage | The compositor snapshot explicitly reports unavailable domains. Ordinary shell transients use production visibility and protection evidence; typed shell actions, effect ordering, every typed platform refresh, and bounded external accessibility are integrated. Pointer diagnostics correlate hosted UI hits with a live bounded semantic tree generation/node ordinal or a fixed Nickel frame role. | Complete GPU timing, shared renderer resources/caches, remaining event and trace categories, and the protected-safe portion of unsupported Codex transient diagnostics. |
 | Physical DRM trace acceptance | Production DRM render dispatch is instrumented. The active seat is shared with the user's compositor. | Test on an isolated seat or machine; primary-GPU selection does not isolate the current udev backend's device enumeration. |
 | Full native acceptance | Recent native work uses a separate Xvfb-backed compositor with its own Xwayland and Wayland clients. | Complete the specifications' physical emergency-stop, assistive workflow, mixed-DPI/multi-output, Windows, and cross-machine gates. |
 
@@ -1557,3 +1557,12 @@ so retries cannot accumulate threads or publish late results. The deadline and
 retained-admission path passes a focused behavioral test, and the actual Windows
 Nickel branch compiles with a disposable MinGW toolchain. Native Windows registry
 execution remains unverified on this Linux host.
+
+The coherent snapshot now retains the latest successful external accessibility
+traversal as a payload-free subsystem record. It carries the MCP operation number,
+fixed scope, provider/owner timestamps, node count, truncation and five-second
+freshness state. Tree nodes, window and application identity, provider metadata,
+names, text, values and actions are excluded at collection. The full native GTK
+AT-SPI matrix correlated a real traversal with its operation record, then passed
+password/editable subtree exclusion, scope, output movement, focus, transient,
+provider-timeout, revocation, input-ownership, retirement and lock checks.

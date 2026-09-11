@@ -2158,6 +2158,8 @@ pub struct NickelSession {
         Option<nickel_remote_control::diagnostics::ApplicationInventoryRefreshOutcome>,
     remote_platform_refresh_generation: u64,
     remote_platform_refreshes: Vec<nickel_remote_control::diagnostics::PlatformRefreshOutcome>,
+    remote_external_accessibility:
+        Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
     remote_appearance: remote_appearance::AppearanceState,
     remote_application_scale: remote_application_scale::ScaleState,
     remote_launcher_favorites: remote_launcher_favorites::FavoritesState,
@@ -3731,6 +3733,10 @@ impl NickelSession {
                             settings_worker: self.remote_settings_staging.snapshot(),
                             diagnostic_worker: self.remote_diagnostic_staging.snapshot(),
                             application_launch: self.remote_application_launch_diagnostic(),
+                            external_accessibility: self
+                                .remote_external_accessibility
+                                .as_ref()
+                                .map(|observation| observation.retained_at(observed_at_us)),
                             recent_events: self.remote_desktop_events.snapshot(),
                             diagnostic_logs: self.remote_diagnostic_logs(),
                             frame_trace: self
@@ -3743,7 +3749,6 @@ impl NickelSession {
                             unavailable_domains: {
                                 [
                                     "shell_transients_without_host_owned_protection_and_codex_content",
-                                    "external_accessibility_not_embedded_in_snapshot",
                                     "native_gpu_renderer_timing",
                                     "shell_gpu_resources_and_external_renderer_resources_and_shared_caches",
                                     "other_compositor_event_categories",
@@ -6004,6 +6009,7 @@ impl NickelSession {
             remote_application_inventory_refresh: None,
             remote_platform_refresh_generation: 0,
             remote_platform_refreshes: Vec::new(),
+            remote_external_accessibility: None,
             remote_appearance: Default::default(),
             remote_application_scale: Default::default(),
             remote_launcher_favorites: Default::default(),

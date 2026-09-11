@@ -58,8 +58,7 @@ for one numbered item passes:
   GTK-shell delayed gesture authority, replacement-menu local input and
   collision with trusted indication pass owned native acceptance.
 - Snapshot `unavailable_domains` currently includes shell transients/content,
-  complete internal hit testing, on-demand external accessibility,
-  native GPU timing, GPU/shared cache resources, additional event/trace
+  complete internal hit testing, native GPU timing, GPU/shared cache resources, additional event/trace
   categories. Explicit unavailability is truthful reporting,
   not completion of the requested diagnostic authority.
 - Typed settings now cover shell behavior, appearance, application scale,

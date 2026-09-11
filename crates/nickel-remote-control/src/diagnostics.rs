@@ -476,6 +476,31 @@ pub struct ApplicationLaunchDiagnostic {
     pub child_capacity: usize,
 }
 
+/// Latest successfully validated external accessibility traversal. The tree,
+/// provider, application and window identities are deliberately not retained.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub struct ExternalAccessibilityDiagnostic {
+    pub operation_id: u64,
+    pub scope: crate::native_semantics::NativeSemanticScope,
+    pub observation_started_at_us: u64,
+    pub observed_at_us: u64,
+    pub owner_validated_at_us: u64,
+    pub nodes: u32,
+    pub truncated: bool,
+    pub stale: bool,
+}
+
+impl ExternalAccessibilityDiagnostic {
+    pub const FRESH_FOR_US: u64 = 5_000_000;
+
+    pub fn retained_at(&self, observed_at_us: u64) -> Self {
+        let mut retained = self.clone();
+        retained.stale =
+            observed_at_us.saturating_sub(self.owner_validated_at_us) > Self::FRESH_FOR_US;
+        retained
+    }
+}
+
 /// Warning/error source metadata only; no formatted messages, fields, or span values.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DiagnosticLogRecord {
@@ -664,6 +689,8 @@ pub struct DiagnosticSnapshot {
     /// Shared bounded worker for application and platform diagnostic refreshes.
     pub diagnostic_worker: Option<SettingsWorkerDiagnostic>,
     pub application_launch: ApplicationLaunchDiagnostic,
+    /// Latest bounded external accessibility observation, if one completed.
+    pub external_accessibility: Option<ExternalAccessibilityDiagnostic>,
     /// Bounded protected-safe window, output, workspace, shell, focus, input and
     /// production-effect transitions.
     pub recent_events: crate::desktop_events::DesktopEventSnapshot,
@@ -1006,6 +1033,46 @@ mod output_identification_tests {
         let event = value["events"][0].as_object().unwrap();
         for excluded in ["client_id", "lease_id", "trace_id", "client", "payload"] {
             assert!(!event.contains_key(excluded));
+        }
+    }
+
+    #[test]
+    fn retained_external_accessibility_reports_freshness_without_tree_identity_or_content() {
+        let observation = ExternalAccessibilityDiagnostic {
+            operation_id: 17,
+            scope: crate::native_semantics::NativeSemanticScope::ApplicationConnection,
+            observation_started_at_us: 10,
+            observed_at_us: 20,
+            owner_validated_at_us: 30,
+            nodes: 42,
+            truncated: true,
+            stale: false,
+        };
+        assert!(
+            !observation
+                .retained_at(30 + ExternalAccessibilityDiagnostic::FRESH_FOR_US)
+                .stale
+        );
+        let value = serde_json::to_value(
+            observation.retained_at(31 + ExternalAccessibilityDiagnostic::FRESH_FOR_US),
+        )
+        .unwrap();
+        assert_eq!(value["operation_id"], 17);
+        assert_eq!(value["nodes"], 42);
+        assert_eq!(value["stale"], true);
+        for excluded in [
+            "window",
+            "application",
+            "provider",
+            "name",
+            "description",
+            "text",
+            "value",
+            "actions",
+            "client_id",
+            "lease_id",
+        ] {
+            assert!(value.get(excluded).is_none());
         }
     }
 }

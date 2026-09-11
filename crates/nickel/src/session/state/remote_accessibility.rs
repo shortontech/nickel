@@ -124,7 +124,24 @@ impl NickelSession {
         result.observed_at_us = completed;
         result.owner_validated_at_us = validated;
         #[cfg(any(feature = "backend-winit", feature = "backend-udev"))]
-        return self.with_capture_authority(WindowId(proof.id), permit, || Ok(result));
+        {
+            let result = self.with_capture_authority(WindowId(proof.id), permit, || Ok(result))?;
+            if let Some(operation_id) = permit.operation_id() {
+                self.remote_external_accessibility = Some(
+                    nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic {
+                        operation_id,
+                        scope: result.scope.clone(),
+                        observation_started_at_us: result.observation_started_at_us,
+                        observed_at_us: result.observed_at_us,
+                        owner_validated_at_us: result.owner_validated_at_us,
+                        nodes: result.nodes.len().min(u32::MAX as usize) as u32,
+                        truncated: result.truncated,
+                        stale: false,
+                    },
+                );
+            }
+            Ok(result)
+        }
         #[cfg(not(any(feature = "backend-winit", feature = "backend-udev")))]
         Err("native accessibility unavailable".into())
     }
