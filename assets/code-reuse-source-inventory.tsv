@@ -12,11 +12,11 @@ nickel-input	7
 nickel-logging	2
 nickel-markdown	1
 nickel-markdown-ui	4
-nickel-mcp-client	1
+nickel-mcp-client	2
 nickel-platform	15
-nickel-remote-control	38
+nickel-remote-control	39
 nickel-render-assets	1
-nickel	156
+nickel	157
 nickel-session-protocol	2
 nickel-settings	11
 nickel-storage	1
