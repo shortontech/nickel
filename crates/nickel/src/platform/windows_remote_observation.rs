@@ -18,11 +18,12 @@ use windows::Win32::Foundation::LPARAM as MessageLparam;
 use windows::core::BOOL;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT, WPARAM},
+        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
             DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW,
-            HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
+            HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY,
+            ScreenToClient, SelectObject,
         },
         System::{
             Diagnostics::ToolHelp::{
@@ -47,11 +48,15 @@ use windows::{
             },
             WindowsAndMessaging::{
                 BringWindowToTop, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EnumWindows, GA_ROOT,
-                GetAncestor, GetClientRect, GetForegroundWindow, GetWindowRect,
-                GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
-                MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE,
-                SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow,
-                SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
+                GUITHREADINFO, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
+                GetGUIThreadInfo, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT,
+                HTBOTTOMRIGHT, HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT,
+                HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IsIconic, IsWindow, IsWindowVisible,
+                IsZoomed, MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW,
+                SEND_MESSAGE_TIMEOUT_FLAGS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_MAXIMIZE, SW_MINIMIZE,
+                SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW,
+                SetForegroundWindow, SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT,
+                WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_NCHITTEST, WindowFromPoint,
             },
         },
     },
@@ -888,7 +893,122 @@ pub(crate) struct Prepared {
     pub windows: Vec<Window>,
     pub outputs: Vec<Output>,
     pub processes: BTreeMap<usize, Arc<WindowsProcessIdentity>>,
+    pub input: NativeInputObservation,
     process_links: BTreeMap<u32, ProcessLink>,
+}
+
+/// Short-lived native input routing evidence. Coordinates remain inside the
+/// request-local preparation and are never copied into a diagnostic snapshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct NativeInputObservation {
+    pub keyboard_root: Option<usize>,
+    pub pointer_root: Option<usize>,
+    pub pointer_recipient_root: Option<usize>,
+    pub pointer_recipient_available: bool,
+    pub pointer_grabbed: bool,
+    pub pointer_client: Option<[i32; 2]>,
+    pub pointer_decoration: Option<nickel_remote_control::diagnostics::InternalDecorationHit>,
+}
+
+fn root_handle(window: HWND) -> Option<usize> {
+    if window.0.is_null() {
+        return None;
+    }
+    // SAFETY: Read-only ancestry query for a handle returned by User32.
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    (!root.0.is_null()).then_some(root.0 as usize)
+}
+
+fn observe_native_input(own_pid: u32) -> NativeInputObservation {
+    let foreground = unsafe { GetForegroundWindow() };
+    let keyboard_root = root_handle(foreground);
+    let mut cursor = POINT::default();
+    // SAFETY: User32 writes the current cursor position to initialized storage.
+    if unsafe { GetCursorPos(&mut cursor) }.is_err() {
+        return NativeInputObservation {
+            keyboard_root,
+            ..Default::default()
+        };
+    }
+    // SAFETY: Read-only hit test at the sampled point.
+    let pointer = unsafe { WindowFromPoint(cursor) };
+    let pointer_root = root_handle(pointer);
+    let pointer_client = pointer_root.and_then(|native| {
+        let mut client = cursor;
+        // SAFETY: The root came from User32 and `client` is writable storage.
+        unsafe { ScreenToClient(HWND(native as *mut std::ffi::c_void), &mut client) }
+            .as_bool()
+            .then_some([client.x, client.y])
+    });
+    let pointer_decoration = pointer_root.and_then(|native| {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(HWND(native as *mut std::ffi::c_void), Some(&mut pid)) };
+        if pid != own_pid {
+            return None;
+        }
+        // WM_NCHITTEST is Nickel's native frame hit test. Bound it on
+        // this observation worker so a hung client can neither stall the owner
+        // nor create an unbounded worker backlog.
+        let packed = i32::from(cursor.x as i16 as u16) | (i32::from(cursor.y as i16 as u16) << 16);
+        let mut result = 0usize;
+        let completed = unsafe {
+            SendMessageTimeoutW(
+                HWND(native as *mut std::ffi::c_void),
+                WM_NCHITTEST,
+                WPARAM(0),
+                LPARAM(packed as isize),
+                SEND_MESSAGE_TIMEOUT_FLAGS(SMTO_ABORTIFHUNG.0 | SMTO_BLOCK.0),
+                25,
+                Some(&mut result),
+            )
+        };
+        if completed.0 == 0 {
+            return None;
+        }
+        use nickel_remote_control::diagnostics::InternalDecorationHit;
+        Some(match result as u32 {
+            HTCAPTION => InternalDecorationHit::Titlebar,
+            HTMINBUTTON => InternalDecorationHit::Minimize,
+            HTMAXBUTTON => InternalDecorationHit::Maximize,
+            HTCLOSE => InternalDecorationHit::Close,
+            HTTOP => InternalDecorationHit::ResizeNorth,
+            HTTOPRIGHT => InternalDecorationHit::ResizeNorthEast,
+            HTRIGHT => InternalDecorationHit::ResizeEast,
+            HTBOTTOMRIGHT => InternalDecorationHit::ResizeSouthEast,
+            HTBOTTOM => InternalDecorationHit::ResizeSouth,
+            HTBOTTOMLEFT => InternalDecorationHit::ResizeSouthWest,
+            HTLEFT => InternalDecorationHit::ResizeWest,
+            HTTOPLEFT => InternalDecorationHit::ResizeNorthWest,
+            _ => return None,
+        })
+    });
+    let mut gui = GUITHREADINFO {
+        cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+        ..Default::default()
+    };
+    // A missing GUI-thread snapshot makes the recipient unavailable, while the
+    // independent hit remains useful. Never guess that hover owns a capture.
+    let gui_available = unsafe { GetGUIThreadInfo(0, &mut gui) }.is_ok();
+    let pointer_grabbed = gui_available && !gui.hwndCapture.0.is_null();
+    let pointer_recipient_root = gui_available
+        .then(|| {
+            let recipient = if gui.hwndCapture.0.is_null() {
+                pointer
+            } else {
+                gui.hwndCapture
+            };
+            root_handle(recipient)
+        })
+        .flatten();
+    NativeInputObservation {
+        keyboard_root,
+        pointer_root,
+        pointer_recipient_root,
+        pointer_recipient_available: gui_available,
+        pointer_grabbed,
+        pointer_client,
+        pointer_decoration,
+    }
 }
 impl Prepared {
     /// Pure owner-side projection over ancestry evidence acquired by the
@@ -919,7 +1039,14 @@ impl Prepared {
     }
 
     pub(crate) fn prepare(permit: &DesktopPermit) -> Result<Self, String> {
-        Self::prepare_checked(|| permit.check_live())
+        Self::prepare_checked(|| permit.check_live(), false)
+    }
+
+    /// Add request-local input routing evidence only for the diagnostic
+    /// snapshot that publishes it. Ordinary observation and mutation workers
+    /// must not pay for or depend on input sampling.
+    pub(crate) fn prepare_with_input(permit: &DesktopPermit) -> Result<Self, String> {
+        Self::prepare_checked(|| permit.check_live(), true)
     }
 
     /// Collect the same bounded native evidence for a trusted Settings
@@ -928,10 +1055,13 @@ impl Prepared {
     /// desktop. The caller must still compare the requested resource identity
     /// with the reconciled owner inventory before changing lease authority.
     pub(crate) fn prepare_local() -> Result<Self, String> {
-        Self::prepare_checked(|| Ok(()))
+        Self::prepare_checked(|| Ok(()), false)
     }
 
-    fn prepare_checked(mut check: impl FnMut() -> Result<(), String>) -> Result<Self, String> {
+    fn prepare_checked(
+        mut check: impl FnMut() -> Result<(), String>,
+        include_input: bool,
+    ) -> Result<Self, String> {
         check()?;
         let _dpi = DpiContext::enter()?;
         let started = Instant::now();
@@ -943,6 +1073,11 @@ impl Prepared {
             return Err(unavailable());
         }
         let outputs = outputs()?;
+        let input = if include_input {
+            observe_native_input(std::process::id())
+        } else {
+            NativeInputObservation::default()
+        };
         let mut handles = HandleCollector {
             handles: Vec::new(),
             overflow: false,
@@ -1020,6 +1155,7 @@ impl Prepared {
             windows,
             outputs,
             processes,
+            input,
             process_links,
         })
     }

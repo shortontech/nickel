@@ -1122,9 +1122,8 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
     ) -> Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String> {
         let _admission = crate::platform::remote_observation::Admission::acquire()?;
-        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
-            &permit,
-        )?);
+        let prepared =
+            Box::new(crate::platform::remote_observation::Prepared::prepare_with_input(&permit)?);
         let completion = permit.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
@@ -2894,11 +2893,12 @@ impl WindowsRemoteControl {
             let focused_window = active.next().is_none().then_some(focused_window).flatten();
             let keyboard_held = self.keyboard_hold.is_some();
             let pointer_held = self.pointer_hold.is_some();
+            let shell_input_observations = shell.remote_shell_surface_observations(state);
             let (shell_surfaces, shell_surfaces_truncated) =
                 crate::windows_shell_diagnostics::project(
                     !self.desktop_unlocked
                         || state.surface_visible(crate::winit_shell::SurfaceRole::Lock),
-                    shell.remote_shell_surface_observations(state),
+                    shell_input_observations.iter().cloned(),
                 );
             let (shell_image_cache, projected_resources) =
                 crate::windows_shell_diagnostics::project_image_cache(
@@ -2910,22 +2910,125 @@ impl WindowsRemoteControl {
                             .is_some_and(|native| projected_native_windows.contains(&native))
                     }),
                 );
-            let keyboard = focused_window.as_ref().map(|window| InputDeviceDiagnostic {
-                focused_window: Some(window.clone()),
-                focused_surface: None,
-                compositor_grabbed: false,
-                remote_hold_active: keyboard_held,
-            });
-
-            let pointer = self
-                .pointer_hold
-                .as_ref()
-                .map(|held| InputDeviceDiagnostic {
-                    focused_window: Some(held.window_id.clone()),
-                    focused_surface: None,
-                    compositor_grabbed: false,
-                    remote_hold_active: pointer_held,
-                });
+            let protected_desktop = !self.desktop_unlocked
+                || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+            let map_recipient =
+                |native: Option<usize>, compositor_grabbed: bool, remote_hold_active: bool| {
+                    let Some(native) = native else {
+                        return Some(InputDeviceDiagnostic {
+                            focused_window: None,
+                            focused_surface: None,
+                            compositor_grabbed,
+                            remote_hold_active,
+                        });
+                    };
+                    if let Some(id) = self.resources.diagnostic_window_id(&scope, native) {
+                        return Some(InputDeviceDiagnostic {
+                            focused_window: Some(id),
+                            focused_surface: None,
+                            compositor_grabbed,
+                            remote_hold_active,
+                        });
+                    }
+                    let surface = crate::windows_shell_diagnostics::input_surface(
+                        protected_desktop,
+                        native,
+                        &shell_input_observations,
+                    )?;
+                    let identity = nickel_remote_control::leases::ResourceId {
+                        id: format!("windows-shell:{}", surface.generation),
+                        generation: surface.generation,
+                    };
+                    self.resources
+                        .shell_surface_authorized(&scope, &identity, surface.output.as_deref())
+                        .then_some(InputDeviceDiagnostic {
+                            focused_window: None,
+                            focused_surface: Some(identity),
+                            compositor_grabbed,
+                            remote_hold_active,
+                        })
+                };
+            let keyboard = map_recipient(prepared.input.keyboard_root, false, keyboard_held);
+            let pointer = prepared
+                .input
+                .pointer_recipient_available
+                .then(|| {
+                    map_recipient(
+                        prepared.input.pointer_recipient_root,
+                        prepared.input.pointer_grabbed,
+                        pointer_held,
+                    )
+                })
+                .flatten();
+            let pointer_hit_test = if let Some(native) = prepared.input.pointer_root {
+                if let Some(id) = self.resources.diagnostic_window_id(&scope, native) {
+                    Some(PointerHitTestDiagnostic {
+                        window: Some(id),
+                        surface: None,
+                        semantic_tree_generation: None,
+                        semantic_node: None,
+                        decoration: None,
+                    })
+                } else {
+                    crate::windows_shell_diagnostics::input_surface(
+                        protected_desktop,
+                        native,
+                        &shell_input_observations,
+                    )
+                    .and_then(|surface| {
+                        let identity = nickel_remote_control::leases::ResourceId {
+                            id: format!("windows-shell:{}", surface.generation),
+                            generation: surface.generation,
+                        };
+                        if !self.resources.shell_surface_authorized(
+                            &scope,
+                            &identity,
+                            surface.output.as_deref(),
+                        ) {
+                            return None;
+                        }
+                        let point = prepared.input.pointer_client?;
+                        let decoration = prepared.input.pointer_decoration;
+                        let semantic = if decoration.is_none() {
+                            state
+                                .bounded_shell_semantics(surface.role, surface.output.as_deref())
+                                .ok()
+                                .and_then(|(generation, nodes)| {
+                                    crate::windows_shell_diagnostics::semantic_node_at(
+                                        surface.scale_factor,
+                                        point,
+                                        nodes.iter().map(|node| {
+                                            [
+                                                node.bounds.origin.x,
+                                                node.bounds.origin.y,
+                                                node.bounds.size.width,
+                                                node.bounds.size.height,
+                                            ]
+                                        }),
+                                    )
+                                    .map(|ordinal| (generation, ordinal))
+                                })
+                        } else {
+                            None
+                        };
+                        Some(PointerHitTestDiagnostic {
+                            window: None,
+                            surface: Some(identity),
+                            semantic_tree_generation: semantic.map(|value| value.0),
+                            semantic_node: semantic.map(|value| value.1),
+                            decoration,
+                        })
+                    })
+                }
+            } else {
+                Some(PointerHitTestDiagnostic {
+                    window: None,
+                    surface: None,
+                    semantic_tree_generation: None,
+                    semantic_node: None,
+                    decoration: None,
+                })
+            };
             Ok(DiagnosticSnapshot {
                 observation_generation: generation,
                 observed_at_us,
@@ -2953,7 +3056,7 @@ impl WindowsRemoteControl {
                     observed_at_us,
                     keyboard,
                     pointer,
-                    pointer_hit_test: None,
+                    pointer_hit_test,
                 },
                 shortcuts: ShortcutDiagnostic {
                     observation_generation: generation,
@@ -3018,7 +3121,6 @@ impl WindowsRemoteControl {
                     "windows_internal_applications".into(),
                     "windows_shell_surfaces_without_production_scene_identity".into(),
                     "windows_renderer_and_shared_presenter_cache_accounting".into(),
-                    "windows_pointer_recipient_and_hit_testing".into(),
                     "windows_shortcut_inventory".into(),
                     "windows_preview_state".into(),
                     "windows_platform_refreshes".into(),

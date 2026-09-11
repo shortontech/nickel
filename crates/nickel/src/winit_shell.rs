@@ -1020,7 +1020,19 @@ impl WinitShell {
             ]
         });
         let scene = state.scene_change_token(surface.role);
+        let native = surface
+            .window
+            .window_handle()
+            .ok()
+            .and_then(|handle| match handle.as_raw() {
+                raw_window_handle::RawWindowHandle::Win32(handle) => {
+                    Some(handle.hwnd.get() as usize)
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
         crate::windows_shell_diagnostics::SurfaceObservation {
+            native,
             role: surface.role,
             generation: surface.diagnostic_generation,
             native_visible: surface.visible,

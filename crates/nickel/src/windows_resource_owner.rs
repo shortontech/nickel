@@ -335,6 +335,41 @@ impl Owner {
             scope.covers(&evidence).then_some(window.native)
         })
     }
+
+    /// Map a freshly sampled native recipient through the same exact scoped,
+    /// protected-filtered projection used by the containing snapshot.
+    pub(crate) fn diagnostic_window_id(
+        &self,
+        scope: &ResourceScope,
+        native: usize,
+    ) -> Option<String> {
+        self.windows(scope).find_map(|(summary, _)| {
+            self.window(&summary.id, summary.generation)
+                .is_some_and(|window| window.native == native)
+                .then_some(summary.id)
+        })
+    }
+
+    pub(crate) fn shell_surface_authorized(
+        &self,
+        scope: &ResourceScope,
+        surface: &ResourceId,
+        output_name: Option<&str>,
+    ) -> bool {
+        let Some(output) =
+            output_name.and_then(|name| self.outputs.get(name).map(|record| &record.identity))
+        else {
+            return false;
+        };
+        scope.covers(&ResourceEvidence {
+            surface: Some(surface),
+            window: None,
+            verified_application: None,
+            output: Some(output),
+            authorized_surface_ancestors: &[],
+            protected: false,
+        })
+    }
     pub(crate) fn outputs<'a>(
         &'a self,
         scope: &'a ResourceScope,
@@ -515,6 +550,86 @@ mod tests {
         assert!(protected_executable(Some("CONSENT.EXE")));
         assert!(protected_executable(Some("nickel-settings.exe")));
         assert!(!protected_executable(Some("ordinary.exe")));
+    }
+    #[test]
+    fn input_recipient_mapping_uses_exact_resource_scope() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                vec![window(11, -500), window(22, 50)],
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let outputs: Vec<_> = owner.outputs(&ResourceScope::FullSession).collect();
+        let left = ResourceScope::Output(ResourceId {
+            id: "left".into(),
+            generation: outputs[0].0.generation,
+        });
+        assert!(owner.diagnostic_window_id(&left, 11).is_some());
+        assert!(owner.diagnostic_window_id(&left, 22).is_none());
+        assert!(
+            owner
+                .diagnostic_window_id(&ResourceScope::FullSession, 22)
+                .is_some()
+        );
+        assert!(
+            owner
+                .diagnostic_window_id(&ResourceScope::FullSession, 99)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn shell_input_scope_requires_exact_surface_or_output_incarnation() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(Vec::new(), vec![output(1, "main", 0, 1000)], |_| {})
+            .unwrap();
+        let output = owner.outputs(&ResourceScope::FullSession).next().unwrap().0;
+        let surface = ResourceId {
+            id: "windows-shell:40".into(),
+            generation: 40,
+        };
+        assert!(owner.shell_surface_authorized(
+            &ResourceScope::FullSession,
+            &surface,
+            Some("main")
+        ));
+        assert!(owner.shell_surface_authorized(
+            &ResourceScope::Surface(surface.clone()),
+            &surface,
+            Some("main")
+        ));
+        assert!(owner.shell_surface_authorized(
+            &ResourceScope::Output(ResourceId {
+                id: output.name,
+                generation: output.generation,
+            }),
+            &surface,
+            Some("main")
+        ));
+        assert!(!owner.shell_surface_authorized(
+            &ResourceScope::Surface(ResourceId {
+                id: surface.id.clone(),
+                generation: surface.generation + 1,
+            }),
+            &surface,
+            Some("main")
+        ));
+        assert!(!owner.shell_surface_authorized(
+            &ResourceScope::Window(surface.clone()),
+            &surface,
+            Some("main")
+        ));
+        assert!(!owner.shell_surface_authorized(
+            &ResourceScope::Output(ResourceId {
+                id: "main".into(),
+                generation: output.generation + 1,
+            }),
+            &surface,
+            Some("main")
+        ));
     }
     #[test]
     fn approval_scope_requires_the_exact_live_owner_incarnation() {

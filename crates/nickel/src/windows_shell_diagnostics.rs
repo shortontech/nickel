@@ -7,6 +7,7 @@ use nickel_remote_control::diagnostics::{
 
 #[derive(Clone, Debug)]
 pub(crate) struct SurfaceObservation {
+    pub(crate) native: usize,
     pub(crate) role: SurfaceRole,
     pub(crate) generation: u64,
     pub(crate) native_visible: bool,
@@ -18,6 +19,62 @@ pub(crate) struct SurfaceObservation {
     pub(crate) scale_factor: f32,
     pub(crate) redraw_pending: bool,
     pub(crate) keyboard_focused: bool,
+}
+
+pub(crate) fn input_surface(
+    protected_desktop: bool,
+    native: usize,
+    observations: &[SurfaceObservation],
+) -> Option<&SurfaceObservation> {
+    if protected_desktop || native == 0 {
+        return None;
+    }
+    observations.iter().find(|observation| {
+        observation.native == native
+            && observation.generation != 0
+            && observation.native_visible
+            && observation.canonical_visible
+            && !observation.protected
+            && observation
+                .geometry
+                .is_some_and(|geometry| geometry[2] > 0 && geometry[3] > 0)
+            && observation.scene_generation.is_some()
+            && observation.scale_factor.is_finite()
+            && observation.scale_factor > 0.0
+            && diagnostic_role(observation.role).is_some()
+    })
+}
+
+pub(crate) fn semantic_node_at(
+    scale_factor: f32,
+    client_point: [i32; 2],
+    bounds: impl IntoIterator<Item = [f32; 4]>,
+) -> Option<u64> {
+    if !scale_factor.is_finite() || scale_factor <= 0.0 || client_point[1] < 0 {
+        return None;
+    }
+    let x = client_point[0] as f64 / f64::from(scale_factor);
+    let y = client_point[1] as f64 / f64::from(scale_factor);
+    bounds
+        .into_iter()
+        .enumerate()
+        .filter(|(_, bounds)| {
+            let [left, top, width, height] = *bounds;
+            width.is_finite()
+                && height.is_finite()
+                && width > 0.0
+                && height > 0.0
+                && x >= f64::from(left)
+                && y >= f64::from(top)
+                && x < f64::from(left + width)
+                && y < f64::from(top + height)
+        })
+        .min_by(|(_, left), (_, right)| {
+            let left_area = left[2] * left[3];
+            let right_area = right[2] * right[3];
+            left_area.total_cmp(&right_area)
+        })
+        .map(|(ordinal, _)| ordinal as u64)
 }
 
 fn diagnostic_role(role: SurfaceRole) -> Option<ShellDiagnosticRole> {
@@ -188,6 +245,7 @@ mod tests {
 
     fn observation(role: SurfaceRole, generation: u64) -> SurfaceObservation {
         SurfaceObservation {
+            native: generation as usize + 100,
             role,
             generation,
             native_visible: true,
@@ -237,6 +295,59 @@ mod tests {
         let (records, truncated) = project(true, [observation(SurfaceRole::Launcher, 1)]);
         assert!(records.is_empty());
         assert!(!truncated);
+    }
+
+    #[test]
+    fn input_correlation_requires_exact_current_ordinary_surface() {
+        let visible = observation(SurfaceRole::Launcher, 7);
+        assert_eq!(
+            input_surface(false, 107, &[visible.clone()])
+                .unwrap()
+                .generation,
+            7
+        );
+        assert!(input_surface(false, 108, &[visible.clone()]).is_none());
+        assert!(input_surface(true, 107, &[visible.clone()]).is_none());
+
+        let mut hidden = visible.clone();
+        hidden.native_visible = false;
+        assert!(input_surface(false, 107, &[hidden]).is_none());
+        let mut protected = visible.clone();
+        protected.protected = true;
+        assert!(input_surface(false, 107, &[protected]).is_none());
+        let mut replaced = visible;
+        replaced.generation = 0;
+        assert!(input_surface(false, 107, &[replaced]).is_none());
+    }
+
+    #[test]
+    fn input_correlation_omits_protected_fixed_roles() {
+        assert!(input_surface(false, 105, &[observation(SurfaceRole::Lock, 5)]).is_none());
+        assert!(input_surface(false, 106, &[observation(SurfaceRole::CodexChat, 6)]).is_none());
+    }
+
+    #[test]
+    fn semantic_hit_uses_client_scale_and_prefers_smallest_node() {
+        assert_eq!(
+            semantic_node_at(
+                2.0,
+                [80, 60],
+                [[0.0, 0.0, 100.0, 100.0], [30.0, 20.0, 20.0, 20.0]]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            semantic_node_at(2.0, [220, 60], [[0.0, 0.0, 100.0, 100.0]]),
+            None
+        );
+        assert_eq!(
+            semantic_node_at(2.0, [80, -1], [[0.0, 0.0, 100.0, 100.0]]),
+            None
+        );
+        assert_eq!(
+            semantic_node_at(f32::NAN, [80, 60], [[0.0, 0.0, 100.0, 100.0]]),
+            None
+        );
     }
 
     #[test]

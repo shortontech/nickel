@@ -1731,3 +1731,18 @@ geometry, output names, titles, text, paths or client identity. Every snapshot a
 subscription read remains behind a freshly checked full-debug permit. Pure
 projection and retention tests cover stale events, protected roles, fixed identity,
 coalescing and payload exclusion. Native Windows event delivery remains unverified.
+
+Windows input diagnostics now sample foreground focus, pointer hit testing and the
+active GUI-thread capture recipient during the existing bounded off-owner native
+preparation. The winit owner maps those short-lived native handles only through the
+fresh protected-filtered resource inventory or an exact current shell-window
+incarnation. Shell hits additionally require LiveShell visibility/protection and
+the current lease's exact surface or output scope before they can expose a bounded
+semantic tree generation and node ordinal; Nickel's bounded native frame hit test
+may expose only one of the fixed decoration roles. Unknown, retired, out-of-scope,
+Codex, lock and trusted recipients make that device or hit unavailable. Cursor
+coordinates and raw HWNDs remain request-local and are never serialized or retained.
+Pure projection and scope tests cover protected and stale shell surfaces, exact native-window mapping,
+and surface/output incarnation mismatch. Cross-compilation and Proton execution do
+not establish native Windows focus, capture or mixed-DPI hit-test behavior, which
+remains open for native acceptance.
