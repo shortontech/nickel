@@ -27,13 +27,19 @@ use crate::session::{
     window_frame::{self, FramePart},
 };
 
-fn physical_emergency_control(xkb_code: u32, syspath: Option<&std::path::Path>) -> Option<KeyCode> {
-    let path = syspath?;
-    if !path.starts_with("/sys/devices")
-        || path
-            .components()
-            .any(|component| component.as_os_str() == "virtual")
-    {
+fn physical_emergency_control(
+    xkb_code: u32,
+    device_id: &str,
+    syspath: Option<&std::path::Path>,
+) -> Option<KeyCode> {
+    let trusted_source = device_id == "winit"
+        || syspath.is_some_and(|path| {
+            path.starts_with("/sys/devices")
+                && !path
+                    .components()
+                    .any(|component| component.as_os_str() == "virtual")
+        });
+    if !trusted_source {
         return None;
     }
     match xkb_code {
@@ -600,6 +606,7 @@ impl NickelSession {
                 // releases that could otherwise reset the physical recognizer's held state.
                 if let Some(key) = physical_emergency_control(
                     event.key_code().raw(),
+                    &event.device().id(),
                     event.device().syspath().as_deref(),
                 ) {
                     let edge = if state == KeyState::Pressed {
@@ -1996,21 +2003,35 @@ mod tests {
             "/sys/devices/pci0000:00/usb1/input/input10/event10",
         ));
         assert_eq!(
-            physical_emergency_control(37, physical),
+            physical_emergency_control(37, "event10", physical),
             Some(KeyCode::ControlLeft)
         );
         assert_eq!(
-            physical_emergency_control(105, physical),
+            physical_emergency_control(105, "event10", physical),
             Some(KeyCode::ControlRight)
         );
-        assert_eq!(physical_emergency_control(38, physical), None);
+        assert_eq!(physical_emergency_control(38, "event10", physical), None);
+        assert_eq!(
+            physical_emergency_control(37, "winit", None),
+            Some(KeyCode::ControlLeft)
+        );
+        assert_eq!(
+            physical_emergency_control(105, "winit", None),
+            Some(KeyCode::ControlRight)
+        );
         for path in [
             None,
             Some(Path::new("/sys/devices/virtual/input/input20/event20")),
             Some(Path::new("remote-agent")),
         ] {
-            assert_eq!(physical_emergency_control(37, path), None);
-            assert_eq!(physical_emergency_control(105, path), None);
+            assert_eq!(
+                physical_emergency_control(37, "nickel-synthetic-input", path),
+                None
+            );
+            assert_eq!(
+                physical_emergency_control(105, "nickel-synthetic-input", path),
+                None
+            );
         }
         let mut chord = nickel_remote_control::EmergencyChord::default();
         let events = [
@@ -2020,7 +2041,7 @@ mod tests {
             (105, physical, nickel_core::hotkeys::KeyEdge::Pressed, true),
         ];
         for (code, path, edge, expected) in events {
-            let stopped = physical_emergency_control(code, path)
+            let stopped = physical_emergency_control(code, "event10", path)
                 .is_some_and(|key| chord.handle_physical(key, edge, true));
             assert_eq!(stopped, expected);
         }

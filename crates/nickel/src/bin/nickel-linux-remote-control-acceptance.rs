@@ -24,7 +24,8 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command as ProcessCommand, ExitCode, Stdio},
     sync::{
-        atomic::{AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -73,6 +74,9 @@ enum Outcome {
 }
 
 fn run() -> Result<Outcome, String> {
+    if env::args().any(|argument| argument == "--physical-emergency") {
+        return physical_emergency_acceptance().map(|()| Outcome::Passed);
+    }
     let xwayland_ordinary_scopes =
         env::args().any(|argument| argument == "--xwayland-ordinary-scopes");
     let Some(display) = host_display() else {
@@ -140,6 +144,199 @@ fn run() -> Result<Outcome, String> {
         "PASS: production pre-lease metrics, complete desktop-tool denial, bounded concurrent diagnostic/capture/input stress, denial/expiry/revocation, repeated shell-surface/output/full-session actions without new prompts, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
     );
     Ok(Outcome::Passed)
+}
+
+fn physical_emergency_acceptance() -> Result<(), String> {
+    validate_physical_environment(
+        env::var_os("NICKEL_ALLOW_NATIVE_TEST_CONTROL").is_some(),
+        env::var_os("NICKEL_TEST_CONTROL_ENV_FILE").is_some(),
+    )?;
+    for (order, instruction) in [
+        ("left-right", "LEFT Control, then RIGHT Control"),
+        ("right-left", "RIGHT Control, then LEFT Control"),
+    ] {
+        physical_emergency_round(order, instruction)?;
+    }
+    println!(
+        "PASS: two fresh production leases stopped synchronously in both physical Control-key orders; held input, trace, subscription, capture, and diagnostics were released without late success"
+    );
+    Ok(())
+}
+
+fn validate_physical_environment(
+    native_test_control: bool,
+    test_control_environment: bool,
+) -> Result<(), String> {
+    if native_test_control || test_control_environment {
+        Err("physical emergency acceptance rejects test-control environment attribution".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn physical_child_arguments() -> [&'static str; 2] {
+    ["--backend", "winit"]
+}
+
+fn physical_emergency_round(order: &str, instruction: &str) -> Result<(), String> {
+    let display = host_display().ok_or(
+        "a reachable host Wayland or X11 display is required for the physical emergency test",
+    )?;
+    let executable = env::current_exe().map_err(|error| error.to_string())?;
+    let directory = executable
+        .parent()
+        .ok_or("acceptance harness has no parent directory")?;
+    let nickel = sibling(directory, "nickel")?;
+    let runtime = RuntimeDirectory::create()?;
+    let address = reserve_loopback_address()?;
+    let mut command = ProcessCommand::new(nickel);
+    command
+        .args(physical_child_arguments())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .env("XDG_CONFIG_HOME", runtime.path().join("config"))
+        .env("XDG_STATE_HOME", runtime.path().join("state"))
+        .env("XDG_DATA_HOME", runtime.path().join("data"))
+        .env("NICKEL_MCP_LISTEN_ADDR", address.to_string())
+        .env("NICKEL_NESTED_SIZE", "960x640")
+        .env("NICKEL_PHYSICAL_EMERGENCY_ORDER", order)
+        .env("NICKEL_DISABLE_XWAYLAND", "1")
+        .stdin(Stdio::null())
+        .stderr(Stdio::piped());
+    configure_software_renderer(&mut command, matches!(&display, HostDisplay::Wayland(_)));
+    match display {
+        HostDisplay::Wayland(path) => {
+            command
+                .env("WINIT_UNIX_BACKEND", "wayland")
+                .env("WAYLAND_DISPLAY", path);
+        }
+        HostDisplay::X11(display) => {
+            command
+                .env("WINIT_UNIX_BACKEND", "x11")
+                .env("DISPLAY", display);
+        }
+    }
+    let child = command
+        .spawn()
+        .map_err(|error| format!("could not start production nested compositor: {error}"))?;
+    let mut session = SessionProcess::new(child, runtime.path().to_path_buf());
+    let result = (|| {
+        let deadline = Instant::now() + READINESS_DEADLINE;
+        while TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+            if let Some(status) = session.try_wait()? {
+                return Err(format!(
+                    "nested compositor exited before listener readiness: {status}"
+                ));
+            }
+            if Instant::now() >= deadline {
+                return Err("production MCP listener did not become ready".into());
+            }
+            thread::sleep(POLL);
+        }
+        if runtime.path().join("shell-environment").exists() {
+            return Err("physical acceptance unexpectedly exposed test-control capability".into());
+        }
+        let identity = connect_identity(address, "physical-emergency-acceptance")?;
+        let watch = ConnectionWatch::start(address, &identity)?;
+        let requested = mcp_call(
+            address,
+            &identity,
+            "request_control_lease",
+            json!({
+                "scope": {"kind": "full_session"}, "duration_seconds": 120,
+                "allow_resumption": false, "full_debug": true
+            }),
+        )?;
+        require_tool_success("request_control_lease", &requested)?;
+        println!(
+            "ACTION REQUIRED: focus the visible Nickel window, approve its Full Control & Debug Nickel request, then wait for the next instruction. This round requires {instruction}."
+        );
+        let lease_id = wait_for_manual_lease(address, &identity, Instant::now() + DEADLINE)?;
+        let outputs = scope_call(
+            address,
+            &identity,
+            "list_outputs",
+            json!({"lease_id": lease_id}),
+        )?;
+        let output = outputs["outputs"]
+            .as_array()
+            .and_then(|outputs| outputs.first())
+            .ok_or("physical acceptance found no capturable output")?;
+        let output = native_resource(output, "name")?;
+        require_tool_success(
+            "start_frame_trace",
+            &mcp_call(
+                address,
+                &identity,
+                "diagnostic_action",
+                json!({"lease_id": lease_id, "action": {"start_frame_trace": {"duration_seconds": 60}}}),
+            )?,
+        )?;
+        let subscription = EventSubscription::start(address, &identity, lease_id)?;
+        require_tool_success(
+            "held pointer drag",
+            &mcp_call(
+                address,
+                &identity,
+                "pointer_action",
+                json!({"lease_id": lease_id, "target": {"kind": "desktop"}, "x": 20, "y": 20,
+                    "action": {"kind": "drag_start", "button": "left"}}),
+            )?,
+        )?;
+        let running = Arc::new(AtomicBool::new(true));
+        let late_success = Arc::new(AtomicUsize::new(0));
+        let worker = physical_work_lane(
+            address,
+            identity.clone(),
+            lease_id,
+            output,
+            Arc::clone(&running),
+            Arc::clone(&late_success),
+        );
+        println!(
+            "ACTION REQUIRED NOW: in the focused Nickel window, physically hold {instruction}. Do not use test-control, automation, or injected input. Timeout: 30 seconds."
+        );
+        let stop_deadline = Instant::now() + DEADLINE;
+        while TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_ok() {
+            if Instant::now() >= stop_deadline {
+                running.store(false, Ordering::Release);
+                let _ = worker.join();
+                return Err(format!(
+                    "physical chord was not observed; focus the Nickel window and press {instruction}"
+                ));
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        running.store(false, Ordering::Release);
+        worker
+            .join()
+            .map_err(|_| "physical work lane panicked".to_owned())??;
+        if late_success.load(Ordering::Acquire) != 0 {
+            return Err("remote work completed after synchronous emergency revocation".into());
+        }
+        if subscription
+            .worker
+            .join()
+            .is_ok_and(|result| result.is_ok())
+        {
+            return Err("event subscription remained successful after emergency revocation".into());
+        }
+        let settings =
+            fs::read_to_string(runtime.path().join("config/nickel/remote-ai-control.toml"))
+                .map_err(|error| {
+                    format!("emergency stop did not persist listener state: {error}")
+                })?;
+        if !settings.contains("requested_enabled = false") {
+            return Err("emergency stop did not persist disabled listener state".into());
+        }
+        thread::sleep(Duration::from_millis(500));
+        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
+            return Err("MCP listener restarted after emergency revocation".into());
+        }
+        drop(watch);
+        Ok(())
+    })();
+    session.shutdown();
+    result
 }
 
 fn configure_software_renderer(command: &mut ProcessCommand, wayland: bool) {
@@ -1316,6 +1513,71 @@ fn scope_call(
         .ok_or_else(|| format!("{operation} omitted structured content"))?;
     // rmcp wraps non-object JSON results in a result field.
     Ok(content.get("result").unwrap_or(content).clone())
+}
+
+fn wait_for_manual_lease(
+    address: SocketAddr,
+    identity: &Identity,
+    deadline: Instant,
+) -> Result<u64, String> {
+    loop {
+        let response = mcp_call(address, identity, "list_control_leases", json!({}))?;
+        require_tool_success("list_control_leases", &response)?;
+        let leases = structured_content("list_control_leases", &response)?;
+        if let Some(lease) = leases.as_array().and_then(|leases| leases.first()) {
+            if lease["full_debug"] != true || lease["scope"]["kind"] != "full_session" {
+                return Err(
+                    "local approval granted a different scope or omitted full debug".into(),
+                );
+            }
+            return lease["lease_id"]
+                .as_u64()
+                .ok_or("approved lease omitted its identity".into());
+        }
+        if Instant::now() >= deadline {
+            return Err(
+                "local Full Control & Debug Nickel approval was not completed within 30 seconds"
+                    .into(),
+            );
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+}
+
+fn physical_work_lane(
+    address: SocketAddr,
+    identity: Identity,
+    lease_id: u64,
+    output: nickel_session_protocol::RemoteResourceId,
+    running: Arc<AtomicBool>,
+    late_success: Arc<AtomicUsize>,
+) -> thread::JoinHandle<Result<(), String>> {
+    thread::spawn(move || {
+        while running.load(Ordering::Acquire) {
+            for (operation, arguments) in [
+                (
+                    "capture_output",
+                    json!({"lease_id": lease_id, "output_id": output.id.clone(), "generation": output.generation}),
+                ),
+                ("diagnostic_snapshot", json!({"lease_id": lease_id})),
+                (
+                    "diagnostic_action",
+                    json!({"lease_id": lease_id, "action": "repaint"}),
+                ),
+            ] {
+                let succeeded = mcp_call(address, &identity, operation, arguments)
+                    .and_then(|response| require_tool_success(operation, &response))
+                    .is_ok();
+                if succeeded && !running.load(Ordering::Acquire) {
+                    late_success.fetch_add(1, Ordering::AcqRel);
+                }
+                if !running.load(Ordering::Acquire) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    })
 }
 
 fn approve_scope(
@@ -2536,8 +2798,18 @@ fn sibling(directory: &Path, name: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::{
         EGL_VENDOR_FILENAMES, MESA_VBLANK_MODE, SessionMessageError, classify_receive_error,
-        configure_mesa_software_renderer, poll_readiness,
+        configure_mesa_software_renderer, physical_child_arguments, poll_readiness,
+        validate_physical_environment,
     };
+
+    #[test]
+    fn physical_mode_rejects_test_control_and_never_passes_its_flag_to_child() {
+        assert!(validate_physical_environment(false, false).is_ok());
+        assert!(validate_physical_environment(true, false).is_err());
+        assert!(validate_physical_environment(false, true).is_err());
+        assert_eq!(physical_child_arguments(), ["--backend", "winit"]);
+        assert!(!physical_child_arguments().contains(&"--test-control"));
+    }
     use nickel_session_protocol::{ServerMessage, ShellReadinessSnapshot};
     use std::{
         ffi::OsStr,

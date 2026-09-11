@@ -87,6 +87,17 @@ pub fn init_winit(
     let state = data;
 
     let renderer_owner = nickel_core::resource_owner::try_acquire_smithay_renderer_owner()?;
+    let physical_emergency_order = std::env::var("NICKEL_PHYSICAL_EMERGENCY_ORDER")
+        .ok()
+        .and_then(|value| match value.as_str() {
+            "left-right" => Some("LEFT Control, then RIGHT Control"),
+            "right-left" => Some("RIGHT Control, then LEFT Control"),
+            _ => None,
+        });
+    let title = physical_emergency_order.map_or_else(
+        || "Nickel nested session".to_owned(),
+        |order| format!("Nickel physical emergency test — press {order}"),
+    );
     let (mut backend, winit) = if let Ok(size) = std::env::var("NICKEL_NESTED_SIZE") {
         let (width, height) = parse_nested_size(&size)
             .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?;
@@ -95,12 +106,19 @@ pub fn init_winit(
                 .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
                     width, height,
                 ))
-                .with_title("Nickel nested session")
+                .with_title(title)
                 .with_visible(true),
         )?
     } else {
         winit::init()?
     };
+    if physical_emergency_order.is_some() {
+        use smithay::reexports::winit::window::UserAttentionType;
+        backend
+            .window()
+            .request_user_attention(Some(UserAttentionType::Critical));
+        backend.window().focus_window();
+    }
     state.set_winit_redraw_window(backend.window());
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
