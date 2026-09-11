@@ -513,15 +513,115 @@ impl ExternalAccessibilityDiagnostic {
     }
 }
 
-/// Warning/error source metadata only; no formatted messages, fields, or span values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSeverity {
+    Warning,
+    Error,
+}
+
+/// Fixed subsystem category derived only from a tracing callsite's static target.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticLogCategory {
+    RemoteControl,
+    Input,
+    Compositor,
+    Presentation,
+    Platform,
+    Shell,
+    Storage,
+    Other,
+}
+
+/// Warning/error callsite metadata only; no formatted messages, fields, span
+/// values, target strings, or source paths.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DiagnosticLogRecord {
     pub generation: u64,
     pub observed_at_us: u64,
-    pub level: String,
-    pub target: String,
-    pub source_file: Option<String>,
+    pub severity: DiagnosticSeverity,
+    pub category: DiagnosticLogCategory,
+    /// Stable FNV-1a digest of static severity/target/file/line metadata. This
+    /// distinguishes production callsites without exposing those strings.
+    pub code: u64,
+    /// Numeric source detail retained from the existing tracing metadata.
     pub source_line: Option<u32>,
+}
+
+impl DiagnosticLogRecord {
+    pub fn from_static_metadata(
+        generation: u64,
+        observed_at_us: u64,
+        level: &str,
+        target: &str,
+        source_file: Option<&str>,
+        source_line: Option<u32>,
+    ) -> Option<Self> {
+        let severity = match level {
+            "WARN" => DiagnosticSeverity::Warning,
+            "ERROR" => DiagnosticSeverity::Error,
+            _ => return None,
+        };
+        Some(Self {
+            generation,
+            observed_at_us,
+            severity,
+            category: diagnostic_log_category(target),
+            code: diagnostic_callsite_code(level, target, source_file, source_line),
+            source_line,
+        })
+    }
+}
+
+fn diagnostic_log_category(target: &str) -> DiagnosticLogCategory {
+    if target.starts_with("nickel_remote_control") {
+        DiagnosticLogCategory::RemoteControl
+    } else if target.contains("::input")
+        || target.contains("clipboard")
+        || target.contains("on_screen_keyboard")
+    {
+        DiagnosticLogCategory::Input
+    } else if target.starts_with("nickel::session::backend")
+        || target.starts_with("nickel::winit_shell")
+    {
+        DiagnosticLogCategory::Presentation
+    } else if target.starts_with("nickel::session") {
+        DiagnosticLogCategory::Compositor
+    } else if target.starts_with("nickel::platform") || target.starts_with("nickel_platform") {
+        DiagnosticLogCategory::Platform
+    } else if target.starts_with("nickel::live_shell")
+        || target.starts_with("nickel::launcher")
+        || target.starts_with("nickel::control_view")
+    {
+        DiagnosticLogCategory::Shell
+    } else if target.starts_with("nickel_storage") {
+        DiagnosticLogCategory::Storage
+    } else {
+        DiagnosticLogCategory::Other
+    }
+}
+
+fn diagnostic_callsite_code(
+    level: &str,
+    target: &str,
+    source_file: Option<&str>,
+    source_line: Option<u32>,
+) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    for component in [level, target, source_file.unwrap_or("")] {
+        for byte in component.bytes().chain(std::iter::once(0xff)) {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    }
+    for byte in source_line.unwrap_or(0).to_le_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -757,8 +857,25 @@ pub struct DiagnosticSnapshot {
     /// and trace identities are removed at projection time.
     pub trace_lifecycle: Option<TraceLifecycleSnapshot>,
     pub truncated: bool,
-    /// Explicitly identifies domains not supplied by this projection.
-    pub unavailable_domains: Vec<String>,
+    /// Explicitly identifies domains not supplied by this projection. This is
+    /// a closed server-owned vocabulary, never a provider error or caller text.
+    pub unavailable_domains: Vec<UnavailableDiagnosticDomain>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum UnavailableDiagnosticDomain {
+    ShellTransientsWithoutHostOwnedProtectionAndCodexContent,
+    NativeGpuRendererTiming,
+    ShellGpuResourcesAndExternalRendererResourcesAndSharedCaches,
+    OtherProductionEffectEventCategories,
+    OtherTraceCategories,
+    WindowsVirtualWorkspaceCreateSwitchRemove,
+    WindowsPerSurfaceRendererCacheAttribution,
+    WindowsPreviewPixelReadback,
+    WindowsOutputPixelCapture,
+    WindowsNonWindowPointerTargets,
+    WindowsSettingsWorker,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -964,6 +1081,87 @@ pub struct OutputIdentificationOutcome {
 #[cfg(test)]
 mod output_identification_tests {
     use super::*;
+
+    #[test]
+    fn structured_log_metadata_uses_fixed_categories_and_hides_static_strings() {
+        use DiagnosticLogCategory as Category;
+        for (target, expected) in [
+            ("nickel_remote_control::server", Category::RemoteControl),
+            ("nickel::session::input", Category::Input),
+            ("nickel::session::state", Category::Compositor),
+            ("nickel::session::backend::udev", Category::Presentation),
+            ("nickel::platform::linux", Category::Platform),
+            ("nickel::live_shell", Category::Shell),
+            ("nickel_storage::atomic", Category::Storage),
+            ("third_party::worker", Category::Other),
+        ] {
+            let record = DiagnosticLogRecord::from_static_metadata(
+                7,
+                11,
+                "ERROR",
+                target,
+                Some("PRIVATE/SOURCE/PATH.rs"),
+                Some(42),
+            )
+            .expect("warning/error metadata");
+            assert_eq!(record.category, expected);
+            assert_ne!(record.code, 0);
+            let value = serde_json::to_value(record).unwrap();
+            assert_eq!(value.as_object().unwrap().len(), 6);
+            assert_eq!(value["severity"], "error");
+            assert_eq!(value["source_line"], 42);
+            let json = value.to_string();
+            for excluded in [
+                target,
+                "PRIVATE",
+                "SOURCE",
+                "PATH",
+                "target",
+                "source_file",
+                "message",
+                "payload",
+                "title",
+                "text",
+            ] {
+                assert!(!json.contains(excluded), "leaked {excluded:?} in {json}");
+            }
+        }
+        assert!(
+            DiagnosticLogRecord::from_static_metadata(1, 1, "INFO", "nickel", None, None).is_none()
+        );
+    }
+
+    #[test]
+    fn trace_and_unavailable_categories_are_closed_payload_free_values() {
+        let trace_categories = [
+            crate::frame_trace::FrameTraceCategory::NestedFrameDispatch,
+            crate::frame_trace::FrameTraceCategory::DrmFrameDispatch,
+        ];
+        assert_eq!(
+            serde_json::to_value(trace_categories).unwrap(),
+            serde_json::json!(["nested_frame_dispatch", "drm_frame_dispatch"])
+        );
+        assert!(
+            serde_json::from_value::<crate::frame_trace::FrameTraceCategory>(serde_json::json!(
+                "PRIVATE_TRACE_NAME"
+            ))
+            .is_err()
+        );
+
+        let unavailable = [
+            UnavailableDiagnosticDomain::NativeGpuRendererTiming,
+            UnavailableDiagnosticDomain::OtherProductionEffectEventCategories,
+            UnavailableDiagnosticDomain::OtherTraceCategories,
+        ];
+        let json = serde_json::to_string(&unavailable).unwrap();
+        assert_eq!(
+            json,
+            "[\"native_gpu_renderer_timing\",\"other_production_effect_event_categories\",\"other_trace_categories\"]"
+        );
+        for excluded in ["payload", "title", "text", "path", "error"] {
+            assert!(!json.contains(excluded));
+        }
+    }
 
     #[test]
     fn output_identification_requires_a_bounded_exact_identity_and_no_custom_label() {

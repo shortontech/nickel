@@ -84,13 +84,15 @@ impl NickelSession {
             records: snapshot
                 .records
                 .into_iter()
-                .map(|record| DiagnosticLogRecord {
-                    generation: record.generation,
-                    observed_at_us: record.observed_at_us,
-                    level: record.level.to_owned(),
-                    target: record.target.chars().take(128).collect(),
-                    source_file: record.file.map(|file| file.chars().take(256).collect()),
-                    source_line: record.line,
+                .filter_map(|record| {
+                    DiagnosticLogRecord::from_static_metadata(
+                        record.generation,
+                        record.observed_at_us,
+                        record.level,
+                        record.target,
+                        record.file,
+                        record.line,
+                    )
                 })
                 .collect(),
         })

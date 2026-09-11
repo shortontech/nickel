@@ -201,13 +201,15 @@ fn windows_diagnostic_logs() -> Option<nickel_remote_control::diagnostics::Diagn
         records: snapshot
             .records
             .into_iter()
-            .map(|record| DiagnosticLogRecord {
-                generation: record.generation,
-                observed_at_us: record.observed_at_us,
-                level: record.level.to_owned(),
-                target: record.target.chars().take(128).collect(),
-                source_file: record.file.map(|file| file.chars().take(256).collect()),
-                source_line: record.line,
+            .filter_map(|record| {
+                DiagnosticLogRecord::from_static_metadata(
+                    record.generation,
+                    record.observed_at_us,
+                    record.level,
+                    record.target,
+                    record.file,
+                    record.line,
+                )
             })
             .collect(),
     })
@@ -7593,14 +7595,19 @@ impl WindowsRemoteControl {
     }
 }
 
-fn windows_unavailable_diagnostic_domains() -> Vec<String> {
+fn windows_unavailable_diagnostic_domains()
+-> Vec<nickel_remote_control::diagnostics::UnavailableDiagnosticDomain> {
+    use nickel_remote_control::diagnostics::UnavailableDiagnosticDomain as Domain;
     vec![
-        "windows_virtual_workspace_create_switch_remove".into(),
-        "windows_per_surface_renderer_cache_attribution".into(),
-        "windows_preview_pixel_readback".into(),
-        "windows_output_pixel_capture".into(),
-        "windows_non_window_pointer_targets".into(),
-        "windows_settings_worker".into(),
+        Domain::NativeGpuRendererTiming,
+        Domain::OtherProductionEffectEventCategories,
+        Domain::OtherTraceCategories,
+        Domain::WindowsVirtualWorkspaceCreateSwitchRemove,
+        Domain::WindowsPerSurfaceRendererCacheAttribution,
+        Domain::WindowsPreviewPixelReadback,
+        Domain::WindowsOutputPixelCapture,
+        Domain::WindowsNonWindowPointerTargets,
+        Domain::WindowsSettingsWorker,
     ]
 }
 
@@ -8040,9 +8047,9 @@ mod tests {
         // become an alias that exposes the protected Codex surface.
         assert!(windows_internal_application_diagnostics().is_empty());
         assert!(
-            !windows_unavailable_diagnostic_domains()
-                .iter()
-                .any(|domain| domain == "windows_internal_applications")
+            !serde_json::to_string(&windows_unavailable_diagnostic_domains())
+                .unwrap()
+                .contains("windows_internal_applications")
         );
     }
     #[test]

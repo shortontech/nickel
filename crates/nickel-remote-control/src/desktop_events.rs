@@ -45,6 +45,21 @@ pub enum ShellEventRole {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopEventCategory {
+    Window,
+    Focus,
+    Output,
+    ProductionEffect,
+    ApplicationInventory,
+    Platform,
+    Accessibility,
+    Workspace,
+    ShellSurface,
+    InputOwnership,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopEventKind {
     /// Native process evidence made this ordinary window observable.
@@ -130,10 +145,37 @@ pub enum DesktopEventKind {
     },
 }
 
+impl DesktopEventKind {
+    pub fn category(self) -> DesktopEventCategory {
+        match self {
+            Self::WindowIdentityVerified { .. }
+            | Self::WindowRetired { .. }
+            | Self::WindowStateChanged { .. } => DesktopEventCategory::Window,
+            Self::KeyboardFocusChanged { .. }
+            | Self::ShellKeyboardFocusChanged { .. }
+            | Self::KeyboardFocusCleared => DesktopEventCategory::Focus,
+            Self::OutputMembershipChanged { .. } | Self::OutputStateChanged { .. } => {
+                DesktopEventCategory::Output
+            }
+            Self::ProductionEffectCompleted { .. } => DesktopEventCategory::ProductionEffect,
+            Self::ApplicationInventoryRefreshCompleted { .. } => {
+                DesktopEventCategory::ApplicationInventory
+            }
+            Self::PlatformRefreshCompleted { .. } => DesktopEventCategory::Platform,
+            Self::ExternalAccessibilityCompleted { .. } => DesktopEventCategory::Accessibility,
+            Self::WorkspaceStateChanged { .. } => DesktopEventCategory::Workspace,
+            Self::ShellSurfaceVisibilityChanged { .. } => DesktopEventCategory::ShellSurface,
+            Self::RemoteInputOwnershipChanged { .. } => DesktopEventCategory::InputOwnership,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 pub struct DesktopEvent {
     pub generation: u64,
     pub observed_at_us: u64,
+    /// Fixed server-owned grouping for this typed event; never a provider or caller label.
+    pub category: DesktopEventCategory,
     pub event: DesktopEventKind,
 }
 
@@ -183,6 +225,7 @@ impl DesktopEvents {
         self.events.push_back(DesktopEvent {
             generation: self.generation,
             observed_at_us,
+            category: event.category(),
             event,
         });
     }
@@ -262,6 +305,161 @@ impl DesktopEvents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_production_event_has_a_fixed_category() {
+        use DesktopEventCategory as Category;
+        let cases = [
+            (
+                DesktopEventKind::WindowIdentityVerified { window_id: 1 },
+                Category::Window,
+            ),
+            (
+                DesktopEventKind::WindowRetired { window_id: 1 },
+                Category::Window,
+            ),
+            (
+                DesktopEventKind::KeyboardFocusChanged { window_id: 1 },
+                Category::Focus,
+            ),
+            (
+                DesktopEventKind::ShellKeyboardFocusChanged {
+                    surface_generation: 1,
+                    role: ShellEventRole::Launcher,
+                },
+                Category::Focus,
+            ),
+            (DesktopEventKind::KeyboardFocusCleared, Category::Focus),
+            (
+                DesktopEventKind::OutputMembershipChanged {
+                    latest_output_identity_generation: 1,
+                    outputs: 1,
+                },
+                Category::Output,
+            ),
+            (
+                DesktopEventKind::OutputStateChanged {
+                    output_generation: 1,
+                    geometry: [0; 4],
+                    work_area: [0; 4],
+                    scale_120: 120,
+                    primary: true,
+                    enabled: true,
+                },
+                Category::Output,
+            ),
+            (
+                DesktopEventKind::ProductionEffectCompleted {
+                    operation_id: 1,
+                    effect: ProductionEffectKind::DiagnosticAction,
+                    outcome: ProductionEffectOutcome::Confirmed,
+                },
+                Category::ProductionEffect,
+            ),
+            (
+                DesktopEventKind::ApplicationInventoryRefreshCompleted {
+                    generation: 1,
+                    partial: false,
+                },
+                Category::ApplicationInventory,
+            ),
+            (
+                DesktopEventKind::PlatformRefreshCompleted {
+                    domain: crate::diagnostics::PlatformRefreshDomain::Audio,
+                    generation: 1,
+                    partial: false,
+                },
+                Category::Platform,
+            ),
+            (
+                DesktopEventKind::ExternalAccessibilityCompleted {
+                    operation_id: 1,
+                    scope: crate::native_semantics::NativeSemanticScope::Window,
+                    nodes: 1,
+                    truncated: false,
+                },
+                Category::Accessibility,
+            ),
+            (
+                DesktopEventKind::WorkspaceStateChanged {
+                    active_workspace: 1,
+                    workspaces: 1,
+                },
+                Category::Workspace,
+            ),
+            (
+                DesktopEventKind::ShellSurfaceVisibilityChanged {
+                    surface_generation: 1,
+                    role: ShellEventRole::Panel,
+                    visible: true,
+                },
+                Category::ShellSurface,
+            ),
+            (
+                DesktopEventKind::WindowStateChanged {
+                    window_id: 1,
+                    geometry: None,
+                    workspace: 1,
+                    active: false,
+                    minimized: false,
+                    maximized: false,
+                    fullscreen: false,
+                },
+                Category::Window,
+            ),
+            (
+                DesktopEventKind::RemoteInputOwnershipChanged {
+                    keyboard_held: false,
+                    pointer_held: false,
+                },
+                Category::InputOwnership,
+            ),
+        ];
+
+        let mut history = DesktopEvents::default();
+        for (index, (event, expected)) in cases.into_iter().enumerate() {
+            assert_eq!(event.category(), expected);
+            history.record(event, index as u64);
+        }
+        assert_eq!(
+            history
+                .snapshot()
+                .events
+                .iter()
+                .map(|event| event.category)
+                .collect::<Vec<_>>(),
+            [
+                Category::Window,
+                Category::Window,
+                Category::Focus,
+                Category::Focus,
+                Category::Focus,
+                Category::Output,
+                Category::Output,
+                Category::ProductionEffect,
+                Category::ApplicationInventory,
+                Category::Platform,
+                Category::Accessibility,
+                Category::Workspace,
+                Category::ShellSurface,
+                Category::Window,
+                Category::InputOwnership,
+            ]
+        );
+        let json = serde_json::to_string(&history.snapshot()).unwrap();
+        for excluded in [
+            "payload",
+            "title",
+            "text",
+            "path",
+            "credential",
+            "keystroke",
+            "message",
+        ] {
+            assert!(!json.contains(excluded));
+        }
+    }
+
     #[test]
     fn cursor_reports_eviction_without_duplicates_or_silent_future_cursor_reset() {
         let mut events = DesktopEvents::default();

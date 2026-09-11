@@ -3992,16 +3992,15 @@ impl NickelSession {
                             trace_lifecycle: self.remote_trace_lifecycle(&permit),
                             truncated,
                             unavailable_domains: {
+                                use nickel_remote_control::diagnostics::UnavailableDiagnosticDomain as Domain;
                                 [
-                                    "shell_transients_without_host_owned_protection_and_codex_content",
-                                    "native_gpu_renderer_timing",
-                                    "shell_gpu_resources_and_external_renderer_resources_and_shared_caches",
-                                    "other_compositor_event_categories",
-                                    "structured_log_details_and_other_trace_categories",
+                                    Domain::ShellTransientsWithoutHostOwnedProtectionAndCodexContent,
+                                    Domain::NativeGpuRendererTiming,
+                                    Domain::ShellGpuResourcesAndExternalRendererResourcesAndSharedCaches,
+                                    Domain::OtherProductionEffectEventCategories,
+                                    Domain::OtherTraceCategories,
                                 ]
-                                .into_iter()
-                                .map(str::to_owned)
-                                .collect::<Vec<_>>()
+                                .into()
                             },
                         })
                     });
