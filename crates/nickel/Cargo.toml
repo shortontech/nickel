@@ -125,6 +125,7 @@ windows = { workspace = true, features = [
 accesskit = "0.24.1"
 nickel-ui-testkit = { path = "../nickel-ui-testkit" }
 sha2.workspace = true
+serde_json.workspace = true
 tempfile = "3.25.0"
 toml.workspace = true
 

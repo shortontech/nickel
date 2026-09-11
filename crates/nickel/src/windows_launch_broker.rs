@@ -79,6 +79,53 @@ impl Handle {
 // SAFETY: ownership is unique and kernel handles may be operated on cross-thread.
 unsafe impl Send for Handle {}
 
+/// A handle value allocated in another process by `DuplicateHandle`.
+///
+/// The value cannot be wrapped in a local `OwnedHandle`, but this guard owns
+/// the obligation to close it in `target_process` until `into_raw` explicitly
+/// transfers that obligation to the receiver.
+struct RemoteHandle<'a> {
+    target_process: &'a Handle,
+    raw: Option<HANDLE>,
+}
+impl<'a> RemoteHandle<'a> {
+    fn duplicate(source: HANDLE, target_process: &'a Handle) -> Result<Self, String> {
+        let mut raw = HANDLE::default();
+        unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                source,
+                target_process.raw(),
+                &mut raw,
+                0,
+                false,
+                DUPLICATE_SAME_ACCESS,
+            )
+            .map_err(error)?;
+        }
+        Ok(Self {
+            target_process,
+            raw: Some(raw),
+        })
+    }
+
+    fn raw(&self) -> HANDLE {
+        self.raw.expect("remote handle ownership")
+    }
+
+    /// Transfers remote-table ownership after the receiver acknowledges it.
+    fn into_raw(mut self) -> HANDLE {
+        self.raw.take().expect("remote handle ownership")
+    }
+}
+impl Drop for RemoteHandle<'_> {
+    fn drop(&mut self) {
+        if let Some(raw) = self.raw.take() {
+            close_remote(self.target_process.raw(), raw);
+        }
+    }
+}
+
 struct Attributes {
     words: Vec<usize>,
     initialized: bool,
@@ -133,7 +180,7 @@ pub(crate) struct StagedLaunch {
     process: Option<Handle>,
     thread: Option<Handle>,
     response: Option<Handle>,
-    ready: Option<Handle>,
+    response_ready: Option<Handle>,
     ack: Option<Handle>,
     nonce: u64,
     committed: bool,
@@ -143,7 +190,7 @@ pub(crate) struct CommittedLaunch {
     deadline: Instant,
     process: Handle,
     response: Handle,
-    ready: Handle,
+    response_ready: Handle,
     ack: Handle,
     nonce: u64,
 }
@@ -165,7 +212,7 @@ impl StagedLaunch {
         }
         let (request_read, request_write) = pipe(size_of::<Request>() as u32)?;
         let (response_read, response_write) = pipe(size_of::<Response>() as u32)?;
-        let ready = event()?;
+        let response_ready = event()?;
         let ack = event()?;
         let parent = duplicate(unsafe { GetCurrentProcess() })?;
         let mut pins = Vec::new();
@@ -186,7 +233,7 @@ impl StagedLaunch {
             .chain([
                 request_read.raw(),
                 response_write.raw(),
-                ready.raw(),
+                response_ready.raw(),
                 ack.raw(),
                 parent.raw(),
             ])
@@ -200,7 +247,7 @@ impl StagedLaunch {
             exe.display(),
             request_read.raw().0 as usize,
             response_write.raw().0 as usize,
-            ready.raw().0 as usize,
+            response_ready.raw().0 as usize,
             ack.raw().0 as usize,
             parent.raw().0 as usize
         )
@@ -256,7 +303,7 @@ impl StagedLaunch {
             process: Some(process),
             thread: Some(thread),
             response: Some(response_read),
-            ready: Some(ready),
+            response_ready: Some(response_ready),
             ack: Some(ack),
             nonce,
             committed: false,
@@ -297,7 +344,7 @@ impl StagedLaunch {
             deadline: self.deadline,
             process: self.process.take().expect("process"),
             response: self.response.take().expect("response"),
-            ready: self.ready.take().expect("ready"),
+            response_ready: self.response_ready.take().expect("response ready"),
             ack: self.ack.take().expect("ack"),
             nonce: self.nonce,
         })
@@ -326,8 +373,13 @@ impl CommittedLaunch {
         let Some(wait) = wait_ms(deadline) else {
             return unavailable();
         };
-        let result =
-            unsafe { WaitForMultipleObjects(&[self.ready.raw(), self.process.raw()], false, wait) };
+        let result = unsafe {
+            WaitForMultipleObjects(
+                &[self.response_ready.raw(), self.process.raw()],
+                false,
+                wait,
+            )
+        };
         if result != WAIT_OBJECT_0 {
             return unavailable();
         }
@@ -347,15 +399,24 @@ impl CommittedLaunch {
         if Instant::now() >= deadline || unsafe { SetEvent(self.ack.raw()) }.is_err() {
             return unavailable();
         }
+        // SetEvent is the ownership-transfer boundary. Before it succeeds the
+        // broker may close this value in our handle table; afterwards this
+        // process must place it under local RAII before doing any further work.
+        let transferred_process = if response.process == 0 {
+            None
+        } else {
+            match unsafe { Handle::new(HANDLE(response.process as usize as *mut _)) } {
+                Ok(process) => Some(process),
+                Err(_) => return unavailable(),
+            }
+        };
         if let Some(wait) = wait_ms(deadline.min(Instant::now() + EXIT_GRACE)) {
             let _ = unsafe { WaitForSingleObject(self.process.raw(), wait) };
         }
-        if response.status != 0 || response.process == 0 {
-            close_local(response.process);
+        if response.status != 0 {
             return unavailable();
         }
-        let process = unsafe { Handle::new(HANDLE(response.process as usize as *mut _)) };
-        let Ok(process) = process else {
+        let Some(process) = transferred_process else {
             return unavailable();
         };
         let identity =
@@ -410,7 +471,7 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
     // Every inherited protocol handle is owned immediately after parsing.
     let request = unsafe { Handle::new(HANDLE(parse(2)? as *mut _))? };
     let response = unsafe { Handle::new(HANDLE(parse(3)? as *mut _))? };
-    let ready = unsafe { Handle::new(HANDLE(parse(4)? as *mut _))? };
+    let response_ready = unsafe { Handle::new(HANDLE(parse(4)? as *mut _))? };
     let ack = unsafe { Handle::new(HANDLE(parse(5)? as *mut _))? };
     let parent = unsafe { Handle::new(HANDLE(parse(6)? as *mut _))? };
     let record = read_record::<Request>(request.raw())?;
@@ -461,34 +522,22 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
         nonce: expected,
         ..Default::default()
     };
-    let mut remote = None;
+    let mut remote_process = None;
     match unsafe { ShellExecuteExW(&mut shell) } {
         Ok(()) if !shell.hProcess.is_invalid() => {
             let launched = unsafe { Handle::new(shell.hProcess)? };
             result.pid = unsafe { GetProcessId(launched.raw()) };
-            let mut duplicated = HANDLE::default();
-            if unsafe {
-                DuplicateHandle(
-                    GetCurrentProcess(),
-                    launched.raw(),
-                    parent.raw(),
-                    &mut duplicated,
-                    0,
-                    false,
-                    DUPLICATE_SAME_ACCESS,
-                )
-            }
-            .is_ok()
-            {
-                result.process = duplicated.0 as usize as u64;
-                remote = Some(duplicated);
-            } else {
-                result.status = 2;
+            match RemoteHandle::duplicate(launched.raw(), &parent) {
+                Ok(remote) => {
+                    result.process = remote.raw().0 as usize as u64;
+                    remote_process = Some(remote);
+                }
+                Err(_) => result.status = 2,
             }
         }
         _ => result.status = 1,
     }
-    publish_response(response.raw(), ready.raw(), &result)?;
+    publish_response(response.raw(), response_ready.raw(), &result)?;
     let wait = unsafe {
         WaitForMultipleObjects(
             &[ack.raw(), parent.raw()],
@@ -496,10 +545,12 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
             tick_wait_ms(deadline_tick),
         )
     };
-    if wait != WAIT_OBJECT_0
-        && let Some(remote) = remote
+    if wait == WAIT_OBJECT_0
+        && let Some(remote) = remote_process
     {
-        close_remote(parent.raw(), remote);
+        // The parent established local RAII ownership after signaling ack.
+        // Relinquish this guard without closing the parent-table value.
+        let _ = remote.into_raw();
     }
     Ok(())
 }
@@ -543,13 +594,6 @@ fn duplicate(raw: HANDLE) -> Result<Handle, String> {
         Ok(Handle::from_api(out))
     }
 }
-fn close_local(raw: u64) {
-    if raw != 0 {
-        unsafe {
-            drop(Handle::new(HANDLE(raw as usize as *mut _)));
-        }
-    }
-}
 fn close_remote(parent: HANDLE, remote: HANDLE) {
     let mut local = HANDLE::default();
     unsafe {
@@ -571,27 +615,38 @@ fn read_record<T: Copy>(handle: HANDLE) -> Result<T, String> {
     let mut value: T = unsafe { zeroed() };
     let bytes =
         unsafe { std::slice::from_raw_parts_mut((&mut value as *mut T).cast(), size_of::<T>()) };
-    let mut count = 0;
-    unsafe {
-        ReadFile(handle, Some(bytes), Some(&mut count), None).map_err(error)?;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let mut count = 0;
+        let read = unsafe { ReadFile(handle, Some(&mut bytes[offset..]), Some(&mut count), None) };
+        if let Err(value) = read {
+            return if offset == 0 {
+                Err(error(value))
+            } else {
+                Err("truncated Windows launch broker record".into())
+            };
+        }
+        if count == 0 {
+            return Err("truncated Windows launch broker record".into());
+        }
+        offset += count as usize;
     }
-    if count as usize != bytes.len() {
-        Err("truncated Windows launch broker record".into())
-    } else {
-        Ok(value)
-    }
+    Ok(value)
 }
 fn write_record<T>(handle: HANDLE, value: &T) -> Result<(), String> {
     let bytes = unsafe { std::slice::from_raw_parts((value as *const T).cast(), size_of::<T>()) };
-    let mut count = 0;
-    unsafe {
-        WriteFile(handle, Some(bytes), Some(&mut count), None).map_err(error)?;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let mut count = 0;
+        unsafe {
+            WriteFile(handle, Some(&bytes[offset..]), Some(&mut count), None).map_err(error)?;
+        }
+        if count == 0 {
+            return Err("truncated Windows launch broker record".into());
+        }
+        offset += count as usize;
     }
-    if count as usize != bytes.len() {
-        Err("truncated Windows launch broker record".into())
-    } else {
-        Ok(())
-    }
+    Ok(())
 }
 fn publish_response(response: HANDLE, ready: HANDLE, value: &Response) -> Result<(), String> {
     write_record(response, value)?;
@@ -606,6 +661,10 @@ fn wait_ms(deadline: Instant) -> Option<u32> {
     )
 }
 fn tick_deadline(deadline: Instant) -> u64 {
+    // Sample Windows uptime first so conversion can only shorten the original
+    // Instant deadline while local work below proceeds; it must never add the
+    // conversion time back to the child's budget.
+    let now_tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() };
     let remaining = deadline
         .checked_duration_since(Instant::now())
         .unwrap_or_default();
@@ -615,8 +674,7 @@ fn tick_deadline(deadline: Instant) -> u64 {
             !remaining.subsec_nanos().is_multiple_of(1_000_000),
         ))
         .min(u128::from(u64::MAX)) as u64;
-    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
-        .saturating_add(milliseconds)
+    now_tick.saturating_add(milliseconds)
 }
 fn tick_wait_ms(deadline: u64) -> u32 {
     deadline
@@ -699,6 +757,19 @@ mod tests {
         assert!(authenticated_response(&observed, 17));
         assert_eq!(observed.pid, 19);
         assert_eq!(observed.process, 23);
+    }
+
+    #[test]
+    fn remote_handle_explicit_transfer_preserves_receiver_handle() {
+        let source = event().unwrap();
+        let parent = duplicate(unsafe { GetCurrentProcess() }).unwrap();
+        let remote = RemoteHandle::duplicate(source.raw(), &parent).unwrap();
+        let raw = remote.into_raw();
+        assert_eq!(
+            unsafe { WaitForSingleObject(raw, 0) },
+            windows::Win32::Foundation::WAIT_TIMEOUT
+        );
+        drop(unsafe { Handle::new(raw) }.unwrap());
     }
 
     #[test]
