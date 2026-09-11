@@ -1141,6 +1141,39 @@ impl NickelSession {
             .collect()
     }
 
+    pub(super) fn remote_codex_feature_diagnostic(
+        &self,
+        observation_generation: u64,
+        observed_at_us: u64,
+    ) -> Option<nickel_remote_control::diagnostics::CodexFeatureDiagnostic> {
+        use nickel_core::optional_features::{FeatureHealth, FeatureInstallation, FeatureSupport};
+        use nickel_remote_control::diagnostics::{
+            CodexFeatureDiagnostic, FeatureHealthDiagnostic, FeatureInstallationDiagnostic,
+        };
+        let projection = self.internal_shell.as_ref()?.codex_projection()?;
+        let installation = match projection.installation {
+            FeatureInstallation::Installed => FeatureInstallationDiagnostic::Installed,
+            FeatureInstallation::Missing => FeatureInstallationDiagnostic::Missing,
+            FeatureInstallation::Incompatible => FeatureInstallationDiagnostic::Incompatible,
+        };
+        let health = match projection.health {
+            FeatureHealth::Unknown => FeatureHealthDiagnostic::Unknown,
+            FeatureHealth::Loading => FeatureHealthDiagnostic::Loading,
+            FeatureHealth::SignedOut => FeatureHealthDiagnostic::SignedOut,
+            FeatureHealth::Ready => FeatureHealthDiagnostic::Ready,
+            FeatureHealth::Failed => FeatureHealthDiagnostic::Failed,
+        };
+        Some(CodexFeatureDiagnostic {
+            observation_generation,
+            observed_at_us,
+            supported: projection.support == FeatureSupport::Supported,
+            installation,
+            enabled: projection.enabled,
+            health,
+            configuration_generation: projection.generation,
+        })
+    }
+
     pub(super) fn remote_platform_diagnostic(
         &self,
         observation_generation: u64,

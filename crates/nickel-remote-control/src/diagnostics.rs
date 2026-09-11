@@ -512,6 +512,9 @@ pub struct DiagnosticSnapshot {
     /// None means the control collector was busy at its independent observation.
     pub lease_metrics: Option<LeaseMetricsDiagnostic>,
     pub platform: PlatformDiagnostic,
+    /// Current compositor-owned optional-feature projection; no source paths,
+    /// account data, project data, or provider diagnostics are retained.
+    pub codex_feature: Option<CodexFeatureDiagnostic>,
     pub shell_behavior: ShellBehaviorDiagnostic,
     /// None means the worker-state collector is unavailable.
     pub settings_worker: Option<SettingsWorkerDiagnostic>,
@@ -524,6 +527,35 @@ pub struct DiagnosticSnapshot {
     pub truncated: bool,
     /// Explicitly identifies domains not supplied by this projection.
     pub unavailable_domains: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureInstallationDiagnostic {
+    Installed,
+    Missing,
+    Incompatible,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FeatureHealthDiagnostic {
+    Unknown,
+    Loading,
+    SignedOut,
+    Ready,
+    Failed,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub struct CodexFeatureDiagnostic {
+    pub observation_generation: u64,
+    pub observed_at_us: u64,
+    pub supported: bool,
+    pub installation: FeatureInstallationDiagnostic,
+    pub enabled: bool,
+    pub health: FeatureHealthDiagnostic,
+    pub configuration_generation: u64,
 }
 
 /// Installed launch targets from the production catalog, never executable arguments.

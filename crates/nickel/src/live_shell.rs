@@ -699,6 +699,12 @@ impl LiveShell {
         self.launcher.apply_codex_projection(projection)
     }
 
+    pub(crate) fn codex_projection(
+        &self,
+    ) -> Option<&nickel_core::optional_features::CodexAvailabilityProjection> {
+        self.launcher.codex_projection()
+    }
+
     pub fn take_requested_codex_project(&mut self) -> Option<String> {
         if self.launcher.codex_available() {
             self.requested_codex_project.take()

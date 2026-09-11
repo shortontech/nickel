@@ -139,6 +139,12 @@ impl InternalShellCoordinator {
         self.shell.apply_codex_projection(projection)
     }
 
+    pub(crate) fn codex_projection(
+        &self,
+    ) -> Option<&nickel_core::optional_features::CodexAvailabilityProjection> {
+        self.shell.codex_projection()
+    }
+
     pub fn set_dashboard_projects(
         &mut self,
         projects: crate::launcher::DashboardSection<Vec<crate::launcher::DashboardProject>>,

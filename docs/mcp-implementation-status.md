@@ -1407,3 +1407,12 @@ physical gestures, delayed menu denial, remote-menu retirement, physical
 replacement survival, and physical semantic-action takeover. This closes the
 previous replacement-menu Escape/focus and physical dispatch seam; the isolated
 compositor, Xvfb, D-Bus services, GTK client, and listener were stopped afterward.
+
+The coherent diagnostic snapshot now includes the compositor-owned Codex feature
+projection: support, installation class, enabled state, runtime health, and
+configuration generation at the snapshot observation point. Source labels,
+executable paths, provider diagnostics, account state, projects, threads, and
+credentials are excluded. A redaction regression seeds private source/failure
+text and proves it cannot reach serialized output. Explicit feature re-probing
+remains separate because the configured source may be an arbitrary executable or
+remote host and cannot be invoked as a generic diagnostic action.
