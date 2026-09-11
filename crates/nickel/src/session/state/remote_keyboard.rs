@@ -576,7 +576,11 @@ impl NickelSession {
                         restore_modifiers: None,
                         pending: Some(NativeStart {
                             permit: permit.clone(),
-                            reply: Some(reply),
+                            // Arm the deferred reply only after begin_input accepts
+                            // the resource boundary. Otherwise dropping this
+                            // uncommitted plan can mask the synchronous denial
+                            // with "native keyboard start cancelled".
+                            reply: None,
                             index: 0,
                             attempts: 1,
                             sequence: 1,
@@ -621,6 +625,13 @@ impl NickelSession {
                 });
                 match result {
                     Ok(owner) => {
+                        let mut native_x11 = native_x11;
+                        if let Some(pending) = native_x11
+                            .as_mut()
+                            .and_then(|native| native.pending.as_mut())
+                        {
+                            pending.reply = Some(reply.clone());
+                        }
                         self.remote_held_keyboard = Some(RemoteHeldKeyboard {
                             owner,
                             window: id,

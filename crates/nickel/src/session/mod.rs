@@ -240,14 +240,7 @@ fn publish_test_control_environment(enabled: bool) -> std::io::Result<()> {
     else {
         return Ok(());
     };
-    let variables = [
-        "XDG_RUNTIME_DIR",
-        "WAYLAND_DISPLAY",
-        "NICKEL_SESSION_CONTROL",
-        "NICKEL_SESSION_TOKEN",
-        "NICKEL_SHELL_TEST_CONTROL",
-    ];
-    let contents = variables
+    let contents = TEST_CONTROL_ENVIRONMENT
         .into_iter()
         .filter_map(|name| {
             std::env::var(name)
@@ -259,6 +252,15 @@ fn publish_test_control_environment(enabled: bool) -> std::io::Result<()> {
     options.write(true).create_new(true).mode(0o600);
     std::io::Write::write_all(&mut options.open(path)?, contents.as_bytes())
 }
+
+const TEST_CONTROL_ENVIRONMENT: [&str; 6] = [
+    "XDG_RUNTIME_DIR",
+    "WAYLAND_DISPLAY",
+    "DISPLAY",
+    "NICKEL_SESSION_CONTROL",
+    "NICKEL_SESSION_TOKEN",
+    "NICKEL_SHELL_TEST_CONTROL",
+];
 
 const USER_SESSION_ENVIRONMENT: &[&str] = &[
     "DBUS_SESSION_BUS_ADDRESS",
@@ -341,8 +343,8 @@ mod tests {
     };
 
     use super::{
-        USER_SESSION_ENVIRONMENT, secure_storage_required, secure_storage_startup_timed_out,
-        test_control_allowed, wait_for_secure_storage_start,
+        TEST_CONTROL_ENVIRONMENT, USER_SESSION_ENVIRONMENT, secure_storage_required,
+        secure_storage_startup_timed_out, test_control_allowed, wait_for_secure_storage_start,
     };
 
     #[test]
@@ -379,6 +381,12 @@ mod tests {
         ] {
             assert!(USER_SESSION_ENVIRONMENT.contains(&variable));
         }
+    }
+
+    #[test]
+    fn test_control_publishes_both_native_client_displays() {
+        assert!(TEST_CONTROL_ENVIRONMENT.contains(&"WAYLAND_DISPLAY"));
+        assert!(TEST_CONTROL_ENVIRONMENT.contains(&"DISPLAY"));
     }
 
     #[test]

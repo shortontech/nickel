@@ -73,6 +73,8 @@ enum Outcome {
 }
 
 fn run() -> Result<Outcome, String> {
+    let xwayland_ordinary_scopes =
+        env::args().any(|argument| argument == "--xwayland-ordinary-scopes");
     let Some(display) = host_display() else {
         return Ok(Outcome::Skipped(
             "no reachable host Wayland or X11 display for a nested compositor".into(),
@@ -100,9 +102,11 @@ fn run() -> Result<Outcome, String> {
         .env("NICKEL_TEST_CONTROL_ENV_FILE", &capability_file)
         .env("NICKEL_MCP_LISTEN_ADDR", address.to_string())
         .env("NICKEL_NESTED_SIZE", "960x640")
-        .env("NICKEL_DISABLE_XWAYLAND", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::piped());
+    if !xwayland_ordinary_scopes {
+        command.env("NICKEL_DISABLE_XWAYLAND", "1");
+    }
     configure_software_renderer(&mut command, matches!(&display, HostDisplay::Wayland(_)));
     match display {
         HostDisplay::Wayland(path) => {
@@ -241,7 +245,12 @@ fn exercise(
     )?;
     let mut stress = exercise_scope_matrix(&environment, address, &identity, bootstrap)?;
     let ordinary_scopes = ordinary_scopes::movement_enabled()
-        || env::args().any(|argument| argument == "--ordinary-scopes");
+        || env::args().any(|argument| {
+            matches!(
+                argument.as_str(),
+                "--ordinary-scopes" | "--xwayland-ordinary-scopes"
+            )
+        });
     let lease_id = if ordinary_scopes {
         ordinary_scopes::exercise(&environment, address, &identity, stress.lease_id)?
     } else {
@@ -2192,6 +2201,7 @@ struct SessionEnvironment {
     token: String,
     runtime: PathBuf,
     wayland: String,
+    display: Option<String>,
 }
 
 fn wait_for_environment(
@@ -2378,6 +2388,10 @@ fn read_environment(path: &Path) -> Result<SessionEnvironment, String> {
         token: value("NICKEL_SESSION_TOKEN")?,
         runtime: PathBuf::from(value("XDG_RUNTIME_DIR")?),
         wayland: value("WAYLAND_DISPLAY")?,
+        display: contents
+            .lines()
+            .find_map(|line| line.strip_prefix("DISPLAY="))
+            .map(str::to_owned),
     })
 }
 

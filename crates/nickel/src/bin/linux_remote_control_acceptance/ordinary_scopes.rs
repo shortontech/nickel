@@ -36,15 +36,21 @@ pub(super) fn exercise(
     identity: &Identity,
     bootstrap: u64,
 ) -> Result<u64, String> {
+    let backend = if env::args().any(|argument| argument == "--xwayland-ordinary-scopes") {
+        FixtureBackend::Xwayland
+    } else {
+        FixtureBackend::Wayland
+    };
     session_message(
         environment,
         Request::Command(Command::SetLauncherVisible { visible: false }),
     )?;
-    let mut recipient = OrdinaryClient::spawn(environment, "keyboard_recipient", "first")?;
+    let mut recipient = OrdinaryClient::spawn(environment, backend, "keyboard_recipient", "first")?;
     let first = wait_for_window(address, identity, bootstrap, &[], &mut recipient)?;
     if first["title"] != "Keyboard recipient acceptance" {
         return Err("owned keyboard fixture published an unexpected window".into());
     }
+    backend.require_x11_class(&first)?;
     // Title identifies the expected fixture only. Authority comes exclusively
     // from the production owner's native process/executable evidence.
     let application = first["verified_application"]
@@ -53,7 +59,7 @@ pub(super) fn exercise(
         .ok_or("native owner could not verify the keyboard fixture application")?
         .to_owned();
     let first_resource = native_resource(&first, "id")?;
-    let mut unrelated = OrdinaryClient::spawn(environment, "standalone", "unrelated")?;
+    let mut unrelated = OrdinaryClient::spawn(environment, backend, "standalone", "unrelated")?;
     let other = wait_for_window(
         address,
         identity,
@@ -69,6 +75,12 @@ pub(super) fn exercise(
         return Err(
             "unrelated example lacks a distinct owner-verified application identity".into(),
         );
+    }
+    backend.require_x11_class(&other)?;
+    if matches!(backend, FixtureBackend::Xwayland)
+        && other["application_id"] == first["application_id"]
+    {
+        return Err("distinct X11 fixtures published the same WM_CLASS".into());
     }
     let movement = if movement_enabled() {
         Some(Movement::prepare(
@@ -124,7 +136,7 @@ pub(super) fn exercise(
     }
     // A later process/window must inherit through verified executable identity;
     // it did not exist when the application lease was approved.
-    let mut second = OrdinaryClient::spawn(environment, "keyboard_recipient", "second")?;
+    let mut second = OrdinaryClient::spawn(environment, backend, "keyboard_recipient", "second")?;
     let additional = wait_for_window(address, identity, lease, &[first_resource.id], &mut second)?;
     if additional["verified_application"] != application {
         return Err("additional native window does not match the approved application".into());
@@ -673,8 +685,31 @@ struct OrdinaryClient {
     log: PathBuf,
     expected_text: String,
 }
+
+#[derive(Clone, Copy)]
+enum FixtureBackend {
+    Wayland,
+    Xwayland,
+}
+
+impl FixtureBackend {
+    fn require_x11_class(self, window: &Value) -> Result<(), String> {
+        if matches!(self, Self::Xwayland)
+            && window["application_id"].as_str().is_none_or(str::is_empty)
+        {
+            return Err("Xwayland fixture did not publish a WM_CLASS application identity".into());
+        }
+        Ok(())
+    }
+}
+
 impl OrdinaryClient {
-    fn spawn(environment: &SessionEnvironment, example: &str, label: &str) -> Result<Self, String> {
+    fn spawn(
+        environment: &SessionEnvironment,
+        backend: FixtureBackend,
+        example: &str,
+        label: &str,
+    ) -> Result<Self, String> {
         let harness = env::current_exe().map_err(|error| error.to_string())?;
         let directory = harness
             .parent()
@@ -687,15 +722,31 @@ impl OrdinaryClient {
         }
         let log = environment.runtime.join(format!("ordinary-{label}.log"));
         let output = fs::File::create(&log).map_err(|error| error.to_string())?;
-        let child = ProcessCommand::new(executable)
-            .env("WINIT_UNIX_BACKEND", "wayland")
-            .env("WAYLAND_DISPLAY", &environment.wayland)
+        let mut command = ProcessCommand::new(executable);
+        match backend {
+            FixtureBackend::Wayland => {
+                command
+                    .env("WINIT_UNIX_BACKEND", "wayland")
+                    .env("WAYLAND_DISPLAY", &environment.wayland)
+                    .env_remove("DISPLAY");
+            }
+            FixtureBackend::Xwayland => {
+                let display = environment
+                    .display
+                    .as_deref()
+                    .ok_or("nested Xwayland did not publish DISPLAY")?;
+                command
+                    .env("WINIT_UNIX_BACKEND", "x11")
+                    .env("DISPLAY", display)
+                    .env_remove("WAYLAND_DISPLAY");
+            }
+        }
+        let child = command
             .env("XDG_RUNTIME_DIR", &environment.runtime)
             .env("XDG_CONFIG_HOME", environment.runtime.join("config"))
             .env("XDG_STATE_HOME", environment.runtime.join("state"))
             .env("NICKEL_SESSION_CONTROL", &environment.control)
             .env("NICKEL_SESSION_TOKEN", &environment.token)
-            .env_remove("DISPLAY")
             .stdin(Stdio::null())
             .stdout(output.try_clone().map_err(|error| error.to_string())?)
             .stderr(output)

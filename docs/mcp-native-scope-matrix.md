@@ -132,3 +132,33 @@ display presenter. This is not physical multi-monitor, DRM, mixed-DPI presentati
 Xwayland, or Windows acceptance. Continuous held-input movement and transient/broker
 identity remain separate cases. The real negative launch test does not prove an
 authorized application launch or output-placement workflow.
+## Ordinary Xwayland clients
+
+The parallel Xwayland increment uses the same repository examples and assertions.
+Run it from a reachable X11 session with:
+
+```sh
+cargo build -p nickel-ui --example keyboard_recipient --example standalone
+target/debug/nickel-linux-remote-control-acceptance --xwayland-ordinary-scopes
+```
+
+This option starts Nickel's private Xwayland server and forces both examples onto
+its published `DISPLAY`. Production resolves each window owner through XRes, then
+corroborates the window with `WM_CLASS` and derives application authority from the
+owner process executable. The test repeats three focus/key actions under one
+window approval, repeats them under one application approval, admits a later
+window from the same executable, and denies focus, capture, and keyboard access
+to the unrelated example.
+
+Native acceptance passed September 11, 2026, with the outer nested compositor on
+the host Xwayland display (`DISPLAY=:0`, with host Wayland removed). The complete
+earlier shell/privacy/stress/emergency suite passed in the same run. The ordinary
+Wayland mode was rerun afterward and also passed unchanged. The X11 negative
+control additionally caught and fixed a reply-ordering bug where an uncommitted
+native keyboard plan could mask the correct resource-boundary denial with a
+cancellation error.
+
+This remains bounded synthetic-input acceptance with two repository clients. It
+does not cover PID reuse, sandbox brokers, shared runtimes, transient ownership,
+physical input, assistive workflows, multiple outputs/workspaces, or native
+Windows behavior.
