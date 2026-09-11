@@ -4789,6 +4789,16 @@ impl NickelSession {
                 if let Some(runtime_id) = self.internal_shell_surfaces.remove(&surface.id) {
                     self.invalidate_remote_shell_surface(runtime_id);
                     self.internal_ui.remove(runtime_id);
+                    if let Some(role) = remote_shell_event_role(surface.role) {
+                        self.remote_desktop_events.record(
+                            nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
+                                surface_generation: runtime_id.snapshot_token(),
+                                role,
+                                visible: false,
+                            },
+                            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                        );
+                    }
                 }
                 continue;
             }
@@ -4942,6 +4952,16 @@ impl NickelSession {
                 .internal_ui
                 .insert_scene(scene, placement, output_scale);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
+            if let Some(role) = remote_shell_event_role(surface.role) {
+                self.remote_desktop_events.record(
+                    nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
+                        surface_generation: runtime_id.snapshot_token(),
+                        role,
+                        visible: true,
+                    },
+                    self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+                );
+            }
             if matches!(
                 surface.role,
                 crate::winit_shell::SurfaceRole::ControlCenter
@@ -5039,6 +5059,28 @@ impl NickelSession {
         self.space.map_element(window.clone(), location, activate);
         self.fit_window_above_keyboard(&window);
         true
+    }
+}
+
+fn remote_shell_event_role(
+    role: crate::winit_shell::SurfaceRole,
+) -> Option<nickel_remote_control::desktop_events::ShellEventRole> {
+    use crate::winit_shell::SurfaceRole;
+    use nickel_remote_control::desktop_events::ShellEventRole;
+    match role {
+        SurfaceRole::Desktop => Some(ShellEventRole::Desktop),
+        SurfaceRole::Panel => Some(ShellEventRole::Panel),
+        SurfaceRole::Launcher => Some(ShellEventRole::Launcher),
+        SurfaceRole::ControlCenter => Some(ShellEventRole::ControlCenter),
+        SurfaceRole::Notification => Some(ShellEventRole::Notification),
+        SurfaceRole::VolumeOsd => Some(ShellEventRole::VolumeOsd),
+        SurfaceRole::WindowPreview => Some(ShellEventRole::WindowPreview),
+        SurfaceRole::WindowContextMenu => Some(ShellEventRole::WindowContextMenu),
+        SurfaceRole::Screenshot => Some(ShellEventRole::Screenshot),
+        SurfaceRole::OnScreenKeyboard => Some(ShellEventRole::OnScreenKeyboard),
+        SurfaceRole::CodexProjectMenu | SurfaceRole::CodexChat | SurfaceRole::Lock => None,
+        #[cfg(target_os = "windows")]
+        SurfaceRole::TrustedControl => None,
     }
 }
 struct DisplacedWindow {
@@ -14116,6 +14158,16 @@ mod protocol_tests {
         session.sync_internal_shell();
         let runtime = session.internal_shell_surfaces[&screenshot];
         assert_eq!(session.internal_ui.focused(), Some(runtime));
+        assert!(session.remote_desktop_events.snapshot().events.iter().any(
+            |event| matches!(
+                event.event,
+                nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
+                    surface_generation,
+                    role: nickel_remote_control::desktop_events::ShellEventRole::Screenshot,
+                    visible: true,
+                } if surface_generation == runtime.snapshot_token()
+            )
+        ));
         let record = session
             .remote_shell_surface_diagnostics()
             .0
@@ -14145,6 +14197,16 @@ mod protocol_tests {
         assert!(!session.internal_shell.as_ref().unwrap().visible(screenshot));
         assert!(!session.internal_ui.is_visible(runtime));
         assert_ne!(session.internal_ui.focused(), Some(runtime));
+        assert!(session.remote_desktop_events.snapshot().events.iter().any(
+            |event| matches!(
+                event.event,
+                nickel_remote_control::desktop_events::DesktopEventKind::ShellSurfaceVisibilityChanged {
+                    surface_generation,
+                    role: nickel_remote_control::desktop_events::ShellEventRole::Screenshot,
+                    visible: false,
+                } if surface_generation == runtime.snapshot_token()
+            )
+        ));
     }
 
     #[test]

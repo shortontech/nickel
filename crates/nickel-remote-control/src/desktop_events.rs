@@ -25,6 +25,21 @@ pub enum ProductionEffectOutcome {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellEventRole {
+    Desktop,
+    Panel,
+    Launcher,
+    ControlCenter,
+    Notification,
+    VolumeOsd,
+    WindowPreview,
+    WindowContextMenu,
+    Screenshot,
+    OnScreenKeyboard,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum DesktopEventKind {
     /// Native process evidence made this ordinary window observable.
@@ -49,6 +64,13 @@ pub enum DesktopEventKind {
     WorkspaceStateChanged {
         active_workspace: u64,
         workspaces: usize,
+    },
+    /// An ordinary compositor-owned shell presentation was inserted or
+    /// retired. Protected and unsupported roles never enter this event.
+    ShellSurfaceVisibilityChanged {
+        surface_generation: u64,
+        role: ShellEventRole,
+        visible: bool,
     },
 }
 
@@ -249,5 +271,23 @@ mod tests {
                 workspaces: 2,
             }
         );
+    }
+
+    #[test]
+    fn shell_visibility_event_schema_has_only_fixed_identity_and_state() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::ShellSurfaceVisibilityChanged {
+                surface_generation: 41,
+                role: ShellEventRole::Screenshot,
+                visible: true,
+            },
+            12,
+        );
+        let json = serde_json::to_string(&events.snapshot()).unwrap();
+        assert!(json.contains("screenshot"));
+        for excluded in ["title", "text", "path", "output", "client"] {
+            assert!(!json.contains(excluded));
+        }
     }
 }

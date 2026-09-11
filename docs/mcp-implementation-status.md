@@ -1457,3 +1457,15 @@ The bounded desktop-event stream now records production workspace create,
 remove and selection outcomes as the resulting active workspace and workspace
 count. Redundant notifications coalesce, and the event carries no window
 membership, title, client identity or input payload.
+
+Ordinary shell presentation insertions and retirements now enter the same
+bounded event stream with a generation-bearing surface identity, fixed role and
+visibility bit. Lock, trusted-control and unsupported Codex roles never enter
+this category; titles, text, pixels, paths, outputs and client identities are
+absent.
+
+Native nested acceptance opened a real GTK context menu, found its matching
+insertion event through the MCP diagnostic snapshot, and then used physical
+Escape to verify a retirement event for the same surface generation. The
+fixture's existing protection, timeout, revocation and lock matrix also passed,
+and all owned compositor, Xvfb and D-Bus processes were stopped.
