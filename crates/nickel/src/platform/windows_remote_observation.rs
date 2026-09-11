@@ -47,12 +47,13 @@ use windows::{
                 GetDpiForMonitor, MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
             },
             WindowsAndMessaging::{
-                BringWindowToTop, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EnumWindows, GA_ROOT,
-                GUITHREADINFO, GetAncestor, GetClientRect, GetCursorPos, GetForegroundWindow,
-                GetGUIThreadInfo, GetWindowRect, GetWindowThreadProcessId, HTBOTTOM, HTBOTTOMLEFT,
-                HTBOTTOMRIGHT, HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON, HTMINBUTTON, HTRIGHT,
-                HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IsIconic, IsWindow, IsWindowVisible,
-                IsZoomed, MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW,
+                BringWindowToTop, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
+                EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_REORDER, EVENT_OBJECT_SHOW, EnumWindows,
+                GA_ROOT, GUITHREADINFO, GetAncestor, GetClientRect, GetCursorPos,
+                GetForegroundWindow, GetGUIThreadInfo, GetWindowRect, GetWindowThreadProcessId,
+                HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLOSE, HTLEFT, HTMAXBUTTON,
+                HTMINBUTTON, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_TOP, IsIconic, IsWindow,
+                IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW,
                 SEND_MESSAGE_TIMEOUT_FLAGS, SMTO_ABORTIFHUNG, SMTO_BLOCK, SW_MAXIMIZE, SW_MINIMIZE,
                 SW_RESTORE, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW,
                 SetForegroundWindow, SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT,
@@ -140,6 +141,118 @@ pub(crate) fn capture_window_client(
     }
 }
 
+pub(crate) fn capture_output_pixels(
+    output: &Output,
+    prepared: &Prepared,
+    mut check: impl FnMut() -> Result<(), String>,
+) -> Result<image::RgbaImage, String> {
+    check()?;
+    prepared.revalidate()?;
+    if prepared.output_capture_has_unlocated_protected_external
+        || prepared
+            .output_capture_protected_external
+            .iter()
+            .any(|bounds| bounds.intersects(output.bounds))
+        || prepared
+            .outputs
+            .iter()
+            .filter(|candidate| *candidate == output)
+            .count()
+            != 1
+    {
+        return Err("Windows output contains protected or changed content".into());
+    }
+    let width = i32::try_from(output.bounds.width)
+        .map_err(|_| "Windows capture dimensions exceed limits")?;
+    let height = i32::try_from(output.bounds.height)
+        .map_err(|_| "Windows capture dimensions exceed limits")?;
+    let (_, _, pixels) = policy::capture_dimensions(width, height)?;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let _dpi = DpiContext::enter()?;
+    // Read the composed physical output. Production shell policy has already
+    // rejected protected surfaces and verified WDA_EXCLUDEFROMCAPTURE on the
+    // trusted indicator retained by its winit owner.
+    let rgba = unsafe {
+        let source = GetDC(None);
+        if source.0.is_null() {
+            return Err(unavailable());
+        }
+        let memory = CreateCompatibleDC(Some(source));
+        if memory.0.is_null() {
+            ReleaseDC(None, source);
+            return Err(unavailable());
+        }
+        let mut data = std::ptr::null_mut();
+        let bitmap = match CreateDIBSection(Some(source), &info, DIB_RGB_COLORS, &mut data, None, 0)
+        {
+            Ok(bitmap) if !data.is_null() => bitmap,
+            Ok(bitmap) => {
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+                let _ = DeleteDC(memory);
+                ReleaseDC(None, source);
+                return Err(unavailable());
+            }
+            Err(_) => {
+                let _ = DeleteDC(memory);
+                ReleaseDC(None, source);
+                return Err(unavailable());
+            }
+        };
+        let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let copied = BitBlt(
+            memory,
+            0,
+            0,
+            width,
+            height,
+            Some(source),
+            output.bounds.x,
+            output.bounds.y,
+            SRCCOPY,
+        );
+        let result: Result<Vec<u8>, String> = (|| {
+            copied.map_err(|_| unavailable())?;
+            check()?;
+            let bytes = pixels.checked_mul(4).ok_or_else(unavailable)?;
+            let bgra = std::slice::from_raw_parts(data.cast::<u8>(), bytes);
+            let mut rgba = vec![0; bytes];
+            for (source_row, target_row) in bgra
+                .chunks_exact(usize::try_from(width).map_err(|_| unavailable())? * 4)
+                .zip(rgba.chunks_exact_mut(usize::try_from(width).map_err(|_| unavailable())? * 4))
+            {
+                check()?;
+                for (source, target) in source_row
+                    .chunks_exact(4)
+                    .zip(target_row.chunks_exact_mut(4))
+                {
+                    target.copy_from_slice(&[source[2], source[1], source[0], 255]);
+                }
+            }
+            Ok(rgba)
+        })();
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(None, source);
+        result?
+    };
+    check()?;
+    prepared.revalidate()?;
+    image::RgbaImage::from_raw(output.bounds.width, output.bounds.height, rgba)
+        .ok_or_else(unavailable)
+}
+
 struct LifecycleSender {
     sender: SyncSender<usize>,
     overflow: Arc<AtomicBool>,
@@ -169,7 +282,7 @@ impl Lifecycle {
         let hook = unsafe {
             SetWinEventHook(
                 EVENT_OBJECT_CREATE,
-                EVENT_OBJECT_DESTROY,
+                EVENT_OBJECT_LOCATIONCHANGE,
                 None,
                 Some(lifecycle_event),
                 0,
@@ -217,7 +330,15 @@ unsafe extern "system" fn lifecycle_event(
     if window.is_invalid()
         || object != OBJID_WINDOW.0
         || child != 0
-        || !matches!(event, EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY)
+        || !matches!(
+            event,
+            EVENT_OBJECT_CREATE
+                | EVENT_OBJECT_DESTROY
+                | EVENT_OBJECT_SHOW
+                | EVENT_OBJECT_HIDE
+                | EVENT_OBJECT_REORDER
+                | EVENT_OBJECT_LOCATIONCHANGE
+        )
     {
         return;
     }
@@ -228,7 +349,8 @@ unsafe extern "system" fn lifecycle_event(
                 value.checked_add(1)
             })
             .is_err()
-            || state.sender.try_send(window.0 as usize).is_err())
+            || (matches!(event, EVENT_OBJECT_CREATE | EVENT_OBJECT_DESTROY)
+                && state.sender.try_send(window.0 as usize).is_err()))
     {
         state.overflow.store(true, Ordering::Release);
     }
@@ -438,7 +560,16 @@ struct HandleCollector {
 unsafe extern "system" fn collect_handle(window: HWND, data: LPARAM) -> BOOL {
     // SAFETY: EnumWindows borrows the live bounded collector below.
     let state = unsafe { &mut *(data.0 as *mut HandleCollector) };
-    if ordinary_window_metadata(window).is_none() {
+    let mut pid = 0;
+    // Capture preparation must account for every visible external top-level
+    // window, including popups that are not ordinary task-switcher resources.
+    // An unattributed window blocks composed readback instead of leaking pixels.
+    if !unsafe { IsWindowVisible(window) }.as_bool()
+        || unsafe { GetAncestor(window, GA_ROOT) } != window
+        || unsafe { GetWindowThreadProcessId(window, Some(&mut pid)) } == 0
+        || pid == 0
+        || pid == std::process::id()
+    {
         return BOOL(1);
     }
     if state.handles.len() >= MAX_WINDOWS {
@@ -489,6 +620,29 @@ fn observe_window(native: usize, process: &WindowsProcessIdentity) -> Option<Win
         protected: false,
         application: process.verified_application().map(str::to_owned),
     })
+}
+
+fn observed_window_bounds(native: usize) -> Result<Option<Rect>, ()> {
+    let mut geometry = RECT::default();
+    // SAFETY: This bounded read is for a freshly enumerated top-level HWND.
+    unsafe { GetWindowRect(HWND(native as *mut std::ffi::c_void), &mut geometry) }
+        .map_err(|_| ())?;
+    if geometry.right <= geometry.left || geometry.bottom <= geometry.top {
+        return Ok(None);
+    }
+    rect(geometry).map(Some).ok_or(())
+}
+
+fn retain_protected_capture_bounds(
+    native: usize,
+    bounds: &mut Vec<Rect>,
+    has_unlocated: &mut bool,
+) {
+    match observed_window_bounds(native) {
+        Ok(Some(window_bounds)) => bounds.push(window_bounds),
+        Ok(None) => {}
+        Err(()) => *has_unlocated = true,
+    }
 }
 
 pub(crate) fn request_window_action(
@@ -894,6 +1048,8 @@ pub(crate) struct Prepared {
     pub outputs: Vec<Output>,
     pub processes: BTreeMap<usize, Arc<WindowsProcessIdentity>>,
     pub input: NativeInputObservation,
+    output_capture_protected_external: Vec<Rect>,
+    output_capture_has_unlocated_protected_external: bool,
     process_links: BTreeMap<u32, ProcessLink>,
 }
 
@@ -1096,9 +1252,19 @@ impl Prepared {
         let mut by_pid = BTreeMap::<u32, Arc<WindowsProcessIdentity>>::new();
         let mut processes = BTreeMap::new();
         let mut windows = Vec::new();
+        let mut output_capture_protected_external = Vec::new();
+        let mut output_capture_has_unlocated_protected_external = false;
         for native in handles.handles {
             check()?;
             let hwnd = HWND(native as *mut std::ffi::c_void);
+            if ordinary_window_metadata(hwnd).is_none() {
+                retain_protected_capture_bounds(
+                    native,
+                    &mut output_capture_protected_external,
+                    &mut output_capture_has_unlocated_protected_external,
+                );
+                continue;
+            }
             let mut pid = 0;
             // SAFETY: This is a revalidated window observation, not PID authority.
             unsafe {
@@ -1109,6 +1275,11 @@ impl Prepared {
             }
             if let std::collections::btree_map::Entry::Vacant(entry) = by_pid.entry(pid) {
                 let Ok(process) = WindowsProcessIdentity::probe(pid) else {
+                    retain_protected_capture_bounds(
+                        native,
+                        &mut output_capture_protected_external,
+                        &mut output_capture_has_unlocated_protected_external,
+                    );
                     continue;
                 };
                 entry.insert(Arc::new(process));
@@ -1120,9 +1291,19 @@ impl Prepared {
                     .map_or(true, |level| level > integrity)
                 || policy::protected_executable(process.executable_name().ok().as_deref())
             {
+                retain_protected_capture_bounds(
+                    native,
+                    &mut output_capture_protected_external,
+                    &mut output_capture_has_unlocated_protected_external,
+                );
                 continue;
             }
             let Some(mut window) = observe_window(native, &process) else {
+                retain_protected_capture_bounds(
+                    native,
+                    &mut output_capture_protected_external,
+                    &mut output_capture_has_unlocated_protected_external,
+                );
                 continue;
             };
             window.fullscreen = !window.minimized
@@ -1156,6 +1337,8 @@ impl Prepared {
             outputs,
             processes,
             input,
+            output_capture_protected_external,
+            output_capture_has_unlocated_protected_external,
             process_links,
         })
     }

@@ -12,11 +12,38 @@ use std::collections::BTreeMap;
 pub(crate) fn capture_dimensions(width: i32, height: i32) -> Result<(u16, u16, usize), String> {
     let width = u16::try_from(width).map_err(|_| "Windows capture dimensions exceed limits")?;
     let height = u16::try_from(height).map_err(|_| "Windows capture dimensions exceed limits")?;
+    if width > 8192 || height > 8192 {
+        return Err("Windows capture dimensions exceed limits".into());
+    }
     let pixels = usize::from(width)
         .checked_mul(usize::from(height))
         .filter(|pixels| *pixels > 0 && *pixels <= 16_777_216)
         .ok_or("Windows capture dimensions exceed limits")?;
     Ok((width, height, pixels))
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutputCaptureChromeEvidence {
+    pub on_requested_output: bool,
+    pub visible: bool,
+    pub protected: bool,
+    /// True only after the production window owner has verified the retained
+    /// trusted HWND's native capture-exclusion affinity.
+    pub natively_excluded: bool,
+}
+
+/// A composed desktop readback is safe only when every visible protected
+/// surface on the requested output has a production-verified native exclusion.
+/// Surfaces on other outputs cannot widen the requested output's pixels.
+pub(crate) fn output_capture_chrome_is_safe(
+    evidence: impl IntoIterator<Item = OutputCaptureChromeEvidence>,
+) -> bool {
+    evidence.into_iter().all(|surface| {
+        !surface.on_requested_output
+            || !surface.visible
+            || !surface.protected
+            || surface.natively_excluded
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,6 +69,14 @@ impl Rect {
                 <= i64::from(self.x) + i64::from(self.width)
             && i64::from(other.y) + i64::from(other.height)
                 <= i64::from(self.y) + i64::from(self.height)
+    }
+    pub(crate) fn intersects(self, other: Self) -> bool {
+        self.valid()
+            && other.valid()
+            && i64::from(self.x) < i64::from(other.x) + i64::from(other.width)
+            && i64::from(other.x) < i64::from(self.x) + i64::from(self.width)
+            && i64::from(self.y) < i64::from(other.y) + i64::from(other.height)
+            && i64::from(other.y) < i64::from(self.y) + i64::from(self.height)
     }
     fn array(self) -> [i32; 4] {
         [self.x, self.y, self.width as i32, self.height as i32]
@@ -258,6 +293,30 @@ impl Owner {
             .values()
             .find(|record| record.identity == *identity)
             .map(|record| &record.value)
+    }
+
+    /// Resolve one exact output incarnation through the requesting lease's
+    /// scope projection. The returned evidence is checked by DesktopPermit at
+    /// the owner boundary immediately before native readback.
+    pub(crate) fn output_capture_resource<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+        id: &str,
+        generation: u64,
+    ) -> Option<(&'a Output, ResourceEvidence<'a>)> {
+        let record = self
+            .outputs
+            .values()
+            .find(|record| record.identity.id == id && record.identity.generation == generation)?;
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: None,
+            output: Some(&record.identity),
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        scope.covers(&evidence).then_some((&record.value, evidence))
     }
 
     /// Validate the owner-side policy for one focus or window mutation before
@@ -602,6 +661,34 @@ mod tests {
             vec![1, 2, 3]
         );
         assert_eq!(owner.windows(&full).count(), 3);
+        assert!(
+            Rect {
+                x: -10,
+                y: 0,
+                width: 20,
+                height: 20,
+            }
+            .intersects(Rect {
+                x: 0,
+                y: 10,
+                width: 20,
+                height: 20,
+            })
+        );
+        assert!(
+            !Rect {
+                x: -20,
+                y: 0,
+                width: 20,
+                height: 20,
+            }
+            .intersects(Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+            })
+        );
     }
     #[test]
     fn destroy_reuse_and_process_incarnation_changes_retire_before_new_identity() {
@@ -1139,10 +1226,103 @@ mod tests {
             (0, 480),
             (640, 0),
             (-1, 480),
+            (8193, 1),
+            (1, 8193),
             (i32::from(u16::MAX) + 1, 1),
             (5000, 5000),
         ] {
             assert!(capture_dimensions(dimensions.0, dimensions.1).is_err());
         }
+    }
+
+    #[test]
+    fn output_capture_lookup_requires_exact_generation_and_applicable_scope() {
+        let mut owner = Owner::default();
+        owner
+            .reconcile(
+                Vec::new(),
+                vec![output(1, "left", -1000, 1000), output(2, "right", 0, 1500)],
+                |_| {},
+            )
+            .unwrap();
+        let left = owner
+            .outputs(&ResourceScope::FullSession)
+            .find(|(output, _)| output.name == "left")
+            .unwrap()
+            .0;
+        let exact = ResourceScope::Output(ResourceId {
+            id: left.name.clone(),
+            generation: left.generation,
+        });
+        assert!(
+            owner
+                .output_capture_resource(&exact, &left.name, left.generation)
+                .is_some()
+        );
+        assert!(
+            owner
+                .output_capture_resource(&ResourceScope::FullSession, &left.name, left.generation)
+                .is_some()
+        );
+        assert!(
+            owner
+                .output_capture_resource(&exact, &left.name, left.generation + 1)
+                .is_none()
+        );
+        assert!(
+            owner
+                .output_capture_resource(&exact, "right", left.generation)
+                .is_none()
+        );
+        assert!(
+            owner
+                .output_capture_resource(
+                    &ResourceScope::Window(ResourceId {
+                        id: "window".into(),
+                        generation: 1,
+                    }),
+                    &left.name,
+                    left.generation,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn output_capture_chrome_requires_native_exclusion_for_visible_protection() {
+        let ordinary = OutputCaptureChromeEvidence {
+            on_requested_output: true,
+            visible: true,
+            protected: false,
+            natively_excluded: false,
+        };
+        let hidden_protected = OutputCaptureChromeEvidence {
+            protected: true,
+            visible: false,
+            ..ordinary
+        };
+        let protected_elsewhere = OutputCaptureChromeEvidence {
+            protected: true,
+            on_requested_output: false,
+            ..ordinary
+        };
+        let trusted_excluded = OutputCaptureChromeEvidence {
+            protected: true,
+            natively_excluded: true,
+            ..ordinary
+        };
+        assert!(output_capture_chrome_is_safe([
+            ordinary,
+            hidden_protected,
+            protected_elsewhere,
+            trusted_excluded,
+        ]));
+        assert!(!output_capture_chrome_is_safe([
+            ordinary,
+            OutputCaptureChromeEvidence {
+                protected: true,
+                ..ordinary
+            },
+        ]));
     }
 }
