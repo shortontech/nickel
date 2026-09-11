@@ -404,11 +404,11 @@ impl RemoteControlServer {
         control: Arc<Mutex<ControlPlane>>,
         desktop: Arc<dyn DesktopAuthority>,
     ) -> Result<Self, ServerError> {
-        Self::start_with_config(
-            control,
-            desktop,
-            crate::listener::ListenerConfig::from_environment()?,
-        )
+        if !control.lock().unwrap().enabled() {
+            return Err(ServerError::Disabled);
+        }
+        let selection = crate::listener::ListenerConfig::from_environment();
+        Self::start_with_config(control, desktop, selection.config?)
     }
 
     pub fn start_with_config(
@@ -2837,6 +2837,35 @@ mod tests {
         ));
         server.stop();
         assert!(std::net::TcpListener::bind(MCP_ADDRESS).is_ok());
+    }
+
+    #[test]
+    fn rejected_listener_start_preserves_requested_endpoint_and_environment_origin() {
+        let settings = crate::RemoteAiControlSettings::default();
+        let mut runtime = crate::RemoteControlRuntime::default();
+        let invalid =
+            crate::listener::ListenerConfig::select(Ok("localhost:43199".into()), None, None);
+        runtime.apply_with_listener_selection(&settings, Arc::new(EmptyDesktop), invalid);
+        assert_eq!(runtime.status().effective, crate::EffectiveState::Rejected);
+        assert_eq!(runtime.status().endpoint, "localhost:43199");
+        assert!(runtime.status().environment_override);
+
+        let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap();
+        let requested = format!("http://{address}/mcp");
+        let unavailable =
+            crate::listener::ListenerConfig::select(Ok(address.to_string()), None, None);
+        runtime.apply_with_listener_selection(&settings, Arc::new(EmptyDesktop), unavailable);
+        assert_eq!(runtime.status().effective, crate::EffectiveState::Rejected);
+        assert_eq!(runtime.status().endpoint, requested);
+        assert!(runtime.status().environment_override);
+        assert!(
+            runtime
+                .status()
+                .diagnostic
+                .as_deref()
+                .is_some_and(|diagnostic| diagnostic.contains(&address.to_string()))
+        );
     }
 
     fn http(request: &str) -> String {

@@ -13,6 +13,12 @@ pub struct ListenerConfig {
     pub(crate) private_key: Option<PathBuf>,
 }
 
+pub(crate) struct ListenerSelection {
+    pub(crate) requested_endpoint: String,
+    pub(crate) environment_override: bool,
+    pub(crate) config: Result<ListenerConfig, ListenerError>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum ListenerError {
     #[error(
@@ -60,19 +66,45 @@ impl ListenerConfig {
             fingerprint,
         }))
     }
-    pub fn from_environment() -> Result<Self, ListenerError> {
-        let address =
-            std::env::var("NICKEL_MCP_LISTEN_ADDR")
-                .map(Some)
-                .or_else(|error| match error {
-                    std::env::VarError::NotPresent => Ok(None),
-                    _ => Err(ListenerError::Address),
-                })?;
-        Self::parse(
-            address.as_deref(),
+    pub(crate) fn from_environment() -> ListenerSelection {
+        Self::select(
+            std::env::var("NICKEL_MCP_LISTEN_ADDR"),
             std::env::var_os("NICKEL_MCP_TLS_CERT").map(PathBuf::from),
             std::env::var_os("NICKEL_MCP_TLS_KEY").map(PathBuf::from),
         )
+    }
+
+    pub(crate) fn select(
+        address: Result<String, std::env::VarError>,
+        certificate: Option<PathBuf>,
+        private_key: Option<PathBuf>,
+    ) -> ListenerSelection {
+        let (address, environment_override, address_error) = match address {
+            Ok(address) => (Some(address), true, None),
+            Err(std::env::VarError::NotPresent) => (None, false, None),
+            Err(std::env::VarError::NotUnicode(value)) => (
+                Some(value.to_string_lossy().into_owned()),
+                true,
+                Some(ListenerError::Address),
+            ),
+        };
+        let config = address_error.map_or_else(
+            || Self::parse(address.as_deref(), certificate, private_key),
+            Err,
+        );
+        let requested_endpoint = config.as_ref().map_or_else(
+            |_| {
+                address
+                    .clone()
+                    .unwrap_or_else(|| crate::MCP_ENDPOINT.to_owned())
+            },
+            Self::endpoint,
+        );
+        ListenerSelection {
+            requested_endpoint,
+            environment_override,
+            config,
+        }
     }
 
     pub fn parse(
@@ -153,5 +185,18 @@ mod tests {
                 .endpoint(),
             "http://[::1]:42638/mcp"
         );
+    }
+
+    #[test]
+    fn selection_retains_rejected_environment_value_and_origin() {
+        let selection = ListenerConfig::select(Ok("localhost:9999".into()), None, None);
+        assert_eq!(selection.requested_endpoint, "localhost:9999");
+        assert!(selection.environment_override);
+        assert!(matches!(selection.config, Err(ListenerError::Address)));
+
+        let selection = ListenerConfig::select(Err(std::env::VarError::NotPresent), None, None);
+        assert_eq!(selection.requested_endpoint, crate::MCP_ENDPOINT);
+        assert!(!selection.environment_override);
+        assert!(selection.config.is_ok());
     }
 }

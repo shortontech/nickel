@@ -808,6 +808,19 @@ impl RemoteControlRuntime {
         settings: &RemoteAiControlSettings,
         desktop: std::sync::Arc<dyn DesktopAuthority>,
     ) {
+        self.apply_with_listener_selection(
+            settings,
+            desktop,
+            listener::ListenerConfig::from_environment(),
+        );
+    }
+
+    pub(crate) fn apply_with_listener_selection(
+        &mut self,
+        settings: &RemoteAiControlSettings,
+        desktop: std::sync::Arc<dyn DesktopAuthority>,
+        selection: listener::ListenerSelection,
+    ) {
         if settings.generation < self.status.acknowledged_generation {
             return;
         }
@@ -824,7 +837,15 @@ impl RemoteControlRuntime {
             return;
         }
         self.control.lock().unwrap().set_enabled(true);
-        match RemoteControlServer::start(self.control.clone(), desktop) {
+        self.status.endpoint = selection.requested_endpoint;
+        self.status.environment_override = selection.environment_override;
+        let server = selection
+            .config
+            .map_err(server::ServerError::from)
+            .and_then(|config| {
+                RemoteControlServer::start_with_config(self.control.clone(), desktop, config)
+            });
+        match server {
             Ok(server) => {
                 self.status.endpoint = server.endpoint().to_owned();
                 self.status.host_fingerprint = server.host_fingerprint.clone();
