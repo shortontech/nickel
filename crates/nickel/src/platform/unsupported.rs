@@ -49,6 +49,10 @@ pub fn audio_status() -> super::AudioStatus {
     super::AudioStatus::default()
 }
 
+pub(crate) fn refresh_audio_status() -> Result<super::AudioRefresh, String> {
+    Err("audio refresh is unsupported on this platform".into())
+}
+
 pub fn set_audio_volume(_volume_percent: u8) -> bool {
     false
 }

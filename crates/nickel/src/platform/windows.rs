@@ -714,6 +714,10 @@ pub fn toggle_bluetooth_device(_id: &str) -> bool {
 }
 
 pub fn audio_status() -> super::AudioStatus {
+    native_audio_refresh().audio
+}
+
+fn native_audio_refresh() -> super::AudioRefresh {
     use windows::Win32::{
         Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
         Media::Audio::{
@@ -725,7 +729,7 @@ pub fn audio_status() -> super::AudioStatus {
 
     unsafe {
         let initialized = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-        let result = (|| -> windows::core::Result<super::AudioStatus> {
+        let result = (|| -> windows::core::Result<(super::AudioStatus, bool)> {
             let enumerator: IMMDeviceEnumerator =
                 CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
             let default_device = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)?;
@@ -737,7 +741,8 @@ pub fn audio_status() -> super::AudioStatus {
             let muted = endpoint.GetMute()?.as_bool();
             let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)?;
             let mut devices = Vec::new();
-            for index in 0..collection.GetCount()? {
+            let count = collection.GetCount()?;
+            for index in 0..count.min(super::AUDIO_DEVICE_LIMIT as u32) {
                 let device: IMMDevice = collection.Item(index)?;
                 let id = take_com_string(device.GetId()?);
                 let store = device.OpenPropertyStore(STGM_READ)?;
@@ -765,18 +770,32 @@ pub fn audio_status() -> super::AudioStatus {
                     .cmp(&left.is_default)
                     .then_with(|| left.name.cmp(&right.name))
             });
-            Ok(super::AudioStatus {
-                available: true,
-                devices,
-                volume_percent,
-                muted,
-            })
+            Ok((
+                super::AudioStatus {
+                    available: true,
+                    devices,
+                    volume_percent,
+                    muted,
+                },
+                count as usize > super::AUDIO_DEVICE_LIMIT,
+            ))
         })();
         if initialized {
             CoUninitialize();
         }
-        result.unwrap_or_default()
+        match result {
+            Ok((status, truncated)) => {
+                let mut refresh = super::bound_audio_refresh(status);
+                refresh.partial |= truncated;
+                refresh
+            }
+            Err(_) => super::bound_audio_refresh(super::AudioStatus::default()),
+        }
     }
+}
+
+pub(crate) fn refresh_audio_status() -> Result<super::AudioRefresh, String> {
+    Ok(native_audio_refresh())
 }
 
 pub fn set_audio_volume(volume_percent: u8) -> bool {

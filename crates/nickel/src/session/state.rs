@@ -347,10 +347,13 @@ struct PreparedApplicationDiscovery {
 
 struct PreparedPlatformRefresh {
     domain: nickel_remote_control::diagnostics::PlatformRefreshDomain,
-    network: crate::platform::NetworkStatus,
-    bluetooth: crate::platform::BluetoothStatus,
-    partial: bool,
+    data: PreparedPlatformRefreshData,
     preparation_duration_us: u64,
+}
+
+enum PreparedPlatformRefreshData {
+    Connectivity(crate::platform::ConnectivityRefresh),
+    Audio(crate::platform::AudioRefresh),
 }
 
 impl RemoteDesktopBridge {
@@ -970,9 +973,14 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
         let platform_refresh = if let Some(domain) = platform_domain {
             permit.with_debug(false, || Ok(()))?;
             let started = Instant::now();
-            let refresh = match domain {
+            let data = match domain {
                 nickel_remote_control::diagnostics::PlatformRefreshDomain::Connectivity => {
-                    crate::platform::refresh_connectivity_status()?
+                    PreparedPlatformRefreshData::Connectivity(
+                        crate::platform::refresh_connectivity_status()?,
+                    )
+                }
+                nickel_remote_control::diagnostics::PlatformRefreshDomain::Audio => {
+                    PreparedPlatformRefreshData::Audio(crate::platform::refresh_audio_status()?)
                 }
             };
             let preparation_duration_us =
@@ -980,9 +988,7 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
             permit.with_debug(false, || Ok(()))?;
             Some(PreparedPlatformRefresh {
                 domain,
-                network: refresh.network,
-                bluetooth: refresh.bluetooth,
-                partial: refresh.partial,
+                data,
                 preparation_duration_us,
             })
         } else {
@@ -3049,15 +3055,35 @@ impl NickelSession {
                                 {
                                     return Err("shared input is busy or unavailable".into());
                                 }
-                                let network_available = prepared.network.available;
-                                let bluetooth_available = prepared.bluetooth.available;
                                 let shell = self.internal_shell.as_mut().unwrap();
-                                let mut changed = shell.apply_system_status_update(
-                                    crate::platform::SystemStatusUpdate::Network(prepared.network),
-                                );
-                                changed.extend(shell.apply_system_status_update(
-                                    crate::platform::SystemStatusUpdate::Bluetooth(prepared.bluetooth),
-                                ));
+                                let (mut changed, network_available, bluetooth_available, audio_available, partial) =
+                                    match (domain, prepared.data) {
+                                        (
+                                            nickel_remote_control::diagnostics::PlatformRefreshDomain::Connectivity,
+                                            PreparedPlatformRefreshData::Connectivity(refresh),
+                                        ) => {
+                                            let network_available = refresh.network.available;
+                                            let bluetooth_available = refresh.bluetooth.available;
+                                            let mut changed = shell.apply_system_status_update(
+                                                crate::platform::SystemStatusUpdate::Network(refresh.network),
+                                            );
+                                            changed.extend(shell.apply_system_status_update(
+                                                crate::platform::SystemStatusUpdate::Bluetooth(refresh.bluetooth),
+                                            ));
+                                            (changed, network_available, bluetooth_available, false, refresh.partial)
+                                        }
+                                        (
+                                            nickel_remote_control::diagnostics::PlatformRefreshDomain::Audio,
+                                            PreparedPlatformRefreshData::Audio(refresh),
+                                        ) => {
+                                            let available = refresh.audio.available;
+                                            let changed = shell.apply_system_status_update(
+                                                crate::platform::SystemStatusUpdate::Audio(refresh.audio),
+                                            );
+                                            (changed, false, false, available, refresh.partial)
+                                        }
+                                        _ => return Err("platform refresh data changed before commit".into()),
+                                    };
                                 changed.sort_unstable();
                                 changed.dedup();
                                 self.remote_platform_refresh_generation = generation;
@@ -3068,7 +3094,8 @@ impl NickelSession {
                                         preparation_duration_us: prepared.preparation_duration_us,
                                         network_available,
                                         bluetooth_available,
-                                        partial: prepared.partial,
+                                        audio_available,
+                                        partial,
                                         reconciliation_confirmed: true,
                                     },
                                 );

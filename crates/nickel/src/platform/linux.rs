@@ -400,6 +400,10 @@ pub fn audio_status() -> super::AudioStatus {
     linux_audio::status()
 }
 
+pub(crate) fn refresh_audio_status() -> Result<super::AudioRefresh, String> {
+    linux_audio::refresh()
+}
+
 /// Subscribe the compositor-owned shell to platform state without a socket or
 /// a frame-rate polling loop. Backend workers publish only actual transitions.
 pub fn system_status_receiver() -> super::status_mailbox::StatusReceiver {

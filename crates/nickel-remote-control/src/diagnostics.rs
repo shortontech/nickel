@@ -55,6 +55,7 @@ pub struct DiagnosticActionOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum PlatformRefreshDomain {
     Connectivity,
+    Audio,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -64,6 +65,7 @@ pub struct PlatformRefreshOutcome {
     pub preparation_duration_us: u64,
     pub network_available: bool,
     pub bluetooth_available: bool,
+    pub audio_available: bool,
     pub partial: bool,
     /// The compositor reconciled the returned snapshots; this is not presentation confirmation.
     pub reconciliation_confirmed: bool,
@@ -629,6 +631,16 @@ mod output_identification_tests {
         assert!(matches!(
             action,
             DiagnosticAction::RefreshApplicationInventory
+        ));
+        let audio: DiagnosticAction = serde_json::from_value(serde_json::json!({
+            "refresh_platform_status": {"domain": "audio"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            audio,
+            DiagnosticAction::RefreshPlatformStatus {
+                domain: PlatformRefreshDomain::Audio
+            }
         ));
         for field in ["path", "root", "limit", "executable", "icon_theme"] {
             assert!(

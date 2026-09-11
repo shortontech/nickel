@@ -28,7 +28,9 @@ use spa::{
     },
 };
 
-use super::super::{AudioDeviceStatus, AudioStatus};
+use super::super::{
+    AUDIO_DEVICE_LIMIT, AudioDeviceStatus, AudioRefresh, AudioStatus, bound_audio_refresh,
+};
 
 #[derive(Debug)]
 enum AudioCommand {
@@ -36,6 +38,7 @@ enum AudioCommand {
     AdjustVolume(i8),
     ToggleMute,
     SelectOutput(String),
+    Refresh(mpsc::SyncSender<Result<AudioRefresh, String>>),
 }
 
 struct AudioBackend {
@@ -116,6 +119,17 @@ pub fn select_output(id: &str) -> bool {
         .commands
         .send(AudioCommand::SelectOutput(id.to_owned()))
         .is_ok()
+}
+
+pub fn refresh() -> Result<AudioRefresh, String> {
+    let (reply, response) = mpsc::sync_channel(1);
+    backend()
+        .commands
+        .send(AudioCommand::Refresh(reply))
+        .map_err(|_| "audio worker stopped".to_owned())?;
+    response
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "audio refresh timed out".to_owned())?
 }
 
 pub fn subscribe() -> crate::platform::status_mailbox::StatusReceiver {
@@ -229,6 +243,31 @@ fn run_connection(
                     if graph.lock().map_or(true, |graph| graph.invalid_inventory) {
                         return Err("PipeWire inventory is ambiguous or exceeded its bound".into());
                     }
+                    let command = match command {
+                        AudioCommand::Refresh(reply) => {
+                            let nodes = graph
+                                .lock()
+                                .map_err(|_| "PipeWire graph lock was poisoned")?
+                                .sinks
+                                .values()
+                                .filter(|sink| sink.exposed)
+                                .take(AUDIO_DEVICE_LIMIT)
+                                .map(|sink| sink.node.clone())
+                                .collect::<Vec<_>>();
+                            for node in nodes {
+                                node.enum_params(0, Some(ParamType::Props), 0, 128, None)
+                                    .map_err(|error| error.to_string())?;
+                            }
+                            audio_roundtrip(core, main_loop, completed)?;
+                            let result = graph
+                                .lock()
+                                .map_err(|_| "PipeWire graph lock was poisoned".to_owned())
+                                .map(|graph| bound_audio_refresh(status_from_graph(&graph)));
+                            let _ = reply.send(result);
+                            continue;
+                        }
+                        command => command,
+                    };
                     apply_command(command, graph)?;
                     audio_roundtrip(core, main_loop, completed)?;
                     // Relative commands must not all read the pre-burst graph.
@@ -653,6 +692,24 @@ fn publish(
     subscribers: &Arc<Mutex<Vec<crate::platform::status_mailbox::StatusSender>>>,
     graph: &Graph,
 ) {
+    let status = bound_audio_refresh(status_from_graph(graph)).audio;
+    let changed = if let Ok(mut current) = snapshot.write() {
+        if *current == status {
+            false
+        } else {
+            *current = status.clone();
+            true
+        }
+    } else {
+        false
+    };
+    if changed && let Ok(mut subscribers) = subscribers.lock() {
+        let status = Arc::new(crate::platform::SystemStatusUpdate::Audio(status));
+        subscribers.retain(|sender| sender.send(status.clone()).is_ok());
+    }
+}
+
+fn status_from_graph(graph: &Graph) -> AudioStatus {
     let mut sinks = graph
         .sinks
         .values()
@@ -674,27 +731,13 @@ fn publish(
         })
         .collect();
     let effective_control = effective.and_then(|sink| control_sink(graph, sink));
-    let status = AudioStatus {
+    AudioStatus {
         available: effective_control.is_some(),
         devices,
         volume_percent: effective_control
             .map(|sink| average_volume(&sink.channel_volumes))
             .unwrap_or(0),
         muted: effective_control.is_some_and(|sink| sink.muted),
-    };
-    let changed = if let Ok(mut current) = snapshot.write() {
-        if *current == status {
-            false
-        } else {
-            *current = status.clone();
-            true
-        }
-    } else {
-        false
-    };
-    if changed && let Ok(mut subscribers) = subscribers.lock() {
-        let status = Arc::new(crate::platform::SystemStatusUpdate::Audio(status));
-        subscribers.retain(|sender| sender.send(status.clone()).is_ok());
     }
 }
 
@@ -753,6 +796,7 @@ fn apply_command(command: AudioCommand, graph: &Arc<Mutex<Graph>>) -> Result<(),
                 )
                 .map_err(|error| error.to_string())
         }
+        AudioCommand::Refresh(_) => Err("refresh command cannot enter the mutation path".into()),
     }
 }
 
@@ -802,7 +846,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use super::{average_volume, default_sink_name, set_volume, status};
+    use super::{average_volume, default_sink_name, refresh, set_volume, status};
 
     #[test]
     #[ignore = "requires owned private PipeWire daemon and dummy sink"]
@@ -1095,6 +1139,17 @@ mod tests {
             thread::sleep(Duration::from_millis(25));
         }
         panic!("live PipeWire graph did not publish an output");
+    }
+
+    #[test]
+    #[ignore = "uses the live user PipeWire graph"]
+    fn live_pipewire_refresh_returns_a_bounded_snapshot() {
+        let refreshed = refresh().expect("live PipeWire refresh");
+        assert!(refreshed.audio.devices.len() <= super::AUDIO_DEVICE_LIMIT);
+        assert!(refreshed.audio.devices.iter().all(|device| {
+            device.id.chars().count() <= crate::platform::AUDIO_TEXT_LIMIT
+                && device.name.chars().count() <= crate::platform::AUDIO_TEXT_LIMIT
+        }));
     }
 
     #[test]

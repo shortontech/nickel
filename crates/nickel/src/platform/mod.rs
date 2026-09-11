@@ -134,6 +134,29 @@ pub struct AudioStatus {
     pub muted: bool,
 }
 
+pub(crate) const AUDIO_DEVICE_LIMIT: usize = 128;
+pub(crate) const AUDIO_TEXT_LIMIT: usize = 512;
+
+#[derive(Clone, Debug)]
+pub(crate) struct AudioRefresh {
+    pub audio: AudioStatus,
+    pub partial: bool,
+}
+
+pub(crate) fn bound_audio_refresh(mut audio: AudioStatus) -> AudioRefresh {
+    let mut partial = audio.devices.len() > AUDIO_DEVICE_LIMIT;
+    audio.devices.truncate(AUDIO_DEVICE_LIMIT);
+    for device in &mut audio.devices {
+        for value in [&mut device.id, &mut device.name] {
+            if value.chars().count() > AUDIO_TEXT_LIMIT {
+                *value = value.chars().take(AUDIO_TEXT_LIMIT).collect();
+                partial = true;
+            }
+        }
+    }
+    AudioRefresh { audio, partial }
+}
+
 /// Replaceable platform state consumed by the in-process shell. Intermediate
 /// snapshots may coalesce; ordered commands must never use this status channel.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -585,6 +608,29 @@ mod tests {
                 && entry.name.chars().count() <= super::CONNECTIVITY_TEXT_LIMIT
         }));
     }
+
+    #[test]
+    fn audio_refresh_bounds_cardinality_and_text() {
+        let long = "x".repeat(super::AUDIO_TEXT_LIMIT + 1);
+        let audio = super::AudioStatus {
+            available: true,
+            devices: (0..super::AUDIO_DEVICE_LIMIT + 1)
+                .map(|_| super::AudioDeviceStatus {
+                    id: long.clone(),
+                    name: long.clone(),
+                    is_default: false,
+                })
+                .collect(),
+            ..Default::default()
+        };
+        let refresh = super::bound_audio_refresh(audio);
+        assert!(refresh.partial);
+        assert_eq!(refresh.audio.devices.len(), super::AUDIO_DEVICE_LIMIT);
+        assert!(refresh.audio.devices.iter().all(|device| {
+            device.id.chars().count() <= super::AUDIO_TEXT_LIMIT
+                && device.name.chars().count() <= super::AUDIO_TEXT_LIMIT
+        }));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -610,8 +656,8 @@ pub use linux::{
 #[cfg(target_os = "linux")]
 pub(crate) use linux::{
     capture_output, installed_application_signatures, prepare_application_discovery,
-    publish_application_discovery, refresh_connectivity_status, run_signature_diagnostics,
-    save_temp_image, shell_command_payload,
+    publish_application_discovery, refresh_audio_status, refresh_connectivity_status,
+    run_signature_diagnostics, save_temp_image, shell_command_payload,
 };
 
 #[cfg(target_os = "windows")]
@@ -650,9 +696,12 @@ pub use unsupported::{
 #[cfg(target_os = "windows")]
 pub(crate) use windows::{
     expose_trusted_control_window, prepare_application_discovery, prepare_trusted_control_window,
-    publish_application_discovery, refresh_connectivity_status, verify_trusted_control_window,
+    publish_application_discovery, refresh_audio_status, refresh_connectivity_status,
+    verify_trusted_control_window,
 };
 
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+pub(crate) use unsupported::refresh_audio_status;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
 pub(crate) use unsupported::refresh_connectivity_status;
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]
