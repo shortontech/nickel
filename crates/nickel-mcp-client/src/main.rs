@@ -3,7 +3,14 @@ use reqwest::{
     Client, Response, Url,
     header::{HeaderMap, HeaderValue},
 };
+use rustls::{
+    DigitallySignedStruct, SignatureScheme,
+    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+    crypto::WebPkiSupportedAlgorithms,
+    pki_types::{CertificateDer, ServerName, UnixTime},
+};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env,
@@ -51,15 +58,22 @@ impl Bridge {
             .no_proxy()
             .connect_timeout(Duration::from_secs(5));
         if url.scheme() == "https" {
-            let path = env::var("NICKEL_MCP_CA_FILE")?;
-            let mut pem = Vec::new();
-            std::fs::File::open(path)?
-                .take(65537)
-                .read_to_end(&mut pem)?;
-            if pem.len() > 65536 {
-                return Err("CA file exceeds limit".into());
+            if let Some(fingerprint) = env::var_os("NICKEL_MCP_HOST_FINGERPRINT") {
+                let fingerprint = fingerprint
+                    .into_string()
+                    .map_err(|_| "host fingerprint is not valid Unicode")?;
+                builder = trust_fingerprint(builder, &fingerprint)?;
+            } else {
+                let path = env::var("NICKEL_MCP_CA_FILE")?;
+                let mut pem = Vec::new();
+                std::fs::File::open(path)?
+                    .take(65537)
+                    .read_to_end(&mut pem)?;
+                if pem.len() > 65536 {
+                    return Err("CA file exceeds limit".into());
+                }
+                builder = trust_certificate(builder, &pem)?;
             }
-            builder = trust_certificate(builder, &pem)?;
         }
         Ok(Self {
             client: builder.build()?,
@@ -119,6 +133,79 @@ fn trust_certificate(
     Ok(builder
         .tls_built_in_root_certs(false)
         .add_root_certificate(reqwest::Certificate::from_pem(pem)?))
+}
+fn parse_fingerprint(value: &str) -> Result<[u8; 32]> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("host fingerprint must be exactly 64 hexadecimal characters".into());
+    }
+    let mut fingerprint = [0; 32];
+    for (output, pair) in fingerprint.iter_mut().zip(value.as_bytes().chunks_exact(2)) {
+        let pair = std::str::from_utf8(pair)?;
+        *output = u8::from_str_radix(pair, 16)?;
+    }
+    Ok(fingerprint)
+}
+fn trust_fingerprint(
+    builder: reqwest::ClientBuilder,
+    fingerprint: &str,
+) -> Result<reqwest::ClientBuilder> {
+    let expected = parse_fingerprint(fingerprint)?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let verifier = FingerprintVerifier {
+        expected,
+        algorithms: provider.signature_verification_algorithms,
+    };
+    let config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(verifier))
+        .with_no_client_auth();
+    Ok(builder.use_preconfigured_tls(config))
+}
+
+#[derive(Debug)]
+struct FingerprintVerifier {
+    expected: [u8; 32],
+    algorithms: WebPkiSupportedAlgorithms,
+}
+impl ServerCertVerifier for FingerprintVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> std::result::Result<ServerCertVerified, rustls::Error> {
+        if Sha256::digest(end_entity.as_ref()).as_slice() != self.expected {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.algorithms.supported_schemes()
+    }
 }
 fn validate_url(url: &Url) -> Result<()> {
     if !url.username().is_empty()
@@ -518,6 +605,15 @@ mod tests {
         }
     }
     #[test]
+    fn fingerprint_is_an_exact_sha256_digest() {
+        let expected = [0xab; 32];
+        assert_eq!(parse_fingerprint(&"ab".repeat(32)).unwrap(), expected);
+        assert_eq!(parse_fingerprint(&"AB".repeat(32)).unwrap(), expected);
+        for invalid in ["", "ab", &"0".repeat(63), &"g0".repeat(32)] {
+            assert!(parse_fingerprint(invalid).is_err());
+        }
+    }
+    #[test]
     fn fragmented_sse_handles_crlf_and_comments() {
         let mut events = Events::default();
         assert!(
@@ -601,12 +697,20 @@ mod tests {
             .unwrap();
     }
     #[tokio::test]
-    async fn explicit_certificate_and_matching_hostname_are_both_required() {
+    async fn explicit_ca_checks_hostname_and_exact_pin_supports_numeric_endpoint() {
         const CERT: &[u8] =
             include_bytes!("../../nickel-remote-control/tests/fixtures/localhost-cert.pem");
         const KEY: &[u8] =
             include_bytes!("../../nickel-remote-control/tests/fixtures/localhost-key.pem");
-        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint_ip = std::net::UdpSocket::bind("0.0.0.0:0")
+            .and_then(|probe| {
+                probe.connect("192.0.2.1:9")?;
+                probe.local_addr().map(|address| address.ip())
+            })
+            .ok()
+            .filter(|address| !address.is_loopback() && !address.is_unspecified())
+            .unwrap_or_else(|| "127.0.0.2".parse().unwrap());
+        let socket = std::net::TcpListener::bind((endpoint_ip, 0)).unwrap();
         socket.set_nonblocking(true).unwrap();
         let address = socket.local_addr().unwrap();
         let tls = axum_server::tls_rustls::RustlsConfig::from_pem(CERT.to_vec(), KEY.to_vec())
@@ -623,10 +727,13 @@ mod tests {
                         .into_make_service(),
                 ),
         );
-        let trusted = trust_certificate(Client::builder().no_proxy(), CERT)
-            .unwrap()
-            .build()
-            .unwrap();
+        let trusted = trust_certificate(
+            Client::builder().no_proxy().resolve("localhost", address),
+            CERT,
+        )
+        .unwrap()
+        .build()
+        .unwrap();
         assert_eq!(
             trusted
                 .get(format!("https://localhost:{}/", address.port()))
@@ -640,6 +747,7 @@ mod tests {
         );
         let untrusted = Client::builder()
             .no_proxy()
+            .resolve("localhost", address)
             .tls_built_in_root_certs(false)
             .build()
             .unwrap();
@@ -662,6 +770,42 @@ mod tests {
         assert!(
             wrong_host
                 .get(format!("https://wrong.example:{}/", address.port()))
+                .send()
+                .await
+                .is_err()
+        );
+
+        let mut cert_pem = CERT;
+        let certificate = rustls_pemfile::certs(&mut cert_pem)
+            .next()
+            .unwrap()
+            .unwrap();
+        let fingerprint = format!("{:x}", Sha256::digest(certificate.as_ref()));
+        let pinned = trust_fingerprint(Client::builder().no_proxy(), &fingerprint)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            pinned
+                .get(format!("https://{endpoint_ip}:{}/", address.port()))
+                .send()
+                .await
+                .unwrap()
+                .text()
+                .await
+                .unwrap(),
+            "ok"
+        );
+        let wrong_pin = trust_fingerprint(
+            Client::builder().no_proxy().resolve("localhost", address),
+            &"0".repeat(64),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(
+            wrong_pin
+                .get(format!("https://localhost:{}/", address.port()))
                 .send()
                 .await
                 .is_err()

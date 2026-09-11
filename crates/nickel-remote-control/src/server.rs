@@ -516,6 +516,12 @@ impl RemoteControlServer {
             ))
         })?;
         listener.set_nonblocking(true).map_err(ServerError::Bind)?;
+        let allowed_hosts = vec![
+            "localhost".to_owned(),
+            "127.0.0.1".to_owned(),
+            "::1".to_owned(),
+            listener_config.address.ip().to_string(),
+        ];
         let cancellation = CancellationToken::new();
         let worker_cancellation = cancellation.clone();
         let (started_tx, started_rx) = mpsc::sync_channel(1);
@@ -547,6 +553,7 @@ impl RemoteControlServer {
                         .with_legacy_session_mode(false)
                         .with_json_response(true)
                         .with_sse_keep_alive(None)
+                        .with_allowed_hosts(allowed_hosts)
                         .with_cancellation_token(worker_cancellation.clone());
                     let service: StreamableHttpService<McpHandler, LocalSessionManager> =
                         StreamableHttpService::new(

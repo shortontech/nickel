@@ -7,9 +7,13 @@ rust-version.workspace = true
 
 [dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+rustls.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio = { workspace = true, features = ["io-std", "io-util", "time"] }
 
 [dev-dependencies]
 axum.workspace = true
 axum-server.workspace = true
+nickel-remote-control = { path = "../nickel-remote-control" }
+rustls-pemfile.workspace = true

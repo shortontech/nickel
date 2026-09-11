@@ -3117,8 +3117,12 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "axum-server",
+ "nickel-remote-control",
  "reqwest",
+ "rustls",
+ "rustls-pemfile",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
