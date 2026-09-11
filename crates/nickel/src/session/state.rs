@@ -1756,6 +1756,15 @@ struct RemoteWindowEventState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RemoteOutputEventState {
+    geometry: [i32; 4],
+    work_area: [i32; 4],
+    scale_120: u32,
+    primary: bool,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PendingLaunchWindowDisposition {
     AwaitExpiry,
     Unrelated,
@@ -2138,6 +2147,7 @@ pub struct NickelSession {
     remote_terminal_presentation: remote_terminal_presentation::TerminalPresentationState,
     remote_desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     remote_window_event_states: HashMap<u64, RemoteWindowEventState>,
+    remote_output_event_states: HashMap<u64, RemoteOutputEventState>,
     remote_frame_trace: Option<nickel_remote_control::frame_trace::FrameTrace>,
     remote_event_windows: HashSet<WindowId>,
     remote_launched_children: Vec<std::process::Child>,
@@ -2706,6 +2716,7 @@ impl NickelSession {
     fn handle_remote_desktop_request(&mut self, request: RemoteDesktopRequest) {
         self.service_remote_connection_cleanup();
         self.refresh_remote_output_identities();
+        self.record_remote_output_state_events();
         self.revalidate_remote_frame_trace();
         match request {
             RemoteDesktopRequest::ClientConnection {
@@ -5910,6 +5921,7 @@ impl NickelSession {
             remote_terminal_presentation: Default::default(),
             remote_desktop_events: Default::default(),
             remote_window_event_states: HashMap::new(),
+            remote_output_event_states: HashMap::new(),
             remote_frame_trace: None,
             remote_event_windows: HashSet::new(),
             remote_launched_children: Vec::new(),
@@ -7336,6 +7348,50 @@ impl NickelSession {
             }
         }
         self.remote_window_event_states = current;
+    }
+
+    fn record_remote_output_state_events(&mut self) {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        if self.locked || self.shell_recovery_visible() {
+            self.remote_output_event_states.clear();
+            return;
+        }
+        let current = self
+            .protocol_outputs()
+            .into_iter()
+            .filter_map(|output| {
+                let generation = self.remote_output_generations.get(&output.name)?.1;
+                let geometry = output.geometry;
+                let work_area = output.work_area;
+                Some((
+                    generation,
+                    RemoteOutputEventState {
+                        geometry: [geometry.x, geometry.y, geometry.width, geometry.height],
+                        work_area: [work_area.x, work_area.y, work_area.width, work_area.height],
+                        scale_120: output.scale_120,
+                        primary: output.primary,
+                        enabled: output.enabled,
+                    },
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        for (&output_generation, &state) in &current {
+            if self.remote_output_event_states.get(&output_generation) != Some(&state) {
+                self.remote_desktop_events.record(
+                    DesktopEventKind::OutputStateChanged {
+                        output_generation,
+                        geometry: state.geometry,
+                        work_area: state.work_area,
+                        scale_120: state.scale_120,
+                        primary: state.primary,
+                        enabled: state.enabled,
+                    },
+                    observed_at_us,
+                );
+            }
+        }
+        self.remote_output_event_states = current;
     }
 
     fn apply_launcher_visibility(&mut self, visible: bool) {

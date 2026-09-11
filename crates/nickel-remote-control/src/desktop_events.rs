@@ -58,6 +58,16 @@ pub enum DesktopEventKind {
         latest_output_identity_generation: u64,
         outputs: usize,
     },
+    /// Current production layout state for one observable output generation.
+    /// Connector names, models, EDID and physical dimensions are excluded.
+    OutputStateChanged {
+        output_generation: u64,
+        geometry: [i32; 4],
+        work_area: [i32; 4],
+        scale_120: u32,
+        primary: bool,
+        enabled: bool,
+    },
     /// A production owner committed a typed shell continuation. Fixed enums
     /// deliberately exclude the command, target, client and application.
     ProductionEffectCompleted {
@@ -424,5 +434,35 @@ mod tests {
         assert!(fields.contains_key("kind"));
         assert!(fields.contains_key("keyboard_held"));
         assert!(fields.contains_key("pointer_held"));
+    }
+
+    #[test]
+    fn output_state_event_schema_excludes_connector_and_hardware_identity() {
+        let mut events = DesktopEvents::default();
+        events.record(
+            DesktopEventKind::OutputStateChanged {
+                output_generation: 4,
+                geometry: [-1920, 0, 1920, 1080],
+                work_area: [-1920, 0, 1920, 1040],
+                scale_120: 150,
+                primary: false,
+                enabled: true,
+            },
+            19,
+        );
+        let value = serde_json::to_value(events.snapshot()).unwrap();
+        let fields = value["events"][0]["event"].as_object().unwrap();
+        assert_eq!(fields.len(), 7);
+        for included in [
+            "kind",
+            "output_generation",
+            "geometry",
+            "work_area",
+            "scale_120",
+            "primary",
+            "enabled",
+        ] {
+            assert!(fields.contains_key(included));
+        }
     }
 }
