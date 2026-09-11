@@ -173,7 +173,7 @@ impl XdgShellHandler for NickelSession {
         {
             self.schedule_remote_window_identity(
                 id,
-                crate::session::remote_identity::IdentitySource::WaylandPeer(pid),
+                crate::session::remote_identity::IdentitySource::WaylandPeer { pid, app_id: None },
             );
         }
         // The authenticated shell creates role-sized surfaces before the
@@ -846,8 +846,18 @@ impl NickelSession {
             .get(&surface.wl_surface().id())
             .copied();
         if let Some(id) = registry_id {
+            let previous_app_id = self.windows.app_id(id).map(str::to_owned);
             self.windows
-                .update_metadata(id, WindowMetadataSource::Xdg, title, app_id);
+                .update_metadata(id, WindowMetadataSource::Xdg, title, app_id.clone());
+            if !authenticated
+                && previous_app_id.as_deref() != app_id.as_deref()
+                && let Some(pid) = client_pid
+            {
+                self.schedule_remote_window_identity(
+                    id,
+                    crate::session::remote_identity::IdentitySource::WaylandPeer { pid, app_id },
+                );
+            }
         }
         // The registry is the canonical session projection. Role, grouping,
         // decoration, and protocol consumers all derive from the same bounded

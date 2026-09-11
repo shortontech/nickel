@@ -2324,7 +2324,14 @@ impl NickelSession {
                     .and_then(|surface| surface.client())
                     .and_then(|client| client.get_credentials(&self.display_handle).ok())
                     .and_then(|credentials| u32::try_from(credentials.pid).ok())
-                    .map(IdentitySource::WaylandPeer)
+                    .map(|pid| IdentitySource::WaylandPeer {
+                        pid,
+                        app_id: self
+                            .windows
+                            .app_id(id)
+                            .filter(|app_id| !app_id.is_empty())
+                            .map(str::to_owned),
+                    })
             };
             if let Some(source) = source {
                 self.schedule_remote_window_identity(id, source);
@@ -2348,6 +2355,14 @@ impl NickelSession {
     }
 
     fn remote_verified_application(&self, id: WindowId) -> Option<String> {
+        self.remote_verified_application_inner(id, &mut Vec::new())
+    }
+
+    fn remote_verified_application_inner(
+        &self,
+        id: WindowId,
+        visited: &mut Vec<WindowId>,
+    ) -> Option<String> {
         if self.remote_window_is_protected(id) {
             return None;
         }
@@ -2368,10 +2383,43 @@ impl NickelSession {
             }
             return None;
         }
-        self.remote_window_identities
-            .get(&id)?
-            .application()
-            .map(str::to_owned)
+        let identity = self.remote_window_identities.get(&id)?;
+        if let Some(application) = identity.application() {
+            return Some(application.to_owned());
+        }
+        // A native transient may use a shared helper/runtime which has no safe
+        // standalone application identity. Inherit only through the live
+        // compositor relationship and the exact same OS process incarnation.
+        // X11's forgeable WM_TRANSIENT_FOR therefore cannot cross a process
+        // boundary, while Wayland's server-owned parent graph receives the same
+        // conservative process check.
+        if visited.len() >= 16 || visited.contains(&id) {
+            return None;
+        }
+        visited.push(id);
+        let parent = self.remote_native_parent(id)?;
+        let child_process = identity.observation_process()?;
+        let parent_process = self
+            .remote_window_identities
+            .get(&parent)?
+            .observation_process()?;
+        if !child_process.same_current_process(&parent_process) {
+            return None;
+        }
+        self.remote_verified_application_inner(parent, visited)
+    }
+
+    fn remote_native_parent(&self, id: WindowId) -> Option<WindowId> {
+        let window = self.window_for_registry_id(id)?;
+        if let Some(surface) = window.x11_surface() {
+            return surface
+                .is_transient_for()
+                .and_then(|parent| self.x11_windows.get(&parent).copied());
+        }
+        let parent = window.toplevel()?.parent()?;
+        self.surface_windows
+            .get(&parent.wl_surface()?.id())
+            .copied()
     }
 
     fn remote_lease_target_live(
@@ -11399,7 +11447,10 @@ mod protocol_tests {
         for _ in 0..2 {
             session.schedule_remote_window_identity(
                 window,
-                IdentitySource::WaylandPeer(std::process::id()),
+                IdentitySource::WaylandPeer {
+                    pid: std::process::id(),
+                    app_id: None,
+                },
             );
             let deadline = Instant::now() + Duration::from_secs(2);
             while session.remote_window_is_protected(window) && Instant::now() < deadline {

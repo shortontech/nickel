@@ -295,6 +295,10 @@ impl Application {
             })
     }
 
+    pub(crate) fn identity_aliases(&self) -> &[String] {
+        &self.identity_aliases
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }

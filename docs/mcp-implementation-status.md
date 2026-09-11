@@ -261,6 +261,21 @@ its owned client and logged out the nested compositor. Evidence:
 `target/mcp-native-2026-09-10/`. Local installed-app selection without bootstrap
 inventory authority, shared runtimes, Windows and output-scoped launch remain open.
 
+Linux application identity now handles installed Flatpaks without treating the
+shared `flatpak`/`bwrap` launcher or a self-reported surface class as authority.
+The identity worker combines the compositor-authenticated Wayland peer PID (or
+XRes-owned XWayland client PID), a bounded root-owned and non-writable
+`/.flatpak-info` application marker from that process's mount namespace, a unique
+installed desktop entry whose command launches the same Flatpak ID, and a matching
+Wayland app ID or desktop-entry/`StartupWMClass` alias. Missing, malformed,
+ambiguous or mismatched evidence leaves application identity unavailable. A
+shared-runtime transient can inherit its live native parent's application only
+when both windows resolve to the same current OS process; an X11
+`WM_TRANSIENT_FOR` claim cannot cross that process boundary. Focused policy tests
+cover Wayland-ID and XWayland-class matching, forged claims, ambiguity and shared
+launcher exclusion. This has not yet been exercised with a live Flatpak under the
+nested compositor; no Flatpak installation is available on this host.
+
 Ordinary shell-surface diagnostic records now include the production presenter
 scale factor and pending-redraw flag, sampled with placement on the owner thread.
 These supplement coordinator scene generation; a cleared redraw flag does not

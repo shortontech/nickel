@@ -18,7 +18,7 @@ use smithay::{reexports::calloop::channel, xwayland::X11Surface};
 use super::window_registry::WindowId;
 
 pub(super) enum IdentitySource {
-    WaylandPeer(u32),
+    WaylandPeer { pid: u32, app_id: Option<String> },
     X11Client(Box<X11Surface>),
 }
 
@@ -33,6 +33,7 @@ pub(super) struct ProcessIdentity {
     pub desktop_entry: Option<String>,
     pub catalog_generation: u64,
     pub protected: bool,
+    flatpak_application: Option<String>,
 }
 
 impl ProcessIdentity {
@@ -63,6 +64,7 @@ impl ProcessIdentity {
             return None;
         }
         let application = executable_application_identity(&executable, &file);
+        let flatpak_application = inspect_flatpak_application(pid);
         let protected = protected_executable(&executable);
         let application_name = application
             .as_ref()
@@ -78,6 +80,7 @@ impl ProcessIdentity {
             desktop_entry: None,
             catalog_generation: 0,
             protected,
+            flatpak_application,
         })
     }
 
@@ -90,6 +93,59 @@ impl ProcessIdentity {
                 .is_ok_and(|file| file.dev() == self.device && file.ino() == self.inode)
             && process_start_time(self.pid) == Some(self.start_time)
     }
+
+    pub(super) fn same_current_process(&self, other: &Self) -> bool {
+        self.pid == other.pid
+            && self.start_time == other.start_time
+            && self.is_current()
+            && other.is_current()
+    }
+}
+
+const MAX_FLATPAK_INFO_BYTES: u64 = 64 * 1024;
+
+fn inspect_flatpak_application(pid: u32) -> Option<String> {
+    let path = format!("/proc/{pid}/root/.flatpak-info");
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC)
+        .open(path)
+        .ok()?;
+    let metadata = file.metadata().ok()?;
+    // Flatpak creates this root-owned, immutable sandbox marker. Refuse a file
+    // the application user could replace or modify.
+    if !metadata.is_file()
+        || metadata.len() > MAX_FLATPAK_INFO_BYTES
+        || metadata.uid() != 0
+        || metadata.mode() & 0o022 != 0
+    {
+        return None;
+    }
+    let mut contents = String::new();
+    file.take(MAX_FLATPAK_INFO_BYTES + 1)
+        .read_to_string(&mut contents)
+        .ok()?;
+    let mut application_section = false;
+    for line in contents.lines().take(4096) {
+        let line = line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            application_section = line == "[Application]";
+        } else if application_section && let Some(value) = line.strip_prefix("name=") {
+            return normalized_desktop_id(value);
+        }
+    }
+    None
+}
+
+fn normalized_desktop_id(value: &str) -> Option<String> {
+    let value = value.trim().trim_end_matches(".desktop");
+    (!value.is_empty()
+        && value.len() <= 512
+        && value.is_ascii()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')))
+    .then(|| value.to_ascii_lowercase())
 }
 
 fn executable_application_identity(
@@ -374,12 +430,15 @@ fn bounded_label(label: &str) -> String {
 struct DesktopCatalog {
     generation: u64,
     files: HashMap<(u64, u64), Vec<DesktopIdentity>>,
+    flatpaks: HashMap<String, Vec<DesktopIdentity>>,
 }
 
+#[derive(Clone)]
 struct DesktopIdentity {
     id: String,
     name: String,
     executable: PathBuf,
+    aliases: Vec<String>,
 }
 
 impl DesktopCatalog {
@@ -391,6 +450,7 @@ impl DesktopCatalog {
         let mut catalog = Self {
             generation,
             files: HashMap::new(),
+            flatpaks: HashMap::new(),
         };
         let directories: Vec<_> = std::env::split_paths(search_path).take(64).collect();
         for application in applications.iter().take(4096) {
@@ -403,6 +463,27 @@ impl DesktopCatalog {
             else {
                 continue;
             };
+            let entry = DesktopIdentity {
+                id: application.id().to_owned(),
+                name: bounded_label(application.name()),
+                executable: PathBuf::new(),
+                aliases: application
+                    .identity_aliases()
+                    .iter()
+                    .filter_map(|alias| normalized_desktop_id(alias))
+                    .collect(),
+            };
+            if let Some(flatpak_id) = flatpak_id_from_command(application.launch_command().unwrap())
+            {
+                catalog
+                    .flatpaks
+                    .entry(flatpak_id)
+                    .or_default()
+                    .push(entry.clone());
+                // `/usr/bin/flatpak` is a launcher shared by every sandbox and
+                // cannot itself establish membership in any one application.
+                continue;
+            }
             let path = std::path::Path::new(command);
             let executable = if path.is_absolute() {
                 Some(path.to_owned())
@@ -427,17 +508,31 @@ impl DesktopCatalog {
                 .entry((file.dev(), file.ino()))
                 .or_default()
                 .push(DesktopIdentity {
-                    id: application.id().to_owned(),
-                    name: bounded_label(application.name()),
                     executable,
+                    ..entry
                 });
         }
         catalog
     }
 
-    fn corroborate(&self, identity: &mut ProcessIdentity) {
+    fn corroborate(&self, identity: &mut ProcessIdentity, surface_claim: Option<&str>) {
         identity.catalog_generation = self.generation;
-        if identity.application.is_none() || identity.protected {
+        if identity.protected {
+            return;
+        }
+        if let (Some(flatpak_id), Some(claim)) = (
+            identity.flatpak_application.as_deref(),
+            surface_claim.and_then(normalized_desktop_id),
+        ) && let Some(entries) = self.flatpaks.get(flatpak_id)
+            && let [entry] = entries.as_slice()
+            && entry.matches_claim(&claim)
+        {
+            identity.application = Some(format!("linux-flatpak:{flatpak_id}"));
+            identity.desktop_entry = Some(entry.id.clone());
+            identity.application_name = Some(entry.name.clone());
+            return;
+        }
+        if identity.application.is_none() {
             return;
         }
         let Some(entries) = self.files.get(&(identity.device, identity.inode)) else {
@@ -453,6 +548,27 @@ impl DesktopCatalog {
             identity.application_name = Some(entry.name.clone());
         }
     }
+}
+
+impl DesktopIdentity {
+    fn matches_claim(&self, claim: &str) -> bool {
+        normalized_desktop_id(&self.id).as_deref() == Some(claim)
+            || self.aliases.iter().any(|alias| alias == claim)
+    }
+}
+
+fn flatpak_id_from_command(command: &[String]) -> Option<String> {
+    let program = std::path::Path::new(command.first()?);
+    if program.file_name()?.to_str()? != "flatpak" {
+        return None;
+    }
+    let mut arguments = command.iter().skip(1);
+    if arguments.next()? != "run" {
+        return None;
+    }
+    arguments
+        .find(|argument| !argument.starts_with('-'))
+        .and_then(|argument| normalized_desktop_id(argument))
 }
 
 fn executable_metadata(path: &std::path::Path) -> Option<fs::Metadata> {
@@ -519,6 +635,8 @@ fn shared_runtime_executable(path: &std::path::Path) -> bool {
             | "node"
             | "nodejs"
             | "electron"
+            | "flatpak"
+            | "bwrap"
             | "dotnet"
             | "mono"
             | "perl"
@@ -593,8 +711,12 @@ impl IdentityWorker {
                     if generation != catalog.generation {
                         catalog = DesktopCatalog::build(generation, &applications, &search_path);
                     }
+                    let surface_claim = match &source {
+                        IdentitySource::WaylandPeer { app_id, .. } => app_id.clone(),
+                        IdentitySource::X11Client(surface) => Some(surface.class()),
+                    };
                     let pid = match source {
-                        IdentitySource::WaylandPeer(pid) => Some(pid),
+                        IdentitySource::WaylandPeer { pid, .. } => Some(pid),
                         // XRes asks the X server about the resource owner. Never use
                         // X11Surface::pid(), which reads the forgeable _NET_WM_PID.
                         IdentitySource::X11Client(surface) => surface.get_client_pid().ok(),
@@ -602,7 +724,7 @@ impl IdentityWorker {
                     let identity = pid
                         .and_then(ProcessIdentity::inspect)
                         .map(|mut identity| {
-                            catalog.corroborate(&mut identity);
+                            catalog.corroborate(&mut identity, surface_claim.as_deref());
                             identity
                         })
                         .map_or(WindowIdentity::Unavailable, WindowIdentity::Verified);
@@ -636,6 +758,114 @@ mod tests {
             None,
             Some(vec![executable.to_string_lossy().into_owned()]),
         )
+    }
+
+    fn flatpak_application(id: &str, alias: Option<&str>) -> crate::model::Application {
+        let application = crate::model::Application::new(
+            format!("{id}.desktop"),
+            "Sandboxed application".into(),
+            None,
+            None,
+            Some(vec![
+                "/usr/bin/flatpak".into(),
+                "run".into(),
+                "--branch=stable".into(),
+                id.into(),
+            ]),
+        );
+        alias.map_or(application.clone(), |alias| {
+            application.with_identity_alias(alias)
+        })
+    }
+
+    fn synthetic_flatpak_process(id: &str) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: std::process::id(),
+            start_time: process_start_time(std::process::id()).unwrap(),
+            device: 1,
+            inode: 2,
+            application: None,
+            application_name: None,
+            desktop_entry: None,
+            catalog_generation: 0,
+            protected: false,
+            flatpak_application: Some(id.into()),
+        }
+    }
+
+    #[test]
+    fn flatpak_identity_requires_sandbox_catalog_and_surface_corroboration() {
+        let id = "org.example.Editor";
+        assert!(shared_runtime_executable(std::path::Path::new(
+            "/usr/bin/flatpak"
+        )));
+        assert!(shared_runtime_executable(std::path::Path::new(
+            "/usr/bin/bwrap"
+        )));
+        let catalog = DesktopCatalog::build(
+            7,
+            &[flatpak_application(id, Some("ExampleEditor"))],
+            std::ffi::OsStr::new("/usr/bin"),
+        );
+        let mut wayland = synthetic_flatpak_process(&id.to_ascii_lowercase());
+        catalog.corroborate(&mut wayland, Some(id));
+        assert_eq!(
+            wayland.application.as_deref(),
+            Some("linux-flatpak:org.example.editor")
+        );
+        assert_eq!(
+            wayland.desktop_entry.as_deref(),
+            Some("org.example.Editor.desktop")
+        );
+
+        let mut xwayland = synthetic_flatpak_process(&id.to_ascii_lowercase());
+        catalog.corroborate(&mut xwayland, Some("ExampleEditor"));
+        assert_eq!(xwayland.application, wayland.application);
+
+        for claim in [None, Some("org.example.Other"), Some("flatpak")] {
+            let mut forged = synthetic_flatpak_process(&id.to_ascii_lowercase());
+            catalog.corroborate(&mut forged, claim);
+            assert!(forged.application.is_none());
+            assert!(forged.desktop_entry.is_none());
+        }
+    }
+
+    #[test]
+    fn transient_inheritance_requires_the_exact_live_process_incarnation() {
+        let current = ProcessIdentity::inspect(std::process::id()).unwrap();
+        let same = current.clone();
+        assert!(current.same_current_process(&same));
+
+        let mut stale = same.clone();
+        stale.start_time = stale.start_time.saturating_add(1);
+        assert!(!current.same_current_process(&stale));
+
+        let mut different = same;
+        different.pid = different.pid.saturating_add(1);
+        assert!(!current.same_current_process(&different));
+    }
+
+    #[test]
+    fn ambiguous_flatpak_catalog_never_establishes_application_scope() {
+        let id = "org.example.Editor";
+        let catalog = DesktopCatalog::build(
+            8,
+            &[
+                flatpak_application(id, None),
+                crate::model::Application::new(
+                    "org.example.Second.desktop".into(),
+                    "Second".into(),
+                    None,
+                    None,
+                    Some(vec!["flatpak".into(), "run".into(), id.into()]),
+                )
+                .with_identity_alias(id),
+            ],
+            std::ffi::OsStr::new("/usr/bin"),
+        );
+        let mut process = synthetic_flatpak_process(&id.to_ascii_lowercase());
+        catalog.corroborate(&mut process, Some(id));
+        assert!(process.application.is_none());
     }
 
     #[test]
@@ -960,7 +1190,7 @@ mod tests {
         let mut identity = ProcessIdentity::inspect(std::process::id()).unwrap();
         let original_authority = identity.application.clone();
         let catalog = DesktopCatalog::build(7, &[application("fixture", &executable)], "".as_ref());
-        catalog.corroborate(&mut identity);
+        catalog.corroborate(&mut identity, None);
         assert_eq!(identity.desktop_entry.as_deref(), Some("fixture"));
         assert_eq!(
             identity.application_name.as_deref(),
@@ -978,13 +1208,13 @@ mod tests {
             ],
             "".as_ref(),
         )
-        .corroborate(&mut ambiguous);
+        .corroborate(&mut ambiguous, None);
         assert!(ambiguous.desktop_entry.is_none());
         assert_eq!(ambiguous.application, original_authority);
 
         let mut runtime = ProcessIdentity::inspect(std::process::id()).unwrap();
         runtime.application = None;
-        catalog.corroborate(&mut runtime);
+        catalog.corroborate(&mut runtime, None);
         assert!(runtime.desktop_entry.is_none());
         assert!(runtime.application.is_none());
     }
@@ -1003,7 +1233,7 @@ mod tests {
         let path = std::env::join_paths([&first, &second]).unwrap();
         let mut identity = ProcessIdentity::inspect(std::process::id()).unwrap();
         DesktopCatalog::build(1, &[application("fixture", "fixture".as_ref())], &path)
-            .corroborate(&mut identity);
+            .corroborate(&mut identity, None);
         assert!(identity.desktop_entry.is_none());
 
         let catalog = DesktopCatalog::build(
@@ -1013,7 +1243,7 @@ mod tests {
         );
         fs::remove_file(second.join("fixture")).unwrap();
         symlink("/bin/sleep", second.join("fixture")).unwrap();
-        catalog.corroborate(&mut identity);
+        catalog.corroborate(&mut identity, None);
         assert!(
             identity.desktop_entry.is_none(),
             "a stale catalog cannot label a replacement executable"
