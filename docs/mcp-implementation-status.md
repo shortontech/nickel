@@ -4,6 +4,29 @@ Both specifications remain active. Their completion criteria include native
 Linux and Windows acceptance and cross-machine debugging. Linux unit and nested
 native checks alone do not establish completion.
 
+The native scope harness now covers ordinary clients on both Wayland and
+Xwayland. Xwayland authority requires production XRes process ownership plus a
+nonempty `WM_CLASS` identity; one approval supports repeated client-confirmed
+input and a later same-executable window, while a distinct executable is denied.
+This run found and fixed a production reply-ordering race: native keyboard reply
+cleanup is armed only after continuous input authorization succeeds, so a
+rejected X11 plan reports the resource-boundary denial instead of masking it as
+cancellation. The Wayland movement mode also verifies window/application scope
+across owner-managed output and workspace moves and verifies output-scope loss
+and regain. Flatpak/shared-runtime, transient/broker, physical-output and native
+Windows identity cases remain open.
+
+A current-process native Linux acceptance test now activates the real AccessKit
+AT-SPI provider, connects through a separate session-bus consumer, verifies the
+trusted indicator's bounded read-only labels and single Stop action, and invokes
+that action through `org.a11y.atspi.Action`. Production owner dispatch revokes the
+approved lease and publishes local stopped acknowledgement, while MCP surface
+enumeration never contains the TrustedControl identity. This run exposed and
+fixed empty informational labels: AccessKit maps AT-SPI `Role::Label` text from
+the node value, so Nickel now publishes the same bounded label text as both its
+label and read-only value. The fixture restores the host accessibility setting.
+An end-user Orca workflow and native Windows UIA execution remain open.
+
 Full-debug now exposes typed preferred-terminal and preferred-file-manager
 settings through opaque IDs from the bounded installed-application catalog.
 Reads and writes are bound to the exact catalog generation and ShellSettings
