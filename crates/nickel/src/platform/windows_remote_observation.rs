@@ -14,10 +14,11 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use windows::Win32::Foundation::LPARAM as MessageLparam;
 use windows::core::BOOL;
 use windows::{
     Win32::{
-        Foundation::{HANDLE, HWND, LPARAM, RECT},
+        Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM},
         Graphics::Gdi::{
             EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
         },
@@ -39,10 +40,12 @@ use windows::{
                 GetDpiForMonitor, MDT_EFFECTIVE_DPI, SetThreadDpiAwarenessContext,
             },
             WindowsAndMessaging::{
-                EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EnumWindows, GA_ROOT, GetAncestor,
-                GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsIconic, IsWindow,
-                IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY, OBJID_WINDOW,
-                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+                BringWindowToTop, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EnumWindows, GA_ROOT,
+                GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
+                HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY,
+                OBJID_WINDOW, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE,
+                SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT,
+                WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
             },
         },
     },
@@ -405,6 +408,75 @@ fn observe_window(native: usize, process: &WindowsProcessIdentity) -> Option<Win
         protected: false,
         application: process.verified_application().map(str::to_owned),
     })
+}
+
+pub(crate) fn request_window_action(
+    window: &Window,
+    session: u32,
+    action: nickel_remote_control::window_actions::WindowAction,
+) -> Result<(), String> {
+    use nickel_remote_control::window_actions::WindowAction;
+    action.validate()?;
+    if !desktop_is_unlocked(session) {
+        return Err(unavailable());
+    }
+    let hwnd = HWND(window.native as *mut std::ffi::c_void);
+    // The owner has just revalidated the HWND, process incarnation, desktop and
+    // permit. These calls request standard top-level window-manager operations;
+    // a separate fresh observation determines whether they actually settled.
+    unsafe {
+        if !IsWindow(Some(hwnd)).as_bool() {
+            return Err(unavailable());
+        }
+        match action {
+            WindowAction::Activate => {
+                if window.minimized {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                let _ = BringWindowToTop(hwnd);
+                if !SetForegroundWindow(hwnd).as_bool() {
+                    return Err("Windows denied foreground activation".into());
+                }
+            }
+            WindowAction::Minimize => {
+                let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            }
+            WindowAction::Maximize => {
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+            WindowAction::Restore | WindowAction::ExitFullscreen => {
+                let _ = ShowWindow(hwnd, SW_RESTORE);
+            }
+            WindowAction::Close => {
+                PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), MessageLparam(0))
+                    .map_err(|_| unavailable())?;
+            }
+            WindowAction::SetBounds {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                SetWindowPos(
+                    hwnd,
+                    Some(HWND_TOP),
+                    x,
+                    y,
+                    width as i32,
+                    height as i32,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+                .map_err(|_| unavailable())?;
+            }
+            WindowAction::Fullscreen | WindowAction::MoveToWorkspace { .. } => {
+                return Err("Windows does not expose this window operation yet".into());
+            }
+        }
+    }
+    if !desktop_is_unlocked(session) {
+        return Err(unavailable());
+    }
+    Ok(())
 }
 
 static PREPARATIONS: AtomicUsize = AtomicUsize::new(0);

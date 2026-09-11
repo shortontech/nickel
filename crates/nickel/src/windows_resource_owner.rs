@@ -217,6 +217,27 @@ impl Owner {
             .find(|record| record.identity.id == id && record.identity.generation == generation)
             .map(|record| &record.value)
     }
+    pub(crate) fn window_resource<'a>(
+        &'a self,
+        scope: &'a ResourceScope,
+        id: &str,
+        generation: u64,
+    ) -> Option<(&'a Window, ResourceEvidence<'a>)> {
+        let record = self
+            .windows
+            .values()
+            .find(|record| record.identity.id == id && record.identity.generation == generation)?;
+        let window = &record.value;
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: Some(&record.identity),
+            verified_application: window.application.as_deref(),
+            output: self.output_for(window.bounds),
+            authorized_surface_ancestors: &[],
+            protected: window.protected,
+        };
+        scope.covers(&evidence).then_some((window, evidence))
+    }
     pub(crate) fn windows<'a>(
         &'a self,
         scope: &'a ResourceScope,
@@ -464,6 +485,48 @@ mod tests {
                 }))
                 .count(),
             0
+        );
+    }
+    #[test]
+    fn mutation_lookup_requires_exact_generation_and_applicable_scope() {
+        let mut owned = window(1, 20);
+        owned.application = Some("verified.app".into());
+        let mut owner = Owner::default();
+        owner
+            .reconcile(vec![owned], vec![output(1, "main", 0, 1000)], |_| {})
+            .unwrap();
+        let summary = owner.windows(&ResourceScope::FullSession).next().unwrap().0;
+        let window_scope = ResourceScope::Window(ResourceId {
+            id: summary.id.clone(),
+            generation: summary.generation,
+        });
+        assert!(
+            owner
+                .window_resource(&window_scope, &summary.id, summary.generation)
+                .is_some()
+        );
+        assert!(
+            owner
+                .window_resource(
+                    &ResourceScope::Application("verified.app".into()),
+                    &summary.id,
+                    summary.generation,
+                )
+                .is_some()
+        );
+        assert!(
+            owner
+                .window_resource(
+                    &ResourceScope::Application("other.app".into()),
+                    &summary.id,
+                    summary.generation,
+                )
+                .is_none()
+        );
+        assert!(
+            owner
+                .window_resource(&window_scope, &summary.id, summary.generation + 1)
+                .is_none()
         );
     }
 }

@@ -96,6 +96,14 @@ enum OwnerRequest {
         kind: ObservationKind,
         reply: SyncSender<Result<ObservationResult, String>>,
     },
+    WindowAction {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        id: String,
+        generation: u64,
+        action: nickel_remote_control::window_actions::WindowAction,
+        reply: SyncSender<Result<nickel_remote_control::window_actions::WindowOutcome, String>>,
+    },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
         action: nickel_remote_control::ClientConnectionAction,
@@ -216,12 +224,33 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
     fn window_action(
         &self,
-        _permit: DesktopPermit,
-        _id: &str,
-        _generation: u64,
-        _action: nickel_remote_control::window_actions::WindowAction,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::window_actions::WindowAction,
     ) -> Result<nickel_remote_control::window_actions::WindowOutcome, String> {
-        Err(NOT_READY.into())
+        action.validate()?;
+        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
+            &permit,
+        )?);
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::WindowAction {
+                permit,
+                prepared,
+                id: id.to_owned(),
+                generation,
+                action,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
     }
 }
 
@@ -376,6 +405,18 @@ impl WindowsRemoteControl {
                     let result = self.observe_resources(permit, *prepared, kind);
                     let _ = reply.try_send(result);
                 }
+                OwnerRequest::WindowAction {
+                    permit,
+                    prepared,
+                    id,
+                    generation,
+                    action,
+                    reply,
+                } => {
+                    let result =
+                        self.perform_window_action(permit, *prepared, &id, generation, action);
+                    let _ = reply.try_send(result);
+                }
                 OwnerRequest::Local(request) => {
                     if Instant::now() >= request.deadline
                         || self
@@ -453,31 +494,7 @@ impl WindowsRemoteControl {
         mut prepared: crate::platform::remote_observation::Prepared,
         kind: ObservationKind,
     ) -> Result<ObservationResult, String> {
-        permit.check_live()?;
-        self.drain_resource_lifecycle();
-        let lifecycle = self
-            .resource_lifecycle
-            .as_ref()
-            .ok_or("Windows native lifecycle observation is unavailable")?;
-        if lifecycle.serial() != prepared.serial {
-            return Err("Windows resources changed; retry observation".into());
-        }
-        prepared.revalidate()?;
-        for window in &mut prepared.windows {
-            let process = prepared
-                .processes
-                .get(&window.native)
-                .ok_or("Windows process evidence is unavailable")?;
-            window.application = self
-                .applications
-                .verified_application(process)
-                .map(str::to_owned);
-        }
-        let control = self.remote_control.control();
-        self.resources
-            .reconcile(prepared.windows.clone(), prepared.outputs.clone(), |id| {
-                revoke_native_resource(&control, id)
-            })?;
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
         let scope = permit.resource_scope()?;
         let result = match kind {
             ObservationKind::Windows => {
@@ -522,6 +539,70 @@ impl WindowsRemoteControl {
         prepared.revalidate()?;
         permit.check_live()?;
         Ok(result)
+    }
+
+    fn reconcile_prepared_resources(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: &mut crate::platform::remote_observation::Prepared,
+    ) -> Result<(), String> {
+        permit.check_live()?;
+        self.drain_resource_lifecycle();
+        let lifecycle = self
+            .resource_lifecycle
+            .as_ref()
+            .ok_or("Windows native lifecycle observation is unavailable")?;
+        if lifecycle.serial() != prepared.serial {
+            return Err("Windows resources changed; retry observation".into());
+        }
+        prepared.revalidate()?;
+        for window in &mut prepared.windows {
+            let process = prepared
+                .processes
+                .get(&window.native)
+                .ok_or("Windows process evidence is unavailable")?;
+            window.application = self
+                .applications
+                .verified_application(process)
+                .map(str::to_owned);
+        }
+        let control = self.remote_control.control();
+        self.resources
+            .reconcile(prepared.windows.clone(), prepared.outputs.clone(), |id| {
+                revoke_native_resource(&control, id)
+            })?;
+        permit.check_live()
+    }
+
+    fn perform_window_action(
+        &mut self,
+        permit: DesktopPermit,
+        mut prepared: crate::platform::remote_observation::Prepared,
+        id: &str,
+        generation: u64,
+        action: nickel_remote_control::window_actions::WindowAction,
+    ) -> Result<nickel_remote_control::window_actions::WindowOutcome, String> {
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
+        let scope = permit.resource_scope()?;
+        let session = prepared.session;
+        let (window, evidence) = self
+            .resources
+            .window_resource(&scope, id, generation)
+            .ok_or("Windows resource is unavailable")?;
+        permit.with_resource(&evidence, || {
+            crate::platform::remote_observation::request_window_action(window, session, action)
+        })?;
+        permit.check_live()?;
+
+        // Confirmation is a new native inventory, never the Win32 request's
+        // return value. This may truthfully report requested-but-unconfirmed.
+        let mut observed = crate::platform::remote_observation::Prepared::prepare(&permit)?;
+        self.reconcile_prepared_resources(&permit, &mut observed)?;
+        let window = self.resources.windows(&scope).find_map(|(window, _)| {
+            (window.id == id && window.generation == generation).then_some(window)
+        });
+        permit.check_live()?;
+        Ok(nickel_remote_control::window_actions::WindowOutcome::observed(action, window))
     }
 
     /// This is the real production host path. It does not relax the separate
