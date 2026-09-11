@@ -21,7 +21,11 @@ pub struct NativeSemanticNode {
 #[serde(rename_all = "snake_case")]
 pub enum NativeSemanticScope {
     Window,
-    /// One authenticated accessibility connection of the anchor window's OS process.
+    /// Platform application projection anchored to the verified window. Linux means
+    /// its one authenticated AT-SPI connection. Windows means the current bounded set
+    /// of ordinary, unprotected windows with its exact owner-verified application
+    /// identity; those windows may span processes and every HWND/process incarnation
+    /// is verified.
     ApplicationConnection,
 }
 

@@ -2073,7 +2073,7 @@ impl McpHandler {
     }
 
     #[tool(
-        description = "Inspect bounded native accessibility role/state metadata for an authorized external application when the platform can prove the application-wide provider boundary. Linux uses one authenticated AT-SPI connection anchored by the window. Windows application-wide UI Automation is currently unavailable. Requires application or full-session scope; window/output/surface leases are denied. Results list unavailable fields and are non-atomic and partial."
+        description = "Inspect bounded native accessibility role/state metadata for an authorized external application. Linux uses one authenticated AT-SPI connection anchored by the window. Windows uses the current bounded set of ordinary, unprotected windows with the anchor's exact owner-verified application identity; every HWND/process incarnation is checked before and after traversal. Requires application or full-session scope; window/output/surface leases are denied. Results list unavailable fields and are non-atomic and partial."
     )]
     async fn inspect_native_application(
         &self,

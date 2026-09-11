@@ -233,12 +233,13 @@ enum OwnerRequest {
         prepared: Box<crate::platform::remote_observation::Prepared>,
         id: String,
         generation: u64,
+        application_wide: bool,
         reply: SyncSender<Result<crate::windows_external_accessibility::Proof, String>>,
     },
     FinishNativeAccessibility {
         permit: DesktopPermit,
         prepared: Box<crate::platform::remote_observation::Prepared>,
-        proof: crate::windows_external_accessibility::Proof,
+        proof: Box<crate::windows_external_accessibility::Proof>,
         observation: crate::windows_external_accessibility::Observation,
         reply: SyncSender<
             Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String>,
@@ -387,6 +388,7 @@ impl WindowsDesktopAuthority {
         permit: DesktopPermit,
         id: &str,
         generation: u64,
+        application_wide: bool,
     ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
         let admission = crate::windows_external_accessibility::Admission::acquire()?;
         let deadline = crate::windows_external_accessibility::deadline();
@@ -398,6 +400,7 @@ impl WindowsDesktopAuthority {
                 prepared,
                 id: id.to_owned(),
                 generation,
+                application_wide,
                 reply,
             })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
@@ -457,7 +460,7 @@ impl WindowsDesktopAuthority {
             .try_send(OwnerRequest::FinishNativeAccessibility {
                 permit,
                 prepared,
-                proof,
+                proof: Box::new(proof),
                 observation,
                 reply,
             })
@@ -520,16 +523,15 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         id: &str,
         generation: u64,
     ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
-        self.inspect_native_accessibility(permit, id, generation)
+        self.inspect_native_accessibility(permit, id, generation, false)
     }
     fn inspect_native_application(
         &self,
         permit: DesktopPermit,
-        _id: &str,
-        _generation: u64,
+        id: &str,
+        generation: u64,
     ) -> Result<nickel_remote_control::native_semantics::NativeSemanticSnapshot, String> {
-        permit.check_live()?;
-        Err("Windows application-wide UI Automation observation is unavailable".into())
+        self.inspect_native_accessibility(permit, id, generation, true)
     }
     fn list_installed_applications(
         &self,
@@ -1100,10 +1102,16 @@ impl WindowsRemoteControl {
                     mut prepared,
                     id,
                     generation,
+                    application_wide,
                     reply,
                 } => {
-                    let result =
-                        self.prepare_native_accessibility(&permit, &mut prepared, &id, generation);
+                    let result = self.prepare_native_accessibility(
+                        &permit,
+                        &mut prepared,
+                        &id,
+                        generation,
+                        application_wide,
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::FinishNativeAccessibility {
@@ -1416,6 +1424,7 @@ impl WindowsRemoteControl {
         prepared: &mut crate::platform::remote_observation::Prepared,
         id: &str,
         generation: u64,
+        application_wide: bool,
     ) -> Result<crate::windows_external_accessibility::Proof, String> {
         self.reconcile_prepared_resources(permit, prepared)?;
         let scope = permit.resource_scope()?;
@@ -1423,16 +1432,74 @@ impl WindowsRemoteControl {
             .resources
             .window_resource(&scope, id, generation)
             .ok_or("Windows resource is unavailable or protected")?;
-        permit.with_resource(&evidence, || {
-            Ok(crate::windows_external_accessibility::Proof {
-                id: id.to_owned(),
-                generation,
-                native: window.native,
-                pid: window.pid,
-                created: window.created,
-                thread: window.thread,
-                bounds: window.bounds,
-            })
+        permit.with_resource(&evidence, || Ok(()))?;
+        let application = window.application.clone();
+        if application_wide {
+            use nickel_remote_control::leases::ResourceScope;
+            let application = application
+                .as_ref()
+                .ok_or("Windows application identity is unverified")?;
+            match &scope {
+                ResourceScope::FullSession => {}
+                ResourceScope::Application(identity) if identity == application => {}
+                _ => return Err("lease does not authorize application-wide observation".into()),
+            }
+        }
+        let anchor = crate::windows_external_accessibility::RootProof {
+            id: id.to_owned(),
+            generation,
+            native: window.native,
+            pid: window.pid,
+            created: window.created,
+            thread: window.thread,
+            bounds: window.bounds,
+        };
+        let roots = if application_wide {
+            let candidates: Vec<_> = self
+                .resources
+                .windows(&scope)
+                .filter(|(summary, _)| {
+                    summary.verified_application.as_deref() == application.as_deref()
+                })
+                .collect();
+            if candidates.len() > crate::windows_external_accessibility::MAX_WINDOWS {
+                return Err("Windows application window inventory exceeds its bound".into());
+            }
+            let mut roots = Vec::with_capacity(candidates.len());
+            for (summary, evidence) in candidates {
+                permit.with_resource(&evidence, || Ok(()))?;
+                let candidate = self
+                    .resources
+                    .window(&summary.id, summary.generation)
+                    .ok_or("Windows application window changed")?;
+                roots.push(crate::windows_external_accessibility::RootProof {
+                    id: summary.id,
+                    generation: summary.generation,
+                    native: candidate.native,
+                    pid: candidate.pid,
+                    created: candidate.created,
+                    thread: candidate.thread,
+                    bounds: candidate.bounds,
+                });
+            }
+            roots
+        } else {
+            vec![anchor.clone()]
+        };
+        if !roots.contains(&anchor) {
+            return Err("Windows application anchor changed".into());
+        }
+        Ok(crate::windows_external_accessibility::Proof {
+            id: id.to_owned(),
+            generation,
+            native: window.native,
+            pid: window.pid,
+            created: window.created,
+            thread: window.thread,
+            bounds: window.bounds,
+            application,
+            roots,
+            application_wide,
         })
     }
 
@@ -1463,6 +1530,44 @@ impl WindowsRemoteControl {
             proof.bounds,
         ) {
             return Err("Windows UI Automation identity changed".into());
+        }
+        if window.application != proof.application {
+            return Err("Windows UI Automation application identity changed".into());
+        }
+        if proof.application_wide {
+            use nickel_remote_control::leases::ResourceScope;
+            let application = proof
+                .application
+                .as_ref()
+                .ok_or("Windows UI Automation application identity is unverified")?;
+            match &scope {
+                ResourceScope::FullSession => {}
+                ResourceScope::Application(identity) if identity == application => {}
+                _ => return Err("lease no longer authorizes application observation".into()),
+            }
+            let current: Vec<_> = self
+                .resources
+                .windows(&scope)
+                .filter(|(summary, _)| {
+                    summary.verified_application.as_deref() == proof.application.as_deref()
+                })
+                .map(|(summary, _)| {
+                    let window = self.resources.window(&summary.id, summary.generation)?;
+                    Some(crate::windows_external_accessibility::RootProof {
+                        id: summary.id,
+                        generation: summary.generation,
+                        native: window.native,
+                        pid: window.pid,
+                        created: window.created,
+                        thread: window.thread,
+                        bounds: window.bounds,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()
+                .ok_or("Windows application window changed")?;
+            if !crate::windows_external_accessibility::same_roots(&proof.roots, &current) {
+                return Err("Windows application window set changed".into());
+            }
         }
         self.observation_generation = self
             .observation_generation

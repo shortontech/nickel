@@ -9,23 +9,25 @@ use std::time::{Duration, Instant};
 
 const MAX_NODES: usize = 128;
 const MAX_DEPTH: usize = 16;
+pub(crate) const MAX_WINDOWS: usize = 16;
 
 fn clipped_bounds(
     rect: windows::Win32::Foundation::RECT,
-    scope: crate::windows_resource_owner::Rect,
+    owner: crate::windows_resource_owner::Rect,
+    origin: crate::windows_resource_owner::Rect,
 ) -> Option<[i32; 4]> {
-    let scope_right = i64::from(scope.x) + i64::from(scope.width);
-    let scope_bottom = i64::from(scope.y) + i64::from(scope.height);
-    let left = i64::from(rect.left).max(i64::from(scope.x));
-    let top = i64::from(rect.top).max(i64::from(scope.y));
+    let scope_right = i64::from(owner.x) + i64::from(owner.width);
+    let scope_bottom = i64::from(owner.y) + i64::from(owner.height);
+    let left = i64::from(rect.left).max(i64::from(owner.x));
+    let top = i64::from(rect.top).max(i64::from(owner.y));
     let right = i64::from(rect.right).min(scope_right);
     let bottom = i64::from(rect.bottom).min(scope_bottom);
     if right <= left || bottom <= top {
         return None;
     }
     Some([
-        i32::try_from(left - i64::from(scope.x)).ok()?,
-        i32::try_from(top - i64::from(scope.y)).ok()?,
+        i32::try_from(left - i64::from(origin.x)).ok()?,
+        i32::try_from(top - i64::from(origin.y)).ok()?,
         i32::try_from(right - left).ok()?,
         i32::try_from(bottom - top).ok()?,
     ])
@@ -40,6 +42,23 @@ pub(crate) struct Proof {
     pub created: u64,
     pub thread: u32,
     pub bounds: crate::windows_resource_owner::Rect,
+    pub application: Option<String>,
+    pub roots: Vec<RootProof>,
+    pub application_wide: bool,
+}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RootProof {
+    pub id: String,
+    pub generation: u64,
+    pub native: usize,
+    pub pid: u32,
+    pub created: u64,
+    pub thread: u32,
+    pub bounds: crate::windows_resource_owner::Rect,
+}
+
+pub(crate) fn same_roots(expected: &[RootProof], current: &[RootProof]) -> bool {
+    expected == current
 }
 pub(crate) struct Observation {
     pub snapshot: NativeSemanticSnapshot,
@@ -101,35 +120,46 @@ pub(crate) fn observe(
     let automation: IUIAutomation =
         unsafe { CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER) }
             .map_err(|_| "Windows UI Automation is unavailable".to_owned())?;
-    let root = unsafe { automation.ElementFromHandle(HWND(proof.native as *mut _)) }
-        .map_err(|_| "Windows UI Automation window is unavailable".to_owned())?;
-    if unsafe { root.CurrentProcessId() }
-        .ok()
-        .and_then(|pid| u32::try_from(pid).ok())
-        != Some(proof.pid)
-    {
-        return Err("Windows UI Automation process identity changed".into());
-    }
     let walker = unsafe { automation.ControlViewWalker() }
         .map_err(|_| "Windows UI Automation control view is unavailable".to_owned())?;
     let mut nodes = Vec::with_capacity(MAX_NODES);
     let mut truncated = false;
-    walk(
-        &root,
-        None,
-        0,
-        &walker,
-        proof,
-        permit,
-        deadline,
-        &mut nodes,
-        &mut truncated,
-    )?;
+    for root_proof in &proof.roots {
+        live(permit, deadline)?;
+        let root = unsafe { automation.ElementFromHandle(HWND(root_proof.native as *mut _)) }
+            .map_err(|_| "Windows UI Automation window is unavailable".to_owned())?;
+        if unsafe { root.CurrentProcessId() }
+            .ok()
+            .and_then(|pid| u32::try_from(pid).ok())
+            != Some(root_proof.pid)
+        {
+            return Err("Windows UI Automation process identity changed".into());
+        }
+        walk(
+            &root,
+            None,
+            0,
+            &walker,
+            root_proof,
+            proof.bounds,
+            permit,
+            deadline,
+            &mut nodes,
+            &mut truncated,
+        )?;
+        if truncated {
+            break;
+        }
+    }
     let completed = Instant::now();
     live(permit, deadline)?;
     Ok(Observation {
         snapshot: NativeSemanticSnapshot {
-            scope: NativeSemanticScope::Window,
+            scope: if proof.application_wide {
+                NativeSemanticScope::ApplicationConnection
+            } else {
+                NativeSemanticScope::Window
+            },
             window: proof.id.clone(),
             window_generation: proof.generation,
             association_generation: None,
@@ -159,7 +189,8 @@ fn walk(
     parent: Option<u32>,
     depth: usize,
     walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    proof: &Proof,
+    proof: &RootProof,
+    origin: crate::windows_resource_owner::Rect,
     permit: &nickel_remote_control::DesktopPermit,
     deadline: Instant,
     nodes: &mut Vec<NativeSemanticNode>,
@@ -186,7 +217,7 @@ fn walk(
             .ok()
             .and_then(|role| u32::try_from(role.0).ok())
             .unwrap_or_default(),
-        bounds: rect.and_then(|rect| clipped_bounds(rect, proof.bounds)),
+        bounds: rect.and_then(|rect| clipped_bounds(rect, proof.bounds, origin)),
         enabled: unsafe { element.CurrentIsEnabled() }.is_ok_and(|value| value.as_bool()),
         focused: unsafe { element.CurrentHasKeyboardFocus() }.is_ok_and(|value| value.as_bool()),
     });
@@ -198,6 +229,7 @@ fn walk(
             depth + 1,
             walker,
             proof,
+            origin,
             permit,
             deadline,
             nodes,
@@ -236,6 +268,7 @@ mod tests {
                     right: 140,
                     bottom: 200
                 },
+                scope,
                 scope
             ),
             Some([0, 10, 40, 90])
@@ -248,9 +281,69 @@ mod tests {
                     right: 0,
                     bottom: 0
                 },
+                scope,
                 scope
             ),
             None
         );
+    }
+
+    #[test]
+    fn application_geometry_uses_one_anchor_coordinate_space() {
+        let owner = crate::windows_resource_owner::Rect {
+            x: -300,
+            y: 100,
+            width: 200,
+            height: 100,
+        };
+        let anchor = crate::windows_resource_owner::Rect {
+            x: 100,
+            y: 50,
+            width: 200,
+            height: 100,
+        };
+        assert_eq!(
+            clipped_bounds(
+                RECT {
+                    left: -350,
+                    top: 90,
+                    right: -200,
+                    bottom: 150,
+                },
+                owner,
+                anchor,
+            ),
+            Some([-400, 50, 100, 50])
+        );
+    }
+
+    #[test]
+    fn application_root_set_changes_fail_exact_comparison() {
+        let root = RootProof {
+            id: "7".into(),
+            generation: 9,
+            native: 11,
+            pid: 13,
+            created: 15,
+            thread: 17,
+            bounds: crate::windows_resource_owner::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+            },
+        };
+        assert!(same_roots(
+            std::slice::from_ref(&root),
+            std::slice::from_ref(&root)
+        ));
+        let mut changed = root.clone();
+        changed.created += 1;
+        assert!(!same_roots(
+            std::slice::from_ref(&root),
+            std::slice::from_ref(&changed)
+        ));
+        assert!(!same_roots(std::slice::from_ref(&root), &[]));
+        assert!(!same_roots(&[], std::slice::from_ref(&root)));
     }
 }
