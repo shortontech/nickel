@@ -122,10 +122,9 @@ The resulting tests prove:
 Native Wayland acceptance passed September 11, 2026, on `d2ca964` plus this change.
 All preceding ordinary/shell cases and the combined diagnostic/capture/input stress,
 privacy and emergency checks also passed. Five focused harness tests and strict
-harness Clippy passed. Evidence: `/tmp/nickel-native-movement-build.log`,
-`/tmp/nickel-native-movement-focused.log` and
-`/tmp/nickel-native-movement-wayland.log`. The added workspace/output were removed,
-all example processes reaped, and the owned compositor/runtime cleaned afterward.
+harness Clippy passed. The commands above reproduce the acceptance path. The added
+workspace/output were removed, all example processes reaped, and the owned
+compositor/runtime cleaned afterward.
 
 The extra output is virtual: it exercises live Wayland clients and production
 compositor resource/geometry/workspace authority, but has no independent physical
