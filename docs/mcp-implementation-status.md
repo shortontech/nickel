@@ -139,7 +139,13 @@ the exact catalog generation, application ID, verified application identity,
 desktop protection and lease scope. The bounded catalog worker retains the actual
 launchable application records and descriptor digests, so the owner does not rescan
 the Start Menu and a changed shortcut advances the catalog generation. The owner
-then pins the exact shortcut and every ancestor through its final permit check.
+first returns immutable catalog metadata without filesystem access. A dedicated
+single-flight worker then pins and hashes the exact shortcut and every ancestor
+under the original two-second request deadline. A blocked read retains admission,
+later preparation fails closed, and timeout cancellation prevents the result from
+entering the second owner stage. That stage revalidates the current catalog
+generation, descriptor digest, identity, policy, desktop state, request, scope and
+permit before reaching the commit boundary.
 The pinned launch is retained by a two-second, one-shot commit gate through the
 final `DesktopPermit` check. Its future callback contract permits only resuming
 an already-created suspended broker and local bookkeeping; it excludes shell

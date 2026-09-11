@@ -52,6 +52,43 @@ pub(crate) struct LaunchCapture {
     _ancestors: Vec<File>,
     invoked_at: Option<u64>,
 }
+
+/// Immutable owner-attested catalog data transferred to a preparation worker.
+/// Constructing this value performs no filesystem or native process operation.
+pub(crate) struct LaunchPlan {
+    catalog_generation: u64,
+    application_id: String,
+    identity: String,
+    digest: [u8; 32],
+    application: Application,
+}
+
+impl LaunchPlan {
+    /// Pin and hash the exact shortcut off the presentation owner.
+    pub(crate) fn prepare(self) -> Result<(Self, LaunchCapture), String> {
+        let capture = LaunchCapture::prepare(&self.application)
+            .ok_or("installed application launch target could not be pinned")?;
+        if capture.application_id() != self.application_id
+            || capture.application_identity() != self.identity
+            || capture.descriptor.digest != self.digest
+        {
+            return Err("installed application changed; enumerate it again".into());
+        }
+        Ok((self, capture))
+    }
+
+    pub(crate) fn catalog_generation(&self) -> u64 {
+        self.catalog_generation
+    }
+
+    pub(crate) fn application_id(&self) -> &str {
+        &self.application_id
+    }
+
+    pub(crate) fn identity(&self) -> &str {
+        &self.identity
+    }
+}
 impl LaunchCapture {
     pub(crate) fn prepare(application: &Application) -> Option<Self> {
         let (descriptor, shortcut) = read_descriptor(
@@ -440,15 +477,12 @@ impl Default for OwnerRegistry {
 }
 
 impl OwnerRegistry {
-    /// Re-resolve an exact generation-bearing catalog entry and pin its shortcut.
-    /// The returned capture is deliberately not executable by this registry: the
-    /// remote owner must transfer it to a launch broker with a bounded authority
-    /// commit before any ShellExecuteEx call can begin.
-    pub(crate) fn prepare_launch(
+    /// Snapshot an exact generation-bearing entry without filesystem access.
+    pub(crate) fn plan_launch(
         &self,
         catalog_generation: u64,
         application_id: &str,
-    ) -> Result<LaunchCapture, String> {
+    ) -> Result<LaunchPlan, String> {
         if catalog_generation == 0 || catalog_generation != self.catalog_generation {
             return Err("application catalog changed; enumerate it again".into());
         }
@@ -461,20 +495,38 @@ impl OwnerRegistry {
             .verified_application
             .as_deref()
             .ok_or("installed application has no launch-bound identity")?;
+        let descriptor = self
+            .catalog_descriptors
+            .iter()
+            .find(|descriptor| descriptor.id == application_id)
+            .ok_or("installed application changed; enumerate it again")?;
         let application = self
             .launch_applications
             .iter()
             .find(|application| application.id() == application_id)
             .cloned()
             .ok_or("installed application changed; enumerate it again")?;
-        let capture = LaunchCapture::prepare(&application)
-            .ok_or("installed application launch target could not be pinned")?;
-        if capture.application_id() != application_id
-            || capture.application_identity() != expected_identity
+        if descriptor.identity != expected_identity
+            || descriptor.policy != RuntimePolicy::LaunchBound
         {
             return Err("installed application changed; enumerate it again".into());
         }
-        Ok(capture)
+        Ok(LaunchPlan {
+            catalog_generation,
+            application_id: application_id.into(),
+            identity: expected_identity.into(),
+            digest: descriptor.digest,
+            application,
+        })
+    }
+
+    /// Revalidate every owner-controlled catalog field immediately before commit.
+    pub(crate) fn revalidate_launch(&self, plan: &LaunchPlan) -> Result<(), String> {
+        let current = self.plan_launch(plan.catalog_generation, &plan.application_id)?;
+        if current.identity != plan.identity || current.digest != plan.digest {
+            return Err("installed application changed; enumerate it again".into());
+        }
+        Ok(())
     }
 }
 impl OwnerRegistry {
@@ -648,6 +700,55 @@ impl Drop for OwnerRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn planned_registry() -> (OwnerRegistry, String, String) {
+        let path = r"C:\missing\PlanOnly.lnk".to_owned();
+        let application_id = format!("windows-shortcut:{}", path.to_ascii_lowercase());
+        let identity = "windows:catalog-launch:test-plan".to_owned();
+        let application = Application::new(
+            application_id.clone(),
+            "Plan only".into(),
+            None,
+            None,
+            Some(vec![path]),
+        );
+        let mut registry = OwnerRegistry::default();
+        registry.catalog_generation = 7;
+        registry.applications = vec![nickel_remote_control::diagnostics::InstalledApplication {
+            id: application_id.clone(),
+            name: "Plan only".into(),
+            verified_application: Some(identity.clone()),
+        }];
+        registry.catalog_descriptors = vec![Descriptor {
+            id: application_id.clone(),
+            identity: identity.clone(),
+            digest: [9; 32],
+            policy: RuntimePolicy::LaunchBound,
+        }];
+        registry.launch_applications = vec![application];
+        (registry, application_id, identity)
+    }
+
+    #[test]
+    fn launch_plan_is_catalog_only_and_revalidates_exact_digest() {
+        let (mut registry, application_id, identity) = planned_registry();
+        // The shortcut deliberately does not exist: owner planning must not touch it.
+        let plan = registry.plan_launch(7, &application_id).unwrap();
+        assert_eq!(plan.catalog_generation(), 7);
+        assert_eq!(plan.application_id(), application_id);
+        assert_eq!(plan.identity(), identity);
+        registry.revalidate_launch(&plan).unwrap();
+
+        registry.catalog_descriptors[0].digest[0] ^= 1;
+        assert!(registry.revalidate_launch(&plan).is_err());
+    }
+
+    #[test]
+    fn launch_plan_rejects_stale_catalog_generation() {
+        let (registry, application_id, _) = planned_registry();
+        assert!(registry.plan_launch(6, &application_id).is_err());
+    }
+
     #[test]
     fn catalog_read_does_not_hold_launch_ancestry_or_write_locks() {
         use windows::Win32::Storage::FileSystem::{

@@ -20,6 +20,27 @@ static EMERGENCY: std::sync::OnceLock<nickel_remote_control::EmergencyStopHandle
     std::sync::OnceLock::new();
 static CHORD: crate::windows_emergency_chord::WindowsEmergencyChord =
     crate::windows_emergency_chord::WindowsEmergencyChord::new();
+static LAUNCH_PREPARATION_BUSY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+struct LaunchPreparationAdmission;
+
+impl LaunchPreparationAdmission {
+    fn acquire() -> Result<Self, String> {
+        use std::sync::atomic::Ordering;
+
+        LAUNCH_PREPARATION_BUSY
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| "Windows application launch preparation is busy".to_owned())?;
+        Ok(Self)
+    }
+}
+
+impl Drop for LaunchPreparationAdmission {
+    fn drop(&mut self) {
+        LAUNCH_PREPARATION_BUSY.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 pub(crate) fn observe_physical_key(event: nickel_input::windows::NativeKeyboardEvent) {
     use std::sync::atomic::Ordering;
@@ -254,6 +275,17 @@ enum OwnerRequest {
     LaunchApplication {
         permit: DesktopPermit,
         request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+        deadline: Instant,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
+        reply: SyncSender<Result<crate::windows_application_registry::native::LaunchPlan, String>>,
+    },
+    CommitApplicationLaunch {
+        permit: DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+        plan: Box<crate::windows_application_registry::native::LaunchPlan>,
+        staged: Box<crate::windows_launch_broker::StagedLaunch>,
+        deadline: Instant,
+        cancelled: Arc<std::sync::atomic::AtomicBool>,
         reply: SyncSender<
             Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String>,
         >,
@@ -360,17 +392,86 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         permit: DesktopPermit,
         request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
     ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct CancelOnDrop(Arc<AtomicBool>);
+        impl Drop for CancelOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
         let completion = permit.clone();
-        let (reply, receiver) = mpsc::sync_channel(1);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let _cancel_on_drop = CancelOnDrop(cancelled.clone());
+        let (plan_reply, plan_receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::LaunchApplication {
+                permit: permit.clone(),
+                request: request.clone(),
+                deadline,
+                cancelled: cancelled.clone(),
+                reply: plan_reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows application launch timed out")?;
+        let plan = plan_receiver
+            .recv_timeout(remaining)
+            .map_err(|_| "Windows desktop owner timed out".to_owned())??;
+        completion.check_live()?;
+        if Instant::now() >= deadline {
+            return Err("Windows application launch timed out".into());
+        }
+        // Shortcut reads, hashing and pinning occur on a single-flight worker,
+        // never on the winit presentation owner or its request-serving caller.
+        // A blocked filesystem operation retains admission, so later requests
+        // fail closed instead of creating an unbounded set of stuck threads.
+        let admission = LaunchPreparationAdmission::acquire()?;
+        let (prepare_reply, prepare_receiver) = mpsc::sync_channel(1);
+        std::thread::Builder::new()
+            .name("nickel-windows-launch-prepare".to_owned())
+            .spawn(move || {
+                let _admission = admission;
+                let _ = prepare_reply.try_send(plan.prepare());
+            })
+            .map_err(|_| "Windows application launch worker is unavailable".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows application launch timed out")?;
+        let (plan, capture) =
+            prepare_receiver
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    mpsc::RecvTimeoutError::Timeout => {
+                        "Windows application launch timed out".to_owned()
+                    }
+                    mpsc::RecvTimeoutError::Disconnected => {
+                        "Windows application launch worker stopped".to_owned()
+                    }
+                })??;
+        completion.check_live()?;
+        if Instant::now() >= deadline {
+            return Err("Windows application launch timed out".into());
+        }
+        let staged = crate::windows_launch_broker::StagedLaunch::new(capture, Instant::now());
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::CommitApplicationLaunch {
                 permit,
                 request,
+                plan: Box::new(plan),
+                staged: Box::new(staged),
+                deadline,
+                cancelled: cancelled.clone(),
                 reply,
             })
             .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows application launch timed out")?;
         let result = receiver
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(remaining)
             .map_err(|_| "Windows desktop owner timed out".to_owned())?;
         completion.check_live()?;
         result
@@ -886,9 +987,31 @@ impl WindowsRemoteControl {
                 OwnerRequest::LaunchApplication {
                     permit,
                     request,
+                    deadline,
+                    cancelled,
                     reply,
                 } => {
-                    let result = self.prepare_application_launch(permit, request);
+                    let result = if Instant::now() >= deadline
+                        || cancelled.load(std::sync::atomic::Ordering::Acquire)
+                    {
+                        Err("Windows application launch timed out".into())
+                    } else {
+                        self.plan_application_launch(&permit, &request)
+                    };
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::CommitApplicationLaunch {
+                    permit,
+                    request,
+                    plan,
+                    staged,
+                    deadline,
+                    cancelled,
+                    reply,
+                } => {
+                    let result = self.commit_application_launch(
+                        permit, request, *plan, *staged, deadline, &cancelled,
+                    );
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -1782,11 +1905,11 @@ impl WindowsRemoteControl {
         permit.with_resource(&evidence, || Ok(inventory))
     }
 
-    fn prepare_application_launch(
-        &mut self,
-        permit: DesktopPermit,
-        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
-    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+    fn plan_application_launch(
+        &self,
+        permit: &DesktopPermit,
+        request: &nickel_remote_control::diagnostics::LaunchApplicationRequest,
+    ) -> Result<crate::windows_application_registry::native::LaunchPlan, String> {
         use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
 
         if !self.desktop_unlocked {
@@ -1795,11 +1918,65 @@ impl WindowsRemoteControl {
         if request.application_id.is_empty() || request.application_id.len() > 512 {
             return Err("invalid application launch target".into());
         }
-        let capture = self
+        let plan = self
             .applications
-            .prepare_launch(request.catalog_generation, &request.application_id)?;
-        let staged = crate::windows_launch_broker::StagedLaunch::new(capture, Instant::now());
+            .plan_launch(request.catalog_generation, &request.application_id)?;
+        let scope = permit.resource_scope()?;
+        match &scope {
+            ResourceScope::FullSession => {}
+            ResourceScope::Application(identity) if identity == plan.identity() => {}
+            ResourceScope::Application(_) => {
+                return Err("installed launch target is outside the application lease".into());
+            }
+            ResourceScope::Output(_) => {
+                return Err(
+                    "Windows output-scoped launch awaits verified placement support".into(),
+                );
+            }
+            ResourceScope::Surface(_) | ResourceScope::Window(_) => {
+                return Err("this Windows lease cannot launch applications".into());
+            }
+        }
+        let evidence = ResourceEvidence {
+            surface: None,
+            window: None,
+            verified_application: Some(plan.identity()),
+            output: None,
+            authorized_surface_ancestors: &[],
+            protected: false,
+        };
+        permit.with_resource(&evidence, || Ok(()))?;
+        Ok(plan)
+    }
+
+    fn commit_application_launch(
+        &mut self,
+        permit: DesktopPermit,
+        request: nickel_remote_control::diagnostics::LaunchApplicationRequest,
+        plan: crate::windows_application_registry::native::LaunchPlan,
+        staged: crate::windows_launch_broker::StagedLaunch,
+        deadline: Instant,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+        use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
+        use std::sync::atomic::Ordering;
+
+        if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
+            return Err("Windows application launch timed out".into());
+        }
+        if !self.desktop_unlocked {
+            return Err("Windows input desktop is protected".into());
+        }
+        if request.catalog_generation != plan.catalog_generation()
+            || request.application_id != plan.application_id()
+        {
+            return Err("Windows application launch plan does not match its request".into());
+        }
+        self.applications.revalidate_launch(&plan)?;
         let staged_identity = staged.application_identity().to_owned();
+        if staged_identity != plan.identity() {
+            return Err("installed application changed; enumerate it again".into());
+        }
         let scope = permit.resource_scope()?;
         let expected = match &scope {
             ResourceScope::FullSession => None,
@@ -1825,6 +2002,9 @@ impl WindowsRemoteControl {
             protected: false,
         };
         let _capture = staged.commit(&permit, &evidence, Instant::now(), || {
+            if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
+                return Err("Windows application launch timed out".into());
+            }
             // Broker construction and inherited-handle transfer are not yet
             // available. Refuse before a process can be resumed.
             Err("Windows launch broker is unavailable".into())
