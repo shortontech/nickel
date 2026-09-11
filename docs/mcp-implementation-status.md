@@ -1815,3 +1815,19 @@ trace audit; revocation prevents later samples from entering the trace. This is 
 presentation dispatch timing, not GPU completion or pixel capture. Windows
 cross-compilation and compatibility-layer tests do not establish native frame timing
 or presentation responsiveness, which remain open for native acceptance.
+
+Windows now implements the typed appearance read and transaction methods against
+the production `ShellSettings` file and `LiveShell` appearance owner. Preparation
+uses the bounded settings parser, an exclusive cooperative transaction lock, an
+opaque native file revision and a staged replacement before entering the winit
+owner. The owner issues the configuration generation, rejects stale prior values
+and revisions, checks full-debug authority and protected shell focus, excludes
+active local or remote input, and rechecks the physical-input epoch, deadline and
+permit immediately before atomic replacement. A committed replacement is always
+reconciled into `LiveShell`, including when revocation races after that boundary;
+the result does not claim OS-wide theme publication or presented pixels. The wire
+schema exposes only theme, hue/intensity, transparency and animation preferences,
+so remote-control, idle-lock, launch-handler and other settings remain preserved
+and unreachable. Pure transaction tests and Windows cross-compilation cover the
+slice; native Windows persistence, focus arbitration and visual reconciliation
+remain open.

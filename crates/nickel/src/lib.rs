@@ -12,6 +12,8 @@ mod windows_remote_control;
 #[cfg(target_os = "windows")]
 mod windows_remote_input;
 #[cfg(any(test, target_os = "windows"))]
+mod windows_remote_settings;
+#[cfg(any(test, target_os = "windows"))]
 mod windows_resource_owner;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_shell_diagnostics;
@@ -2309,7 +2311,7 @@ pub fn run() -> Result<(), String> {
     loop {
         #[cfg(target_os = "windows")]
         if let Some(owner) = &mut remote_control {
-            owner.poll(&mut shell, &state);
+            owner.poll(&mut shell, &mut state);
             owner.reconcile_indicators(&mut shell, state.semantic_theme());
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);

@@ -559,6 +559,18 @@ enum OwnerRequest {
             Result<nickel_remote_control::desktop_events::DesktopEventObservation, String>,
         >,
     },
+    ReadAppearance {
+        permit: DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedAppearanceRead,
+        reply: SyncSender<Result<nickel_remote_control::appearance::Snapshot, String>>,
+    },
+    AppearanceTransaction {
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::appearance::Transaction,
+        prepared: crate::windows_remote_settings::PreparedAppearanceChange,
+        deadline: Instant,
+        reply: SyncSender<Result<nickel_remote_control::appearance::Snapshot, String>>,
+    },
     Applications {
         permit: DesktopPermit,
         prepared: Option<Box<crate::platform::remote_observation::Prepared>>,
@@ -1064,6 +1076,59 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         completion.check_live()?;
         result
     }
+    fn read_appearance(
+        &self,
+        permit: DesktopPermit,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        let prepared = crate::windows_remote_settings::PreparedAppearanceRead::prepare()?;
+        permit.with_debug(false, || Ok(()))?;
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::ReadAppearance {
+                permit,
+                prepared,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows appearance observation timed out".to_owned())?;
+        completion.check_live()?;
+        result
+    }
+    fn appearance_transaction(
+        &self,
+        permit: DesktopPermit,
+        transaction: nickel_remote_control::appearance::Transaction,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        permit.with_debug(false, || Ok(()))?;
+        let prepared =
+            crate::windows_remote_settings::PreparedAppearanceChange::prepare(&transaction)?;
+        permit.with_debug(false, || Ok(()))?;
+        if Instant::now() >= deadline {
+            return Err("Windows appearance preparation timed out".into());
+        }
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::AppearanceTransaction {
+                permit,
+                transaction,
+                prepared,
+                deadline,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or("Windows appearance transaction expired before dispatch")?;
+        receiver.recv_timeout(remaining).map_err(|_| {
+            "Windows appearance result uncertain; read current appearance before retrying"
+                .to_owned()
+        })?
+    }
     fn inspect_native_window(
         &self,
         permit: DesktopPermit,
@@ -1528,6 +1593,7 @@ pub(crate) struct WindowsRemoteControl {
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
     desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
+    appearance: crate::windows_remote_settings::AppearanceState,
     shell_focus: Option<ShellFocusState>,
     external_accessibility:
         Option<nickel_remote_control::diagnostics::ExternalAccessibilityDiagnostic>,
@@ -1674,6 +1740,7 @@ impl WindowsRemoteControl {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            appearance: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),
@@ -1715,7 +1782,11 @@ impl WindowsRemoteControl {
             STOP_REQUESTED.store(true, Ordering::Release);
         }
     }
-    pub(crate) fn poll(&mut self, shell: &mut WinitShell, state: &crate::live_shell::LiveShell) {
+    pub(crate) fn poll(
+        &mut self,
+        shell: &mut WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+    ) {
         self.collect_frame_dispatches(shell, state);
         self.poll_with_shell(Some((shell, state)));
     }
@@ -1859,7 +1930,7 @@ impl WindowsRemoteControl {
 
     fn poll_with_shell(
         &mut self,
-        mut shell: Option<(&mut WinitShell, &crate::live_shell::LiveShell)>,
+        mut shell: Option<(&mut WinitShell, &mut crate::live_shell::LiveShell)>,
     ) {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
@@ -2039,6 +2110,39 @@ impl WindowsRemoteControl {
                     let result = self.read_desktop_events(permit, after);
                     let _ = reply.try_send(result);
                 }
+                OwnerRequest::ReadAppearance {
+                    permit,
+                    prepared,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(_, state)| self.read_appearance(&permit, prepared, state),
+                    );
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::AppearanceTransaction {
+                    permit,
+                    transaction,
+                    prepared,
+                    deadline,
+                    reply,
+                } => {
+                    let result = shell.as_mut().map_or_else(
+                        || Err("Windows presentation owner is unavailable".into()),
+                        |(shell, state)| {
+                            self.change_appearance(
+                                shell,
+                                state,
+                                &permit,
+                                transaction,
+                                prepared,
+                                deadline,
+                            )
+                        },
+                    );
+                    let _ = reply.try_send(result);
+                }
                 OwnerRequest::Applications {
                     permit,
                     prepared,
@@ -2136,6 +2240,89 @@ impl WindowsRemoteControl {
         }
         self.sync_input_ownership_event();
     }
+
+    fn read_appearance(
+        &mut self,
+        permit: &DesktopPermit,
+        prepared: crate::windows_remote_settings::PreparedAppearanceRead,
+        state: &crate::live_shell::LiveShell,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        permit.with_debug(false, || Ok(()))?;
+        prepared.ensure_current()?;
+        let protected =
+            !self.desktop_unlocked || state.surface_visible(crate::winit_shell::SurfaceRole::Lock);
+        permit.with_debug(protected, || {
+            self.appearance.observe(
+                &prepared,
+                self.start_time
+                    .elapsed()
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            )
+        })
+    }
+
+    fn change_appearance(
+        &mut self,
+        shell: &WinitShell,
+        state: &mut crate::live_shell::LiveShell,
+        permit: &DesktopPermit,
+        transaction: nickel_remote_control::appearance::Transaction,
+        prepared: crate::windows_remote_settings::PreparedAppearanceChange,
+        request_deadline: Instant,
+    ) -> Result<nickel_remote_control::appearance::Snapshot, String> {
+        let protected = !self.desktop_unlocked
+            || state.surface_visible(crate::winit_shell::SurfaceRole::Lock)
+            || shell
+                .remote_shell_surface_observations(state)
+                .iter()
+                .any(|surface| surface.keyboard_focused && surface.protected);
+        let expected_input_epoch = local_input_epoch();
+        let input_busy = self.keyboard_hold.is_some()
+            || self.pointer_hold.is_some()
+            || state.pointer_interaction_active()
+            || !crate::windows_remote_input::physical_input_idle();
+        let mut committed = None;
+        let authorization = permit.with_debug_input_deadline(protected, |deadline| {
+            if Instant::now() >= request_deadline {
+                return Err("appearance transaction expired before commit".into());
+            }
+            if input_busy {
+                return Err("shared input is busy".into());
+            }
+            self.appearance.validate(&prepared, &transaction)?;
+            committed = Some(
+                prepared.commit(deadline.deadline().min(request_deadline), || {
+                    if local_input_epoch() != expected_input_epoch {
+                        return Err("local input interrupted the settings transaction".into());
+                    }
+                    permit.check_commit_boundary(deadline)
+                })?,
+            );
+            self.appearance.invalidate();
+            Ok(())
+        });
+        let (requested, revision) = match committed {
+            Some(value) => value,
+            None => {
+                authorization?;
+                return Err("appearance unavailable; inspect current state before retrying".into());
+            }
+        };
+        // A successful replacement must be reflected by the production model,
+        // even if revocation raced immediately after the commit boundary.
+        state.apply_shell_settings(requested.clone());
+        authorization?;
+        self.appearance.observe_committed(
+            revision?,
+            &requested,
+            self.start_time
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        )
+    }
+
     fn sync_input_ownership_event(&mut self) {
         self.desktop_events.record_remote_input_ownership(
             self.keyboard_hold.is_some(),
@@ -5094,6 +5281,7 @@ mod tests {
             keyboard_hold: None,
             pointer_hold: None,
             desktop_events: Default::default(),
+            appearance: Default::default(),
             shell_focus: None,
             external_accessibility: None,
             native_action_observations: Default::default(),
