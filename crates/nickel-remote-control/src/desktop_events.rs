@@ -15,6 +15,7 @@ pub enum ProductionEffectKind {
     WorkspaceAction,
     DiagnosticAction,
     SemanticAction,
+    SettingsTransaction,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
@@ -324,11 +325,19 @@ mod tests {
             },
             21,
         );
+        events.record(
+            DesktopEventKind::ProductionEffectCompleted {
+                effect: ProductionEffectKind::SettingsTransaction,
+                outcome: ProductionEffectOutcome::Confirmed,
+            },
+            22,
+        );
         let json = serde_json::to_string(&events.snapshot()).unwrap();
         assert!(json.contains("window_action"));
         assert!(json.contains("workspace_action"));
         assert!(json.contains("diagnostic_action"));
         assert!(json.contains("semantic_action"));
+        assert!(json.contains("settings_transaction"));
     }
 
     #[test]

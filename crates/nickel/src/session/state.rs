@@ -2795,6 +2795,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_appearance(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadLauncherFavorites {
@@ -2812,6 +2813,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_launcher_favorites(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadWallpaper {
@@ -2829,6 +2831,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_wallpaper(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadFileIcons {
@@ -2846,6 +2849,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_file_icons(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadCodexPreference {
@@ -2863,6 +2867,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_codex_preference(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadIdlePreferences {
@@ -2880,6 +2885,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_idle_preferences(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadTerminalPresentation {
@@ -2898,6 +2904,7 @@ impl NickelSession {
             } => {
                 let result =
                     self.remote_change_terminal_presentation(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ReadKeyboardPreference {
@@ -2915,6 +2922,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_change_keyboard_preference(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::ShellBehavior {
@@ -2924,6 +2932,7 @@ impl NickelSession {
                 reply,
             } => {
                 let result = self.remote_shell_behavior_transaction(&permit, transaction, prepared);
+                self.record_remote_settings_transaction(&result);
                 let _ = reply.send(result);
             }
             RemoteDesktopRequest::NativeKeyboardState {
@@ -7274,6 +7283,15 @@ impl NickelSession {
             },
             self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
         );
+    }
+
+    fn record_remote_settings_transaction<T>(&mut self, result: &Result<T, String>) {
+        if result.is_ok() {
+            self.record_remote_production_effect_outcome(
+                nickel_remote_control::desktop_events::ProductionEffectKind::SettingsTransaction,
+                nickel_remote_control::desktop_events::ProductionEffectOutcome::Confirmed,
+            );
+        }
     }
 
     fn record_remote_window_state_events(&mut self) {
