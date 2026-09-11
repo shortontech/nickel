@@ -1452,3 +1452,8 @@ production frame hit test and exposes no pointer coordinates, window title, or
 client payload. Focused owner coverage places the pointer on both a live button
 node and a hosted titlebar. With semantic and frame hits represented, the broad
 `internal_hit_testing` unavailable marker has been removed.
+
+The bounded desktop-event stream now records production workspace create,
+remove and selection outcomes as the resulting active workspace and workspace
+count. Redundant notifications coalesce, and the event carries no window
+membership, title, client identity or input payload.

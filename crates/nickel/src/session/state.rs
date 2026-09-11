@@ -6873,6 +6873,11 @@ impl NickelSession {
     }
 
     fn notify_workspace_state(&mut self) {
+        self.remote_desktop_events.record_workspace_state(
+            self.workspaces.active().0,
+            self.workspaces.ordered().len(),
+            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        );
         let Ok(event) = encode(&ServerEnvelope {
             request_id: 0,
             message: ServerMessage::Event(SessionEvent::Workspaces(self.protocol_workspaces())),
@@ -10586,6 +10591,30 @@ mod protocol_tests {
         assert!(
             old.into_iter()
                 .all(|id| !session.internal_ui.is_visible(id))
+        );
+    }
+
+    #[test]
+    fn workspace_notifications_record_coarse_owner_state_once() {
+        use nickel_remote_control::desktop_events::DesktopEventKind;
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let initial_count = session.workspaces.ordered().len();
+
+        session.notify_workspace_state();
+        session.notify_workspace_state();
+        assert_eq!(session.remote_desktop_events.snapshot().events.len(), 1);
+
+        session.workspaces.create().unwrap();
+        session.notify_workspace_state();
+        let snapshot = session.remote_desktop_events.snapshot();
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(
+            snapshot.events.last().unwrap().event,
+            DesktopEventKind::WorkspaceStateChanged {
+                active_workspace: 1,
+                workspaces: initial_count + 1,
+            }
         );
     }
 

@@ -44,6 +44,12 @@ pub enum DesktopEventKind {
         effect: ProductionEffectKind,
         outcome: ProductionEffectOutcome,
     },
+    /// Production workspace owner state after create, remove, or selection.
+    /// Window membership is available only through the protected snapshot.
+    WorkspaceStateChanged {
+        active_workspace: u64,
+        workspaces: usize,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -100,6 +106,30 @@ impl DesktopEvents {
             observed_at_us,
             event,
         });
+    }
+
+    pub fn record_workspace_state(
+        &mut self,
+        active_workspace: u64,
+        workspaces: usize,
+        observed_at_us: u64,
+    ) {
+        if self.events.back().is_some_and(|event| {
+            event.event
+                == (DesktopEventKind::WorkspaceStateChanged {
+                    active_workspace,
+                    workspaces,
+                })
+        }) {
+            return;
+        }
+        self.record(
+            DesktopEventKind::WorkspaceStateChanged {
+                active_workspace,
+                workspaces,
+            },
+            observed_at_us,
+        );
     }
     pub fn since(&self, after: u64) -> Result<DesktopEventBatch, String> {
         if after > self.generation {
@@ -200,5 +230,24 @@ mod tests {
         for excluded in ["command", "target", "client", "path", "application_id"] {
             assert!(!json.contains(excluded));
         }
+    }
+
+    #[test]
+    fn workspace_state_events_coalesce_redundant_notifications() {
+        let mut events = DesktopEvents::default();
+        events.record_workspace_state(1, 2, 10);
+        events.record_workspace_state(1, 2, 11);
+        events.record_workspace_state(2, 2, 12);
+        let snapshot = events.snapshot();
+        assert_eq!(snapshot.generation, 2);
+        assert_eq!(snapshot.events.len(), 2);
+        assert_eq!(snapshot.events[0].observed_at_us, 10);
+        assert_eq!(
+            snapshot.events[1].event,
+            DesktopEventKind::WorkspaceStateChanged {
+                active_workspace: 2,
+                workspaces: 2,
+            }
+        );
     }
 }
