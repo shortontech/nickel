@@ -2150,6 +2150,11 @@ fn shell_event_ends_process(event: &ShellEvent) -> bool {
 
 /// Runs the Nickel desktop shell using process command-line arguments.
 pub fn run() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--nickel-launch-broker"))
+    {
+        return windows_launch_broker::run_broker_child();
+    }
     #[cfg(target_os = "linux")]
     platform::prepare_audio_environment();
     let command_line = CommandLineOptions::parse(std::env::args_os().skip(1))?;

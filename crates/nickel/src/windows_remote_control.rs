@@ -286,9 +286,7 @@ enum OwnerRequest {
         staged: Box<crate::windows_launch_broker::StagedLaunch>,
         deadline: Instant,
         cancelled: Arc<std::sync::atomic::AtomicBool>,
-        reply: SyncSender<
-            Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String>,
-        >,
+        reply: SyncSender<Result<crate::windows_launch_broker::CommittedLaunch, String>>,
     },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
@@ -433,13 +431,20 @@ impl DesktopAuthority for WindowsDesktopAuthority {
             .name("nickel-windows-launch-prepare".to_owned())
             .spawn(move || {
                 let _admission = admission;
-                let _ = prepare_reply.try_send(plan.prepare());
+                let prepared = plan.prepare().and_then(|(plan, capture)| {
+                    let staged =
+                        crate::windows_launch_broker::StagedLaunch::new(capture, deadline)?;
+                    Ok((plan, staged))
+                });
+                // If the caller's bounded receive has expired, dropping the
+                // staged result terminates its still-suspended broker.
+                let _ = prepare_reply.try_send(prepared);
             })
             .map_err(|_| "Windows application launch worker is unavailable".to_owned())?;
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("Windows application launch timed out")?;
-        let (plan, capture) =
+        let (plan, staged) =
             prepare_receiver
                 .recv_timeout(remaining)
                 .map_err(|error| match error {
@@ -454,7 +459,8 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         if Instant::now() >= deadline {
             return Err("Windows application launch timed out".into());
         }
-        let staged = crate::windows_launch_broker::StagedLaunch::new(capture, Instant::now());
+        let outcome_generation = request.catalog_generation;
+        let outcome_application = request.application_id.clone();
         let (reply, receiver) = mpsc::sync_channel(1);
         self.sender
             .try_send(OwnerRequest::CommitApplicationLaunch {
@@ -470,11 +476,23 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         let remaining = deadline
             .checked_duration_since(Instant::now())
             .ok_or("Windows application launch timed out")?;
-        let result = receiver
+        let committed = receiver
             .recv_timeout(remaining)
-            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
-        completion.check_live()?;
-        result
+            .map_err(|_| "Windows desktop owner timed out".to_owned())??;
+        // ResumeThread was the irreversible, freshly authorized commit. A
+        // revocation after that point must not report failure and invite retry.
+        let (process_spawn_confirmed, process_id) = committed.finish(deadline);
+        Ok(
+            nickel_remote_control::diagnostics::LaunchApplicationOutcome {
+                catalog_generation: outcome_generation,
+                application_id: outcome_application,
+                requested: true,
+                process_spawn_confirmed,
+                process_id,
+                output_requested: None,
+                output_confirmed: false,
+            },
+        )
     }
     fn keyboard_action(
         &self,
@@ -1957,7 +1975,7 @@ impl WindowsRemoteControl {
         staged: crate::windows_launch_broker::StagedLaunch,
         deadline: Instant,
         cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<nickel_remote_control::diagnostics::LaunchApplicationOutcome, String> {
+    ) -> Result<crate::windows_launch_broker::CommittedLaunch, String> {
         use nickel_remote_control::leases::{ResourceEvidence, ResourceScope};
         use std::sync::atomic::Ordering;
 
@@ -2001,15 +2019,10 @@ impl WindowsRemoteControl {
             authorized_surface_ancestors: &[],
             protected: false,
         };
-        let _capture = staged.commit(&permit, &evidence, Instant::now(), || {
-            if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
-                return Err("Windows application launch timed out".into());
-            }
-            // Broker construction and inherited-handle transfer are not yet
-            // available. Refuse before a process can be resumed.
-            Err("Windows launch broker is unavailable".into())
-        })?;
-        Err("Windows launch broker is unavailable".into())
+        if Instant::now() >= deadline || cancelled.load(Ordering::Acquire) {
+            return Err("Windows application launch timed out".into());
+        }
+        staged.commit(&permit, &evidence, Instant::now())
     }
 
     fn perform_window_action(

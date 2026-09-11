@@ -1625,3 +1625,22 @@ Shared GPU caches and external client allocations remain explicitly unavailable
 because their ownership cannot yet exclude trusted surfaces. Native nested
 acceptance recomputed every total from the published source records and matched
 them exactly without resource identities or paths.
+
+Windows installed-application launch now crosses its irreversible boundary
+through a suspended one-shot child broker. The parent supplies an exact
+`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` containing only fixed protocol handles and
+duplicates of the already pinned shortcut and its ancestors; the broker receives
+no path or command and derives the target from the first inherited pin. A
+versioned nonce-bound request and response, manual-reset response-ready event,
+acknowledgement, parent-death observation and bounded process waits avoid pipe
+read deadlocks. Every local native handle and the process attribute list has
+immediate RAII ownership. The final permit callback contains only
+`ResumeThread`; rejection or expiry terminates the still-suspended child, while
+post-commit revocation cannot convert an accepted launch into a retryable error.
+The actual Windows branch passes cross-compilation and strict cross-Clippy. Proton
+executed all three fixed broker protocol/event tests and the two catalog-only plan
+tests. Its mapped filesystem could not create the volume-GUID-backed
+`LaunchCapture` required by the existing canonical pinning test, which failed at
+fixture preparation. This compatibility-layer evidence does not verify native
+ShellExecute, handle inheritance, parent-death or revocation execution; no native
+Windows host is available here.

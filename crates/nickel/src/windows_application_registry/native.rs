@@ -90,6 +90,14 @@ impl LaunchPlan {
     }
 }
 impl LaunchCapture {
+    pub(crate) fn inherited_handles(&self) -> impl Iterator<Item = isize> + '_ {
+        std::iter::once(self._shortcut.as_raw_handle() as isize).chain(
+            self._ancestors
+                .iter()
+                .map(|file| file.as_raw_handle() as isize),
+        )
+    }
+
     pub(crate) fn prepare(application: &Application) -> Option<Self> {
         let (descriptor, shortcut) = read_descriptor(
             application,
