@@ -5667,7 +5667,7 @@ mod tests {
             },
         ];
 
-        let messages = vec![
+        let messages = [
             SettingsMessage::DecideRemoteClient {
                 client_id: "new-assistive-client".into(),
                 decision: nickel_session_protocol::RemoteClientDecision::AllowOnce,

@@ -4987,26 +4987,26 @@ impl LiveShell {
             if let Some((output, _, index)) = &self.output_identification
                 && output == &self.desktop_active_viewport
             {
-            let size = 144.0_f32.min(width as f32).min(height as f32);
-            let rect = Rect::new(
-                (width as f32 - size) / 2.0,
-                (height as f32 - size) / 2.0,
-                size,
-                size,
-            );
-            commands.push(PaintCommand::RoundedFill {
-                rect,
-                color: 0xee202124,
-                radius: 24.0,
-            });
+                let size = 144.0_f32.min(width as f32).min(height as f32);
+                let rect = Rect::new(
+                    (width as f32 - size) / 2.0,
+                    (height as f32 - size) / 2.0,
+                    size,
+                    size,
+                );
+                commands.push(PaintCommand::RoundedFill {
+                    rect,
+                    color: 0xee202124,
+                    radius: 24.0,
+                });
                 commands.push(PaintCommand::Text {
-                bounds: rect,
-                text: (index + 1).to_string(),
-                scale: 64.0,
-                color: 0xffffffff,
-                align: TextAlign::Center,
-                bold: true,
-                wrap: false,
+                    bounds: rect,
+                    text: (index + 1).to_string(),
+                    scale: 64.0,
+                    color: 0xffffffff,
+                    align: TextAlign::Center,
+                    bold: true,
+                    wrap: false,
                 });
             }
             commands
