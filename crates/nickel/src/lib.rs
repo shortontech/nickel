@@ -5,7 +5,7 @@ mod remote_indicator;
 mod remote_peripheral_controls;
 mod remote_surface_authority;
 mod remote_terminal_launch_policy;
-#[cfg(any(test, target_os = "windows"))]
+#[cfg(any(test, target_os = "linux", target_os = "windows"))]
 mod trusted_accessibility;
 #[cfg(any(test, target_os = "windows"))]
 mod windows_application_registry;

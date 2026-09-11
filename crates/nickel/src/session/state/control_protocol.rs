@@ -110,6 +110,19 @@ impl NickelSession {
                 }
             })
             .collect::<Vec<_>>();
+        let mut authority_revision = control
+            .leases()
+            .iter()
+            .filter(|lease| lease.expires_at.is_none_or(|deadline| now < deadline))
+            .map(|lease| {
+                (
+                    lease.id,
+                    lease.operation_generation,
+                    lease.renewal_generation,
+                )
+            })
+            .collect::<Vec<_>>();
+        authority_revision.sort_unstable();
         drop(control);
         let stopped_confirmation = self
             .remote_stop_confirmation_until
@@ -122,6 +135,7 @@ impl NickelSession {
                 .map(|(_, id)| id)
                 .collect::<Vec<_>>()
             {
+                self.remote_indicator_accessibility.remove(&id);
                 self.internal_ui.remove(id);
             }
             self.request_output_redraw();
@@ -169,13 +183,17 @@ impl NickelSession {
             .collect::<Vec<_>>()
         {
             if let Some(id) = self.remote_indicator_surfaces.remove(&name) {
+                self.remote_indicator_accessibility.remove(&id);
                 self.internal_ui.remove(id);
             }
         }
+        let mut local_stop = false;
+        let mut accessibility_failure = None;
         for (name, scale, placement) in desired {
             use super::super::remote_indicator::RemoteIndicator;
-            if let Some(id) = self.remote_indicator_surfaces.get(&name).copied() {
-                self.internal_ui.configure_surface(id, placement, scale);
+            let id = if let Some(id) = self.remote_indicator_surfaces.get(&name).copied() {
+                self.internal_ui
+                    .configure_surface(id, placement.clone(), scale);
                 if let Some(app) = self.internal_ui.application_mut::<RemoteIndicator>(id) {
                     app.transport = transport.to_owned();
                     app.grants = grants.clone();
@@ -189,6 +207,7 @@ impl NickelSession {
                         ..Default::default()
                     },
                 );
+                id
             } else {
                 let id = self.internal_ui.insert(
                     RemoteIndicator {
@@ -198,11 +217,85 @@ impl NickelSession {
                         stop_requested: false,
                         stopped_confirmation,
                     },
-                    placement,
+                    placement.clone(),
                     scale,
                 );
                 self.remote_indicator_surfaces.insert(name, id);
+                id
+            };
+            if grants.is_empty() {
+                // The short post-stop acknowledgement is read-only and has no
+                // Stop target; retire the actionable provider first.
+                self.remote_indicator_accessibility.remove(&id);
+                continue;
             }
+            let geometry = crate::trusted_accessibility::native::IndicatorGeometry {
+                x: placement.geometry.0,
+                y: placement.geometry.1,
+                width: placement.geometry.2,
+                height: placement.geometry.3,
+                scale,
+            };
+            let nodes = self.internal_ui.accessibility_nodes(id);
+            if let Some((accessibility, revision)) =
+                self.remote_indicator_accessibility.get_mut(&id)
+            {
+                if let Err(error) =
+                    accessibility.update(&nodes, geometry, *revision != authority_revision)
+                {
+                    accessibility_failure = Some(error);
+                    break;
+                }
+                *revision = authority_revision.clone();
+            } else {
+                let wake = self.remote_indicator_accessibility_wake.clone();
+                match crate::trusted_accessibility::native::IndicatorAccessibility::new(
+                    &nodes,
+                    geometry,
+                    move || {
+                        let _ = wake.send(());
+                    },
+                ) {
+                    Ok(accessibility) => {
+                        // This provider is owned by the compositor process and
+                        // has no wl_surface/gtk-shell association. The remote
+                        // AT-SPI observer admits only the exact PID/UID-bound
+                        // peer associated with an authorized external window.
+                        self.remote_indicator_accessibility
+                            .insert(id, (accessibility, authority_revision.clone()));
+                    }
+                    Err(error) => {
+                        accessibility_failure = Some(error);
+                        break;
+                    }
+                }
+            }
+            if let Some((accessibility, _)) = self.remote_indicator_accessibility.get_mut(&id)
+                && let Some(target) = accessibility.take_stop()
+            {
+                if let Err(error) = self.internal_ui.perform_accessibility_action(
+                    id,
+                    target,
+                    nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+                ) {
+                    accessibility_failure = Some(error);
+                    break;
+                }
+                local_stop |= self
+                    .internal_ui
+                    .application_mut::<RemoteIndicator>(id)
+                    .is_some_and(|app| app.stop_requested);
+            }
+        }
+        if let Some(error) = accessibility_failure {
+            self.remote_control
+                .set_diagnostic(format!("Trusted accessibility unavailable: {error}"));
+            self.emergency_stop_remote_control();
+            return;
+        }
+        if local_stop {
+            self.emergency_stop_remote_control();
+            return;
         }
         self.schedule_internal_ui_frame();
         self.request_output_redraw();

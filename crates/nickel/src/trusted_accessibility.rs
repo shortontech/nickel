@@ -25,11 +25,13 @@ struct PendingStop {
     queued_at: Instant,
 }
 
-/// COM threads retain only this bounded mailbox and an atomic publication ID.
-/// They cannot read or mutate UiHost, window ownership or lease state.
+/// Native accessibility threads retain only this bounded mailbox and an atomic
+/// publication ID. They cannot read or mutate UiHost, surface ownership or
+/// lease state.
 pub(crate) struct LocalActionHandler {
     current: Arc<AtomicU64>,
     sender: SyncSender<PendingStop>,
+    wake: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 impl ActionHandler for LocalActionHandler {
     fn do_action(&mut self, request: ActionRequest) {
@@ -41,10 +43,17 @@ impl ActionHandler for LocalActionHandler {
         {
             return;
         }
-        let _ = self.sender.try_send(PendingStop {
-            node: request.target_node,
-            queued_at: Instant::now(),
-        });
+        if self
+            .sender
+            .try_send(PendingStop {
+                node: request.target_node,
+                queued_at: Instant::now(),
+            })
+            .is_ok()
+            && let Some(wake) = &self.wake
+        {
+            wake();
+        }
     }
 }
 
@@ -56,7 +65,12 @@ pub(crate) struct TrustedAccessibility {
     stop: Option<(NodeId, UiId)>,
 }
 impl TrustedAccessibility {
+    #[cfg(any(test, target_os = "windows"))]
     pub(crate) fn new() -> (Self, LocalActionHandler) {
+        Self::new_with_wake(None)
+    }
+
+    fn new_with_wake(wake: Option<Arc<dyn Fn() + Send + Sync>>) -> (Self, LocalActionHandler) {
         let (sender, receiver) = mpsc::sync_channel(8);
         let current = Arc::new(AtomicU64::new(0));
         (
@@ -67,7 +81,11 @@ impl TrustedAccessibility {
                 next_id: 2,
                 stop: None,
             },
-            LocalActionHandler { current, sender },
+            LocalActionHandler {
+                current,
+                sender,
+                wake,
+            },
         )
     }
 
@@ -206,6 +224,117 @@ impl TrustedAccessibility {
 impl Drop for TrustedAccessibility {
     fn drop(&mut self) {
         self.current.store(0, Ordering::Release);
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) mod native {
+    use super::*;
+    use accesskit::{ActivationHandler, DeactivationHandler, Rect, TreeUpdate};
+    use std::sync::Mutex;
+
+    struct InitialTree(Arc<Mutex<TreeUpdate>>);
+    impl ActivationHandler for InitialTree {
+        fn request_initial_tree(&mut self) -> Option<TreeUpdate> {
+            Some(
+                self.0
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            )
+        }
+    }
+
+    struct Deactivation;
+    impl DeactivationHandler for Deactivation {
+        fn deactivate_accessibility(&mut self) {}
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) struct IndicatorGeometry {
+        pub x: i32,
+        pub y: i32,
+        pub width: u32,
+        pub height: u32,
+        pub scale: f32,
+    }
+
+    pub(crate) struct IndicatorAccessibility {
+        // Dropping the projection invalidates queued actions before the Unix
+        // adapter unregisters its AT-SPI objects.
+        projection: TrustedAccessibility,
+        adapter: accesskit_unix::Adapter,
+        snapshot: Arc<Mutex<TreeUpdate>>,
+    }
+
+    impl IndicatorAccessibility {
+        pub(crate) fn new(
+            nodes: &[AccessibilityNode],
+            geometry: IndicatorGeometry,
+            wake: impl Fn() + Send + Sync + 'static,
+        ) -> Result<Self, String> {
+            let (mut projection, actions) =
+                TrustedAccessibility::new_with_wake(Some(Arc::new(wake)));
+            let tree = projection.publish(nodes, f64::from(geometry.scale), true)?;
+            let snapshot = Arc::new(Mutex::new(tree));
+            let mut adapter = accesskit_unix::Adapter::new(
+                InitialTree(Arc::clone(&snapshot)),
+                actions,
+                Deactivation,
+            );
+            set_bounds(&mut adapter, geometry)?;
+            Ok(Self {
+                projection,
+                adapter,
+                snapshot,
+            })
+        }
+
+        pub(crate) fn update(
+            &mut self,
+            nodes: &[AccessibilityNode],
+            geometry: IndicatorGeometry,
+            renew_actions: bool,
+        ) -> Result<(), String> {
+            let update =
+                self.projection
+                    .publish(nodes, f64::from(geometry.scale), renew_actions)?;
+            set_bounds(&mut self.adapter, geometry)?;
+            *self
+                .snapshot
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = update.clone();
+            self.adapter.update_if_active(|| update);
+            Ok(())
+        }
+
+        pub(crate) fn take_stop(&mut self) -> Option<UiId> {
+            self.projection.take_stop()
+        }
+    }
+
+    fn set_bounds(
+        adapter: &mut accesskit_unix::Adapter,
+        geometry: IndicatorGeometry,
+    ) -> Result<(), String> {
+        let scale = f64::from(geometry.scale);
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err("trusted accessibility geometry is invalid".to_owned());
+        }
+        let rect = Rect::new(
+            f64::from(geometry.x) * scale,
+            f64::from(geometry.y) * scale,
+            f64::from(geometry.x) * scale + f64::from(geometry.width) * scale,
+            f64::from(geometry.y) * scale + f64::from(geometry.height) * scale,
+        );
+        if ![rect.x0, rect.y0, rect.x1, rect.y1]
+            .iter()
+            .all(|value| value.is_finite())
+        {
+            return Err("trusted accessibility geometry is invalid".to_owned());
+        }
+        adapter.set_root_window_bounds(rect, rect);
+        Ok(())
     }
 }
 
@@ -461,6 +590,48 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 8);
+    }
+
+    #[test]
+    fn accepted_native_actions_wake_the_owner_but_rejected_actions_do_not() {
+        let host = host();
+        let wakes = Arc::new(AtomicU64::new(0));
+        let wake_counter = Arc::clone(&wakes);
+        let (mut projection, mut actions) =
+            TrustedAccessibility::new_with_wake(Some(Arc::new(move || {
+                wake_counter.fetch_add(1, Ordering::Relaxed);
+            })));
+        projection
+            .publish(host.accessibility_nodes(), 1.0, true)
+            .unwrap();
+        let stop = projection.stop.as_ref().unwrap().0;
+        let mut rejected = click(stop);
+        rejected.action = Action::SetValue;
+        actions.do_action(rejected);
+        assert_eq!(wakes.load(Ordering::Relaxed), 0);
+        actions.do_action(click(stop));
+        assert_eq!(wakes.load(Ordering::Relaxed), 1);
+        assert!(projection.take_stop().is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn unix_adapter_accepts_the_production_indicator_tree_and_geometry() {
+        let host = host();
+        let geometry = native::IndicatorGeometry {
+            x: 120,
+            y: 24,
+            width: 420,
+            height: 260,
+            scale: 1.5,
+        };
+        let mut adapter =
+            native::IndicatorAccessibility::new(host.accessibility_nodes(), geometry, || {})
+                .unwrap();
+        adapter
+            .update(host.accessibility_nodes(), geometry, false)
+            .unwrap();
+        assert!(adapter.take_stop().is_none());
     }
 
     #[test]

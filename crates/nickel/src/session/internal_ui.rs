@@ -1587,6 +1587,19 @@ impl InternalUiRuntime {
             .unwrap_or_default()
     }
 
+    /// Full local accessibility projection for a compositor-owned surface.
+    /// Remote callers cannot reach this interface; their bounded projection
+    /// below admits only ordinary hosted applications.
+    pub(crate) fn accessibility_nodes(
+        &self,
+        id: InternalSurfaceId,
+    ) -> Vec<nickel_ui::AccessibilityNode> {
+        self.surfaces
+            .get(id)
+            .map(|surface| surface.accessibility_nodes())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn bounded_application_semantics(
         &self,
         id: InternalSurfaceId,
@@ -2135,6 +2148,34 @@ impl InternalUiRuntime {
             presentation.dirty = true;
         }
         changed
+    }
+
+    /// Dispatch a native assistive action to the canonical compositor-owned
+    /// host while preserving the runtime's normal dirty/clipboard handling.
+    pub(crate) fn perform_accessibility_action(
+        &mut self,
+        id: InternalSurfaceId,
+        target: nickel_ui::UiId,
+        action: nickel_ui::SemanticAction,
+    ) -> Result<bool, String> {
+        let Some(surface) = self.surfaces.get_mut(id) else {
+            return Err("local accessibility surface is unavailable".to_owned());
+        };
+        let mut outcome = surface.step(HostBatch {
+            clipboard_text_limit: Some(self.clipboard_limit),
+            events: vec![HostEvent::Accessibility { target, action }],
+            ..Default::default()
+        });
+        crate::session_host::record_clipboard_outcome(&mut self.clipboard_result, &mut outcome);
+        if !outcome.semantic_failures.is_empty() {
+            return Err("local accessibility target changed".to_owned());
+        }
+        if outcome.changed
+            && let Some(presentation) = self.presentation.get_mut(&id)
+        {
+            presentation.dirty = true;
+        }
+        Ok(outcome.changed)
     }
 
     pub fn update_scene(&mut self, id: InternalSurfaceId, commands: Vec<PaintCommand>) -> bool {

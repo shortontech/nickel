@@ -13,7 +13,7 @@ use std::{
 };
 
 use crate::{
-    ControllerFamily, DamageRegion, HostBatch, HostEventOutcome, HostInspection,
+    AccessibilityNode, ControllerFamily, DamageRegion, HostBatch, HostEventOutcome, HostInspection,
     SemanticNodeSnapshot, SoftwareRenderer, UiHost,
 };
 
@@ -65,6 +65,9 @@ pub trait InternalUiSurface {
     fn step(&mut self, batch: HostBatch) -> HostEventOutcome;
     fn inspect(&self) -> HostInspection;
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot>;
+    /// Local assistive-technology projection from the canonical resolved tree.
+    /// Remote adapters remain on the separately bounded semantic interface.
+    fn accessibility_nodes(&self) -> Vec<AccessibilityNode>;
     fn bounded_semantic_nodes(
         &self,
         _max_nodes: usize,
@@ -168,6 +171,10 @@ impl<A: crate::Application + 'static> InternalUiSurface for HostedApplication<A>
 
     fn semantic_nodes(&self) -> Vec<SemanticNodeSnapshot> {
         self.host.semantic_nodes()
+    }
+
+    fn accessibility_nodes(&self) -> Vec<AccessibilityNode> {
+        self.host.accessibility_nodes().to_vec()
     }
 
     fn bounded_semantic_nodes(

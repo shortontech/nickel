@@ -2385,6 +2385,16 @@ pub struct NickelSession {
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
+    /// Local AT-SPI adapters for trusted indicators. These are keyed by the
+    /// compositor's private surface identity and never enter remote inventory.
+    pub(crate) remote_indicator_accessibility: HashMap<
+        nickel_ui::InternalSurfaceId,
+        (
+            crate::trusted_accessibility::native::IndicatorAccessibility,
+            Vec<(u64, u64, u64)>,
+        ),
+    >,
+    remote_indicator_accessibility_wake: smithay::reexports::calloop::channel::Sender<()>,
     internal_file_surfaces: HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     /// Latest motion is reduced immediately; scene work is bounded by frames.
     pending_desktop_scenes: HashSet<nickel_ui::InternalSurfaceId>,
@@ -6433,6 +6443,16 @@ impl NickelSession {
                 }
             })
             .expect("failed to register deferred focus restoration");
+        let (remote_indicator_accessibility_wake, remote_indicator_accessibility_events) =
+            channel::channel();
+        event_loop
+            .handle()
+            .insert_source(remote_indicator_accessibility_events, |event, _, data| {
+                if let channel::Event::Msg(()) = event {
+                    data.sync_remote_control_indicators();
+                }
+            })
+            .expect("failed to register trusted accessibility wake");
         let remote_cleanup_wake = Self::register_remote_connection_cleanup_wake(
             &event_loop.handle(),
             smithay::reexports::rustix::event::eventfd(
@@ -6544,6 +6564,8 @@ impl NickelSession {
             internal_codex: None,
             internal_shell_surfaces: HashMap::new(),
             remote_indicator_surfaces: HashMap::new(),
+            remote_indicator_accessibility: HashMap::new(),
+            remote_indicator_accessibility_wake,
             pending_desktop_scenes: HashSet::new(),
             internal_file_surfaces: HashMap::new(),
             internal_shell_timer: InternalShellTimer::default(),
@@ -12809,6 +12831,15 @@ mod protocol_tests {
             placement.role,
             crate::session::InternalSurfaceRole::TrustedControl
         );
+        assert_eq!(session.remote_indicator_accessibility.len(), 1);
+        assert!(session.internal_ui.remote_access_protected(indicator));
+        assert_eq!(
+            session
+                .internal_ui
+                .bounded_application_semantics(indicator)
+                .unwrap_err(),
+            "hosted application semantics unavailable"
+        );
         assert_eq!(placement.output.as_deref(), Some("file-test"));
         assert!(
             session
@@ -12824,16 +12855,14 @@ mod protocol_tests {
             .find(|node| node.name.as_deref() == Some("Stop"))
             .expect("trusted indicator exposes an accessible Stop button");
         assert!(stop.actions.contains(&nickel_ui::ActionKind::Activate));
-        session.internal_ui.step(
-            indicator,
-            nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Accessibility {
-                    target: stop.id,
-                    action: nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
-                }],
-                ..Default::default()
-            },
-        );
+        session
+            .internal_ui
+            .perform_accessibility_action(
+                indicator,
+                stop.id,
+                nickel_ui::SemanticAction::Invoke(nickel_ui::ActionKind::Activate),
+            )
+            .unwrap();
         assert!(
             session
                 .internal_ui
@@ -12844,6 +12873,7 @@ mod protocol_tests {
         assert!(control.lock().unwrap().revoke(&pending.id));
         session.sync_remote_control_indicators();
         assert!(session.remote_indicator_surfaces.is_empty());
+        assert!(session.remote_indicator_accessibility.is_empty());
         assert!(session.internal_ui.placement(indicator).is_none());
 
         let pairing = control.lock().unwrap().start_pairing(20).unwrap();
