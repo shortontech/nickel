@@ -171,9 +171,15 @@ versioned nonce-bound records authenticate the exchange. The broker derives the
 launch target from the pinned shortcut, calls `ShellExecuteExW`, publishes the
 complete response before signaling readiness, and retains any returned process
 handle until the parent acknowledges it. Parent death, timeout, cancellation, or
-an unacknowledged response closes that handle; the commit callback's only native
-effect is `ResumeThread`. Windows cross-build, strict cross-Clippy, three broker
-protocol tests under Proton, and malformed standalone-invocation rejection passed.
+an unacknowledged response closes that handle; the parent requests immediate
+termination of the one-shot broker on every completed or failed finish path, so a
+blocked shell call is not left orphaned after the original request deadline. That
+deadline is carried into the child as
+an absolute Windows uptime deadline and governs response acknowledgement and exit;
+the commit callback's only native effect is `ResumeThread`. Windows cross-build,
+strict cross-Clippy, five broker protocol tests under Proton (including truncated
+response and expired-deadline cases), and malformed standalone-invocation rejection
+passed.
 Native Windows launch remains unverified, and output-scoped launch still requires
 verified first-map placement.
 

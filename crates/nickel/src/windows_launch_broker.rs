@@ -44,7 +44,7 @@ struct Request {
     pins: [u64; MAX_PINS],
 }
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 struct Response {
     magic: u32,
     version: u32,
@@ -179,6 +179,7 @@ impl StagedLaunch {
             return Err("Windows launch target has no pinned shortcut".into());
         }
         let nonce = nonce();
+        let deadline_tick = tick_deadline(deadline);
         let inherited: Vec<_> = pins
             .iter()
             .map(Handle::raw)
@@ -195,7 +196,7 @@ impl StagedLaunch {
         use std::os::windows::ffi::OsStrExt;
         let exe_w: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
         let mut command: Vec<u16> = format!(
-            "\"{}\" --nickel-launch-broker {nonce} {} {} {} {} {}",
+            "\"{}\" --nickel-launch-broker {nonce} {deadline_tick} {} {} {} {} {}",
             exe.display(),
             request_read.raw().0 as usize,
             response_write.raw().0 as usize,
@@ -340,8 +341,11 @@ impl CommittedLaunch {
         if !authenticated_response(&response, self.nonce) {
             return unavailable();
         }
-        unsafe {
-            let _ = SetEvent(self.ack.raw());
+        // Parsing and validation are bounded local work, but still precede the
+        // ownership-transfer acknowledgement. Never acknowledge after the
+        // caller's original deadline.
+        if Instant::now() >= deadline || unsafe { SetEvent(self.ack.raw()) }.is_err() {
+            return unavailable();
         }
         if let Some(wait) = wait_ms(deadline.min(Instant::now() + EXIT_GRACE)) {
             let _ = unsafe { WaitForSingleObject(self.process.raw(), wait) };
@@ -376,9 +380,20 @@ impl CommittedLaunch {
     }
 }
 
+impl Drop for CommittedLaunch {
+    fn drop(&mut self) {
+        // A synchronous ShellExecuteEx call in the broker can otherwise outlive
+        // the request indefinitely. Termination is harmless after normal exit
+        // and closes all child-owned protocol and pinned-file handles.
+        unsafe {
+            let _ = TerminateProcess(self.process.raw(), 72);
+        }
+    }
+}
+
 pub(crate) fn run_broker_child() -> Result<(), String> {
     let args: Vec<_> = std::env::args_os().skip(2).collect();
-    if args.len() != 6 {
+    if args.len() != 7 {
         return Err("invalid Windows launch broker invocation".into());
     }
     let parse = |i: usize| {
@@ -388,12 +403,16 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
             .ok_or_else(|| "invalid Windows launch broker invocation".to_owned())
     };
     let expected = parse(0)? as u64;
+    let deadline_tick = args[1]
+        .to_str()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "invalid Windows launch broker invocation".to_owned())?;
     // Every inherited protocol handle is owned immediately after parsing.
-    let request = unsafe { Handle::new(HANDLE(parse(1)? as *mut _))? };
-    let response = unsafe { Handle::new(HANDLE(parse(2)? as *mut _))? };
-    let ready = unsafe { Handle::new(HANDLE(parse(3)? as *mut _))? };
-    let ack = unsafe { Handle::new(HANDLE(parse(4)? as *mut _))? };
-    let parent = unsafe { Handle::new(HANDLE(parse(5)? as *mut _))? };
+    let request = unsafe { Handle::new(HANDLE(parse(2)? as *mut _))? };
+    let response = unsafe { Handle::new(HANDLE(parse(3)? as *mut _))? };
+    let ready = unsafe { Handle::new(HANDLE(parse(4)? as *mut _))? };
+    let ack = unsafe { Handle::new(HANDLE(parse(5)? as *mut _))? };
+    let parent = unsafe { Handle::new(HANDLE(parse(6)? as *mut _))? };
     let record = read_record::<Request>(request.raw())?;
     if record.magic != MAGIC
         || record.version != VERSION
@@ -474,7 +493,7 @@ pub(crate) fn run_broker_child() -> Result<(), String> {
         WaitForMultipleObjects(
             &[ack.raw(), parent.raw()],
             false,
-            COMMIT_TTL.as_millis() as u32,
+            tick_wait_ms(deadline_tick),
         )
     };
     if wait != WAIT_OBJECT_0
@@ -586,6 +605,24 @@ fn wait_ms(deadline: Instant) -> Option<u32> {
             .min(u128::from(u32::MAX)) as u32,
     )
 }
+fn tick_deadline(deadline: Instant) -> u64 {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .unwrap_or_default();
+    let milliseconds = remaining
+        .as_millis()
+        .saturating_add(u128::from(
+            !remaining.subsec_nanos().is_multiple_of(1_000_000),
+        ))
+        .min(u128::from(u64::MAX)) as u64;
+    unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
+        .saturating_add(milliseconds)
+}
+fn tick_wait_ms(deadline: u64) -> u32 {
+    deadline
+        .saturating_sub(unsafe { windows::Win32::System::SystemInformation::GetTickCount64() })
+        .min(u64::from(u32::MAX)) as u32
+}
 fn authenticated_response(response: &Response, nonce: u64) -> bool {
     response.magic == MAGIC && response.version == VERSION && response.nonce == nonce
 }
@@ -662,5 +699,30 @@ mod tests {
         assert!(authenticated_response(&observed, 17));
         assert_eq!(observed.pid, 19);
         assert_eq!(observed.process, 23);
+    }
+
+    #[test]
+    fn partial_response_is_rejected() {
+        let (read, write) = pipe(size_of::<Response>() as u32).unwrap();
+        let byte = [0u8; 1];
+        let mut written = 0;
+        unsafe {
+            WriteFile(write.raw(), Some(&byte), Some(&mut written), None).unwrap();
+        }
+        assert_eq!(written, 1);
+        drop(write);
+        assert_eq!(
+            read_record::<Response>(read.raw()).unwrap_err(),
+            "truncated Windows launch broker record"
+        );
+    }
+
+    #[test]
+    fn inherited_deadline_never_regains_time() {
+        let expired = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() }
+            .saturating_sub(1);
+        assert_eq!(tick_wait_ms(expired), 0);
+        let soon = tick_deadline(Instant::now() + Duration::from_millis(25));
+        assert!(tick_wait_ms(soon) <= 26);
     }
 }
