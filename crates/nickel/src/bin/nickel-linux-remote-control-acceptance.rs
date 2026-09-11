@@ -1,17 +1,19 @@
-//! Live Linux acceptance for the Spec 0230 emergency-control boundary.
+//! Live Linux acceptance for the Spec 0230/0231 remote-control boundary.
 //!
 //! This launches the production compositor and MCP server in an isolated nested
-//! session. The private test-control protocol labels emergency input as either
-//! synthetic or physical-fixture input. The latter exercises production source
-//! classification but is not evidence from a physical keyboard.
+//! session. It exercises the pre-lease tool and diagnostics gates before locally
+//! approving debug authority. The private test-control protocol labels emergency
+//! input as either synthetic or physical-fixture input. The latter exercises
+//! production source classification but is not evidence from a physical keyboard.
 
 use nickel_session_protocol::{
     ClientEnvelope, Command, InputState, Query, RemoteControlEffectiveState, RemoteLeaseTransition,
-    Request, ServerEnvelope, ServerMessage, TestEmergencyControlSide, TestEmergencyControlSource,
-    TestInput, decode, encode,
+    RemoteOperationOutcome, Request, ServerEnvelope, ServerMessage, TestEmergencyControlSide,
+    TestEmergencyControlSource, TestInput, decode, encode,
 };
 use serde_json::{Value, json};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     env, fs,
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -27,11 +29,15 @@ use std::{
 };
 
 const DEADLINE: Duration = Duration::from_secs(30);
+const READINESS_DEADLINE: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(100);
+const MATRIX_PACING: Duration = Duration::from_millis(75);
 const SESSION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const MCP_VERSION: &str = "2025-06-18";
 const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
 const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+const TYPED_CANARY: &str = "native-typed-password-DO-NOT-RETAIN";
+const CREDENTIAL_CANARY: &str = "native-credential-DO-NOT-RETAIN";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn main() -> ExitCode {
@@ -111,7 +117,7 @@ fn run() -> Result<Outcome, String> {
     }
     result?;
     println!(
-        "PASS: a production full-session lease survived synthetic dual-Control input and was revoked by the explicitly attributed physical fixture; no physical keyboard was exercised"
+        "PASS: production pre-lease metrics, complete desktop-tool denial, payload-free diagnostics, and emergency revocation passed; no physical keyboard was exercised"
     );
     Ok(Outcome::Passed)
 }
@@ -134,7 +140,7 @@ fn exercise(
     address: SocketAddr,
 ) -> Result<(), String> {
     let environment = wait_for_environment(session, capability_file, Instant::now() + DEADLINE)?;
-    wait_for_readiness(session, &environment, Instant::now() + DEADLINE)?;
+    wait_for_readiness(session, &environment, Instant::now() + READINESS_DEADLINE)?;
 
     let initial = remote_snapshot(&environment)?;
     if initial.effective != RemoteControlEffectiveState::Enabled
@@ -145,8 +151,57 @@ fn exercise(
         ));
     }
 
-    let identity = connect_identity(address, "Spec 0230 native acceptance")?;
+    let initial_metrics = metrics(address)?;
+    require_metric(&initial_metrics, "nickel_mcp_active_leases 0")?;
+    require_no_canaries(
+        "pre-identity metrics",
+        &initial_metrics,
+        &[TYPED_CANARY, CREDENTIAL_CANARY],
+    )?;
+
+    let identity = connect_identity(address, CREDENTIAL_CANARY)?;
     let watch = ConnectionWatch::start(address, &identity)?;
+    let audit_baseline = remote_snapshot(&environment)?
+        .operation_audit
+        .last()
+        .map_or(0, |event| event.generation);
+    let desktop_tools = desktop_tool_fixtures(address, &identity)?;
+    if desktop_tools.len() < 52 {
+        return Err("tools/list exposed fewer than the reviewed desktop-tool baseline".into());
+    }
+    for (name, arguments) in &desktop_tools {
+        let response = mcp_call(address, &identity, name, arguments.clone())
+            .map_err(|_| format!("pre-lease {name} did not receive an MCP response"))?;
+        require_prelease_denial(name, &response)?;
+        // The production authenticated admission bucket permits a 32-request
+        // burst and refills at 16 requests/second. Pace the complete inventory
+        // so this test reaches every lease gate instead of testing HTTP 429.
+        thread::sleep(MATRIX_PACING);
+    }
+    let prelease_metrics = metrics(address)?;
+    require_metric(&prelease_metrics, "nickel_mcp_active_leases 0")?;
+    for name in desktop_tools.keys() {
+        require_metric(
+            &prelease_metrics,
+            &format!("nickel_mcp_requests_total{{method=\"{name}\",outcome=\"error\"}} 1"),
+        )?;
+    }
+    require_no_canaries(
+        "pre-lease metrics",
+        &prelease_metrics,
+        &[
+            TYPED_CANARY,
+            CREDENTIAL_CANARY,
+            &identity.client_id,
+            &identity.token,
+        ],
+    )?;
+    require_prelease_operation_audit(
+        &remote_snapshot(&environment)?,
+        audit_baseline,
+        desktop_tools.keys().map(String::as_str),
+    )?;
+
     let request_result = mcp_call(
         address,
         &identity,
@@ -155,7 +210,7 @@ fn exercise(
             "scope": {"kind": "full_session"},
             "duration_seconds": 1200,
             "allow_resumption": false,
-            "full_debug": false
+            "full_debug": true
         }),
     )?;
     require_tool_success("request_control_lease", &request_result)?;
@@ -196,6 +251,70 @@ fn exercise(
         .first()
         .ok_or("local approval did not create an active lease")?;
     let lease_id = lease.lease_id;
+
+    let trace_started = mcp_call(
+        address,
+        &identity,
+        "diagnostic_action",
+        json!({
+            "lease_id": lease_id,
+            "action": {"start_frame_trace": {"duration_seconds": 5}}
+        }),
+    )?;
+    require_tool_success("start_frame_trace", &trace_started)?;
+    let repaint = mcp_call(
+        address,
+        &identity,
+        "diagnostic_action",
+        json!({"lease_id": lease_id, "action": "repaint"}),
+    )?;
+    require_tool_success("repaint during frame trace", &repaint)?;
+    let typed = mcp_call(
+        address,
+        &identity,
+        "keyboard_action",
+        json!({
+            "lease_id": lease_id,
+            "window_id": "native-privacy-missing-window",
+            "generation": 1,
+            "action": {"kind": "text", "text": TYPED_CANARY}
+        }),
+    )?;
+    require_tool_error("leased typed-text privacy probe", &typed)?;
+    require_no_canaries(
+        "typed-text error response",
+        &typed.to_string(),
+        &[TYPED_CANARY, &identity.token],
+    )?;
+    thread::sleep(Duration::from_millis(250));
+    let trace_stopped = mcp_call(
+        address,
+        &identity,
+        "diagnostic_action",
+        json!({"lease_id": lease_id, "action": "stop_frame_trace"}),
+    )?;
+    require_tool_success("stop_frame_trace", &trace_stopped)?;
+    let diagnostics = mcp_call(
+        address,
+        &identity,
+        "diagnostic_snapshot",
+        json!({"lease_id": lease_id}),
+    )?;
+    require_tool_success("diagnostic_snapshot privacy probe", &diagnostics)?;
+    require_diagnostic_privacy(&diagnostics, &identity)?;
+    require_typed_probe_audit(&remote_snapshot(&environment)?, &identity)?;
+
+    let live_metrics = metrics(address)?;
+    require_no_canaries(
+        "post-probe metrics",
+        &live_metrics,
+        &[
+            TYPED_CANARY,
+            CREDENTIAL_CANARY,
+            &identity.client_id,
+            &identity.token,
+        ],
+    )?;
 
     let before = mcp_call(
         address,
@@ -288,6 +407,149 @@ fn require_tool_success(operation: &str, response: &Value) -> Result<(), String>
     Ok(())
 }
 
+fn require_tool_error(operation: &str, response: &Value) -> Result<(), String> {
+    if response.get("error").is_some()
+        || response
+            .pointer("/result/isError")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        Ok(())
+    } else {
+        Err(format!("{operation} unexpectedly succeeded"))
+    }
+}
+
+fn require_prelease_denial(operation: &str, response: &Value) -> Result<(), String> {
+    require_tool_error(operation, response)?;
+    if response
+        .to_string()
+        .contains("lease is missing, expired, suspended, or outside the resource boundary")
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "pre-lease {operation} did not reach the production lease gate"
+        ))
+    }
+}
+
+fn require_metric(metrics: &str, expected: &str) -> Result<(), String> {
+    metrics
+        .contains(expected)
+        .then_some(())
+        .ok_or_else(|| format!("metrics omitted expected fixed series {expected}"))
+}
+
+fn require_no_canaries(surface: &str, text: &str, canaries: &[&str]) -> Result<(), String> {
+    if canaries.iter().any(|canary| text.contains(canary)) {
+        Err(format!("{surface} retained a private payload canary"))
+    } else {
+        Ok(())
+    }
+}
+
+fn require_prelease_operation_audit<'a>(
+    snapshot: &nickel_session_protocol::RemoteControlSnapshot,
+    baseline: u64,
+    expected: impl Iterator<Item = &'a str>,
+) -> Result<(), String> {
+    let expected = expected.collect::<BTreeSet<_>>();
+    let events = snapshot
+        .operation_audit
+        .iter()
+        .filter(|event| event.generation > baseline)
+        .collect::<Vec<_>>();
+    let observed = events
+        .iter()
+        .map(|event| event.method.as_str())
+        .collect::<BTreeSet<_>>();
+    if observed != expected || events.len() != expected.len() {
+        return Err(
+            "trusted operation audit did not record every pre-lease desktop denial exactly once"
+                .into(),
+        );
+    }
+    if events.iter().any(|event| {
+        event.matched_lease_id.is_some() || event.outcome != RemoteOperationOutcome::Error
+    }) {
+        return Err(
+            "trusted operation audit attributed a pre-lease denial to desktop authority".into(),
+        );
+    }
+    let visible = events
+        .iter()
+        .map(|event| event.method.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    require_no_canaries(
+        "trusted pre-lease operation audit",
+        &visible,
+        &[TYPED_CANARY, CREDENTIAL_CANARY],
+    )
+}
+
+fn require_typed_probe_audit(
+    snapshot: &nickel_session_protocol::RemoteControlSnapshot,
+    identity: &Identity,
+) -> Result<(), String> {
+    let Some(event) = snapshot
+        .operation_audit
+        .iter()
+        .rev()
+        .find(|event| event.method == "keyboard_action")
+    else {
+        return Err("trusted operation audit omitted the leased typed-text probe".into());
+    };
+    if event.outcome != RemoteOperationOutcome::Error || event.matched_lease_id.is_some() {
+        return Err("trusted operation audit recorded the wrong typed-text probe outcome".into());
+    }
+    let visible = snapshot
+        .operation_audit
+        .iter()
+        .map(|event| event.method.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    require_no_canaries(
+        "trusted operation audit",
+        &visible,
+        &[TYPED_CANARY, CREDENTIAL_CANARY, &identity.token],
+    )
+}
+
+fn require_diagnostic_privacy(response: &Value, identity: &Identity) -> Result<(), String> {
+    let snapshot = response
+        .pointer("/result/structuredContent")
+        .and_then(Value::as_object)
+        .ok_or("diagnostic_snapshot omitted structured content")?;
+    for field in [
+        "metrics",
+        "recent_events",
+        "diagnostic_logs",
+        "frame_trace",
+        "trace_lifecycle",
+    ] {
+        if !snapshot.get(field).is_some_and(Value::is_object) {
+            return Err(format!(
+                "diagnostic_snapshot omitted available production {field} data"
+            ));
+        }
+    }
+    if snapshot.contains_key("operation_audit") {
+        return Err("MCP diagnostics exposed the trusted local operation audit".into());
+    }
+    require_no_canaries(
+        "metrics, events, logs, and traces in diagnostic_snapshot",
+        &response.to_string(),
+        &[
+            TYPED_CANARY,
+            CREDENTIAL_CANARY,
+            &identity.client_id,
+            &identity.token,
+        ],
+    )
+}
+
 fn require_no_trusted_indicator_data(response: &Value) -> Result<(), String> {
     let serialized = response.to_string().to_ascii_lowercase();
     for forbidden in [
@@ -366,6 +628,154 @@ fn mcp_call(
     )
 }
 
+fn desktop_tool_fixtures(
+    address: SocketAddr,
+    identity: &Identity,
+) -> Result<BTreeMap<String, Value>, String> {
+    let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/list",
+        "params": {},
+    })
+    .to_string();
+    let authorization = format!("Bearer {}", identity.token);
+    let response = http_json(
+        address,
+        "/mcp",
+        &body,
+        &[
+            ("Accept", "application/json, text/event-stream"),
+            ("MCP-Protocol-Version", MCP_VERSION),
+            ("Mcp-Method", "tools/list"),
+            ("X-Nickel-Client", &identity.client_id),
+            ("Authorization", &authorization),
+        ],
+    )?;
+    if response.get("error").is_some() {
+        return Err("tools/list failed while discovering the pre-lease matrix".into());
+    }
+    let tools = response
+        .pointer("/result/tools")
+        .and_then(Value::as_array)
+        .ok_or("tools/list omitted its tool inventory")?;
+    let capability_free = [
+        "client_connection",
+        "request_control_lease",
+        "list_control_leases",
+        "get_control_status",
+    ];
+    let names = tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str))
+        .collect::<BTreeSet<_>>();
+    if capability_free.iter().any(|name| !names.contains(name)) {
+        return Err("tools/list omitted a capability-free control-plane tool".into());
+    }
+
+    tools
+        .iter()
+        .filter_map(|tool| {
+            let name = tool.get("name")?.as_str()?;
+            (!capability_free.contains(&name)).then_some((name, tool))
+        })
+        .map(|(name, tool)| {
+            let schema = tool
+                .get("inputSchema")
+                .ok_or_else(|| format!("published tool {name} omitted its input schema"))?;
+            let mut fixture = schema_fixture(schema, schema)?;
+            if name == "pointer_action" {
+                fixture["target"] = json!({"kind": "desktop"});
+            } else if name == "keyboard_action" {
+                fixture = json!({
+                    "lease_id": 1,
+                    "window_id": "native-privacy-missing-window",
+                    "generation": 1,
+                    "action": {"kind": "text", "text": TYPED_CANARY}
+                });
+            }
+            Ok((name.to_owned(), fixture))
+        })
+        .collect()
+}
+
+fn schema_fixture(schema: &Value, root: &Value) -> Result<Value, String> {
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let pointer = reference
+            .strip_prefix('#')
+            .ok_or("published tool schema used a non-local reference")?;
+        return schema_fixture(
+            root.pointer(pointer)
+                .ok_or("published tool schema reference did not resolve")?,
+            root,
+        );
+    }
+    if let Some(value) = schema.get("const") {
+        return Ok(value.clone());
+    }
+    if let Some(value) = schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .and_then(|values| values.iter().find(|value| !value.is_null()))
+    {
+        return Ok(value.clone());
+    }
+    for keyword in ["oneOf", "anyOf"] {
+        if let Some(options) = schema.get(keyword).and_then(Value::as_array) {
+            let option = options
+                .iter()
+                .find(|option| option.get("type").and_then(Value::as_str) != Some("null"))
+                .ok_or("published tool schema union had no concrete fixture")?;
+            return schema_fixture(option, root);
+        }
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") | None if schema.get("properties").is_some() => {
+            let properties = schema["properties"]
+                .as_object()
+                .ok_or("published tool object schema had invalid properties")?;
+            let required = schema
+                .get("required")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|name| {
+                    name.as_str()
+                        .ok_or("published tool required field was not a string")
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut fixture = serde_json::Map::new();
+            for name in required {
+                let property = properties
+                    .get(name)
+                    .ok_or("published tool required field had no schema")?;
+                fixture.insert(name.to_owned(), schema_fixture(property, root)?);
+            }
+            Ok(Value::Object(fixture))
+        }
+        Some("array") => Ok(Value::Array(Vec::new())),
+        Some("integer") => Ok(json!(
+            schema
+                .get("minimum")
+                .and_then(Value::as_i64)
+                .unwrap_or(1)
+                .max(1)
+        )),
+        Some("number") => Ok(json!(
+            schema
+                .get("minimum")
+                .and_then(Value::as_f64)
+                .unwrap_or(1.0)
+                .max(1.0)
+        )),
+        Some("boolean") => Ok(Value::Bool(false)),
+        Some("string") => Ok(Value::String("fixture".into())),
+        Some("null") => Ok(Value::Null),
+        kind => Err(format!("unsupported published tool schema kind {kind:?}")),
+    }
+}
+
 fn client_metadata(progress: u64) -> Value {
     json!({
         "progressToken": progress,
@@ -411,6 +821,30 @@ fn http_json(
         .map(|(_, body)| body)
         .ok_or_else(|| format!("HTTP response omitted a body: {response}"))?;
     serde_json::from_str(body).map_err(|error| format!("invalid JSON response ({error}): {body}"))
+}
+
+fn metrics(address: SocketAddr) -> Result<String, String> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .map_err(|error| format!("could not connect to metrics listener: {error}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|error| error.to_string())?;
+    write!(
+        stream,
+        "GET /metrics HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )
+    .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    stream
+        .read_to_string(&mut response)
+        .map_err(|error| format!("could not read metrics response: {error}"))?;
+    if !response.starts_with("HTTP/1.1 200") {
+        return Err("pre-lease metrics endpoint was unavailable".into());
+    }
+    response
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_owned())
+        .ok_or("metrics response omitted a body".into())
 }
 
 struct ConnectionWatch {
@@ -577,7 +1011,7 @@ fn poll_readiness(
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Err("shell readiness did not become ready within 30 seconds".into());
+            return Err("shell readiness did not become ready before its deadline".into());
         }
         match query(response_timeout.min(remaining)) {
             Ok(ServerMessage::ShellReadiness(readiness)) if readiness.ready => return Ok(()),
@@ -586,7 +1020,7 @@ fn poll_readiness(
             Err(SessionMessageError::RetryableReceive(_)) if Instant::now() < deadline => {}
             Err(SessionMessageError::RetryableReceive(error)) => {
                 return Err(format!(
-                    "readiness did not respond within 30 seconds: {error}"
+                    "readiness did not respond before its deadline: {error}"
                 ));
             }
             Err(SessionMessageError::Fatal(error)) => {
