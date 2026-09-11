@@ -29,6 +29,8 @@ use std::{
 const DEADLINE: Duration = Duration::from_secs(30);
 const POLL: Duration = Duration::from_millis(100);
 const MCP_VERSION: &str = "2025-06-18";
+const EGL_VENDOR_FILENAMES: &str = "__EGL_VENDOR_LIBRARY_FILENAMES";
+const MESA_EGL_VENDOR_MANIFEST: &str = "/usr/share/glvnd/egl_vendor.d/50_mesa.json";
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn main() -> ExitCode {
@@ -78,6 +80,7 @@ fn run() -> Result<Outcome, String> {
         .env("NICKEL_DISABLE_XWAYLAND", "1")
         .stdin(Stdio::null())
         .stderr(Stdio::piped());
+    configure_software_renderer(&mut command);
     match display {
         HostDisplay::Wayland(path) => {
             command
@@ -110,6 +113,18 @@ fn run() -> Result<Outcome, String> {
         "PASS: a production full-session lease survived synthetic dual-Control input and was revoked by the explicitly attributed physical fixture; no physical keyboard was exercised"
     );
     Ok(Outcome::Passed)
+}
+
+fn configure_software_renderer(command: &mut ProcessCommand) {
+    let mesa_manifest = Path::new(MESA_EGL_VENDOR_MANIFEST);
+    if mesa_manifest.is_file() {
+        // GLVND can select an installed hardware vendor that cannot initialize
+        // against an isolated Xvfb or nested Wayland display. Pin the acceptance
+        // child to Mesa so LIBGL_ALWAYS_SOFTWARE reliably selects llvmpipe.
+        command
+            .env(EGL_VENDOR_FILENAMES, mesa_manifest)
+            .env("LIBGL_ALWAYS_SOFTWARE", "1");
+    }
 }
 
 fn exercise(
@@ -636,7 +651,6 @@ impl SessionProcess {
         let mut stderr = String::new();
         self.child.stderr.take()?.read_to_string(&mut stderr).ok()?;
         [
-            "EGL error: Unable to obtain a valid EGL Display",
             "Failed to connect to Wayland display",
             "Failed to connect to X11 display",
         ]
