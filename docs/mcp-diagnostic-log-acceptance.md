@@ -3,8 +3,9 @@
 The full-debug snapshot exposes `diagnostic_logs`, a separate in-memory collector
 of warning/error source metadata. It never reads file logs or visits tracing
 message fields or span values. Each record contains its generation, monotonic
-collection time, level, target, source file, and line. Retention is limited to 256
-records; eviction and lock-contention drops are explicit. A busy or uninitialized
+collection time, fixed severity and subsystem categories, a numeric static-callsite
+code, and numeric source-line detail. It omits target strings and source paths.
+Retention is limited to 256 records; eviction and lock-contention drops are explicit. A busy or uninitialized
 collector is reported as unavailable. Logging collection has its own clock and
 generation rather than claiming synchronous compositor observation.
 
