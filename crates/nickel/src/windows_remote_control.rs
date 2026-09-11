@@ -171,6 +171,13 @@ enum ObservationResult {
     Outputs(nickel_remote_control::diagnostics::OutputInventory),
     CaptureSource(crate::windows_resource_owner::Window),
 }
+struct PointerOwnerAction {
+    id: String,
+    generation: u64,
+    x: i32,
+    y: i32,
+    action: nickel_remote_control::pointer::PointerAction,
+}
 enum OwnerRequest {
     Local(LocalRequest),
     Observation {
@@ -193,6 +200,12 @@ enum OwnerRequest {
         id: String,
         generation: u64,
         action: nickel_remote_control::keyboard::KeyboardAction,
+        reply: SyncSender<Result<(), String>>,
+    },
+    Pointer {
+        permit: DesktopPermit,
+        prepared: Box<crate::platform::remote_observation::Prepared>,
+        request: PointerOwnerAction,
         reply: SyncSender<Result<(), String>>,
     },
     Connection {
@@ -288,14 +301,38 @@ impl DesktopAuthority for WindowsDesktopAuthority {
     }
     fn pointer_action(
         &self,
-        _permit: DesktopPermit,
-        _id: &str,
-        _generation: u64,
-        _x: i32,
-        _y: i32,
-        _action: nickel_remote_control::pointer::PointerAction,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+        x: i32,
+        y: i32,
+        action: nickel_remote_control::pointer::PointerAction,
     ) -> Result<(), String> {
-        Err(NOT_READY.into())
+        let _admission = crate::platform::remote_observation::Admission::acquire()?;
+        let prepared = Box::new(crate::platform::remote_observation::Prepared::prepare(
+            &permit,
+        )?);
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::Pointer {
+                permit,
+                prepared,
+                request: PointerOwnerAction {
+                    id: id.to_owned(),
+                    generation,
+                    x,
+                    y,
+                    action,
+                },
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
     }
     fn diagnostic_snapshot(
         &self,
@@ -444,12 +481,21 @@ pub(crate) struct WindowsRemoteControl {
     desktop_unlocked: bool,
     local_input_epoch: u64,
     keyboard_hold: Option<WindowsKeyboardHold>,
+    pointer_hold: Option<WindowsPointerHold>,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
 struct WindowsKeyboardHold {
     authority: nickel_remote_control::HeldInput,
     keys: Vec<u8>,
+    window_id: String,
+    generation: u64,
+    native: usize,
+    deadline: Instant,
+}
+struct WindowsPointerHold {
+    authority: nickel_remote_control::HeldInput,
+    button: nickel_remote_control::pointer::PointerButton,
     window_id: String,
     generation: u64,
     native: usize,
@@ -528,6 +574,7 @@ impl WindowsRemoteControl {
             desktop_unlocked,
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
+            pointer_hold: None,
             start_time: started,
             last_stop: None,
         };
@@ -567,6 +614,7 @@ impl WindowsRemoteControl {
         self.reconcile_desktop_authority();
         self.reconcile_local_input();
         self.reconcile_keyboard_hold();
+        self.reconcile_pointer_hold();
         // Service transport loss before ordinary requests, even if their queue is full.
         if self.authority.cleanup_wake.take_wake_failure() {
             tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
@@ -578,14 +626,17 @@ impl WindowsRemoteControl {
                 .unwrap()
                 .reconcile_pending_lease_requests(Instant::now());
             self.reconcile_keyboard_hold();
+            self.reconcile_pointer_hold();
         }
         if STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::AcqRel) {
             crate::windows_remote_input::release_all();
             self.keyboard_hold.take();
+            self.pointer_hold.take();
             self.handle(Request::Command(Command::EmergencyStopRemoteControl));
         }
         self.drain_resource_lifecycle();
         self.reconcile_keyboard_hold();
+        self.reconcile_pointer_hold();
         for _ in 0..8 {
             let Ok(request) = self.receiver.try_recv() else {
                 break;
@@ -622,6 +673,15 @@ impl WindowsRemoteControl {
                 } => {
                     let result =
                         self.perform_keyboard_action(permit, *prepared, &id, generation, action);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::Pointer {
+                    permit,
+                    prepared,
+                    request,
+                    reply,
+                } => {
+                    let result = self.perform_pointer_action(permit, *prepared, request);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -667,6 +727,7 @@ impl WindowsRemoteControl {
         self.local_input_epoch = observed;
         crate::windows_remote_input::release_all();
         self.keyboard_hold.take();
+        self.pointer_hold.take();
         if let Ok(mut control) = self.remote_control.control().lock() {
             // The hook has already released registered keys. Clear shared
             // ownership so no continuation can blend with this newly observed
@@ -687,6 +748,20 @@ impl WindowsRemoteControl {
         if expired {
             crate::windows_remote_input::release_all();
             self.keyboard_hold.take();
+        }
+    }
+    fn reconcile_pointer_hold(&mut self) {
+        let expired = self.pointer_hold.as_ref().is_some_and(|held| {
+            Instant::now() >= held.deadline
+                || held.authority.check_live().is_err()
+                || self
+                    .resources
+                    .window(&held.window_id, held.generation)
+                    .is_none_or(|window| window.native != held.native)
+        });
+        if expired {
+            crate::windows_remote_input::release_all();
+            self.pointer_hold.take();
         }
     }
     fn reconcile_desktop_authority(&mut self) {
@@ -796,6 +871,8 @@ impl WindowsRemoteControl {
     ) -> Result<(), String> {
         permit.check_live()?;
         self.drain_resource_lifecycle();
+        self.reconcile_keyboard_hold();
+        self.reconcile_pointer_hold();
         let lifecycle = self
             .resource_lifecycle
             .as_ref()
@@ -964,6 +1041,176 @@ impl WindowsRemoteControl {
                 let held = self.keyboard_hold.take().unwrap();
                 let result = permit.continue_input(&held.authority, &evidence, || {
                     crate::windows_remote_input::release_keys(&held.keys)
+                });
+                if result.is_err() {
+                    crate::windows_remote_input::release_all();
+                }
+                result
+            }
+        }
+    }
+
+    fn perform_pointer_action(
+        &mut self,
+        permit: DesktopPermit,
+        mut prepared: crate::platform::remote_observation::Prepared,
+        request: PointerOwnerAction,
+    ) -> Result<(), String> {
+        let PointerOwnerAction {
+            id,
+            generation,
+            x,
+            y,
+            action,
+        } = request;
+        self.reconcile_prepared_resources(&permit, &mut prepared)?;
+        let scope = permit.resource_scope()?;
+        let (window, evidence) = self
+            .resources
+            .window_resource(&scope, &id, generation)
+            .ok_or("Windows resource is unavailable")?;
+        let native = window.native;
+
+        match action {
+            nickel_remote_control::pointer::PointerAction::Move
+            | nickel_remote_control::pointer::PointerAction::Click { .. }
+            | nickel_remote_control::pointer::PointerAction::DoubleClick { .. }
+            | nickel_remote_control::pointer::PointerAction::Scroll { .. } => {
+                if self.keyboard_hold.is_some()
+                    || self.pointer_hold.is_some()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
+                    return Err("local or remote input is already active".into());
+                }
+                let input_epoch = local_input_epoch();
+                permit.with_input(&evidence, || {
+                    if local_input_epoch() != input_epoch {
+                        return Err("local input cancelled the pointer transaction".into());
+                    }
+                    let point = crate::windows_remote_input::target_point(native, x, y)?;
+                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    if local_input_epoch() != input_epoch {
+                        return Err("local input interrupted the pointer transaction".into());
+                    }
+                    match action {
+                        nickel_remote_control::pointer::PointerAction::Move => Ok(()),
+                        nickel_remote_control::pointer::PointerAction::Click { button } => {
+                            crate::windows_remote_input::target_point(native, x, y)?;
+                            crate::windows_remote_input::click(button, 1)
+                        }
+                        nickel_remote_control::pointer::PointerAction::DoubleClick { button } => {
+                            crate::windows_remote_input::target_point(native, x, y)?;
+                            crate::windows_remote_input::click(button, 2)
+                        }
+                        nickel_remote_control::pointer::PointerAction::Scroll {
+                            horizontal_v120,
+                            vertical_v120,
+                        } => {
+                            crate::windows_remote_input::target_point(native, x, y)?;
+                            crate::windows_remote_input::scroll(horizontal_v120, vertical_v120)
+                        }
+                        _ => unreachable!("held pointer actions use the other owner branch"),
+                    }?;
+                    if local_input_epoch() != input_epoch {
+                        crate::windows_remote_input::release_all();
+                        return Err("local input interrupted the pointer transaction".into());
+                    }
+                    Ok(())
+                })
+            }
+            nickel_remote_control::pointer::PointerAction::DragStart { button } => {
+                if self.keyboard_hold.is_some()
+                    || self.pointer_hold.is_some()
+                    || !crate::windows_remote_input::physical_input_idle()
+                {
+                    return Err("local or remote input is already active".into());
+                }
+                let input_epoch = local_input_epoch();
+                let authority = permit.begin_input(&evidence, || {
+                    if local_input_epoch() != input_epoch {
+                        return Err("local input cancelled the pointer gesture".into());
+                    }
+                    let point = crate::windows_remote_input::target_point(native, x, y)?;
+                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    if local_input_epoch() != input_epoch {
+                        return Err("local input interrupted the pointer gesture".into());
+                    }
+                    crate::windows_remote_input::press_button(button)?;
+                    if local_input_epoch() != input_epoch {
+                        crate::windows_remote_input::release_all();
+                        return Err("local input interrupted the pointer gesture".into());
+                    }
+                    Ok(())
+                })?;
+                self.pointer_hold = Some(WindowsPointerHold {
+                    authority,
+                    button,
+                    window_id: id.clone(),
+                    generation,
+                    native,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                });
+                Ok(())
+            }
+            nickel_remote_control::pointer::PointerAction::DragMove => {
+                let held = self
+                    .pointer_hold
+                    .as_mut()
+                    .ok_or("no Windows pointer gesture is active")?;
+                if held.window_id != id
+                    || held.generation != generation
+                    || held.native != native
+                    || !held.authority.owned_by(&permit)
+                {
+                    return Err("request does not own this input gesture".into());
+                }
+                let input_epoch = local_input_epoch();
+                permit.continue_input(&held.authority, &evidence, || {
+                    if local_input_epoch() != input_epoch {
+                        return Err("local input cancelled the pointer gesture".into());
+                    }
+                    let point = crate::windows_remote_input::target_point(native, x, y)?;
+                    crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    if local_input_epoch() != input_epoch {
+                        crate::windows_remote_input::release_all();
+                        return Err("local input interrupted the pointer gesture".into());
+                    }
+                    Ok(())
+                })?;
+                held.deadline = Instant::now() + Duration::from_secs(30);
+                Ok(())
+            }
+            nickel_remote_control::pointer::PointerAction::DragEnd
+            | nickel_remote_control::pointer::PointerAction::DragCancel => {
+                let owned = self.pointer_hold.as_ref().is_some_and(|held| {
+                    held.window_id == id
+                        && held.generation == generation
+                        && held.native == native
+                        && held.authority.owned_by(&permit)
+                });
+                if !owned {
+                    return Err("request does not own this input gesture".into());
+                }
+                let held = self.pointer_hold.take().unwrap();
+                let cancelled = matches!(
+                    action,
+                    nickel_remote_control::pointer::PointerAction::DragCancel
+                );
+                let input_epoch = local_input_epoch();
+                let result = permit.continue_input(&held.authority, &evidence, || {
+                    if !cancelled {
+                        if local_input_epoch() != input_epoch {
+                            return Err("local input cancelled the pointer gesture".into());
+                        }
+                        let point = crate::windows_remote_input::target_point(native, x, y)?;
+                        crate::windows_remote_input::move_pointer(point.0, point.1)?;
+                    }
+                    let released = crate::windows_remote_input::release_button(held.button);
+                    if !cancelled && local_input_epoch() != input_epoch {
+                        crate::windows_remote_input::release_all();
+                        return Err("local input interrupted the pointer gesture".into());
+                    }
+                    released
                 });
                 if result.is_err() {
                     crate::windows_remote_input::release_all();
@@ -1338,6 +1585,7 @@ impl WindowsRemoteControl {
             Command::EmergencyStopRemoteControl => {
                 crate::windows_remote_input::release_all();
                 self.keyboard_hold.take();
+                self.pointer_hold.take();
                 self.last_stop = Some(Instant::now());
                 let mut settings = RemoteAiControlSettings::load_default().unwrap_or_default();
                 settings.set_requested(false);
@@ -1733,6 +1981,7 @@ mod tests {
             desktop_unlocked: false,
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
+            pointer_hold: None,
             start_time: Instant::now(),
             last_stop: None,
         }
