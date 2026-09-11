@@ -1362,7 +1362,7 @@ slice because `x86_64-w64-mingw32-gcc` is unavailable, and no native Windows
 execution is claimed. No source files were added; the exact inventory remains 344.
 
 The safe platform re-query action now has exact `connectivity`, `audio`,
-`peripherals`, and `maintenance` domains.
+`peripherals`, `maintenance`, and `default_associations` domains.
 Linux queues acknowledged immediate NetworkManager/BlueZ or PipeWire observations
 on their existing production workers; requested preparation cannot publish or
 replace shell state. Windows uses its existing native status readers on the bounded
@@ -1391,3 +1391,11 @@ remain open. The diagnostic returns unavailable on Windows rather than invoking
 the maintenance service's unbounded PowerShell helpers; native job containment
 and acceptance are required before that path can open. No source files were
 added; the exact inventory remains 344.
+
+Default-association refresh queries a fixed four-target freedesktop set through
+the production association service. Linux `xdg-mime` reads and writes now use
+the shared process-group deadline and 64 KiB output cap. The diagnostic returns
+only targets queried, effective-default count, directly-writable count,
+availability, and partial status; association keys, handler identities, names,
+paths, provider details, and errors never cross the boundary. Windows returns
+unavailable until its registry traversal has a verified latency boundary.

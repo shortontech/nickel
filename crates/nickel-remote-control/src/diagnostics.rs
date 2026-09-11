@@ -58,6 +58,7 @@ pub enum PlatformRefreshDomain {
     Audio,
     Peripherals,
     Maintenance,
+    DefaultAssociations,
 }
 
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -81,6 +82,10 @@ pub struct PlatformRefreshOutcome {
     pub malware_protection_healthy: Option<bool>,
     pub known_permission_states: u32,
     pub secure_storage_status_available: bool,
+    pub associations_available: bool,
+    pub association_targets_queried: u32,
+    pub effective_associations: u32,
+    pub directly_writable_associations: u32,
     pub partial: bool,
     /// The compositor reconciled the returned snapshots; this is not presentation confirmation.
     pub reconciliation_confirmed: bool,
@@ -675,6 +680,16 @@ mod output_identification_tests {
             maintenance,
             DiagnosticAction::RefreshPlatformStatus {
                 domain: PlatformRefreshDomain::Maintenance
+            }
+        ));
+        let associations: DiagnosticAction = serde_json::from_value(serde_json::json!({
+            "refresh_platform_status": {"domain": "default_associations"}
+        }))
+        .unwrap();
+        assert!(matches!(
+            associations,
+            DiagnosticAction::RefreshPlatformStatus {
+                domain: PlatformRefreshDomain::DefaultAssociations
             }
         ));
         for field in ["path", "root", "limit", "executable", "icon_theme"] {

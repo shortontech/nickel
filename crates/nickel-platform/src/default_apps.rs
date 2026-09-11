@@ -12,6 +12,8 @@ use std::{
 
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::time::Duration;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum AssociationTarget {
@@ -658,10 +660,14 @@ impl LinuxAssociations {
     }
 
     fn query(target: &AssociationTarget) -> Result<Option<String>, AssociationError> {
-        let output = std::process::Command::new("xdg-mime")
-            .args(["query", "default", &target.platform_key()])
-            .output()
-            .map_err(|error| AssociationError(format!("could not run xdg-mime: {error}")))?;
+        let key = target.platform_key();
+        let output = crate::peripherals::bounded_command_output(
+            "xdg-mime",
+            &["query", "default", &key],
+            Duration::from_secs(2),
+            64 * 1024,
+        )
+        .map_err(|error| AssociationError(format!("could not run xdg-mime: {error}")))?;
         if !output.status.success() {
             return Err(AssociationError(format!(
                 "xdg-mime query failed with {}",
@@ -961,13 +967,17 @@ impl AssociationBackend for LinuxAssociations {
                 detail: "the selected application is no longer installed".into(),
             });
         }
-        let status = std::process::Command::new("xdg-mime")
-            .args(["default", handler_id, &target.platform_key()])
-            .status()
-            .map_err(|error| AssociationError(format!("could not run xdg-mime: {error}")))?;
-        if !status.success() {
+        let key = target.platform_key();
+        let output = crate::peripherals::bounded_command_output(
+            "xdg-mime",
+            &["default", handler_id, &key],
+            Duration::from_secs(2),
+            64 * 1024,
+        )
+        .map_err(|error| AssociationError(format!("could not run xdg-mime: {error}")))?;
+        if !output.status.success() {
             return Ok(ChangeOutcome::Rejected {
-                detail: format!("xdg-mime rejected the change with {status}"),
+                detail: format!("xdg-mime rejected the change with {}", output.status),
             });
         }
         Ok(ChangeOutcome::Confirmed(self.inspect(target)?))

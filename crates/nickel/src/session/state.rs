@@ -356,6 +356,7 @@ enum PreparedPlatformRefreshData {
     Audio(crate::platform::AudioRefresh),
     Peripherals(crate::platform::PeripheralRefresh),
     Maintenance(crate::platform::MaintenanceRefresh),
+    DefaultAssociations(crate::platform::DefaultAssociationsRefresh),
 }
 
 impl RemoteDesktopBridge {
@@ -992,6 +993,11 @@ impl nickel_remote_control::DesktopAuthority for RemoteDesktopBridge {
                 nickel_remote_control::diagnostics::PlatformRefreshDomain::Maintenance => {
                     PreparedPlatformRefreshData::Maintenance(
                         crate::platform::refresh_maintenance_status()?,
+                    )
+                }
+                nickel_remote_control::diagnostics::PlatformRefreshDomain::DefaultAssociations => {
+                    PreparedPlatformRefreshData::DefaultAssociations(
+                        crate::platform::refresh_default_associations()?,
                     )
                 }
             };
@@ -3070,6 +3076,8 @@ impl NickelSession {
                                     maintenance_available, updates_available, restart_required,
                                     firewall_healthy, malware_protection_healthy,
                                     known_permission_states, secure_storage_status_available,
+                                    associations_available, association_targets_queried,
+                                    effective_associations, directly_writable_associations,
                                     partial, reconciliation_confirmed) =
                                     match (domain, prepared.data) {
                                         (
@@ -3091,6 +3099,7 @@ impl NickelSession {
                                             (changed, network_available, bluetooth_available, false,
                                                 false, false, false, 0, 0, 0,
                                                 false, None, None, None, None, 0, false,
+                                                false, 0, 0, 0,
                                                 refresh.partial, true)
                                         }
                                         (
@@ -3108,6 +3117,7 @@ impl NickelSession {
                                             (changed, false, false, available,
                                                 false, false, false, 0, 0, 0,
                                                 false, None, None, None, None, 0, false,
+                                                false, 0, 0, 0,
                                                 refresh.partial, true)
                                         }
                                         (
@@ -3119,6 +3129,7 @@ impl NickelSession {
                                                 refresh.filesystems_available, refresh.printer_count,
                                                 refresh.volume_count, refresh.filesystem_count,
                                                 false, None, None, None, None, 0, false,
+                                                false, 0, 0, 0,
                                                 refresh.partial, false)
                                         }
                                         (
@@ -3132,6 +3143,20 @@ impl NickelSession {
                                                 refresh.malware_protection_healthy,
                                                 refresh.known_permission_states,
                                                 refresh.secure_storage_status_available,
+                                                false, 0, 0, 0,
+                                                refresh.partial, false)
+                                        }
+                                        (
+                                            nickel_remote_control::diagnostics::PlatformRefreshDomain::DefaultAssociations,
+                                            PreparedPlatformRefreshData::DefaultAssociations(refresh),
+                                        ) => {
+                                            (Vec::new(), false, false, false,
+                                                false, false, false, 0, 0, 0,
+                                                false, None, None, None, None, 0, false,
+                                                refresh.associations_available,
+                                                refresh.targets_queried,
+                                                refresh.effective_associations,
+                                                refresh.directly_writable_associations,
                                                 refresh.partial, false)
                                         }
                                         _ => return Err("platform refresh data changed before commit".into()),
@@ -3160,6 +3185,10 @@ impl NickelSession {
                                         malware_protection_healthy,
                                         known_permission_states,
                                         secure_storage_status_available,
+                                        associations_available,
+                                        association_targets_queried,
+                                        effective_associations,
+                                        directly_writable_associations,
                                         partial,
                                         reconciliation_confirmed,
                                     },

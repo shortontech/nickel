@@ -166,6 +166,64 @@ pub(crate) struct MaintenanceRefresh {
     pub partial: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DefaultAssociationsRefresh {
+    pub associations_available: bool,
+    pub targets_queried: u32,
+    pub effective_associations: u32,
+    pub directly_writable_associations: u32,
+    pub partial: bool,
+}
+
+fn summarize_default_associations(
+    results: Vec<(
+        nickel_platform::AssociationTarget,
+        Result<nickel_platform::AssociationSnapshot, nickel_platform::AssociationError>,
+    )>,
+) -> DefaultAssociationsRefresh {
+    let targets_queried = results.len().min(u32::MAX as usize) as u32;
+    let mut successful = 0_u32;
+    let mut effective_associations = 0_u32;
+    let mut directly_writable_associations = 0_u32;
+    for (_, result) in results {
+        let Ok(snapshot) = result else { continue };
+        successful = successful.saturating_add(1);
+        effective_associations =
+            effective_associations.saturating_add(u32::from(snapshot.effective.is_some()));
+        directly_writable_associations = directly_writable_associations.saturating_add(u32::from(
+            snapshot.capability == nickel_platform::AssociationCapability::DirectUserChange,
+        ));
+    }
+    DefaultAssociationsRefresh {
+        associations_available: successful != 0,
+        targets_queried,
+        effective_associations,
+        directly_writable_associations,
+        partial: successful != targets_queried,
+    }
+}
+
+pub(crate) fn refresh_default_associations() -> Result<DefaultAssociationsRefresh, String> {
+    #[cfg(target_os = "windows")]
+    return Err(
+        "bounded Windows association diagnostics are unavailable until registry query deadlines are enforced"
+            .into(),
+    );
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let targets = [
+            nickel_platform::AssociationTarget::scheme("https"),
+            nickel_platform::AssociationTarget::mime("text/plain"),
+            nickel_platform::AssociationTarget::mime("image/png"),
+            nickel_platform::AssociationTarget::mime("application/pdf"),
+        ];
+        Ok(summarize_default_associations(
+            nickel_platform::association_service().inspect_many(&targets),
+        ))
+    }
+}
+
 fn summarize_maintenance(snapshot: nickel_platform::MaintenanceSnapshot) -> MaintenanceRefresh {
     use nickel_platform::{ObservationState, ProtectionHealth};
     let current = |state| state == ObservationState::Current;
@@ -845,6 +903,50 @@ mod tests {
                 partial: true,
             }
         );
+    }
+
+    #[test]
+    fn association_refresh_retains_counts_without_targets_handlers_or_errors() {
+        let results = vec![
+            (
+                nickel_platform::AssociationTarget::scheme("private-scheme"),
+                Ok(nickel_platform::AssociationSnapshot {
+                    target: nickel_platform::AssociationTarget::scheme("private-scheme"),
+                    effective: Some(nickel_platform::ApplicationHandler {
+                        id: "private.desktop".into(),
+                        name: "Private Application".into(),
+                        icon: Some("/private/icon".into()),
+                        source: "/private/source".into(),
+                    }),
+                    handlers: Vec::new(),
+                    capability: nickel_platform::AssociationCapability::DirectUserChange,
+                    scope: nickel_platform::AssociationScope::User,
+                    detail: "private detail".into(),
+                }),
+            ),
+            (
+                nickel_platform::AssociationTarget::mime("private/type"),
+                Err(nickel_platform::AssociationError("private failure".into())),
+            ),
+        ];
+        assert_eq!(
+            super::summarize_default_associations(results),
+            super::DefaultAssociationsRefresh {
+                associations_available: true,
+                targets_queried: 2,
+                effective_associations: 1,
+                directly_writable_associations: 1,
+                partial: true,
+            }
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "queries live freedesktop association providers"]
+    fn live_default_association_refresh_returns_only_coarse_status() {
+        let refresh = super::refresh_default_associations().expect("live association refresh");
+        assert_eq!(refresh.targets_queried, 4);
     }
 
     #[cfg(target_os = "linux")]
