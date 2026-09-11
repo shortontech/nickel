@@ -1463,15 +1463,11 @@ impl SettingsApp {
                 }
             }
             SettingsMessage::CopyRemoteConnectionInfo => {
-                let mut connection = format!(
-                    "Nickel MCP endpoint: {}",
-                    self.remote_control_runtime.endpoint
-                );
-                if let Some(fingerprint) = &self.remote_control_runtime.host_fingerprint {
-                    connection.push_str("\nHost certificate SHA-256: ");
-                    connection.push_str(fingerprint);
+                if let Some(connection) =
+                    view::remote_exposure_presentation(&self.remote_control_runtime).connection_info
+                {
+                    self.remote_clipboard_write = Some(connection);
                 }
-                self.remote_clipboard_write = Some(connection);
             }
             SettingsMessage::StartRemotePairing => {
                 let now = std::time::SystemTime::now()
@@ -5457,14 +5453,27 @@ mod tests {
         let local = remote_exposure_presentation(&app.remote_control_runtime);
         assert_eq!(local.kind, nickel_ui::SettingsStatusKind::Information);
         assert!(local.exposure.starts_with("Local only"));
-        assert_eq!(local.transport, "Local HTTP restricted to this computer");
+        assert_eq!(
+            local.transport,
+            "Loopback HTTP active · restricted to this computer"
+        );
+        assert_eq!(local.effective_endpoint, "http://127.0.0.1:42637/mcp");
+        assert_eq!(local.listen_address, "127.0.0.1:42637");
+        assert_eq!(local.fingerprint, "Not used — loopback HTTP");
+        assert!(local.connection_info.is_some());
 
         app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
         app.remote_control_runtime.host_fingerprint = Some("SHA256:fixture".into());
         let remote = remote_exposure_presentation(&app.remote_control_runtime);
         assert_eq!(remote.kind, nickel_ui::SettingsStatusKind::Validation);
-        assert!(remote.exposure.starts_with("Remote exposure active"));
-        assert!(remote.transport.contains("fingerprint available"));
+        assert!(remote.exposure.starts_with("REMOTE EXPOSURE ACTIVE"));
+        assert!(
+            remote
+                .transport
+                .contains("verify the host certificate fingerprint")
+        );
+        assert_eq!(remote.listen_address, "192.0.2.40:42637");
+        assert_eq!(remote.fingerprint, "SHA256:fixture");
 
         app.remote_control_runtime.effective =
             nickel_session_protocol::RemoteControlEffectiveState::Disabled;
@@ -5472,6 +5481,8 @@ mod tests {
         assert_eq!(disabled.kind, nickel_ui::SettingsStatusKind::Unavailable);
         assert!(disabled.exposure.starts_with("Not exposed"));
         assert!(disabled.exposure.contains("remote address is configured"));
+        assert_eq!(disabled.effective_endpoint, "None — listener is disabled");
+        assert!(disabled.connection_info.is_none());
     }
 
     #[test]
@@ -5481,6 +5492,7 @@ mod tests {
             nickel_session_protocol::RemoteControlEffectiveState::Enabled;
         app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
         app.remote_control_runtime.host_fingerprint = Some("SHA256:host-fixture".into());
+        app.remote_control_runtime.environment_override = true;
         app.remote_control_runtime.granted_clients =
             vec![nickel_session_protocol::RemoteGrantedClientSnapshot {
                 id: "client-authority-canary".into(),
@@ -5501,6 +5513,35 @@ mod tests {
                 full_debug: true,
             }];
         let mut host = UiHost::new(app, 1100, 1200);
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        for expected in [
+            "REMOTE EXPOSURE ACTIVE. New connections have no authority until locally approved.",
+            "Effective MCP endpoint",
+            "https://192.0.2.40:42637/mcp",
+            "Configured listen address",
+            "192.0.2.40:42637",
+            "Protected transport",
+            "HTTPS active · verify the host certificate fingerprint below",
+            "Listener configuration source",
+            "NICKEL_MCP_LISTEN_ADDR process environment (read only)",
+            "Host certificate SHA-256",
+            "SHA256:host-fixture",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing active field {expected:?}"
+            );
+        }
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .find(|node| { node.id.as_str().ends_with("remote-control-copy-connection") })
+                .is_some_and(|node| node.enabled)
+        );
         let target = host
             .unique_semantic_target_for_message(&SettingsMessage::CopyRemoteConnectionInfo)
             .expect("copy action has one production semantic target");
@@ -5511,10 +5552,66 @@ mod tests {
             .expect("semantic activation offers connection details to the host clipboard");
         assert_eq!(
             copied,
-            "Nickel MCP endpoint: https://192.0.2.40:42637/mcp\nHost certificate SHA-256: SHA256:host-fixture"
+            "Nickel MCP listen address: 192.0.2.40:42637\nNickel MCP endpoint: https://192.0.2.40:42637/mcp\nTransport: HTTPS\nConfiguration source: NICKEL_MCP_LISTEN_ADDR process environment\nHost certificate SHA-256: SHA256:host-fixture"
         );
         assert!(!copied.contains("client-authority-canary"));
         assert!(!copied.contains("8675309"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rejected_environment_bind_is_truthful_through_the_semantic_host() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::OptionalFeatures);
+        app.remote_control_settings.set_requested(true);
+        app.remote_control_runtime.requested_enabled = true;
+        app.remote_control_runtime.effective =
+            nickel_session_protocol::RemoteControlEffectiveState::Rejected;
+        app.remote_control_runtime.endpoint = "https://192.0.2.40:42637/mcp".into();
+        app.remote_control_runtime.environment_override = true;
+        app.remote_control_runtime.host_fingerprint = Some("stale-fingerprint-canary".into());
+        app.remote_control_runtime.diagnostic =
+            Some("cannot bind MCP listener: 192.0.2.40:42637: address in use".into());
+
+        let mut host = UiHost::new(app, 1100, 1200);
+        let labels = host
+            .accessibility_nodes()
+            .iter()
+            .filter_map(|node| node.label.as_deref())
+            .collect::<Vec<_>>();
+        for expected in [
+            "NO LISTENER ACTIVE. The requested remote address failed to bind. Nickel did not fall back to loopback or another port.",
+            "Effective MCP endpoint",
+            "None — listener did not start",
+            "Configured listen address",
+            "192.0.2.40:42637",
+            "Protected transport",
+            "Unavailable — the listener did not start",
+            "Listener configuration source",
+            "NICKEL_MCP_LISTEN_ADDR process environment (read only)",
+            "Host certificate SHA-256",
+            "Unavailable — listener did not start",
+            "cannot bind MCP listener: 192.0.2.40:42637: address in use",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing truthful field {expected:?}"
+            );
+        }
+        assert!(!labels.contains(&"stale-fingerprint-canary"));
+
+        let copy = host
+            .accessibility_nodes()
+            .iter()
+            .find(|node| node.id.as_str().ends_with("remote-control-copy-connection"))
+            .expect("copy connection button");
+        assert!(!copy.enabled);
+        assert!(
+            host.semantic_targets_for_message(&SettingsMessage::CopyRemoteConnectionInfo)
+                .is_empty()
+        );
+        host.application_mut()
+            .handle_settings_message(SettingsMessage::CopyRemoteConnectionInfo);
+        assert!(host.application().remote_clipboard_write.is_none());
     }
 
     #[test]

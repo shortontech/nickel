@@ -915,6 +915,8 @@ impl RemoteControlRuntime {
         self.status.acknowledged_generation = settings.generation;
         self.status.diagnostic = None;
         if !settings.requested_enabled {
+            self.status.endpoint = selection.requested_endpoint;
+            self.status.environment_override = selection.environment_override;
             self.stop(EffectiveState::Disabled);
             return;
         }
@@ -925,6 +927,7 @@ impl RemoteControlRuntime {
         self.control.lock().unwrap().set_enabled(true);
         self.status.endpoint = selection.requested_endpoint;
         self.status.environment_override = selection.environment_override;
+        self.status.host_fingerprint = None;
         let server = selection
             .config
             .map_err(server::ServerError::from)
@@ -976,6 +979,7 @@ impl RemoteControlRuntime {
         if let Some(server) = self.server.take() {
             server.stop();
         }
+        self.status.host_fingerprint = None;
         self.status.effective = effective;
     }
 }

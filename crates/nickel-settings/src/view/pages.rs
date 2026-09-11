@@ -12,6 +12,10 @@ pub(crate) struct RemoteExposurePresentation {
     pub(crate) kind: SettingsStatusKind,
     pub(crate) exposure: String,
     pub(crate) transport: String,
+    pub(crate) effective_endpoint: String,
+    pub(crate) listen_address: String,
+    pub(crate) fingerprint: String,
+    pub(crate) connection_info: Option<String>,
 }
 
 pub(crate) fn remote_exposure_presentation(
@@ -28,60 +32,128 @@ pub(crate) fn remote_exposure_presentation(
     let https = endpoint
         .as_ref()
         .is_some_and(|endpoint| endpoint.scheme() == "https");
-    let transport = match (https, loopback, snapshot.host_fingerprint.is_some()) {
-        (true, _, true) => {
-            "HTTPS with a host certificate fingerprint available for verification".into()
+    let transport = match (
+        snapshot.effective,
+        https,
+        loopback,
+        snapshot.host_fingerprint.is_some(),
+    ) {
+        (Effective::Disabled, _, _, _) => "Inactive — the listener is disabled".into(),
+        (Effective::Rejected, _, _, _) => "Unavailable — the listener did not start".into(),
+        (Effective::Enabled, true, _, true) => {
+            "HTTPS active · verify the host certificate fingerprint below".into()
         }
-        (true, _, false) => {
-            "HTTPS reported, but the host certificate fingerprint is unavailable".into()
+        (Effective::Enabled, true, _, false) => {
+            "HTTPS reported, but the active host certificate fingerprint is unavailable".into()
         }
-        (false, Some(true), _) => "Local HTTP restricted to this computer".into(),
-        (false, Some(false), _) => {
-            "Unprotected HTTP was reported for a non-loopback address".into()
+        (Effective::Enabled, false, Some(true), _) => {
+            "Loopback HTTP active · restricted to this computer".into()
         }
-        (false, None, _) => {
-            "Transport state unavailable; the endpoint could not be classified".into()
+        (Effective::Enabled, false, Some(false), _) => {
+            "Unsafe unprotected HTTP reported on a non-loopback address".into()
+        }
+        (Effective::Enabled, false, None, _) => {
+            "Transport state unavailable · the active endpoint could not be classified".into()
         }
     };
 
-    let (kind, exposure) = match (snapshot.effective, loopback, https) {
-        (Effective::Enabled, Some(false), true) => (
+    let (kind, exposure) = match (
+        snapshot.effective,
+        loopback,
+        https,
+        snapshot.host_fingerprint.is_some(),
+    ) {
+        (Effective::Enabled, Some(false), true, true) => (
             SettingsStatusKind::Validation,
-            "Remote exposure active. New connections have no authority until locally approved.".into(),
+            "REMOTE EXPOSURE ACTIVE. New connections have no authority until locally approved.".into(),
         ),
-        (Effective::Enabled, Some(false), false) => (
+        (Effective::Enabled, Some(false), true, false) => (
+            SettingsStatusKind::Error,
+            "REMOTE EXPOSURE REPORTED, but the active HTTPS host fingerprint is unavailable.".into(),
+        ),
+        (Effective::Enabled, Some(false), false, _) => (
             SettingsStatusKind::Error,
             "Unsafe remote exposure reported: the active non-loopback endpoint is not protected by HTTPS.".into(),
         ),
-        (Effective::Enabled, Some(true), _) => (
+        (Effective::Enabled, Some(true), true, false) => (
+            SettingsStatusKind::Error,
+            "Local HTTPS is reported, but the active host fingerprint is unavailable.".into(),
+        ),
+        (Effective::Enabled, Some(true), _, _) => (
             SettingsStatusKind::Information,
             "Local only. The listener accepts connections from this computer.".into(),
         ),
-        (Effective::Enabled, None, _) => (
+        (Effective::Enabled, None, _, _) => (
             SettingsStatusKind::Unavailable,
             "Exposure state unavailable because the active endpoint could not be classified.".into(),
         ),
-        (Effective::Disabled, Some(false), _) => (
+        (Effective::Disabled, Some(false), _, _) => (
             SettingsStatusKind::Unavailable,
             "Not exposed. A remote address is configured, but the listener is disabled.".into(),
         ),
-        (Effective::Disabled, _, _) => (
+        (Effective::Disabled, _, _, _) => (
             SettingsStatusKind::Unavailable,
             "Not exposed. The listener is disabled.".into(),
         ),
-        (Effective::Rejected, Some(false), _) => (
+        (Effective::Rejected, Some(false), _, _) => (
             SettingsStatusKind::Error,
-            "Not exposed. A remote address is configured, but the listener failed to start.".into(),
+            "NO LISTENER ACTIVE. The requested remote address failed to bind. Nickel did not fall back to loopback or another port.".into(),
         ),
-        (Effective::Rejected, _, _) => (
+        (Effective::Rejected, _, _, _) => (
             SettingsStatusKind::Error,
-            "Not exposed. The listener failed to start.".into(),
+            "NO LISTENER ACTIVE. The requested address failed to bind. Nickel did not fall back to another address or port.".into(),
         ),
     };
+    let effective_endpoint = match snapshot.effective {
+        Effective::Enabled => snapshot.endpoint.clone(),
+        Effective::Disabled => "None — listener is disabled".into(),
+        Effective::Rejected => "None — listener did not start".into(),
+    };
+    let socket_address = endpoint.as_ref().and_then(|endpoint| {
+        let host = endpoint.host_str()?.parse::<std::net::IpAddr>().ok()?;
+        Some(std::net::SocketAddr::new(host, endpoint.port()?))
+    });
+    let listen_address =
+        socket_address.map_or_else(|| snapshot.endpoint.clone(), |address| address.to_string());
+    let fingerprint = match snapshot.effective {
+        Effective::Enabled => snapshot.host_fingerprint.clone().unwrap_or_else(|| {
+            if https {
+                "Unavailable — active HTTPS identity is incomplete".into()
+            } else {
+                "Not used — loopback HTTP".into()
+            }
+        }),
+        Effective::Disabled => "Unavailable — listener is disabled".into(),
+        Effective::Rejected => "Unavailable — listener did not start".into(),
+    };
+    let copyable = snapshot.effective == Effective::Enabled
+        && socket_address.is_some()
+        && ((https && snapshot.host_fingerprint.is_some()) || (!https && loopback == Some(true)));
+    let connection_info = copyable.then_some(socket_address).flatten().map(|address| {
+        let source = if snapshot.environment_override {
+            "NICKEL_MCP_LISTEN_ADDR process environment"
+        } else {
+            "Nickel built-in loopback default"
+        };
+        let endpoint = format!("{}://{address}/mcp", if https { "https" } else { "http" });
+        let mut connection = format!(
+            "Nickel MCP listen address: {address}\nNickel MCP endpoint: {endpoint}\nTransport: {}\nConfiguration source: {source}",
+            if https { "HTTPS" } else { "Loopback HTTP" },
+        );
+        if let Some(fingerprint) = &snapshot.host_fingerprint {
+            connection.push_str("\nHost certificate SHA-256: ");
+            connection.push_str(fingerprint);
+        }
+        connection
+    });
     RemoteExposurePresentation {
         kind,
         exposure,
         transport,
+        effective_endpoint,
+        listen_address,
+        fingerprint,
+        connection_info,
     }
 }
 
@@ -1205,8 +1277,13 @@ impl SettingsApp {
         )
         .child(SettingsRow::new(
             theme,
-            "MCP endpoint",
-            self.remote_control_runtime.endpoint.clone(),
+            "Effective MCP endpoint",
+            remote_exposure.effective_endpoint,
+        ))
+        .child(SettingsRow::new(
+            theme,
+            "Configured listen address",
+            remote_exposure.listen_address,
         ))
         .child(SettingsRow::new(
             theme,
@@ -1228,26 +1305,24 @@ impl SettingsApp {
                 "Copy connection info",
                 ButtonPresentation::Secondary,
             )
+            .enabled(remote_exposure.connection_info.is_some())
             .id("remote-control-copy-connection")
-            .accessibility_label("Copy MCP endpoint and host fingerprint")
+            .accessibility_label("Copy effective MCP connection information")
             .width(220.0),
         )
         .child(SettingsRow::new(
             theme,
-            "Listener configuration",
+            "Listener configuration source",
             if self.remote_control_runtime.environment_override {
-                "Process environment override"
+                "NICKEL_MCP_LISTEN_ADDR process environment (read only)"
             } else {
-                "Default loopback address"
+                "Nickel built-in loopback default"
             },
         ))
         .child(SettingsRow::new(
             theme,
             "Host certificate SHA-256",
-            self.remote_control_runtime
-                .host_fingerprint
-                .clone()
-                .unwrap_or_else(|| "Local HTTP listener".into()),
+            remote_exposure.fingerprint,
         ))
         .child(SettingsRow::new(
             theme,

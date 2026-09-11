@@ -4322,12 +4322,16 @@ mod tests {
     fn rejected_listener_start_preserves_requested_endpoint_and_environment_origin() {
         let settings = crate::RemoteAiControlSettings::default();
         let mut runtime = crate::RemoteControlRuntime::default();
+        runtime.status.host_fingerprint = Some("stale-fingerprint-canary".into());
         let invalid =
             crate::listener::ListenerConfig::select(Ok("localhost:43199".into()), None, None);
         runtime.apply_with_listener_selection(&settings, Arc::new(EmptyDesktop), invalid);
         assert_eq!(runtime.status().effective, crate::EffectiveState::Rejected);
         assert_eq!(runtime.status().endpoint, "localhost:43199");
         assert!(runtime.status().environment_override);
+        assert!(runtime.status().host_fingerprint.is_none());
+        assert!(runtime.server.is_none());
+        assert!(!runtime.control.lock().unwrap().enabled());
 
         let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
@@ -4338,6 +4342,9 @@ mod tests {
         assert_eq!(runtime.status().effective, crate::EffectiveState::Rejected);
         assert_eq!(runtime.status().endpoint, requested);
         assert!(runtime.status().environment_override);
+        assert!(runtime.status().host_fingerprint.is_none());
+        assert!(runtime.server.is_none());
+        assert!(!runtime.control.lock().unwrap().enabled());
         assert!(
             runtime
                 .status()
@@ -4345,6 +4352,24 @@ mod tests {
                 .as_deref()
                 .is_some_and(|diagnostic| diagnostic.contains(&address.to_string()))
         );
+    }
+
+    #[test]
+    fn disabled_listener_still_reports_the_process_environment_configuration() {
+        let mut settings = crate::RemoteAiControlSettings::default();
+        settings.set_requested(false);
+        let mut runtime = crate::RemoteControlRuntime::default();
+        runtime.status.host_fingerprint = Some("stale-fingerprint-canary".into());
+        let selection =
+            crate::listener::ListenerConfig::select(Ok("127.0.0.9:43210".into()), None, None);
+
+        runtime.apply_with_listener_selection(&settings, Arc::new(EmptyDesktop), selection);
+
+        assert_eq!(runtime.status().effective, crate::EffectiveState::Disabled);
+        assert_eq!(runtime.status().endpoint, "http://127.0.0.9:43210/mcp");
+        assert!(runtime.status().environment_override);
+        assert!(runtime.status().host_fingerprint.is_none());
+        assert!(runtime.server.is_none());
     }
 
     fn http(request: &str) -> String {
