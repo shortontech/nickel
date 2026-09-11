@@ -237,6 +237,13 @@ enum OwnerRequest {
         prepared: Box<crate::platform::remote_observation::Prepared>,
         reply: SyncSender<Result<nickel_remote_control::diagnostics::DiagnosticSnapshot, String>>,
     },
+    Events {
+        permit: DesktopPermit,
+        after: u64,
+        reply: SyncSender<
+            Result<nickel_remote_control::desktop_events::DesktopEventObservation, String>,
+        >,
+    },
     Connection {
         permit: nickel_remote_control::ClientConnectionPermit,
         action: nickel_remote_control::ClientConnectionAction,
@@ -298,6 +305,26 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         receiver
             .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "Windows desktop owner timed out".to_owned())?
+    }
+    fn read_desktop_events(
+        &self,
+        permit: DesktopPermit,
+        after: u64,
+    ) -> Result<nickel_remote_control::desktop_events::DesktopEventObservation, String> {
+        let completion = permit.clone();
+        let (reply, receiver) = mpsc::sync_channel(1);
+        self.sender
+            .try_send(OwnerRequest::Events {
+                permit,
+                after,
+                reply,
+            })
+            .map_err(|_| "Windows desktop owner is busy or stopped".to_owned())?;
+        let result = receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "Windows desktop owner timed out".to_owned())?;
+        completion.check_live()?;
+        result
     }
     fn keyboard_action(
         &self,
@@ -528,6 +555,7 @@ pub(crate) struct WindowsRemoteControl {
     local_input_epoch: u64,
     keyboard_hold: Option<WindowsKeyboardHold>,
     pointer_hold: Option<WindowsPointerHold>,
+    desktop_events: nickel_remote_control::desktop_events::DesktopEvents,
     start_time: Instant,
     last_stop: Option<Instant>,
 }
@@ -621,6 +649,7 @@ impl WindowsRemoteControl {
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
             pointer_hold: None,
+            desktop_events: Default::default(),
             start_time: started,
             last_stop: None,
         };
@@ -661,6 +690,7 @@ impl WindowsRemoteControl {
         self.reconcile_local_input();
         self.reconcile_keyboard_hold();
         self.reconcile_pointer_hold();
+        self.sync_input_ownership_event();
         // Service transport loss before ordinary requests, even if their queue is full.
         if self.authority.cleanup_wake.take_wake_failure() {
             tracing::warn!("Remote connection cleanup wake failed; owner fallback is active");
@@ -719,6 +749,7 @@ impl WindowsRemoteControl {
                 } => {
                     let result =
                         self.perform_keyboard_action(permit, *prepared, &id, generation, action);
+                    self.sync_input_ownership_event();
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Pointer {
@@ -728,6 +759,7 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.perform_pointer_action(permit, *prepared, request);
+                    self.sync_input_ownership_event();
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Diagnostic {
@@ -736,6 +768,14 @@ impl WindowsRemoteControl {
                     reply,
                 } => {
                     let result = self.perform_diagnostic_snapshot(permit, *prepared);
+                    let _ = reply.try_send(result);
+                }
+                OwnerRequest::Events {
+                    permit,
+                    after,
+                    reply,
+                } => {
+                    let result = self.read_desktop_events(permit, after);
                     let _ = reply.try_send(result);
                 }
                 OwnerRequest::Local(request) => {
@@ -769,6 +809,14 @@ impl WindowsRemoteControl {
             self.applications.poll(&mut control);
             self.local_cues.update(control.leases(), Instant::now());
         }
+        self.sync_input_ownership_event();
+    }
+    fn sync_input_ownership_event(&mut self) {
+        self.desktop_events.record_remote_input_ownership(
+            self.keyboard_hold.is_some(),
+            self.pointer_hold.is_some(),
+            self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64,
+        );
     }
     fn reconcile_local_input(&mut self) {
         let observed = local_input_epoch();
@@ -1409,8 +1457,7 @@ impl WindowsRemoteControl {
                     child_capacity: 0,
                 },
                 external_accessibility: None,
-                recent_events: nickel_remote_control::desktop_events::DesktopEvents::default()
-                    .snapshot(),
+                recent_events: self.desktop_events.snapshot(),
                 diagnostic_logs: windows_diagnostic_logs(),
                 frame_trace: None,
                 trace_lifecycle: trace_lifecycle_snapshot(&permit, self.start_time),
@@ -1427,7 +1474,6 @@ impl WindowsRemoteControl {
                     "windows_settings_and_diagnostic_workers".into(),
                     "windows_application_launch_state".into(),
                     "windows_external_accessibility".into(),
-                    "windows_desktop_event_stream".into(),
                     "windows_frame_trace".into(),
                 ],
             })
@@ -1442,6 +1488,27 @@ impl WindowsRemoteControl {
         }
         permit.check_live()?;
         Ok(snapshot)
+    }
+
+    fn read_desktop_events(
+        &mut self,
+        permit: DesktopPermit,
+        after: u64,
+    ) -> Result<nickel_remote_control::desktop_events::DesktopEventObservation, String> {
+        permit.with_debug(!self.desktop_unlocked, || {
+            self.observation_generation = self
+                .observation_generation
+                .checked_add(1)
+                .ok_or("Windows observation generations exhausted")?;
+            let observed_at_us = self.start_time.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            Ok(
+                nickel_remote_control::desktop_events::DesktopEventObservation {
+                    observation_generation: self.observation_generation,
+                    observed_at_us,
+                    history: self.desktop_events.since(after)?,
+                },
+            )
+        })
     }
 
     fn perform_window_action(
@@ -2206,6 +2273,7 @@ mod tests {
             local_input_epoch: local_input_epoch(),
             keyboard_hold: None,
             pointer_hold: None,
+            desktop_events: Default::default(),
             start_time: Instant::now(),
             last_stop: None,
         }
