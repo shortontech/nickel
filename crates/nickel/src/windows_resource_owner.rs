@@ -8,6 +8,16 @@ use nickel_remote_control::{
 };
 use std::collections::BTreeMap;
 
+pub(crate) fn capture_dimensions(width: i32, height: i32) -> Result<(u16, u16, usize), String> {
+    let width = u16::try_from(width).map_err(|_| "Windows capture dimensions exceed limits")?;
+    let height = u16::try_from(height).map_err(|_| "Windows capture dimensions exceed limits")?;
+    let pixels = usize::from(width)
+        .checked_mul(usize::from(height))
+        .filter(|pixels| *pixels > 0 && *pixels <= 16_777_216)
+        .ok_or("Windows capture dimensions exceed limits")?;
+    Ok((width, height, pixels))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Rect {
     pub x: i32,
@@ -528,5 +538,18 @@ mod tests {
                 .window_resource(&window_scope, &summary.id, summary.generation + 1)
                 .is_none()
         );
+    }
+    #[test]
+    fn capture_dimensions_bound_pixels_and_wire_dimensions() {
+        assert_eq!(capture_dimensions(640, 480), Ok((640, 480, 307_200)));
+        for dimensions in [
+            (0, 480),
+            (640, 0),
+            (-1, 480),
+            (i32::from(u16::MAX) + 1, 1),
+            (5000, 5000),
+        ] {
+            assert!(capture_dimensions(dimensions.0, dimensions.1).is_err());
+        }
     }
 }

@@ -20,7 +20,9 @@ use windows::{
     Win32::{
         Foundation::{HANDLE, HWND, LPARAM, RECT, WPARAM},
         Graphics::Gdi::{
-            EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleDC, CreateDIBSection,
+            DIB_RGB_COLORS, DeleteDC, DeleteObject, EnumDisplayMonitors, GetDC, GetMonitorInfoW,
+            HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITORINFOEXW, ReleaseDC, SRCCOPY, SelectObject,
         },
         System::{
             RemoteDesktop::{
@@ -41,11 +43,11 @@ use windows::{
             },
             WindowsAndMessaging::{
                 BringWindowToTop, EVENT_OBJECT_CREATE, EVENT_OBJECT_DESTROY, EnumWindows, GA_ROOT,
-                GetAncestor, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId,
-                HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed, MONITORINFOF_PRIMARY,
-                OBJID_WINDOW, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SWP_NOACTIVATE,
-                SWP_NOZORDER, SetForegroundWindow, SetWindowPos, ShowWindow, WINEVENT_OUTOFCONTEXT,
-                WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
+                GetAncestor, GetClientRect, GetForegroundWindow, GetWindowRect,
+                GetWindowThreadProcessId, HWND_TOP, IsIconic, IsWindow, IsWindowVisible, IsZoomed,
+                MONITORINFOF_PRIMARY, OBJID_WINDOW, PostMessageW, SW_MAXIMIZE, SW_MINIMIZE,
+                SW_RESTORE, SWP_NOACTIVATE, SWP_NOZORDER, SetForegroundWindow, SetWindowPos,
+                ShowWindow, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE,
             },
         },
     },
@@ -57,6 +59,76 @@ const MAX_OUTPUTS: usize = nickel_remote_control::diagnostics::MAX_DIAGNOSTIC_OU
 const MAX_AGE: Duration = Duration::from_millis(250);
 fn unavailable() -> String {
     "Windows desktop evidence is unavailable or changed".into()
+}
+
+pub(crate) fn capture_window_client(
+    window: &Window,
+    session: u32,
+) -> Result<image::RgbaImage, String> {
+    if !desktop_is_unlocked(session) {
+        return Err(unavailable());
+    }
+    let hwnd = HWND(window.native as *mut std::ffi::c_void);
+    let mut bounds = RECT::default();
+    // SAFETY: The owner freshly validated this HWND and process incarnation.
+    unsafe { GetClientRect(hwnd, &mut bounds) }.map_err(|_| unavailable())?;
+    let width = bounds.right - bounds.left;
+    let height = bounds.bottom - bounds.top;
+    let (_, _, pixels) = policy::capture_dimensions(width, height)?;
+    let info = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: width,
+            biHeight: -height,
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    // Read the target's client DC, not the composed desktop. Compositor-owned
+    // trusted chrome is therefore absent even when it overlaps this rectangle.
+    unsafe {
+        let source = GetDC(Some(hwnd));
+        if source.0.is_null() {
+            return Err(unavailable());
+        }
+        let memory = CreateCompatibleDC(Some(source));
+        if memory.0.is_null() {
+            ReleaseDC(Some(hwnd), source);
+            return Err(unavailable());
+        }
+        let mut data = std::ptr::null_mut();
+        let bitmap = match CreateDIBSection(Some(source), &info, DIB_RGB_COLORS, &mut data, None, 0)
+        {
+            Ok(bitmap) => bitmap,
+            Err(_) => {
+                let _ = DeleteDC(memory);
+                ReleaseDC(Some(hwnd), source);
+                return Err(unavailable());
+            }
+        };
+        let previous = SelectObject(memory, HGDIOBJ(bitmap.0));
+        let copied = BitBlt(memory, 0, 0, width, height, Some(source), 0, 0, SRCCOPY);
+        let mut rgba = vec![0; pixels * 4];
+        if copied.is_ok() && !data.is_null() {
+            let bgra = std::slice::from_raw_parts(data.cast::<u8>(), rgba.len());
+            for (source, target) in bgra.chunks_exact(4).zip(rgba.chunks_exact_mut(4)) {
+                target.copy_from_slice(&[source[2], source[1], source[0], 255]);
+            }
+        }
+        SelectObject(memory, previous);
+        let _ = DeleteObject(HGDIOBJ(bitmap.0));
+        let _ = DeleteDC(memory);
+        ReleaseDC(Some(hwnd), source);
+        copied.map_err(|_| unavailable())?;
+        if !desktop_is_unlocked(session) {
+            rgba.fill(0);
+            return Err(unavailable());
+        }
+        image::RgbaImage::from_raw(width as u32, height as u32, rgba).ok_or_else(unavailable)
+    }
 }
 
 struct LifecycleSender {

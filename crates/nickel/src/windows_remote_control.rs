@@ -83,10 +83,12 @@ enum ObservationKind {
     Windows,
     Outputs,
     Inspect { id: String, generation: u64 },
+    CaptureSource { id: String, generation: u64 },
 }
 enum ObservationResult {
     Windows(Vec<nickel_remote_control::WindowSummary>),
     Outputs(nickel_remote_control::diagnostics::OutputInventory),
+    CaptureSource(crate::windows_resource_owner::Window),
 }
 enum OwnerRequest {
     Local(LocalRequest),
@@ -113,6 +115,9 @@ enum OwnerRequest {
 struct WindowsDesktopAuthority {
     cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     sender: SyncSender<OwnerRequest>,
+    started: Instant,
+    desktop_session: Option<u32>,
+    capture_generation: std::sync::atomic::AtomicU64,
 }
 impl WindowsDesktopAuthority {
     fn observe(
@@ -222,6 +227,67 @@ impl DesktopAuthority for WindowsDesktopAuthority {
         )?;
         Err("Native Windows UI Automation observation is not available".into())
     }
+    fn validate_window_capture(
+        &self,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<(), String> {
+        match self.observe(
+            permit,
+            ObservationKind::CaptureSource {
+                id: id.into(),
+                generation,
+            },
+        )? {
+            ObservationResult::CaptureSource(_) => Ok(()),
+            _ => Err("Windows observation mismatch".into()),
+        }
+    }
+    fn capture_window(
+        &self,
+        permit: DesktopPermit,
+        id: &str,
+        generation: u64,
+    ) -> Result<nickel_remote_control::capture::CapturedWindow, String> {
+        let submitted_at_us = self.started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+        let source = match self.observe(
+            permit.clone(),
+            ObservationKind::CaptureSource {
+                id: id.into(),
+                generation,
+            },
+        )? {
+            ObservationResult::CaptureSource(source) => source,
+            _ => return Err("Windows observation mismatch".into()),
+        };
+        permit.check_live()?;
+        let session = self
+            .desktop_session
+            .ok_or("Windows desktop evidence is unavailable")?;
+        let image = crate::platform::remote_observation::capture_window_client(&source, session)?;
+        permit.check_live()?;
+        self.validate_window_capture(permit.clone(), id, generation)?;
+        let capture_generation = self
+            .capture_generation
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |value| value.checked_add(1),
+            )
+            .map_err(|_| "Windows capture generations exhausted")?
+            + 1;
+        Ok(nickel_remote_control::capture::CapturedWindow {
+            window_id: id.into(),
+            generation,
+            capture_generation,
+            submitted_at_us,
+            completed_at_us: self.started.elapsed().as_micros().min(u64::MAX as u128) as u64,
+            width: image.width() as u16,
+            height: image.height() as u16,
+            rgba: image.into_raw(),
+        })
+    }
     fn window_action(
         &self,
         permit: DesktopPermit,
@@ -283,9 +349,17 @@ impl WindowsRemoteControl {
         cleanup_wake: nickel_remote_control::ConnectionCleanupWake,
     ) -> io::Result<Self> {
         let (sender, receiver) = mpsc::sync_channel(16);
+        let desktop_session =
+            nickel_platform::process_identity::WindowsProcessIdentity::probe(std::process::id())
+                .ok()
+                .map(|identity| identity.session_id());
+        let started = Instant::now();
         let authority = Arc::new(WindowsDesktopAuthority {
             cleanup_wake,
             sender: sender.clone(),
+            started,
+            desktop_session,
+            capture_generation: std::sync::atomic::AtomicU64::new(0),
         });
         let transport = nickel_platform::local_control::LocalControlServer::start(move |frame| {
             let envelope: nickel_session_protocol::ClientEnvelope =
@@ -318,10 +392,6 @@ impl WindowsRemoteControl {
             })
             .map_err(io::Error::other)
         })?;
-        let desktop_session =
-            nickel_platform::process_identity::WindowsProcessIdentity::probe(std::process::id())
-                .ok()
-                .map(|identity| identity.session_id());
         let desktop_unlocked =
             desktop_session.is_some_and(crate::platform::remote_observation::desktop_is_unlocked);
         let mut owner = Self {
@@ -337,7 +407,7 @@ impl WindowsRemoteControl {
             authority,
             desktop_session,
             desktop_unlocked,
-            start_time: Instant::now(),
+            start_time: started,
             last_stop: None,
         };
         // Publish the lock-free cancellation handle before any listener starts.
@@ -534,6 +604,14 @@ impl WindowsRemoteControl {
                 // inspect_window means a real semantic tree. Do not manufacture a
                 // Nickel surface/tree identity from an external window caption.
                 return Err("Native Windows UI Automation observation is not available".into());
+            }
+            ObservationKind::CaptureSource { id, generation } => {
+                let (window, evidence) = self
+                    .resources
+                    .window_resource(&scope, &id, generation)
+                    .ok_or("Windows resource is unavailable")?;
+                let window = permit.with_resource(&evidence, || Ok(window.clone()))?;
+                ObservationResult::CaptureSource(window)
             }
         };
         prepared.revalidate()?;
@@ -1312,6 +1390,9 @@ mod tests {
             authority: Arc::new(WindowsDesktopAuthority {
                 sender,
                 cleanup_wake: nickel_remote_control::ConnectionCleanupWake::new(|| true),
+                started: Instant::now(),
+                desktop_session: None,
+                capture_generation: std::sync::atomic::AtomicU64::new(0),
             }),
             desktop_session: None,
             desktop_unlocked: false,
