@@ -4925,6 +4925,7 @@ impl NickelSession {
                 surface.role,
                 crate::winit_shell::SurfaceRole::ControlCenter
                     | crate::winit_shell::SurfaceRole::Screenshot
+                    | crate::winit_shell::SurfaceRole::WindowContextMenu
             ) {
                 focus_on_show = Some(runtime_id);
             }
@@ -10502,6 +10503,47 @@ mod protocol_tests {
                 .all(|id| !session.internal_ui.is_visible(id))
         );
         assert_eq!(session.remote_codex_runtime_generation, 43);
+    }
+
+    #[test]
+    fn newly_inserted_window_context_menu_receives_keyboard_focus() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session
+            .internal_shell
+            .as_mut()
+            .unwrap()
+            .apply_session_snapshot(nickel_session_protocol::Snapshot {
+                windows: vec![nickel_session_protocol::WindowSnapshot {
+                    id: nickel_session_protocol::WindowId(41),
+                    application_id: "owned-test".into(),
+                    title: "Owned test".into(),
+                    active: true,
+                    minimized: false,
+                    maximized: false,
+                    fullscreen: false,
+                    geometry: None,
+                    workspace: nickel_session_protocol::WorkspaceId(1),
+                }],
+                ..Default::default()
+            });
+        assert!(
+            session
+                .internal_shell
+                .as_mut()
+                .unwrap()
+                .open_window_menu_at(41, 120, 80)
+        );
+        session.sync_internal_shell();
+        let menu = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surface(crate::winit_shell::SurfaceRole::WindowContextMenu, None)
+            .unwrap()
+            .id;
+        let runtime = session.internal_shell_surfaces[&menu];
+        assert_eq!(session.internal_ui.focused(), Some(runtime));
     }
 
     #[test]

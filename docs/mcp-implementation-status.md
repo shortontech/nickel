@@ -1399,3 +1399,11 @@ only targets queried, effective-default count, directly-writable count,
 availability, and partial status; association keys, handler identities, names,
 paths, provider details, and errors never cross the boundary. Windows returns
 unavailable until its registry traversal has a verified latency boundary.
+
+GTK-originated internal window menus now receive compositor keyboard focus when
+their surface is first inserted. The owned native GTK/X11 origin fixture passes
+remote maximize/restore, delayed post-revocation gesture denial, independent
+physical gestures, delayed menu denial, remote-menu retirement, physical
+replacement survival, and physical semantic-action takeover. This closes the
+previous replacement-menu Escape/focus and physical dispatch seam; the isolated
+compositor, Xvfb, D-Bus services, GTK client, and listener were stopped afterward.
