@@ -2653,6 +2653,72 @@ fn navigation_scope_exit_parent_contain_and_dismiss_are_distinct() {
 }
 
 #[test]
+fn exiting_layout_only_scope_does_not_focus_its_container() {
+    let view = Container::new()
+        .id("pane")
+        .navigation_scope(crate::NavigationScope::pane(true))
+        .child(
+            Container::new()
+                .id("launcher")
+                .navigation_scope(crate::NavigationScope::group())
+                .child(Button::new(TestMessage::Option(1), "Chrome").id("chrome")),
+        );
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 240.0, 120.0), &mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerDown);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(selected_suffix(&state, "/chrome"));
+
+    tree.handle_event(&mut state, UiEvent::ControllerBack);
+    tree.handle_event(&mut state, UiEvent::ControllerBack);
+    assert_ne!(
+        state.navigation().controller_selected().map(UiId::as_str),
+        Some("root/pane")
+    );
+}
+
+#[test]
+fn left_bubbles_from_nested_waypoint_through_pane_to_previous_pane() {
+    let view = Row::new().children([
+        Container::new()
+            .id("sidebar")
+            .navigation_scope(crate::NavigationScope::pane(true))
+            .child(Button::new(TestMessage::Option(1), "Home").id("home")),
+        Container::new()
+            .id("detail")
+            .navigation_scope(crate::NavigationScope::pane(false))
+            .child(
+                Container::new()
+                    .id("launcher")
+                    .navigation_scope(crate::NavigationScope::group())
+                    .semantic_role(SemanticRole::Button)
+                    .accessibility_label("Application launcher")
+                    .message(TestMessage::Option(2))
+                    .child(Button::new(TestMessage::Option(3), "Chrome").id("chrome")),
+            ),
+    ]);
+    let mut state = UiStateStore::default();
+    let tree = UiFrame::layout_with_state(view, Rect::new(0.0, 0.0, 480.0, 120.0), &mut state);
+
+    tree.handle_event(&mut state, UiEvent::ControllerNextPane);
+    tree.handle_event(&mut state, UiEvent::ControllerActivate);
+    assert!(selected_suffix(&state, "/chrome"));
+
+    tree.handle_event(&mut state, UiEvent::ControllerLeft);
+    assert!(selected_suffix(&state, "/launcher"));
+    tree.handle_event(&mut state, UiEvent::ControllerLeft);
+    assert!(selected_suffix(&state, "/home"));
+    assert!(
+        state
+            .navigation()
+            .controller_pane()
+            .is_some_and(|id| id.as_str().ends_with("/sidebar"))
+    );
+}
+
+#[test]
 fn linear_navigation_honors_rtl_and_containment_at_edges() {
     let view = Container::new()
         .id("scope")

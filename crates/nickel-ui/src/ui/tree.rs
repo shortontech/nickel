@@ -2972,13 +2972,16 @@ impl<Message: Clone> UiFrame<Message> {
                         &mut outcome.messages,
                     );
                     if moved == Invalidation::None {
-                        state
-                            .navigation()
-                            .controller_scope()
-                            .cloned()
-                            .map_or(Invalidation::None, |scope| {
-                                self.leave_controller_scope(state, &scope)
-                            })
+                        state.navigation().controller_scope().cloned().map_or(
+                            Invalidation::None,
+                            |scope| {
+                                if state.navigation().controller_pane() == Some(&scope) {
+                                    self.switch_controller_pane(state, -1)
+                                } else {
+                                    self.leave_controller_scope(state, &scope)
+                                }
+                            },
+                        )
                     } else {
                         moved
                     }
@@ -4492,14 +4495,24 @@ impl<Message: Clone> UiFrame<Message> {
             }
             crate::NavigationExit::Parent => {
                 self.remember_scope_selection(state, scope);
+                let is_active_pane = state.navigation().controller_pane() == Some(scope);
                 let parent_scope = self
                     .nearest_ancestor_where(scope, |node| node.navigation_scope.is_some())
                     .map(|node| node.id.clone());
-                state
+                let mut invalidation = state
                     .navigation_mut()
                     .set_controller_scope(parent_scope)
-                    .merge(state.navigation_mut().set_controller_editing(false))
-                    .merge(self.select_controller_id(state, scope.clone()))
+                    .merge(state.navigation_mut().set_controller_editing(false));
+                // A scope is a waypoint in its parent only when it owns a controller
+                // action there. Layout-only scopes (notably pane containers) route
+                // traversal but must never retain selection themselves.
+                let selection = if is_active_pane {
+                    state.navigation_mut().set_controller_selected(None)
+                } else {
+                    self.select_controller_id(state, scope.clone())
+                };
+                invalidation = invalidation.merge(selection);
+                invalidation
             }
         }
     }
