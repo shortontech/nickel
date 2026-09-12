@@ -4738,6 +4738,16 @@ impl LiveShell {
     /// whichever application was active before this surface opened.
     pub(crate) fn dismiss_ephemeral_on_focus_loss(&mut self, role: SurfaceRole) -> bool {
         match role {
+            SurfaceRole::Launcher => {
+                if !self.launcher_visible {
+                    return false;
+                }
+                // Focus already moved to the destination. Do not use the
+                // explicit Hide command, which restores the pre-launcher
+                // window as though the user had cancelled the launcher.
+                self.apply_session_launcher_visibility(false);
+                true
+            }
             SurfaceRole::ControlCenter => {
                 self.control_host.application_mut().show_control_center();
                 std::mem::replace(&mut self.control_visible, false)

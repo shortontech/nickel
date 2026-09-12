@@ -1161,6 +1161,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ephemeral_focus_loss_hides_launcher_without_restoring_displaced_focus() {
+        #[derive(Default)]
+        struct RecordingHost(std::sync::Mutex<Vec<ShellCommand>>);
+        impl SessionHost for RecordingHost {
+            fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError> {
+                self.0.lock().unwrap().push(command);
+                Ok(())
+            }
+        }
+        let host = Arc::new(RecordingHost::default());
+        let mut coordinator =
+            InternalShellCoordinator::new(host.clone(), PanelEdge::Bottom).unwrap();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "test".into(),
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+        }]);
+        coordinator.apply_launcher_visibility(true);
+        host.0.lock().unwrap().clear();
+
+        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher));
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        assert!(!coordinator.visible(launcher));
+        assert!(
+            host.0.lock().unwrap().is_empty(),
+            "focus loss must not restore the window displaced by launcher activation"
+        );
+    }
+
     struct TestHost;
 
     impl SessionHost for TestHost {

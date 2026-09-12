@@ -5629,6 +5629,16 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
+        let launcher_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
+            shell.surfaces().iter().any(|surface| {
+                surface.role == SurfaceRole::Launcher
+                    && shell.visible(surface.id)
+                    && self
+                        .internal_shell_surfaces
+                        .get(&surface.id)
+                        .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
+            })
+        });
         let window_menu_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
             shell.surfaces().iter().any(|surface| {
                 surface.role == SurfaceRole::WindowContextMenu
@@ -5639,7 +5649,7 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
-        if menu.is_none() && !control_blurred && !window_menu_blurred {
+        if menu.is_none() && !launcher_blurred && !control_blurred && !window_menu_blurred {
             return;
         }
         if let Some(menu) = menu {
@@ -5648,6 +5658,9 @@ impl NickelSession {
         if let Some(shell) = self.internal_shell.as_mut() {
             if menu.is_some() {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::CodexProjectMenu);
+            }
+            if launcher_blurred {
+                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher);
             }
             if control_blurred {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter);
@@ -9937,6 +9950,7 @@ impl NickelSession {
         if self.internal_ui.clear_focus().is_some() {
             self.record_remote_focus_cleared();
             self.reconcile_keyboard_internal_recipient();
+            self.dismiss_unfocused_internal_popovers();
             self.wake_internal_shell();
             self.schedule_internal_ui_frame();
         }
