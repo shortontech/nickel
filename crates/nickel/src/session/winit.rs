@@ -7,7 +7,7 @@ use smithay::{
     backend::{
         allocator::Fourcc,
         renderer::{
-            Bind, Color32F, ExportMem, Frame, ImportAll, ImportMem, Offscreen, Renderer,
+            Bind, Color32F, ExportMem, Frame, ImportAll, ImportDma, ImportMem, Offscreen, Renderer,
             damage::OutputDamageTracker,
             element::{
                 AsRenderElements, Kind,
@@ -101,7 +101,7 @@ pub fn init_winit(
     let (mut backend, winit) = if let Ok(size) = std::env::var("NICKEL_NESTED_SIZE") {
         let (width, height) = parse_nested_size(&size)
             .ok_or("NICKEL_NESTED_SIZE must be WIDTHxHEIGHT, each between 320 and 8192")?;
-        winit::init_from_attributes(
+        winit::init_from_attributes::<GlesRenderer>(
             smithay::reexports::winit::window::WindowAttributes::default()
                 .with_surface_size(smithay::reexports::winit::dpi::LogicalSize::new(
                     width, height,
@@ -110,7 +110,7 @@ pub fn init_winit(
                 .with_visible(true),
         )?
     } else {
-        winit::init()?
+        winit::init::<GlesRenderer>()?
     };
     if physical_emergency_order.is_some() {
         use smithay::reexports::winit::window::UserAttentionType;
@@ -120,6 +120,7 @@ pub fn init_winit(
         backend.window().focus_window();
     }
     state.set_winit_redraw_window(backend.window());
+    state.advertise_dmabuf_formats(backend.renderer().dmabuf_formats().iter().copied());
     let startup_frame_pump_until = Instant::now() + Duration::from_secs(3);
 
     let mode = Mode {

@@ -2445,6 +2445,7 @@ pub struct RadioOption<Message = String> {
     id: Option<UiId>,
     leading: Option<Element<Message>>,
     trailing: Option<Element<Message>>,
+    compact: bool,
 }
 
 impl<Message> RadioOption<Message> {
@@ -2464,6 +2465,7 @@ impl<Message> RadioOption<Message> {
             id: None,
             leading: None,
             trailing: None,
+            compact: false,
         }
     }
 
@@ -2489,6 +2491,11 @@ impl<Message> RadioOption<Message> {
 
     pub fn trailing(mut self, trailing: impl Component<Message>) -> Self {
         self.trailing = Some(trailing.into_element());
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.compact = true;
         self
     }
 }
@@ -2533,9 +2540,18 @@ impl<Message> Component<Message> for RadioOption<Message> {
             (true, false) => "unselected",
         };
         let mut option = Container::new()
-            .min_height(58.0)
+            .min_height(if self.compact { 44.0 } else { 58.0 })
             .fill_width()
-            .padding(Insets::all(self.theme.spacing.content))
+            .padding(if self.compact {
+                Insets {
+                    top: 4.0,
+                    right: 12.0,
+                    bottom: 4.0,
+                    left: 12.0,
+                }
+            } else {
+                Insets::all(self.theme.spacing.content)
+            })
             .radius(self.theme.radii.control)
             .background(self.theme.surfaces.card)
             .border(

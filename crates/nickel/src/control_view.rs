@@ -8,7 +8,7 @@ use nickel_core::theme::{Appearance, ThemePalette};
 use nickel_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Insets,
     Length, LinearGradient, Row, SemanticRole, SemanticTheme, SemanticTokenSet, Slider, Spacer,
-    Text, UiHost, VerticalScroll, ViewContext,
+    Switch, SwitchState, Text, UiHost, VerticalScroll, ViewContext,
 };
 
 const GOOD: u32 = 0x6ee7a8;
@@ -27,7 +27,7 @@ fn control_theme(palette: ThemePalette) -> SemanticTheme {
         palette.muted,
         palette.accent,
         palette.surface,
-        GOOD,
+        palette.accent,
         WARNING,
     ))
 }
@@ -495,45 +495,16 @@ fn toggle(
     enabled: bool,
     message: ControlAction,
 ) -> AnyView<ControlAction> {
-    let thumb = || {
-        AnyView::new(
-            Container::new()
-                .width(18.0)
-                .height(18.0)
-                .radius(9.0)
-                .background(if enabled { palette.text } else { palette.muted }),
-        )
+    let state = match (value, enabled) {
+        (false, true) => SwitchState::Off,
+        (true, true) => SwitchState::On,
+        (false, false) => SwitchState::DisabledOff,
+        (true, false) => SwitchState::DisabledOn,
     };
     AnyView::new(
-        Container::new()
+        Switch::with_state_action(state, enabled.then_some(message), control_theme(palette))
             .id(id)
-            .width(42.0)
-            .height(24.0)
-            .radius(12.0)
-            .padding(3.0)
-            .background(if value {
-                palette.accent
-            } else {
-                palette.surface_hover
-            })
-            .semantic_role(SemanticRole::Switch)
-            .accessibility_label(id)
-            .message(message)
-            .enabled(enabled)
-            .child(
-                Row::new()
-                    .fill_width()
-                    .child(if value {
-                        AnyView::new(Spacer::flex())
-                    } else {
-                        thumb()
-                    })
-                    .child(if value {
-                        thumb()
-                    } else {
-                        AnyView::new(Spacer::flex())
-                    }),
-            ),
+            .accessibility_label(id),
     )
 }
 
@@ -604,16 +575,7 @@ fn wifi(palette: ThemePalette, status: &NetworkStatus, expanded: bool) -> Card {
             Row::new()
                 .height(38.0)
                 .align_items(Align::Start)
-                .child(title(
-                    palette,
-                    "Wi-Fi",
-                    detail,
-                    if status.connected {
-                        GOOD
-                    } else {
-                        palette.muted
-                    },
-                ))
+                .child(title(palette, "Wi-Fi", detail, palette.muted))
                 .child(Spacer::flex())
                 .child(toggle(
                     palette,
@@ -680,12 +642,7 @@ fn bluetooth_view(palette: ThemePalette, status: &BluetoothStatus, expanded: boo
         AnyView::new(
             Row::new()
                 .height(38.0)
-                .child(title(
-                    palette,
-                    "Bluetooth",
-                    detail,
-                    if connected > 0 { GOOD } else { palette.muted },
-                ))
+                .child(title(palette, "Bluetooth", detail, palette.muted))
                 .child(Spacer::flex())
                 .child(toggle(
                     palette,
@@ -831,7 +788,7 @@ fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Ca
 }
 
 fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Card {
-    let mut controls = workspaces
+    let workspace_controls = workspaces
         .iter()
         .take(10)
         .enumerate()
@@ -853,26 +810,28 @@ fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Ca
             )
         })
         .collect::<Vec<_>>();
-    controls.push(AnyView::new(
+    let can_remove = workspaces.len() > 1;
+    let active_workspace = workspaces
+        .iter()
+        .find(|workspace| workspace.active)
+        .map_or(0, |workspace| workspace.id);
+    let create = AnyView::new(
         button(palette, action(ControlAction::CreateWorkspace), "+")
             .id("workspace-create")
             .width(34.0)
             .height(28.0),
-    ));
-    if workspaces.len() > 1
-        && let Some(active) = workspaces.iter().find(|workspace| workspace.active)
-    {
-        controls.push(AnyView::new(
-            button(
-                palette,
-                action(ControlAction::RemoveWorkspace(active.id)),
-                "−",
-            )
-            .id("workspace-remove")
-            .width(34.0)
-            .height(28.0),
-        ));
-    }
+    );
+    let remove = AnyView::new(
+        button(
+            palette,
+            action(ControlAction::RemoveWorkspace(active_workspace)),
+            "−",
+        )
+        .id("workspace-remove")
+        .width(34.0)
+        .height(28.0)
+        .enabled(can_remove),
+    );
     card(
         palette,
         82.0,
@@ -884,7 +843,21 @@ fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Ca
                     .bold(true)
                     .color(palette.text),
             ),
-            AnyView::new(Row::new().height(28.0).gap(6.0).children(controls)),
+            AnyView::new(
+                Row::new()
+                    .fill_width()
+                    .height(28.0)
+                    .gap(6.0)
+                    .child(
+                        Row::new()
+                            .height(28.0)
+                            .gap(6.0)
+                            .children(workspace_controls),
+                    )
+                    .child(Spacer::flex())
+                    .child(create)
+                    .child(remove),
+            ),
         ],
     )
 }
@@ -1155,6 +1128,44 @@ mod tests {
         }
         assert!(!has_action(&host, &ControlAction::RemoveWorkspace(4)));
     }
+
+    #[test]
+    fn workspace_create_and_remove_controls_keep_fixed_positions() {
+        let one = build(&[WorkspaceSummary {
+            id: 4,
+            active: true,
+        }]);
+        let three = build(&[
+            WorkspaceSummary {
+                id: 4,
+                active: true,
+            },
+            WorkspaceSummary {
+                id: 9,
+                active: false,
+            },
+            WorkspaceSummary {
+                id: 12,
+                active: false,
+            },
+        ]);
+        let control = |host: &ControlCenterHost, name: &str| {
+            host.semantic_nodes()
+                .into_iter()
+                .find(|node| node.name.as_deref() == Some(name))
+                .expect("workspace control should remain present")
+        };
+
+        let one_create = control(&one, "+");
+        let one_remove = control(&one, "−");
+        let three_create = control(&three, "+");
+        let three_remove = control(&three, "−");
+        assert_eq!(one_create.bounds, three_create.bounds);
+        assert_eq!(one_remove.bounds, three_remove.bounds);
+        assert!(!one_remove.enabled);
+        assert!(three_remove.enabled);
+    }
+
     #[test]
     fn volume_is_a_semantic_value_control() {
         let mut host = build(&[]);

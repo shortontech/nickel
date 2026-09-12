@@ -5,11 +5,25 @@ use super::{
     copy_mapped_damage_to_strided, copy_mapped_region_to_strided, damage_bounding_box,
     dependent_renderers_after_primary_removal, device_activation_priority, draw_contained_preview,
     draw_memory_render_buffer, drm_render_strategy, mapped_damage_rows,
-    mark_disabled_outputs_absent, normalize_capture_rows, paced_render_delay,
-    parse_kde_cursor_settings, pending_recovery_devices, primary_dependency_to_activate,
-    published_disabled_outputs, render_primary_available, renderer_retained_reason,
-    should_attempt_scanned_connector, switcher_visible_range, union_rectangles,
+    mark_disabled_outputs_absent, no_usable_drm_device_error, normalize_capture_rows,
+    paced_render_delay, parse_kde_cursor_settings, pending_recovery_devices,
+    primary_dependency_to_activate, published_disabled_outputs, render_primary_available,
+    renderer_retained_reason, should_attempt_scanned_connector, switcher_visible_range,
+    union_rectangles,
 };
+
+#[test]
+fn unusable_drm_error_preserves_each_device_failure() {
+    let error = no_usable_drm_device_error(&[
+        "card1 (/dev/dri/card1): failed to initialize EGL renderer: bad allocation".into(),
+        "card0 (/dev/dri/card0): failed to open DRM device through libseat: busy".into(),
+    ]);
+
+    assert!(error.contains("card1 (/dev/dri/card1)"));
+    assert!(error.contains("failed to initialize EGL renderer: bad allocation"));
+    assert!(error.contains("card0 (/dev/dri/card0)"));
+    assert!(error.contains("failed to open DRM device through libseat: busy"));
+}
 
 #[test]
 fn duplicate_active_connector_is_not_retried_on_every_hotplug_scan() {

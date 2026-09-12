@@ -292,6 +292,18 @@ mod tests {
             ));
             assert!(runtime.pointer_button_with_client(position, edge == KeyEdge::Pressed, true));
         }
+        for edge in [KeyEdge::Pressed, KeyEdge::Released] {
+            assert!(runtime.desktop_pointer_input(
+                "mouse",
+                position,
+                DesktopPointerAction::Button {
+                    button: PointerButton::Secondary,
+                    edge,
+                },
+                Default::default(),
+                true,
+            ));
+        }
         let events = runtime
             .drain_routed_events()
             .into_iter()
@@ -314,6 +326,11 @@ mod tests {
                 HostEvent::Ui(nickel_ui::UiEvent::PointerReleased(_))
             ))
         );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            HostEvent::Ui(nickel_ui::UiEvent::PointerContext(point))
+                if *point == nickel_ui::Point { x: 20.0, y: 20.0 }
+        )));
         assert!(
             !events
                 .iter()
@@ -964,6 +981,34 @@ impl InternalUiRuntime {
         let Some(id) = target else {
             return false;
         };
+        let panel_placement = self
+            .presentation
+            .get(&id)
+            .filter(|surface| {
+                surface.visible
+                    && surface.external_scene.is_some()
+                    && surface.placement.role == InternalSurfaceRole::Panel
+            })
+            .map(|surface| surface.placement.clone());
+        if let (
+            Some(placement),
+            DesktopPointerAction::Button {
+                button: PointerButton::Secondary,
+                edge,
+            },
+        ) = (panel_placement, &action)
+        {
+            if *edge == KeyEdge::Pressed {
+                self.dispatch_ui(
+                    id,
+                    nickel_ui::UiEvent::PointerContext(nickel_ui::Point {
+                        x: (position.0 - f64::from(placement.geometry.0)) as f32,
+                        y: (position.1 - f64::from(placement.geometry.1)) as f32,
+                    }),
+                );
+            }
+            return true;
+        }
         let captured = self.desktop_input.capture.is_some();
         let placement = self
             .presentation

@@ -393,6 +393,8 @@ struct OutputSnapshot {
     primary: bool,
     enabled: bool,
     scale_120: u32,
+    modes: Vec<nickel_session_protocol::OutputMode>,
+    current_mode: Option<nickel_session_protocol::OutputMode>,
 }
 
 #[derive(Clone, Debug)]
@@ -402,6 +404,10 @@ struct DisplayCard {
     detail: String,
     logical_width: i32,
     logical_height: i32,
+    logical_x: i32,
+    logical_y: i32,
+    modes: Vec<nickel_session_protocol::OutputMode>,
+    mode: nickel_session_protocol::OutputMode,
     rect: Rect,
     primary: bool,
     enabled: bool,
@@ -657,6 +663,13 @@ enum SettingsMessage {
     DisplayPrimary,
     DisplayEnabled(bool),
     SetDisplayScale(u32),
+    ToggleDisplayResolutionSelect,
+    SetDisplayResolution {
+        width: i32,
+        height: i32,
+    },
+    ToggleDisplayRefreshSelect,
+    SetDisplayRefresh(i32),
     ApplicationScaleFollow,
     ApplicationScaleUnchanged,
     SetApplicationScale(u32),
@@ -1854,6 +1867,8 @@ impl SettingsApp {
             SettingsMessage::SelectDisplay(index) => {
                 if index < self.displays.len() {
                     self.selected = index;
+                    self.display_resolution_select_expanded = false;
+                    self.display_refresh_select_expanded = false;
                 }
             }
             SettingsMessage::DisplayDrag { index, phase, x, y } => match phase {
@@ -1904,6 +1919,48 @@ impl SettingsApp {
                         .expect("bounded scale slider always produces a positive value");
                 self.applied = false;
                 self.status = self.localizer.text("settings-status-changes-not-applied");
+            }
+            SettingsMessage::ToggleDisplayResolutionSelect => {
+                self.display_resolution_select_expanded = !self.display_resolution_select_expanded;
+                self.display_refresh_select_expanded = false;
+            }
+            SettingsMessage::SetDisplayResolution { width, height } => {
+                let current_refresh = self.displays[self.selected].mode.refresh_millihz;
+                if let Some(mode) = self.displays[self.selected]
+                    .modes
+                    .iter()
+                    .filter(|mode| mode.width == width && mode.height == height)
+                    .copied()
+                    .max_by_key(|mode| {
+                        (
+                            mode.refresh_millihz == current_refresh,
+                            mode.refresh_millihz,
+                        )
+                    })
+                {
+                    self.set_selected_display_mode(mode);
+                }
+                self.display_resolution_select_expanded = false;
+            }
+            SettingsMessage::ToggleDisplayRefreshSelect => {
+                self.display_refresh_select_expanded = !self.display_refresh_select_expanded;
+                self.display_resolution_select_expanded = false;
+            }
+            SettingsMessage::SetDisplayRefresh(refresh_millihz) => {
+                let selected = &self.displays[self.selected];
+                if let Some(mode) = selected
+                    .modes
+                    .iter()
+                    .find(|mode| {
+                        mode.width == selected.mode.width
+                            && mode.height == selected.mode.height
+                            && mode.refresh_millihz == refresh_millihz
+                    })
+                    .copied()
+                {
+                    self.set_selected_display_mode(mode);
+                }
+                self.display_refresh_select_expanded = false;
             }
             SettingsMessage::ApplicationScaleFollow => {
                 self.application_scale_policy = ApplicationScalePolicy::FollowNickel;
@@ -1966,6 +2023,22 @@ impl SettingsApp {
         self.request_redraw();
     }
 
+    fn set_selected_display_mode(&mut self, mode: nickel_session_protocol::OutputMode) {
+        let display = &mut self.displays[self.selected];
+        display.mode = mode;
+        display.logical_width = mode.width;
+        display.logical_height = mode.height;
+        display.detail = format!(
+            "{}  {} × {} @ {:.2} Hz",
+            display.connector,
+            mode.width,
+            mode.height,
+            f64::from(mode.refresh_millihz) / 1000.0
+        );
+        self.applied = false;
+        self.status = self.localizer.text("settings-status-changes-not-applied");
+    }
+
     fn begin_display_drag(&mut self, index: usize, x: i32, y: i32) {
         if self.page != SettingsPage::Display || index >= self.displays.len() {
             return;
@@ -1974,6 +2047,10 @@ impl SettingsApp {
         let rect = self.displays[index].rect;
         self.drag_offset = Some((x - rect.x, y - rect.y));
         self.drag_origin = Some(rect);
+        self.drag_layout_origin = Some((
+            self.displays[index].logical_x,
+            self.displays[index].logical_y,
+        ));
     }
 
     fn move_display_drag(&mut self, x: i32, y: i32) {
@@ -1992,6 +2069,14 @@ impl SettingsApp {
             .filter(|(index, _)| *index != self.selected)
             .fold(rect, |moving, (_, other)| snap_rect(moving, other.rect, 42));
         self.displays[self.selected].rect = rect;
+        if let (Some(origin), Some((logical_x, logical_y))) =
+            (self.drag_origin, self.drag_layout_origin)
+        {
+            self.displays[self.selected].logical_x =
+                logical_x + (f64::from(rect.x - origin.x) / self.pixels_per_logical).round() as i32;
+            self.displays[self.selected].logical_y =
+                logical_y + (f64::from(rect.y - origin.y) / self.pixels_per_logical).round() as i32;
+        }
         if self.drag_origin != Some(rect) {
             self.applied = false;
             self.status = self.localizer.text("settings-status-changes-not-applied");
@@ -2014,20 +2099,8 @@ impl SettingsApp {
             self.request_redraw();
             return;
         }
-        let snapped = self
-            .displays
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != self.selected)
-            .map(|(_, other)| attach_rect_centered(selected, other.rect))
-            .min_by_key(|rect| {
-                let dx = rect.x - selected.x;
-                let dy = rect.y - selected.y;
-                dx * dx + dy * dy
-            })
-            .unwrap_or(selected);
-        self.displays[self.selected].rect = snapped;
-        if snapped != origin {
+        self.drag_layout_origin = None;
+        if selected != origin {
             self.applied = false;
             self.status = self.localizer.text("settings-status-changes-not-applied");
         }
@@ -2036,6 +2109,7 @@ impl SettingsApp {
 
     fn cancel_drag(&mut self) {
         self.drag_offset = None;
+        self.drag_layout_origin = None;
         let Some(origin) = self.drag_origin.take() else {
             return;
         };
@@ -2545,7 +2619,9 @@ impl SettingsApp {
                     self.request_redraw();
                 }
                 nickel_session_protocol::Event::Snapshot(_) => {
-                    self.load_outputs();
+                    if self.applied && self.pending_display_revert.is_none() {
+                        self.load_outputs();
+                    }
                     self.refresh_workspace_state();
                     self.request_redraw();
                 }
@@ -2559,6 +2635,9 @@ impl SettingsApp {
         }
         if self.page == SettingsPage::Display && now >= self.next_toolkit_scale_refresh {
             self.refresh_toolkit_scale();
+            if self.using_mock_displays {
+                self.load_outputs();
+            }
         }
         if self
             .appearance_save_deadline
@@ -2751,39 +2830,6 @@ fn snap_rect(mut moving: Rect, fixed: Rect, threshold: i32) -> Rect {
     moving
 }
 
-fn attach_rect_centered(moving: Rect, fixed: Rect) -> Rect {
-    let candidates = [
-        Rect {
-            x: fixed.x - moving.w,
-            y: fixed.y + (fixed.h - moving.h) / 2,
-            ..moving
-        },
-        Rect {
-            x: fixed.x + fixed.w,
-            y: fixed.y + (fixed.h - moving.h) / 2,
-            ..moving
-        },
-        Rect {
-            x: fixed.x + (fixed.w - moving.w) / 2,
-            y: fixed.y - moving.h,
-            ..moving
-        },
-        Rect {
-            x: fixed.x + (fixed.w - moving.w) / 2,
-            y: fixed.y + fixed.h,
-            ..moving
-        },
-    ];
-    candidates
-        .into_iter()
-        .min_by_key(|candidate| {
-            let dx = candidate.x - moving.x;
-            let dy = candidate.y - moving.y;
-            dx * dx + dy * dy
-        })
-        .unwrap_or(moving)
-}
-
 fn center_display_rects(displays: &mut [DisplayCard], plane: Rect) {
     let Some(first) = displays.first() else {
         return;
@@ -2825,42 +2871,10 @@ fn logical_placements(displays: &[DisplayCard]) -> Vec<(i32, i32)> {
     if displays.is_empty() {
         return Vec::new();
     }
-    let mut placements = vec![(0, 0); displays.len()];
-    for index in 1..displays.len() {
-        let moving = &displays[index];
-        let fixed = &displays[index - 1];
-        let (fixed_x, fixed_y) = placements[index - 1];
-        let edge_distances = [
-            (moving.rect.x + moving.rect.w - fixed.rect.x).abs(),
-            (moving.rect.x - fixed.rect.x - fixed.rect.w).abs(),
-            (moving.rect.y + moving.rect.h - fixed.rect.y).abs(),
-            (moving.rect.y - fixed.rect.y - fixed.rect.h).abs(),
-        ];
-        let edge = edge_distances
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, distance)| *distance)
-            .map(|(edge, _)| edge)
-            .unwrap_or(1);
-        placements[index] = match edge {
-            0 => (
-                fixed_x - moving.logical_width,
-                fixed_y + (fixed.logical_height - moving.logical_height) / 2,
-            ),
-            1 => (
-                fixed_x + fixed.logical_width,
-                fixed_y + (fixed.logical_height - moving.logical_height) / 2,
-            ),
-            2 => (
-                fixed_x + (fixed.logical_width - moving.logical_width) / 2,
-                fixed_y - moving.logical_height,
-            ),
-            _ => (
-                fixed_x + (fixed.logical_width - moving.logical_width) / 2,
-                fixed_y + fixed.logical_height,
-            ),
-        };
-    }
+    let mut placements = displays
+        .iter()
+        .map(|display| (display.logical_x, display.logical_y))
+        .collect::<Vec<_>>();
     let minimum_x = placements.iter().map(|(x, _)| *x).min().unwrap_or(0);
     let minimum_y = placements.iter().map(|(_, y)| *y).min().unwrap_or(0);
     for (x, y) in &mut placements {
@@ -3258,9 +3272,9 @@ mod tests {
         FeatureSupport, FileIconPreference, MaintenanceTaskResult, NetworkAdapter,
         OptionalFeatureRuntime, OptionalFeatureSettings, Rect, SIDEBAR_WIDTH, SettingsApp,
         SettingsHostAdapter, SettingsMessage, SettingsPage, ThemePreference, UiHost,
-        WallpaperSettings, WifiNetwork, attach_rect_centered, codex_feature_state,
-        constrain_center, resolve_codex_feature_state, shell_behavior_transaction,
-        show_pending_maintenance_phase, snap_rect,
+        WallpaperSettings, WifiNetwork, codex_feature_state, constrain_center,
+        resolve_codex_feature_state, shell_behavior_transaction, show_pending_maintenance_phase,
+        snap_rect,
     };
     use nickel_core::optional_features::FeaturePolicy;
     use std::sync::mpsc;
@@ -3325,7 +3339,13 @@ mod tests {
         );
         let policy = nodes
             .iter()
-            .filter(|node| node.semantic_role == Some(SemanticRole::Radio))
+            .filter(|node| {
+                node.semantic_role == Some(SemanticRole::Radio)
+                    && matches!(
+                        node.label.as_deref(),
+                        Some("Follow Nickel" | "Leave unchanged" | "Custom")
+                    )
+            })
             .collect::<Vec<_>>();
         assert_eq!(policy.len(), 3);
         assert_eq!(
@@ -3433,27 +3453,6 @@ mod tests {
     }
 
     #[test]
-    fn released_monitor_touches_and_centers_on_nearest_edge() {
-        let fixed = Rect {
-            x: 400,
-            y: 180,
-            w: 220,
-            h: 125,
-        };
-        let moving = Rect {
-            x: 150,
-            y: 205,
-            w: 220,
-            h: 125,
-        };
-
-        let attached = attach_rect_centered(moving, fixed);
-
-        assert_eq!(attached.x + attached.w, fixed.x);
-        assert_eq!(attached.y + attached.h / 2, fixed.y + fixed.h / 2);
-    }
-
-    #[test]
     fn distant_monitors_keep_freeform_position() {
         let fixed = Rect {
             x: 400,
@@ -3495,6 +3494,74 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn resolution_and_refresh_selectors_form_only_supported_modes() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        app.selected = 0;
+        app.displays[0].modes = vec![
+            nickel_session_protocol::OutputMode {
+                width: 1920,
+                height: 1080,
+                refresh_millihz: 60_000,
+            },
+            nickel_session_protocol::OutputMode {
+                width: 1920,
+                height: 1080,
+                refresh_millihz: 120_000,
+            },
+            nickel_session_protocol::OutputMode {
+                width: 1280,
+                height: 720,
+                refresh_millihz: 75_000,
+            },
+        ];
+        app.displays[0].mode = app.displays[0].modes[0];
+
+        app.handle_settings_message(SettingsMessage::SetDisplayResolution {
+            width: 1280,
+            height: 720,
+        });
+        assert_eq!(app.displays[0].mode, app.displays[0].modes[2]);
+
+        let tree = app.build_ui(900.0, 900.0);
+        assert_eq!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetDisplayRefresh(75_000))
+                .len(),
+            1
+        );
+        assert!(
+            tree.semantic_targets_for_message(&SettingsMessage::SetDisplayRefresh(120_000))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn compositor_snapshots_do_not_overwrite_staged_display_changes() {
+        let mut app = SettingsApp::with_initial_page(SettingsPage::Display);
+        app.using_mock_displays = false;
+        app.applied = false;
+        app.next_toolkit_scale_refresh =
+            std::time::Instant::now() + std::time::Duration::from_secs(60);
+        app.displays[0].mode = nickel_session_protocol::OutputMode {
+            width: 1440,
+            height: 900,
+            refresh_millihz: 60_000,
+        };
+        let staged = app.displays[0].mode;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.session_events = Some(receiver);
+        sender
+            .send(nickel_session_protocol::Event::Snapshot(
+                nickel_session_protocol::Snapshot::default(),
+            ))
+            .unwrap();
+
+        app.tick();
+
+        assert_eq!(app.displays[0].mode, staged);
+        assert!(!app.applied);
     }
 
     #[test]
@@ -5298,6 +5365,10 @@ mod tests {
             760,
         );
         SettingsHostAdapter::sync_display_plane(&mut host);
+        // The native adapter schedules a frame after synchronizing resolved
+        // canvas geometry. Rebuild explicitly in this direct host test so its
+        // semantic hit targets use the same coordinates as the model.
+        host.resize(1200, 760);
         let target = host
             .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(0))
             .expect("first display is a semantic drag target");
@@ -5318,6 +5389,7 @@ mod tests {
 
         host.handle_event(nickel_ui::UiEvent::PointerMoved(moved));
         assert_ne!(host.application().displays[0].rect, origin);
+        assert_ne!(host.application().displays[0].logical_y, 0);
 
         host.handle_event(nickel_ui::UiEvent::PointerReleased(moved));
         assert!(host.application().drag_offset.is_none());
@@ -5325,10 +5397,17 @@ mod tests {
         assert!(!host.application().applied);
 
         let settled = host.application().displays[0].rect;
-        host.handle_event(nickel_ui::UiEvent::PointerPressed(start));
+        let settled_target = host
+            .unique_semantic_target_for_message(&SettingsMessage::SelectDisplay(0))
+            .expect("moved display remains a semantic drag target");
+        let settled_start = nickel_ui::Point {
+            x: settled_target.bounds.origin.x + 12.0,
+            y: settled_target.bounds.origin.y + 12.0,
+        };
+        host.handle_event(nickel_ui::UiEvent::PointerPressed(settled_start));
         host.handle_event(nickel_ui::UiEvent::PointerMoved(nickel_ui::Point {
-            x: start.x - 45.0,
-            y: start.y - 35.0,
+            x: settled_start.x - 45.0,
+            y: settled_start.y - 35.0,
         }));
         assert_ne!(host.application().displays[0].rect, settled);
         host.handle_event(nickel_ui::UiEvent::FocusLost);

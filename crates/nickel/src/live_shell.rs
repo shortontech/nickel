@@ -37,7 +37,7 @@ use crate::{
         LauncherViewState, reduce_launcher_action,
     },
     model::{Application, OpenWindow, TrayItem, WindowGroup},
-    notification::DesktopNotification,
+    notification::{DesktopNotification, NotificationAction, NotificationRequest},
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     platform::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
@@ -192,7 +192,7 @@ const PANEL_TRAY_ICON_SIZE: u32 = 18;
 const PANEL_CODEX_WIDTH: f32 = 36.0;
 const PANEL_CODEX_ICON_SIZE: f32 = 28.0;
 const PREVIEW_LEAVE_DELAY: Duration = Duration::from_millis(500);
-const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(350);
+const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
 const PREVIEW_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
 #[cfg(target_os = "linux")]
 const RECURRING_DIAGNOSTIC_INTERVAL: Duration = Duration::from_secs(30);
@@ -492,6 +492,8 @@ pub struct LiveShell {
     tray_icons: Vec<Arc<image::RgbaImage>>,
     notification: Option<DesktopNotification>,
     notification_history_visible: bool,
+    #[cfg(target_os = "linux")]
+    remote_lease_notifications: HashMap<u32, nickel_session_protocol::RemotePendingLease>,
     wallpaper_path: Option<std::path::PathBuf>,
     wallpaper_source_fingerprint: Option<WallpaperSourceFingerprint>,
     wallpaper_loaded_source_fingerprint: Option<WallpaperSourceFingerprint>,
@@ -988,6 +990,8 @@ impl LiveShell {
             tray_icons,
             notification: None,
             notification_history_visible: false,
+            #[cfg(target_os = "linux")]
+            remote_lease_notifications: HashMap::new(),
             wallpaper_path,
             wallpaper_source_fingerprint,
             wallpaper_loaded_source_fingerprint,
@@ -1172,6 +1176,8 @@ impl LiveShell {
     }
 
     pub(crate) fn refresh_fast_changes(&mut self) -> Vec<SurfaceRole> {
+        #[cfg(target_os = "linux")]
+        self.sync_remote_lease_notifications();
         self.refresh_fast_changes_with_preview_source(|feed, window| feed.preview(window))
     }
 
@@ -1607,6 +1613,11 @@ impl LiveShell {
                 changed || show
             }
             platform::SystemStatusUpdate::ShellSettingsChanged => self.refresh_system(),
+            platform::SystemStatusUpdate::ApplicationInventory(discovery) => {
+                platform::publish_application_discovery(&discovery);
+                self.apply_application_discovery(discovery);
+                true
+            }
         }
     }
 
@@ -2560,6 +2571,26 @@ impl LiveShell {
         self.apply_notification_effects()
     }
 
+    pub(crate) fn notification_host_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.notification.is_none() && !self.notification_history_visible {
+            return false;
+        }
+        self.sync_notification_host(width, height);
+        let outcome = self.notification_host.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        outcome.changed | self.apply_notification_effects()
+    }
+
     pub fn notification_key(&mut self, key: Option<KeyCode>) -> bool {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
@@ -2914,15 +2945,7 @@ impl LiveShell {
             }
             PanelAction::Task(index) => {
                 let groups = self.panel_groups();
-                if groups
-                    .get(index)
-                    .is_some_and(|group| group.windows.len() > 1)
-                {
-                    self.open_window_preview(index);
-                    self.preview_focus_requested = true;
-                } else if let Some(window) =
-                    groups.get(index).and_then(|group| group.windows.first())
-                {
+                if let Some(window) = groups.get(index).and_then(|group| group.windows.last()) {
                     let _ = self.send_session_command(
                         "activate-window",
                         ShellCommand::WindowAction {
@@ -4722,6 +4745,13 @@ impl LiveShell {
             SurfaceRole::CodexProjectMenu => {
                 std::mem::replace(&mut self.codex_project_menu_visible, false)
             }
+            SurfaceRole::WindowContextMenu => {
+                let visible = self.window_menu.is_some() || self.application_menu_target.is_some();
+                if visible {
+                    self.close_window_preview();
+                }
+                visible
+            }
             _ => false,
         }
     }
@@ -4821,7 +4851,7 @@ impl LiveShell {
     }
 
     pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
-        self.window_menu.map(|_| {
+        (self.window_menu.is_some() || self.application_menu_target.is_some()).then(|| {
             (
                 self.window_menu_anchor_x.unwrap_or(self.panel_origin_x),
                 self.window_menu_anchor_y.unwrap_or(self.panel_origin_y),
@@ -4829,6 +4859,19 @@ impl LiveShell {
                 self.window_context_menu_height().max(1) as u32,
             )
         })
+    }
+
+    pub(crate) fn preview_geometry(&mut self) -> Option<(i32, i32, u32, u32)> {
+        let index = self.preview_group?;
+        let groups = self.panel_groups();
+        let group = groups.get(index)?;
+        let (width, height) = preview_dimensions(group.windows.len());
+        Some((
+            self.preview_origin_x(index, width),
+            self.panel_origin_y,
+            width,
+            height,
+        ))
     }
 
     pub(crate) fn open_active_window_menu_at(&mut self, x: i32, y: i32) -> bool {
@@ -5233,6 +5276,20 @@ impl LiveShell {
                     notification_id,
                     key,
                 } => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(pending) = self.remote_lease_notifications.remove(&notification_id)
+                    {
+                        let allow = key == "approve";
+                        if (allow || key == "deny")
+                            && let Err(error) =
+                                self.session_host.decide_remote_lease(&pending, allow)
+                        {
+                            tracing::warn!(%error, "remote lease notification action failed");
+                        }
+                    } else {
+                        self.notification_feed.invoke(notification_id, &key);
+                    }
+                    #[cfg(not(target_os = "linux"))]
                     self.notification_feed.invoke(notification_id, &key);
                     self.dismiss_notification_transport(notification_id);
                 }
@@ -5259,6 +5316,78 @@ impl LiveShell {
             }
         }
         handled
+    }
+
+    #[cfg(target_os = "linux")]
+    fn sync_remote_lease_notifications(&mut self) {
+        let pending = self.session_host.remote_pending_leases();
+        let stale = self
+            .remote_lease_notifications
+            .iter()
+            .filter(|(_, shown)| {
+                !pending.iter().any(|current| {
+                    current.client_id == shown.client_id
+                        && current.pending_generation == shown.pending_generation
+                })
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        for id in stale {
+            self.remote_lease_notifications.remove(&id);
+            self.notification_feed.close_internal(id);
+        }
+        for request in pending {
+            if self.remote_lease_notifications.values().any(|shown| {
+                shown.client_id == request.client_id
+                    && shown.pending_generation == request.pending_generation
+            }) {
+                continue;
+            }
+            let scope = match &request.request.scope {
+                nickel_session_protocol::RemoteResourceScope::FullSession => {
+                    "the full desktop".to_owned()
+                }
+                nickel_session_protocol::RemoteResourceScope::Application(_) => {
+                    "an application".to_owned()
+                }
+                nickel_session_protocol::RemoteResourceScope::Window(_) => "a window".to_owned(),
+                nickel_session_protocol::RemoteResourceScope::Surface(_) => "a surface".to_owned(),
+                nickel_session_protocol::RemoteResourceScope::Output(_) => "a display".to_owned(),
+            };
+            let duration = request
+                .request
+                .duration_seconds
+                .map(|seconds| {
+                    format!(
+                        " for {} minute{}",
+                        seconds.div_ceil(60),
+                        if seconds.div_ceil(60) == 1 { "" } else { "s" }
+                    )
+                })
+                .unwrap_or_default();
+            let id = self.notification_feed.notify_internal(NotificationRequest {
+                app_name: "Nickel".into(),
+                summary: "Remote control request".into(),
+                body: format!(
+                    "{} wants to control {scope}{duration}.",
+                    request.client_label
+                ),
+                actions: vec![
+                    NotificationAction {
+                        key: "deny".into(),
+                        label: "Deny".into(),
+                    },
+                    NotificationAction {
+                        key: "approve".into(),
+                        label: "Approve".into(),
+                    },
+                ],
+                expire_timeout_ms: 0,
+            });
+            if id != 0 {
+                self.remote_lease_notifications.insert(id, request);
+            }
+        }
     }
 
     fn dismiss_notification_transport(&mut self, notification_id: u32) {
@@ -6053,6 +6182,7 @@ impl LiveShell {
                         y: entry.y,
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
+                        mode: None,
                     })
                     .collect(),
             };
@@ -6100,6 +6230,7 @@ impl LiveShell {
                         y: entry.y,
                         enabled: entry.enabled,
                         scale_120: entry.scale.units(),
+                        mode: None,
                     })
                     .collect(),
             };

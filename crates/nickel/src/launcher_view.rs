@@ -6,7 +6,12 @@
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
-    sync::{Arc, OnceLock},
+    path::PathBuf,
+    sync::{
+        Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    },
 };
 
 use crate::{
@@ -110,6 +115,7 @@ pub struct LauncherApplication {
     effects: Vec<LauncherAction>,
     dirty: bool,
     reading_direction: Option<ReadingDirection>,
+    icon_revision: u64,
 }
 
 impl LauncherApplication {
@@ -119,6 +125,7 @@ impl LauncherApplication {
         icons: LauncherIconCache,
         palette: ThemePalette,
     ) -> Self {
+        let icon_revision = icons.revision();
         Self {
             launcher,
             state: RefCell::new(state),
@@ -128,6 +135,7 @@ impl LauncherApplication {
             effects: Vec::new(),
             dirty: false,
             reading_direction: None,
+            icon_revision,
         }
     }
 
@@ -272,7 +280,10 @@ impl UiApplication for LauncherApplication {
     }
 
     fn poll(&mut self) -> bool {
-        std::mem::take(&mut self.dirty)
+        let revision = self.icons.borrow().revision();
+        let icons_changed = revision != self.icon_revision;
+        self.icon_revision = revision;
+        std::mem::take(&mut self.dirty) || icons_changed
     }
 
     fn shortcut(&mut self, shortcut: Shortcut) -> bool {
@@ -376,10 +387,21 @@ pub fn reduce_launcher_action(
 /// Bounded CPU image cache with stable renderer resource IDs.
 #[derive(Clone)]
 pub struct LauncherIconCache {
+    shared: Arc<LauncherIconCacheShared>,
+}
+
+struct LauncherIconCacheShared {
+    state: Mutex<LauncherIconCacheState>,
+    requests: mpsc::Sender<LauncherIconRequest>,
+    revision: AtomicU64,
+}
+
+struct LauncherIconCacheState {
     icons: HashMap<String, CachedIcon>,
     insertion_order: VecDeque<String>,
     next_id: u16,
     evictions: u64,
+    generation: u64,
 }
 
 const LAUNCHER_ICON_CACHE_CAPACITY: usize = 512;
@@ -393,92 +415,115 @@ const LAUNCHER_ICON_CACHE_MAX_BYTES: usize = LAUNCHER_ICON_CACHE_CAPACITY
 struct CachedIcon {
     id: u16,
     image: Option<Arc<RgbaImage>>,
+    pending: bool,
+}
+
+struct LauncherIconRequest {
+    key: String,
+    id: u16,
+    generation: u64,
+    icon_path: Option<PathBuf>,
+    icon_reference: Option<String>,
 }
 
 impl LauncherIconCache {
     pub fn new() -> Self {
-        Self {
-            icons: HashMap::new(),
-            insertion_order: VecDeque::new(),
-            // Keep launcher IDs away from wallpaper and panel fixed IDs.
-            next_id: 0x4000,
-            evictions: 0,
-        }
+        let (requests, receiver) = mpsc::channel();
+        let shared = Arc::new(LauncherIconCacheShared {
+            state: Mutex::new(LauncherIconCacheState {
+                icons: HashMap::new(),
+                insertion_order: VecDeque::new(),
+                // Keep launcher IDs away from wallpaper and panel fixed IDs.
+                next_id: 0x4000,
+                evictions: 0,
+                generation: 0,
+            }),
+            requests,
+            revision: AtomicU64::new(0),
+        });
+        let worker_shared = Arc::downgrade(&shared);
+        std::thread::Builder::new()
+            .name("nickel-launcher-icons".into())
+            .spawn(move || launcher_icon_worker(worker_shared, receiver))
+            .expect("launcher icon worker must start");
+        Self { shared }
     }
 
     pub fn diagnostics(&self) -> LauncherIconCacheDiagnostics {
+        let state = self.shared.state.lock().expect("launcher icon cache lock");
         LauncherIconCacheDiagnostics {
-            entries: self.icons.len(),
+            entries: state.icons.len(),
             capacity: LAUNCHER_ICON_CACHE_CAPACITY,
-            retained_pixel_bytes: self
+            retained_pixel_bytes: state
                 .icons
                 .values()
                 .filter_map(|cached| cached.image.as_ref())
                 .map(|image| image.as_raw().len())
                 .sum(),
             byte_capacity: LAUNCHER_ICON_CACHE_MAX_BYTES,
-            evictions: self.evictions,
+            evictions: state.evictions,
         }
     }
 
+    fn revision(&self) -> u64 {
+        self.shared.revision.load(Ordering::Acquire)
+    }
+
     pub fn begin_visual_generation(&mut self) {
-        self.icons.retain(|key, _| !key.starts_with("structural:"));
-        self.insertion_order
+        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+        state.icons.retain(|key, _| !key.starts_with("structural:"));
+        state
+            .insertion_order
             .retain(|key| !key.starts_with("structural:"));
     }
 
     pub(crate) fn invalidate_application_inventory(&mut self) {
-        self.icons.clear();
-        self.insertion_order.clear();
-    }
-
-    fn insert(&mut self, key: String, cached: CachedIcon) {
-        let evictions_before = self.evictions;
-        while self.icons.len() >= LAUNCHER_ICON_CACHE_CAPACITY {
-            let Some(oldest) = self.insertion_order.pop_front() else {
-                break;
-            };
-            if self.icons.remove(&oldest).is_some() {
-                self.evictions = self.evictions.saturating_add(1);
-            }
-        }
-        self.insertion_order.push_back(key.clone());
-        self.icons.insert(key, cached);
-        if self.evictions != evictions_before {
-            let diagnostics = self.diagnostics();
-            tracing::debug!(
-                entries = diagnostics.entries,
-                capacity = diagnostics.capacity,
-                evictions = diagnostics.evictions,
-                "launcher icon cache evicted its oldest entry"
-            );
-        }
+        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+        state.generation = state.generation.wrapping_add(1);
+        state.icons.clear();
+        state.insertion_order.clear();
     }
 
     pub(crate) fn resolve(&mut self, application: &Application) -> Option<(u16, Arc<RgbaImage>)> {
-        if let Some(cached) = self.icons.get(application.id()) {
+        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+        if let Some(cached) = state.icons.get(application.id()) {
             return cached
                 .image
                 .as_ref()
                 .map(|image| (cached.id, Arc::clone(image)));
         }
-        let image = application
-            .icon_path()
-            .and_then(icons::load)
-            .or_else(|| application.icon().and_then(platform::application_icon))
-            .filter(has_visible_pixel)
-            .map(normalize_launcher_icon)
-            .map(Arc::new);
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
-        self.insert(
-            application.id().to_owned(),
+        let id = state.next_id;
+        state.next_id = state.next_id.checked_add(1).unwrap_or(0x4000);
+        let key = application.id().to_owned();
+        let generation = state.generation;
+        insert_launcher_icon(
+            &mut state,
+            key.clone(),
             CachedIcon {
                 id,
-                image: image.clone(),
+                image: None,
+                pending: true,
             },
         );
-        image.map(|image| (id, image))
+        drop(state);
+        if self
+            .shared
+            .requests
+            .send(LauncherIconRequest {
+                key: key.clone(),
+                id,
+                generation,
+                icon_path: application.icon_path().map(PathBuf::from),
+                icon_reference: application.icon().map(str::to_owned),
+            })
+            .is_err()
+        {
+            let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+            if let Some(cached) = state.icons.get_mut(&key) {
+                cached.pending = false;
+            }
+        }
+        None
     }
 
     pub(crate) fn resolve_window_icon(
@@ -487,7 +532,8 @@ impl LauncherIconCache {
         image: Arc<RgbaImage>,
     ) -> (u16, Arc<RgbaImage>) {
         let key = format!("window:{}", window.0);
-        if let Some(cached) = self.icons.get(&key)
+        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+        if let Some(cached) = state.icons.get(&key)
             && cached
                 .image
                 .as_ref()
@@ -495,13 +541,15 @@ impl LauncherIconCache {
         {
             return (cached.id, Arc::clone(cached.image.as_ref().unwrap()));
         }
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
-        self.insert(
+        let id = state.next_id;
+        state.next_id = state.next_id.checked_add(1).unwrap_or(0x4000);
+        insert_launcher_icon(
+            &mut state,
             key,
             CachedIcon {
                 id,
                 image: Some(Arc::clone(&image)),
+                pending: false,
             },
         );
         (id, image)
@@ -514,7 +562,8 @@ impl LauncherIconCache {
         color: u32,
     ) -> Option<(u16, Arc<RgbaImage>)> {
         let key = format!("structural:{name}:{color:06x}");
-        if let Some(cached) = self.icons.get(&key) {
+        let mut state = self.shared.state.lock().expect("launcher icon cache lock");
+        if let Some(cached) = state.icons.get(&key) {
             return cached
                 .image
                 .as_ref()
@@ -533,16 +582,69 @@ impl LauncherIconCache {
             }
             Arc::new(image)
         });
-        let id = self.next_id;
-        self.next_id = self.next_id.checked_add(1).unwrap_or(0x4000);
-        self.insert(
+        let id = state.next_id;
+        state.next_id = state.next_id.checked_add(1).unwrap_or(0x4000);
+        insert_launcher_icon(
+            &mut state,
             key,
             CachedIcon {
                 id,
                 image: image.clone(),
+                pending: false,
             },
         );
         image.map(|image| (id, image))
+    }
+}
+
+fn insert_launcher_icon(state: &mut LauncherIconCacheState, key: String, cached: CachedIcon) {
+    while state.icons.len() >= LAUNCHER_ICON_CACHE_CAPACITY {
+        let Some(oldest) = state.insertion_order.pop_front() else {
+            break;
+        };
+        if state.icons.remove(&oldest).is_some() {
+            state.evictions = state.evictions.saturating_add(1);
+        }
+    }
+    state.insertion_order.push_back(key.clone());
+    state.icons.insert(key, cached);
+}
+
+fn launcher_icon_worker(
+    shared: std::sync::Weak<LauncherIconCacheShared>,
+    receiver: mpsc::Receiver<LauncherIconRequest>,
+) {
+    while let Ok(request) = receiver.recv() {
+        let image = request
+            .icon_path
+            .as_deref()
+            .and_then(icons::load)
+            .or_else(|| {
+                request
+                    .icon_reference
+                    .as_deref()
+                    .and_then(platform::application_icon)
+            })
+            .filter(has_visible_pixel)
+            .map(normalize_launcher_icon)
+            .map(Arc::new);
+        let Some(shared) = shared.upgrade() else {
+            return;
+        };
+        let mut state = shared.state.lock().expect("launcher icon cache lock");
+        if state.generation != request.generation {
+            continue;
+        }
+        let Some(cached) = state.icons.get_mut(&request.key) else {
+            continue;
+        };
+        if cached.id != request.id || !cached.pending {
+            continue;
+        }
+        cached.image = image;
+        cached.pending = false;
+        drop(state);
+        shared.revision.fetch_add(1, Ordering::Release);
     }
 }
 
@@ -1469,6 +1571,25 @@ mod tests {
     }
 
     #[test]
+    fn controller_left_backs_out_of_content_to_the_sidebar() {
+        let mut scenario = populated_launcher_scenario();
+
+        scenario.controller(ControllerAction::Down).unwrap();
+        assert!(controller_target(&scenario).contains("launcher-applications"));
+
+        for _ in 0..4 {
+            scenario.controller(ControllerAction::Left).unwrap();
+            if controller_target(&scenario).contains("start-menu-primary-pane") {
+                return;
+            }
+        }
+        panic!(
+            "Left did not back out to the sidebar; selected {}",
+            controller_target(&scenario)
+        );
+    }
+
+    #[test]
     fn controller_moves_from_recent_project_toward_home_tiles() {
         let mut launcher = Launcher::default();
         launcher.set_codex_available(true);
@@ -2374,6 +2495,44 @@ mod tests {
         assert!(diagnostics.entries <= diagnostics.capacity);
         assert!(diagnostics.retained_pixel_bytes <= diagnostics.byte_capacity);
         assert!(diagnostics.evictions > 0);
+    }
+
+    #[test]
+    fn application_icon_decode_completes_after_the_render_path_returns() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("application.png");
+        RgbaImage::from_pixel(256, 256, image::Rgba([20, 80, 220, 255]))
+            .save(&path)
+            .unwrap();
+        let application = Application::new(
+            "application".into(),
+            "Application".into(),
+            None,
+            Some(path),
+            None,
+        );
+        let mut cache = LauncherIconCache::new();
+
+        assert!(
+            cache.resolve(&application).is_none(),
+            "the render path must enqueue decoding instead of doing it inline"
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let (_, icon) = loop {
+            if let Some(icon) = cache.resolve(&application) {
+                break icon;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "background icon decode did not complete"
+            );
+            std::thread::yield_now();
+        };
+
+        assert_eq!(
+            icon.dimensions(),
+            (LAUNCHER_ICON_MAX_SIDE, LAUNCHER_ICON_MAX_SIDE)
+        );
     }
 
     #[test]

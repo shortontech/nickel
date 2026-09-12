@@ -431,6 +431,7 @@ pub enum SystemStatusUpdate {
         activity: AudioActivity,
     },
     ShellSettingsChanged,
+    ApplicationInventory(crate::model::ApplicationDiscovery),
 }
 
 /// Bounded feedback facts from snapshots replaced before the consumer drained.

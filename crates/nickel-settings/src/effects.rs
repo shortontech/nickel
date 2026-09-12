@@ -75,6 +75,7 @@ impl SettingsApp {
         let Ok(ServerMessage::Outputs(protocol_outputs)) =
             session_request(SessionRequest::Query(SessionQuery::Outputs))
         else {
+            self.using_mock_displays = true;
             self.status = self.localizer.text("settings-status-using-mock-displays");
             return;
         };
@@ -92,10 +93,14 @@ impl SettingsApp {
                 primary: output.primary,
                 enabled: output.enabled,
                 scale_120: output.scale_120,
+                modes: output.modes,
+                current_mode: output.current_mode,
             })
             .collect();
         if outputs.is_empty() {
+            self.using_mock_displays = true;
             self.status = self.localizer.text("settings-status-using-mock-displays");
+            return;
         }
         let minimum_x = outputs.iter().map(|output| output.x).min().unwrap_or(0);
         let minimum_y = outputs.iter().map(|output| output.y).min().unwrap_or(0);
@@ -129,6 +134,14 @@ impl SettingsApp {
         self.displays = outputs
             .into_iter()
             .map(|output| {
+                let current_mode =
+                    output
+                        .current_mode
+                        .unwrap_or(nickel_session_protocol::OutputMode {
+                            width: output.width,
+                            height: output.height,
+                            refresh_millihz: 60_000,
+                        });
                 let physical_size_known =
                     output.physical_width >= 50 && output.physical_height >= 50;
                 let (card_width, card_height) = if physical_size_known {
@@ -156,6 +169,10 @@ impl SettingsApp {
                     name: output.model,
                     logical_width: output.width,
                     logical_height: output.height,
+                    logical_x: output.x,
+                    logical_y: output.y,
+                    modes: output.modes,
+                    mode: current_mode,
                     rect: Rect {
                         x: self.display_plane.x
                             + (f64::from(output.x - minimum_x) * self.pixels_per_logical).round()
@@ -172,10 +189,6 @@ impl SettingsApp {
                 }
             })
             .collect();
-        for index in 1..self.displays.len() {
-            let previous = self.displays[index - 1].rect;
-            self.displays[index].rect = attach_rect_centered(self.displays[index].rect, previous);
-        }
         center_display_rects(&mut self.displays, self.display_plane);
         self.selected = self
             .displays
@@ -186,6 +199,7 @@ impl SettingsApp {
             self.confirmed_displays = self.displays.clone();
         }
         self.applied = true;
+        self.using_mock_displays = false;
         self.status.clear();
     }
 
@@ -605,6 +619,7 @@ impl SettingsApp {
                     y,
                     enabled: display.enabled,
                     scale_120: display.scale.units(),
+                    mode: Some(display.mode),
                 })
                 .collect(),
         };

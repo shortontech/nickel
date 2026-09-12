@@ -742,6 +742,15 @@
 
         shell.sync_transient_overlays();
         assert_eq!(shell.window_menu_anchor_x, Some(expected_anchor));
+        assert_eq!(
+            shell.window_menu_geometry(),
+            Some((
+                expected_anchor,
+                shell.panel_origin_y,
+                super::MENU_WIDTH.ceil() as u32,
+                shell.window_context_menu_height() as u32,
+            ))
+        );
 
         shell.close_window_preview();
         let outcome = shell.panel_host.perform_accessibility_action(
@@ -776,6 +785,49 @@
     }
 
     #[test]
+    fn taskbar_primary_click_activates_the_topmost_group_window_without_opening_previews() {
+        let host = std::sync::Arc::new(crate::session_host::StagedSessionHost::new(
+            crate::session_host::default_session_host(),
+        ));
+        let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+        shell
+            .launcher
+            .set_preferences(LauncherPreferences::default());
+        let application_id = ApplicationId::new("org.kde.konsole");
+        shell.windows = [WindowId(41), WindowId(42)]
+            .into_iter()
+            .map(|id| OpenWindow {
+                id,
+                application_id: Some(application_id.clone()),
+                active: id == WindowId(42),
+                title: format!("Terminal {}", id.0),
+                state: crate::model::WindowState::default(),
+            })
+            .collect();
+        let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
+        let target = shell
+            .panel_host
+            .unique_semantic_target_for_message(&super::PanelAction::Task(0))
+            .expect("taskbar item");
+        let center = target.bounds.origin.x + target.bounds.size.width / 2.0;
+
+        assert!(shell.panel_click(center, 1_280, false));
+        assert!(shell.preview_group.is_none());
+        let commands = host.take_commands();
+        assert!(commands.iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::WindowAction {
+                window: WindowId(42),
+                action: crate::platform::WindowAction::Activate,
+            }
+        )));
+        assert!(!commands.iter().any(|command| matches!(
+            command,
+            crate::platform::ShellCommand::ShowPreview { .. }
+        )));
+    }
+
+    #[test]
     fn preview_window_menus_anchor_to_their_distinct_cards() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_preferences(LauncherPreferences::default());
@@ -794,6 +846,16 @@
         let _ = shell.scene(SurfaceRole::Panel, 1_280, 56);
         shell.open_window_preview(0);
         let _ = shell.scene(SurfaceRole::WindowPreview, 640, 240);
+        let (preview_width, preview_height) = super::preview_dimensions(2);
+        assert_eq!(
+            shell.preview_geometry(),
+            Some((
+                shell.preview_origin_x(0, preview_width),
+                shell.panel_origin_y,
+                preview_width,
+                preview_height,
+            ))
+        );
 
         shell.apply_preview_action(crate::window_preview::PreviewAction::OpenMenu(WindowId(71)));
         let first = shell.window_menu_anchor_x.expect("first card anchor");

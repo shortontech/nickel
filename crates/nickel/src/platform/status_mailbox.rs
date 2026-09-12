@@ -12,7 +12,7 @@ type Wake = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Default)]
 struct Pending {
-    slots: [Option<Arc<SystemStatusUpdate>>; 4],
+    slots: [Option<Arc<SystemStatusUpdate>>; 5],
     wake: Option<Wake>,
     audio_activity: super::AudioActivity,
 }
@@ -56,6 +56,7 @@ impl StatusSender {
             SystemStatusUpdate::Network(_) => 1,
             SystemStatusUpdate::Bluetooth(_) => 2,
             SystemStatusUpdate::ShellSettingsChanged => 3,
+            SystemStatusUpdate::ApplicationInventory(_) => 4,
         };
         let (retired, wake) = {
             let mut pending = shared.pending.lock().unwrap();

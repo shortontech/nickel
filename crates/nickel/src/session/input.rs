@@ -1001,6 +1001,89 @@ impl NickelSession {
                 let location = pointer.current_location();
                 let client_present =
                     self.client_scene_under(location) && !self.internal_applications_are_foremost();
+                let suppress_secondary_release = event.button() == Some(MouseButton::Right)
+                    && button_state == ButtonState::Released
+                    && self.suppress_secondary_button_release;
+                if suppress_secondary_release {
+                    self.suppress_secondary_button_release = false;
+                }
+                if event.button() == Some(MouseButton::Right)
+                    && button_state == ButtonState::Pressed
+                    && !self.locked
+                    && !pointer.is_grabbed()
+                {
+                    let internal_target = (!client_present
+                        && self
+                            .internal_ui
+                            .surface_at((location.x, location.y), true)
+                            .is_none())
+                    .then(|| {
+                        self.internal_ui
+                            .internal_frame_target((location.x, location.y))
+                    })
+                    .flatten()
+                    .filter(|(_, part)| *part == FramePart::Titlebar)
+                    .and_then(|(surface, _)| self.internal_window_for_surface(surface));
+                    let native_target = internal_target.or_else(|| {
+                        window_frame::topmost_frame_target(self.space.elements().rev().filter_map(
+                            |window| {
+                                let surface_accepts_input =
+                                    self.space.element_location(window).is_some_and(|loc| {
+                                        window
+                                            .surface_under(
+                                                location - loc.to_f64(),
+                                                WindowSurfaceType::ALL,
+                                            )
+                                            .is_some()
+                                    });
+                                let bounds = self.space.element_geometry(window)?;
+                                let geometry = crate::session::shell_layout::Geometry {
+                                    x: bounds.loc.x,
+                                    y: bounds.loc.y,
+                                    width: bounds.size.w,
+                                    height: bounds.size.h,
+                                };
+                                let frame_part =
+                                    (!self.shell_windows().any(|shell| shell == window)
+                                        && !self.is_fullscreen_window(window)
+                                        && self.is_server_decorated(window))
+                                    .then(|| {
+                                        window_frame::hit_test(
+                                            geometry,
+                                            location.x.round() as i32,
+                                            location.y.round() as i32,
+                                        )
+                                    })
+                                    .flatten();
+                                Some((window.clone(), surface_accepts_input, frame_part))
+                            },
+                        ))
+                        .filter(|(_, part)| *part == FramePart::Titlebar)
+                        .and_then(|(window, _)| {
+                            self.surface_windows
+                                .get(&window.wl_surface()?.id())
+                                .copied()
+                        })
+                    });
+                    if let Some(id) = native_target {
+                        self.activate_window(id);
+                        let opened = self.internal_shell.as_mut().is_some_and(|shell| {
+                            shell.open_window_menu_at(
+                                id.0,
+                                location.x.round() as i32,
+                                location.y.round() as i32,
+                            )
+                        });
+                        if opened {
+                            self.sync_internal_shell();
+                            self.schedule_internal_ui_frame();
+                            self.wake_internal_shell();
+                            self.suppress_secondary_button_release = true;
+                            pointer.frame(self);
+                            return None;
+                        }
+                    }
+                }
                 if event.button() == Some(MouseButton::Left)
                     && button_state == ButtonState::Pressed
                     && !self.locked
@@ -1117,7 +1200,8 @@ impl NickelSession {
                 // Once Smithay owns a pointer grab, every following button edge must reach that
                 // grab. Letting an internal surface consume the release here strands Super+drag
                 // in its move grab and leaves the surface attached to the cursor indefinitely.
-                let internally_handled = !pointer.is_grabbed()
+                let internally_handled = !suppress_secondary_release
+                    && !pointer.is_grabbed()
                     && (self.internal_ui.desktop_pointer_input(
                         &event.device().id(),
                         (location.x, location.y),
@@ -1165,7 +1249,7 @@ impl NickelSession {
 
                 const DOUBLE_CLICK_MS: u32 = 500;
                 const DOUBLE_CLICK_DISTANCE: f64 = 6.0;
-                let mut suppress_pointer_event = false;
+                let mut suppress_pointer_event = suppress_secondary_release;
                 let mut frame_handled = false;
                 let mut launcher_focus_restored = false;
                 let mouse_button = event.button();
@@ -1256,6 +1340,11 @@ impl NickelSession {
                             crate::session::focus::KeyboardFocusTarget::for_window(&window),
                             serial,
                         );
+                        if let Some(surface) = window.x11_surface()
+                            && let Err(error) = surface.reassert_keyboard_focus()
+                        {
+                            tracing::warn!(?error, "failed to reassert X11 keyboard focus");
+                        }
                         self.space.elements().for_each(|window| {
                             if let Some(toplevel) = window.toplevel() {
                                 toplevel.send_pending_configure();
@@ -1472,6 +1561,11 @@ impl NickelSession {
                                     crate::session::focus::KeyboardFocusTarget::for_window(&window),
                                     serial,
                                 );
+                                if let Some(surface) = window.x11_surface()
+                                    && let Err(error) = surface.reassert_keyboard_focus()
+                                {
+                                    tracing::warn!(?error, "failed to reassert X11 keyboard focus");
+                                }
                                 self.space.elements().for_each(|window| {
                                     if let Some(toplevel) = window.toplevel() {
                                         toplevel.send_pending_configure();

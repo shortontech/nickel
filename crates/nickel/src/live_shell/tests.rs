@@ -4,6 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use crate::platform::NotificationSource;
 use image::{Rgba, RgbaImage};
 use nickel_input::KeyCode;
 use nickel_session_protocol::{
@@ -75,6 +77,102 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
 
     assert!(!shell.apply_system_status_update(SystemStatusUpdate::Audio(status)));
     assert_eq!(shell.next_host_deadline(), before);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn pending_remote_lease_becomes_persistent_shell_notification() {
+    use nickel_session_protocol::{
+        RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease, RemoteResourceScope,
+    };
+    use std::sync::Mutex;
+
+    struct PendingLeaseHost {
+        pending: Mutex<Vec<RemotePendingLease>>,
+        decisions: Mutex<Vec<bool>>,
+    }
+    impl crate::session_host::SessionHost for PendingLeaseHost {
+        fn dispatch(
+            &self,
+            _: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            Ok(())
+        }
+        fn remote_pending_leases(&self) -> Vec<RemotePendingLease> {
+            self.pending.lock().unwrap().clone()
+        }
+        fn decide_remote_lease(
+            &self,
+            _: &RemotePendingLease,
+            allow: bool,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            self.decisions.lock().unwrap().push(allow);
+            Ok(())
+        }
+    }
+
+    let pending = RemotePendingLease {
+        pending_generation: 4,
+        client_id: "agent-1".into(),
+        client_label: "Codex".into(),
+        request: RemoteLeaseRequest {
+            renewal: None,
+            scope: RemoteResourceScope::FullSession,
+            duration_seconds: Some(1_200),
+            allow_resumption: false,
+            full_debug: true,
+        },
+        resource_label: None,
+        changes: RemoteLeaseRequestChanges::default(),
+    };
+    let host = Arc::new(PendingLeaseHost {
+        pending: Mutex::new(vec![pending]),
+        decisions: Mutex::new(Vec::new()),
+    });
+    let mut shell = LiveShell::new_with_session_host(host.clone()).unwrap();
+
+    shell.sync_remote_lease_notifications();
+
+    let notification = shell.notification_feed.snapshot().unwrap();
+    assert_eq!(notification.summary, "Remote control request");
+    assert_eq!(
+        notification.body,
+        "Codex wants to control the full desktop for 20 minutes."
+    );
+    assert_eq!(notification.actions[0].key, "deny");
+    assert_eq!(notification.actions[1].key, "approve");
+    assert_eq!(shell.remote_lease_notifications.len(), 1);
+
+    shell.notification = Some(notification);
+    shell.sync_notification_host(420, 180);
+    let approve = shell
+        .notification_host
+        .query_unique(&nickel_ui::SemanticSelector::RoleAndName {
+            role: nickel_ui::SemanticRole::Button,
+            name: "Approve".into(),
+        })
+        .unwrap();
+    let point = nickel_input::Point {
+        x: f64::from(approve.bounds.origin.x + approve.bounds.size.width / 2.0),
+        y: f64::from(approve.bounds.origin.y + approve.bounds.size.height / 2.0),
+    };
+    let event = |edge| {
+        nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Button {
+            device: nickel_input::DeviceId(1),
+            order: nickel_input::EventOrder(1),
+            position: Some(point),
+            button: nickel_input::PointerButton::Primary,
+            edge,
+        })
+    };
+    shell.notification_host_input(event(nickel_input::KeyEdge::Pressed), 420, 180);
+    shell.notification_host_input(event(nickel_input::KeyEdge::Released), 420, 180);
+    assert_eq!(*host.decisions.lock().unwrap(), vec![true]);
+
+    host.pending.lock().unwrap().clear();
+    shell.sync_remote_lease_notifications();
+    assert!(shell.remote_lease_notifications.is_empty());
+    assert!(shell.notification_feed.snapshot().is_none());
 }
 
 #[cfg(target_os = "linux")]

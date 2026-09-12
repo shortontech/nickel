@@ -522,6 +522,7 @@ struct SurfaceData {
     background: SolidColorBuffer,
     render_path_logged: bool,
     invalidate_pending: bool,
+    modes: Vec<DrmMode>,
 }
 
 struct DisabledOutput<N = DrmNode, T = Output> {
@@ -791,6 +792,15 @@ struct TaskSwitcherBufferCache {
 }
 
 impl UdevData {
+    pub(crate) fn import_dmabuf(
+        &mut self,
+        dmabuf: &smithay::backend::allocator::dmabuf::Dmabuf,
+    ) -> bool {
+        self.gpus
+            .single_renderer(&self.primary_gpu)
+            .is_ok_and(|mut renderer| renderer.import_dmabuf(dmabuf, None).is_ok())
+    }
+
     pub(crate) fn disabled_outputs(&self) -> impl Iterator<Item = &Output> {
         published_disabled_outputs(&self.disabled_outputs)
     }
@@ -1096,9 +1106,11 @@ pub fn init_udev(
     }
     let mut devices = devices;
     devices.sort_by_key(|(node, _)| device_activation_priority(*node, primary_gpu));
+    let mut device_failures = Vec::new();
     for (node, path) in devices {
         if let Err(error) = data.add_drm_device(event_loop, node, &path) {
             tracing::warn!(%node, %error, "skipping DRM device");
+            device_failures.push(format!("{node} ({}): {error}", path.display()));
         }
     }
     if data
@@ -1106,8 +1118,21 @@ pub fn init_udev(
         .as_ref()
         .is_none_or(|native| native.devices.is_empty())
     {
-        return Err("no usable DRM device was found".into());
+        return Err(no_usable_drm_device_error(&device_failures).into());
     }
+    let dmabuf_formats = {
+        let native = data.native.as_mut().expect("native backend should exist");
+        let renderer = native
+            .gpus
+            .single_renderer(&native.primary_gpu)
+            .map_err(|error| format!("failed to inspect primary renderer formats: {error}"))?;
+        renderer
+            .dmabuf_formats()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+    data.advertise_dmabuf_formats(dmabuf_formats);
     let usable_outputs = data
         .native
         .as_ref()
@@ -1241,6 +1266,17 @@ pub fn init_udev(
     unsafe { std::env::set_var("WAYLAND_DISPLAY", &data.socket_name) };
     tracing::info!(seat = %seat_name, gpu = %primary_gpu, "native backend initialized");
     Ok(())
+}
+
+fn no_usable_drm_device_error(device_failures: &[String]) -> String {
+    if device_failures.is_empty() {
+        return "no usable DRM device was found; no enumerated device reported an activation failure"
+            .into();
+    }
+    format!(
+        "no usable DRM device was found; device activation failures: {}",
+        device_failures.join("; ")
+    )
 }
 
 fn select_primary_gpu(session: &LibSeatSession) -> Result<DrmNode, Box<dyn std::error::Error>> {
@@ -1788,12 +1824,12 @@ impl NickelSession {
                 "output {name} is waiting for retired Wayland globals to drain"
             ));
         }
-        let Some(mode) = connector
-            .modes()
+        let modes = connector.modes().to_vec();
+        let Some(mode) = modes
             .iter()
             .find(|mode| mode.mode_type().contains(ModeTypeFlags::PREFERRED))
             .copied()
-            .or_else(|| connector.modes().first().copied())
+            .or_else(|| modes.first().copied())
         else {
             return Err(format!("output {name} has no modes"));
         };
@@ -1810,6 +1846,9 @@ impl NickelSession {
                 serial_number: stable_edid_id(&name),
             },
         );
+        for advertised in modes.iter().copied().map(Mode::from) {
+            output.add_mode(advertised);
+        }
         output.set_preferred(wl_mode);
         let configured_scale = self.configured_output_scale(&output);
         output.change_current_state(
@@ -1906,6 +1945,7 @@ impl NickelSession {
                 ),
                 render_path_logged: false,
                 invalidate_pending: is_evdi,
+                modes,
             },
         );
         self.restore_output_windows(&output);
@@ -1985,6 +2025,73 @@ impl NickelSession {
                 .map(|mode| (disabled.output.name(), mode.size.to_logical(1)))
         }));
         outputs
+    }
+
+    pub(crate) fn set_native_output_mode(
+        &mut self,
+        name: &str,
+        requested: nickel_session_protocol::OutputMode,
+    ) -> Result<(), &'static str> {
+        let native = self
+            .native
+            .as_mut()
+            .ok_or("native DRM backend is unavailable")?;
+        let (devices, gpus) = (&mut native.devices, &mut native.gpus);
+        let device = devices
+            .values_mut()
+            .find(|device| {
+                device
+                    .surfaces
+                    .values()
+                    .any(|surface| surface.output.name() == name)
+            })
+            .ok_or("output is not active")?;
+        let surface = device
+            .surfaces
+            .values_mut()
+            .find(|surface| surface.output.name() == name)
+            .ok_or("output is not active")?;
+        let mode = surface
+            .modes
+            .iter()
+            .copied()
+            .find(|mode| {
+                let advertised = Mode::from(*mode);
+                advertised.size.w == requested.width
+                    && advertised.size.h == requested.height
+                    && advertised.refresh == requested.refresh_millihz
+            })
+            .ok_or("display mode is not supported by this output")?;
+        let current = surface.output.current_mode();
+        if current == Some(Mode::from(mode)) {
+            return Ok(());
+        }
+        match &mut surface.drm {
+            OutputDrm::Gbm(output) => {
+                let mut renderer = gpus
+                    .single_renderer(&device.render_node)
+                    .map_err(|_| "display renderer is unavailable")?;
+                let empty = DrmOutputRenderElements::<
+                    NativeRenderer<'_>,
+                    NativeElement<
+                        NativeRenderer<'_>,
+                        WaylandSurfaceRenderElement<NativeRenderer<'_>>,
+                    >,
+                >::default();
+                output
+                    .use_mode(mode, &mut renderer, &empty)
+                    .map_err(|_| "DRM rejected the requested display mode")?;
+            }
+            OutputDrm::Evdi(_) => return Err("EVDI mode changes are not supported yet"),
+        }
+        let advertised = Mode::from(mode);
+        surface
+            .output
+            .change_current_state(Some(advertised), None, None, None);
+        surface.background =
+            SolidColorBuffer::new(advertised.size.to_logical(1), [0.055, 0.065, 0.085, 1.0]);
+        surface.invalidate_pending = true;
+        Ok(())
     }
 
     pub(crate) fn set_native_output_enabled(

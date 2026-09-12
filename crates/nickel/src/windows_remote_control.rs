@@ -8263,7 +8263,7 @@ impl WindowsRemoteControl {
                 self.pending_output_launches.clear();
                 self.stop_confirmation_until = Some(Instant::now() + Duration::from_secs(3));
                 let mut settings = RemoteAiControlSettings::load_default().unwrap_or_default();
-                settings.set_requested(false);
+                settings.set_requested(true);
                 self.remote_control.emergency_stop_at(settings.generation);
                 if let Ok(control) = self.remote_control.control().lock() {
                     self.local_cues

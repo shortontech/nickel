@@ -707,6 +707,8 @@ impl<Message> Switch<Message> {
             .background(
                 if matches!(state, SwitchState::Mixed | SwitchState::MixedUnavailable) {
                     theme.text.disabled
+                } else if value {
+                    theme.text.inverse
                 } else {
                     theme.text.primary
                 },
@@ -1060,6 +1062,11 @@ impl<Message> SliderField<Message> {
         self.0 = self.0.stacked();
         self
     }
+
+    pub fn compact(mut self) -> Self {
+        self.0 = self.0.compact();
+        self
+    }
 }
 
 impl<Message> Component<Message> for SliderField<Message> {
@@ -1101,6 +1108,11 @@ impl<Message> SelectField<Message> {
 
     pub fn id(mut self, id: impl Into<UiId>) -> Self {
         self.0 = self.0.id(id);
+        self
+    }
+
+    pub fn compact(mut self) -> Self {
+        self.0 = self.0.compact();
         self
     }
 }
@@ -1695,6 +1707,23 @@ mod tests {
         tree.handle_event(&mut state, UiEvent::PointerPressed(center));
         let outcome = tree.handle_event(&mut state, UiEvent::PointerReleased(center));
         assert_eq!(outcome.messages, vec![Message::Toggle(true)]);
+    }
+
+    #[test]
+    fn enabled_switch_uses_inverse_thumb() {
+        let theme = theme();
+        let tree = UiFrame::layout(
+            Switch::new(true, toggle, theme).id("switch"),
+            Rect::new(0.0, 0.0, 100.0, 50.0),
+        );
+
+        assert!(tree.commands().iter().any(|command| {
+            matches!(
+                command,
+                PaintCommand::RoundedFill { color, radius, .. }
+                    if *color == theme.text.inverse && *radius == 9.0
+            )
+        }));
     }
 
     #[test]

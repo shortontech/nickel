@@ -195,6 +195,7 @@ impl Application for WindowMenuApp {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let theme = semantic_theme_from_palette(self.palette);
         let entries = match self.page {
             WindowMenuPage::Root => {
                 window_menu_entries(&self.window, &self.workspaces, &self.outputs)
@@ -208,11 +209,20 @@ impl Application for WindowMenuApp {
                 column.child(
                     Button::new(action, label)
                         .id(format!("window-menu-action-{index}"))
+                        .width(MENU_WIDTH - MENU_PADDING * 2.0)
                         .height(MENU_ROW_HEIGHT)
-                        .background(self.palette.panel)
-                        .focus_background_tint(self.palette.accent)
-                        .controller_focus_background_tint(self.palette.accent)
-                        .color(self.palette.text),
+                        .padding(Insets {
+                            top: 4.0,
+                            right: 10.0,
+                            bottom: 4.0,
+                            left: 10.0,
+                        })
+                        .center_label_vertically()
+                        .label_align(TextAlign::Start)
+                        .background(theme.surfaces.raised)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus)
+                        .color(theme.text.primary),
                 )
             },
         );
@@ -225,8 +235,9 @@ impl Application for WindowMenuApp {
                 &self.outputs,
             )))
             .padding(Insets::all(MENU_PADDING))
-            .background(self.palette.panel)
-            .radius(10.0)
+            .background(theme.surfaces.raised)
+            .border(theme.borders.ordinary, theme.sizing.border)
+            .radius(theme.radii.overlay)
             .semantic_role(SemanticRole::Menu)
             .accessibility_label(format!("Window menu for {}", self.window.title))
             .child(content)
@@ -374,6 +385,7 @@ impl Application for ApplicationMenuApp {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let theme = semantic_theme_from_palette(self.palette);
         let entries = application_menu_entries(&self.target, self.pinned);
         let content = entries.into_iter().enumerate().fold(
             nickel_ui::Column::new().gap(MENU_ROW_GAP),
@@ -381,11 +393,20 @@ impl Application for ApplicationMenuApp {
                 column.child(
                     Button::new(action, label)
                         .id(format!("application-menu-action-{index}"))
+                        .width(MENU_WIDTH - MENU_PADDING * 2.0)
                         .height(MENU_ROW_HEIGHT)
-                        .background(self.palette.panel)
-                        .focus_background_tint(self.palette.accent)
-                        .controller_focus_background_tint(self.palette.accent)
-                        .color(self.palette.text),
+                        .padding(Insets {
+                            top: 4.0,
+                            right: 10.0,
+                            bottom: 4.0,
+                            left: 10.0,
+                        })
+                        .center_label_vertically()
+                        .label_align(TextAlign::Start)
+                        .background(theme.surfaces.raised)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus)
+                        .color(theme.text.primary),
                 )
             },
         );
@@ -396,8 +417,9 @@ impl Application for ApplicationMenuApp {
                 application_menu_entries(&self.target, self.pinned).len(),
             ))
             .padding(Insets::all(MENU_PADDING))
-            .background(self.palette.panel)
-            .radius(10.0)
+            .background(theme.surfaces.raised)
+            .border(theme.borders.ordinary, theme.sizing.border)
+            .radius(theme.radii.overlay)
             .semantic_role(SemanticRole::Menu)
             .accessibility_label(format!(
                 "Application menu for {}",

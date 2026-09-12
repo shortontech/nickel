@@ -4355,7 +4355,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_listener_still_reports_the_process_environment_configuration() {
+    fn persisted_disabled_preference_does_not_gate_the_always_on_listener() {
         let mut settings = crate::RemoteAiControlSettings::default();
         settings.set_requested(false);
         let mut runtime = crate::RemoteControlRuntime::default();
@@ -4365,11 +4365,16 @@ mod tests {
 
         runtime.apply_with_listener_selection(&settings, Arc::new(EmptyDesktop), selection);
 
-        assert_eq!(runtime.status().effective, crate::EffectiveState::Disabled);
+        assert_eq!(runtime.status().effective, crate::EffectiveState::Enabled);
+        assert!(runtime.status().requested_enabled);
         assert_eq!(runtime.status().endpoint, "http://127.0.0.9:43210/mcp");
         assert!(runtime.status().environment_override);
         assert!(runtime.status().host_fingerprint.is_none());
-        assert!(runtime.server.is_none());
+        assert!(runtime.server.is_some());
+        runtime.emergency_stop();
+        assert_eq!(runtime.status().effective, crate::EffectiveState::Enabled);
+        assert!(runtime.server.is_some());
+        assert!(runtime.control.lock().unwrap().enabled());
     }
 
     fn http(request: &str) -> String {

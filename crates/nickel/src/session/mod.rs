@@ -101,6 +101,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&state.internal_projection_outputs),
         Arc::clone(&state.internal_capture),
         Arc::clone(&state.internal_keyboard_snapshot),
+        state.remote_control.control(),
     )?;
     let secure_storage_required = secure_storage_required(
         arguments.backend == backend::BackendKind::Udev,
@@ -171,6 +172,29 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             TimeoutAction::ToDuration(Duration::from_secs(1))
         },
     )?;
+
+    let (controller_changed, controller_events) = smithay::reexports::calloop::channel::channel();
+    event_loop
+        .handle()
+        .insert_source(controller_events, |event, _, state| {
+            if let smithay::reexports::calloop::channel::Event::Msg((action, family)) = event {
+                state.handle_native_controller_action(action, family);
+            }
+        })?;
+    thread::Builder::new()
+        .name("nickel-controller-events".into())
+        .spawn(move || {
+            let mut controller = nickel_ui::ControllerInput::new();
+            loop {
+                let actions = controller.wait_global(Duration::from_secs(1));
+                let family = controller.active_family().unwrap_or_default();
+                for action in actions {
+                    if controller_changed.send((action, family)).is_err() {
+                        return;
+                    }
+                }
+            }
+        })?;
 
     match arguments.backend {
         backend::BackendKind::Winit => {

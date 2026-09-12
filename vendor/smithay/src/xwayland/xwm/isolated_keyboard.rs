@@ -12,6 +12,7 @@ use x11rb::{
 #[derive(Clone, Copy, Debug)]
 pub(super) struct IsolatedKeyboard {
     pub master: u16,
+    pub core_pointer: u16,
     pub core_master: u16,
     pub slave: u8,
     pub event_base: u8,
@@ -40,7 +41,11 @@ impl IsolatedKeyboard {
             .attachment;
         let name = format!("Smithay scoped keyboard {identity}").into_bytes();
         let data = HierarchyChangeDataAddMaster {
-            send_core: true,
+            // This master exists solely for recipient-bound synthetic input.
+            // Advertising it as a core device makes Xwayland route ordinary
+            // physical keyboard events through the isolated hierarchy too,
+            // leaving legacy X11 clients without keyboard input.
+            send_core: false,
             enable: true,
             name: name.clone(),
         };
@@ -61,6 +66,7 @@ impl IsolatedKeyboard {
             .deviceid;
         let keyboard = Self {
             master,
+            core_pointer,
             core_master,
             slave: 0,
             event_base: extension.first_event,
@@ -87,6 +93,11 @@ impl IsolatedKeyboard {
     }
 
     pub fn observe_focus(self, conn: &RustConnection, window: u32) -> Result<(), ConnectionError> {
+        // XIAddMaster can otherwise become the implicit client pointer for X11
+        // clients connecting after the scoped pair is created. Keep ordinary
+        // application input on Xwayland's virtual-core pointer/keyboard pair;
+        // the scoped master remains available for explicit remote delivery.
+        conn.xinput_xi_set_client_pointer(window, self.core_pointer)?;
         conn.xinput_xi_select_events(
             window,
             &[xinput::EventMask {

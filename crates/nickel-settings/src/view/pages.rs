@@ -1,8 +1,8 @@
 use super::*;
 use nickel_ui::{
     Collection, CollectionPresentation, CollectionState, Column, ComponentBuilderExt, Container,
-    GridColumnSpec, NavigationScope, RadioGroup, RadioOption, Row, SettingsListCard, Text,
-    TextField, Track,
+    GridColumnSpec, Layer, NavigationScope, Point, RadioGroup, RadioOption, Row, SettingsListCard,
+    Text, TextField, Track,
 };
 
 const REMOTE_ACCESS_ACTION_HEIGHT: f32 = 48.0;
@@ -1877,21 +1877,73 @@ impl SettingsApp {
             ButtonPresentation::Secondary,
         )
         .max_lines(3);
-        let enabled = SettingsRow::new(theme, "Display enabled", "").trailing(
-            Switch::new(selected.enabled, SettingsMessage::DisplayEnabled, theme)
-                .id("display-enabled")
-                .accessibility_label("Display enabled"),
-        );
+        let enabled = SettingsRow::new(theme, "Display enabled", "")
+            .trailing(
+                Switch::new(selected.enabled, SettingsMessage::DisplayEnabled, theme)
+                    .id("display-enabled")
+                    .accessibility_label("Display enabled"),
+            )
+            .compact();
         let scale = SliderField::new(
             theme,
             "Scale",
-            "Logical size on this display. Applications may need to redraw.",
+            "",
             format!("{}%", selected.scale.units() * 100 / 120),
             (selected.scale.units().saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
             display_scale_message,
         )
         .id("display-scale")
-        .stacked();
+        .compact();
+        let mut resolutions = selected
+            .modes
+            .iter()
+            .map(|mode| (mode.width, mode.height))
+            .collect::<Vec<_>>();
+        resolutions.sort_unstable_by(|left, right| right.cmp(left));
+        resolutions.dedup();
+        let resolution = SelectField::new(
+            theme,
+            "Resolution",
+            "",
+            SettingsMessage::ToggleDisplayResolutionSelect,
+            format!("{} × {}", selected.mode.width, selected.mode.height),
+            resolutions.into_iter().map(|(width, height)| {
+                (
+                    format!("{width} × {height}"),
+                    SettingsMessage::SetDisplayResolution { width, height },
+                )
+            }),
+            self.display_resolution_select_expanded,
+        )
+        .id("display-resolution")
+        .compact();
+        let mut refresh_rates = selected
+            .modes
+            .iter()
+            .filter(|mode| mode.width == selected.mode.width && mode.height == selected.mode.height)
+            .map(|mode| mode.refresh_millihz)
+            .collect::<Vec<_>>();
+        refresh_rates.sort_unstable_by(|left, right| right.cmp(left));
+        refresh_rates.dedup();
+        let refresh_rate = SelectField::new(
+            theme,
+            "Refresh rate",
+            "",
+            SettingsMessage::ToggleDisplayRefreshSelect,
+            format!(
+                "{:.2} Hz",
+                f64::from(selected.mode.refresh_millihz) / 1000.0
+            ),
+            refresh_rates.into_iter().map(|refresh| {
+                (
+                    format!("{:.2} Hz", f64::from(refresh) / 1000.0),
+                    SettingsMessage::SetDisplayRefresh(refresh),
+                )
+            }),
+            self.display_refresh_select_expanded,
+        )
+        .id("display-refresh-rate")
+        .compact();
         let app_scale_units = match self.application_scale_policy {
             ApplicationScalePolicy::Custom(scale) => scale.units(),
             _ => 120,
@@ -1903,14 +1955,14 @@ impl SettingsApp {
                 "Follow Nickel",
                 self.application_scale_policy == ApplicationScalePolicy::FollowNickel,
             )
-            .description("Clear Nickel-owned toolkit overrides and follow compositor scaling."),
+            .compact(),
             RadioOption::new(
                 theme,
                 SettingsMessage::ApplicationScaleUnchanged,
                 "Leave unchanged",
                 self.application_scale_policy == ApplicationScalePolicy::Unchanged,
             )
-            .description("Do not write toolkit-wide compatibility settings."),
+            .compact(),
             RadioOption::new(
                 theme,
                 SettingsMessage::SetApplicationScale(
@@ -1922,13 +1974,13 @@ impl SettingsApp {
                     ApplicationScalePolicy::Custom(_)
                 ),
             )
-            .description("Use the custom application scale selected below."),
+            .compact(),
         ])
         .id("application-scale-policy");
         let app_scale = SettingsCard::titled(
             theme,
             "Application compatibility scale",
-            "Toolkit compatibility is separate from per-display Wayland scale. Running applications may need a restart.",
+            "Toolkit scale can differ from display scale; applications may need a restart.",
         )
         .id("application-scale")
         .child(application_scale_policy_choices)
@@ -1936,13 +1988,13 @@ impl SettingsApp {
             SliderField::new(
                 theme,
                 "Custom application scale",
-                "Used only when custom compatibility scaling is selected.",
+                "",
                 format!("{}%", app_scale_units * 100 / 120),
                 (app_scale_units.saturating_sub(60) as f32 / 420.0).clamp(0.0, 1.0),
                 application_scale_message,
             )
             .id("application-custom-scale")
-            .stacked(),
+            .compact(),
         )
         .child(nickel_ui::Text::new(&self.toolkit_scale_status).color(palette.muted));
         let apply = Button::semantic(
@@ -1992,34 +2044,47 @@ impl SettingsApp {
             } else {
                 2.0
             };
-            ui! {
+            let card = ui! {
                 <Container id={format!("display-card-{index}")}
                     width={if compact_cards { (content_width - 120.0).max(120.0) } else { display.rect.w as f32 }}
-                    height={if compact_cards { 220.0 } else { display.rect.h as f32 }}
-                    min_width={if compact_cards { 120.0 } else { 160.0 }} min_height={220.0}
+                    height={if compact_cards { 140.0 } else { display.rect.h as f32 }}
+                    min_width={if compact_cards { 120.0 } else { 160.0 }} min_height={if compact_cards { 140.0 } else { 80.0 }}
                     background={if !display.enabled { palette.background }
                         else if selected { palette.accent_soft } else { palette.surface }}
                     border={(border_color, border_width)} radius={theme.radii.card}
-                    padding={Insets::all(18.0)}
+                    padding={Insets::all(12.0)}
                     on_drag={(SettingsMessage::SelectDisplay(index), display_drag_message)}
                     on_press={SettingsMessage::SelectDisplay(index)}
                     semantic_role={SemanticRole::Button}
                     accessibility_label={format!("{} display, {}", display.name, detail)}
                     accessibility_state={if selected { "selected" } else { "not selected" }}>
-                    <Column gap={8.0}>
-                        <Text scale={1.5} color={palette.text} wrap={true}>{&display.name}</Text>
-                        <Text color={palette.muted} wrap={true}>{detail}</Text>
-                        <Text bold={true} color={palette.accent}>
+                    <Column gap={4.0}>
+                        <Text color={palette.text} wrap={true}>{&display.name}</Text>
+                        <Text scale={0.9} color={palette.muted} wrap={true}>{detail}</Text>
+                        <Text scale={0.9} bold={true} color={palette.accent}>
                             {if display.primary { "PRIMARY" } else { "" }}
                         </Text>
                     </Column>
                 </Container>
+            };
+            if compact_cards {
+                card
+            } else {
+                card.position(Point {
+                    x: (display.rect.x - self.display_plane.x - 12) as f32,
+                    y: (display.rect.y - self.display_plane.y - 12) as f32,
+                })
             }
         }).collect::<Vec<_>>();
         let display_layout = if compact_cards {
             AnyView::new(Column::new().gap(12.0).children(display_cards))
         } else {
-            AnyView::new(Row::new().gap(12.0).children(display_cards))
+            AnyView::new(
+                Layer::new()
+                    .width(content_width)
+                    .height(216.0)
+                    .children(display_cards),
+            )
         };
         ui! {
             <Column grow={1.0} padding={Insets {
@@ -2028,18 +2093,18 @@ impl SettingsApp {
                 <VerticalScroll id={"display-page-scroll"} on_scroll={SettingsMessage::DisplayScroll}
                     grow={1.0}
                     offset={0.0} theme={theme}>
-                    <Column gap={12.0}>
-                        <Container id={"display-plane"} min_height={300.0}
+                    <Column gap={8.0}>
+                        <Container id={"display-plane"} min_height={240.0}
                             background={palette.surface} border={(palette.muted, 1.0)}
-                            padding={Insets::all(20.0)} align_items={nickel_ui::Align::Center}
+                            padding={Insets::all(12.0)} align_items={nickel_ui::Align::Center}
                             justify_content={nickel_ui::Justify::Center}
                             semantic_role={SemanticRole::TabPanel}
                             accessibility_label={"Display arrangement"}>
                             {display_layout}
                         </Container>
                         <Container background={palette.surface} border={(palette.muted, 1.0)}
-                            padding={Insets::all(12.0)}>
-                            <Column gap={10.0}>
+                            padding={Insets::all(8.0)}>
+                            <Column gap={6.0}>
                                 <Row gap={12.0}>
                                     <Column grow={1.0} gap={3.0}>
                                         <Text color={palette.text} wrap={true}>{&selected.name}</Text>
@@ -2052,6 +2117,8 @@ impl SettingsApp {
                                     </Text>
                                 </Row>
                                 {enabled}
+                                {resolution}
+                                {refresh_rate}
                                 {scale}
                                 <Grid columns={GridColumnSpec::AutoFit(Track::minmax(120.0, Track::fr(1.0)))} gap={12.0}>
                                     {identify}{make_primary}{apply}

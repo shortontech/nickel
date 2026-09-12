@@ -910,16 +910,12 @@ impl RemoteControlRuntime {
         if settings.generation < self.status.acknowledged_generation {
             return;
         }
-        self.status.requested_enabled = settings.requested_enabled;
+        // The capability-free listener is part of the shell. Desktop authority remains gated by
+        // a locally approved lease, so a persisted UI preference must never make MCP unreachable.
+        self.status.requested_enabled = true;
         self.status.generation = settings.generation;
         self.status.acknowledged_generation = settings.generation;
         self.status.diagnostic = None;
-        if !settings.requested_enabled {
-            self.status.endpoint = selection.requested_endpoint;
-            self.status.environment_override = selection.environment_override;
-            self.stop(EffectiveState::Disabled);
-            return;
-        }
         if self.server.is_some() {
             self.status.effective = EffectiveState::Enabled;
             return;
@@ -956,8 +952,17 @@ impl RemoteControlRuntime {
     }
 
     pub fn emergency_stop_at(&mut self, generation: u64) {
-        self.stop(EffectiveState::Disabled);
-        self.status.requested_enabled = false;
+        self.emergency.trigger();
+        let mut control = self.control.lock().unwrap();
+        control.set_enabled(false);
+        control.set_enabled(true);
+        drop(control);
+        self.status.requested_enabled = true;
+        self.status.effective = if self.server.is_some() {
+            EffectiveState::Enabled
+        } else {
+            EffectiveState::Rejected
+        };
         self.status.generation = generation;
         self.status.acknowledged_generation = generation;
     }

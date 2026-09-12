@@ -87,6 +87,7 @@ pub(crate) struct InternalShellCoordinator {
     file_actions: Vec<nickel_file::FileWindowAction>,
     clipboard_result: Option<Result<String, String>>,
     preview_generation: Option<u64>,
+    controller_family: nickel_ui::ControllerFamily,
 }
 
 impl InternalShellCoordinator {
@@ -106,7 +107,13 @@ impl InternalShellCoordinator {
             file_actions: Vec::new(),
             clipboard_result: None,
             preview_generation: None,
+            controller_family: nickel_ui::ControllerFamily::default(),
         })
+    }
+
+    pub(crate) fn set_controller_family(&mut self, family: nickel_ui::ControllerFamily) {
+        self.controller_family = family;
+        self.shell.set_launcher_controller_family(family);
     }
 
     pub fn semantic_theme(&self) -> nickel_ui::SemanticTheme {
@@ -608,6 +615,9 @@ impl InternalShellCoordinator {
                 Some(&[SurfaceRole::ControlCenter])
             }
             crate::platform::SystemStatusUpdate::ShellSettingsChanged => None,
+            crate::platform::SystemStatusUpdate::ApplicationInventory(_) => {
+                Some(&[SurfaceRole::Launcher, SurfaceRole::Panel])
+            }
         };
         if !self.shell.apply_system_status_update(update) {
             return Vec::new();
@@ -721,15 +731,53 @@ impl InternalShellCoordinator {
             );
         }
         for event in batch.events {
-            if entry.role == SurfaceRole::Screenshot {
-                changed |= match event {
-                    nickel_ui::HostEvent::Controller(action) => {
-                        self.shell.screenshot_controller(action)
+            if let nickel_ui::HostEvent::Controller(action) = &event {
+                let action = *action;
+                match entry.role {
+                    SurfaceRole::Panel => dependent_roles.extend([
+                        SurfaceRole::Panel,
+                        SurfaceRole::WindowPreview,
+                        SurfaceRole::WindowContextMenu,
+                    ]),
+                    SurfaceRole::ControlCenter => dependent_roles.extend([
+                        SurfaceRole::Panel,
+                        SurfaceRole::VolumeOsd,
+                        SurfaceRole::OnScreenKeyboard,
+                    ]),
+                    SurfaceRole::WindowPreview => {
+                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu])
                     }
-                    event => self
+                    SurfaceRole::WindowContextMenu => {
+                        dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview])
+                    }
+                    _ => {}
+                }
+                changed |= match entry.role {
+                    SurfaceRole::Lock => self.shell.lock_host_controller(action),
+                    SurfaceRole::Launcher => self
                         .shell
-                        .screenshot_host_event(event, entry.size.0, entry.size.1),
+                        .launcher_host_controller(action, self.controller_family),
+                    SurfaceRole::ControlCenter => {
+                        self.shell
+                            .control_controller(action, entry.size.0, entry.size.1)
+                    }
+                    SurfaceRole::WindowPreview => self.shell.preview_controller(action),
+                    SurfaceRole::WindowContextMenu => {
+                        self.shell.window_menu_host_controller(action)
+                    }
+                    SurfaceRole::Notification => self.shell.notification_controller(action),
+                    SurfaceRole::Panel => self.shell.panel_controller(action, entry.size.0),
+                    SurfaceRole::Desktop => self.shell.desktop_controller(action),
+                    SurfaceRole::Screenshot => self.shell.screenshot_controller(action),
+                    SurfaceRole::OnScreenKeyboard => self.shell.keyboard_controller(action),
+                    _ => false,
                 };
+                continue;
+            }
+            if entry.role == SurfaceRole::Screenshot {
+                changed |= self
+                    .shell
+                    .screenshot_host_event(event, entry.size.0, entry.size.1);
                 continue;
             }
             if matches!(
@@ -801,6 +849,11 @@ impl InternalShellCoordinator {
                         changed |=
                             self.shell
                                 .window_menu_host_input(input, entry.size.0, entry.size.1);
+                    }
+                    SurfaceRole::Notification => {
+                        changed |=
+                            self.shell
+                                .notification_host_input(input, entry.size.0, entry.size.1);
                     }
                     _ => {}
                 }
@@ -996,6 +1049,10 @@ impl InternalShellCoordinator {
 
     pub(crate) fn window_menu_geometry(&self) -> Option<(i32, i32, u32, u32)> {
         self.shell.window_menu_geometry()
+    }
+
+    pub(crate) fn preview_geometry(&mut self) -> Option<(i32, i32, u32, u32)> {
+        self.shell.preview_geometry()
     }
 
     pub(crate) fn open_window_menu_at(&mut self, id: u64, x: i32, y: i32) -> bool {
@@ -1770,6 +1827,43 @@ mod tests {
     }
 
     #[test]
+    fn window_context_menu_is_ephemeral_on_focus_loss() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        coordinator.apply_session_snapshot(nickel_session_protocol::Snapshot {
+            windows: vec![nickel_session_protocol::WindowSnapshot {
+                id: nickel_session_protocol::WindowId(41),
+                application_id: "owned-test".into(),
+                title: "Owned test".into(),
+                active: true,
+                minimized: false,
+                maximized: false,
+                fullscreen: false,
+                geometry: None,
+                workspace: nickel_session_protocol::WorkspaceId(1),
+            }],
+            ..Default::default()
+        });
+        assert!(coordinator.open_window_menu_at(41, 70, 80));
+        let menu = coordinator
+            .surface(SurfaceRole::WindowContextMenu, None)
+            .unwrap()
+            .id;
+        assert!(coordinator.visible(menu));
+
+        assert!(coordinator.dismiss_ephemeral_on_focus_loss(SurfaceRole::WindowContextMenu));
+        assert!(!coordinator.visible(menu));
+        assert_eq!(coordinator.window_menu_generation(), None);
+    }
+
+    #[test]
     fn applying_session_snapshot_immediately_refreshes_running_window_projection() {
         let mut coordinator = coordinator();
         let snapshot = nickel_session_protocol::Snapshot {
@@ -2204,6 +2298,33 @@ mod tests {
             );
             assert!(!coordinator.visible(id));
         }
+    }
+
+    #[test]
+    fn native_launcher_routes_controller_actions_through_the_coordinator() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "nested".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        assert!(coordinator.toggle_launcher());
+        let launcher = coordinator.surface(SurfaceRole::Launcher, None).unwrap().id;
+        assert!(coordinator.visible(launcher));
+        coordinator.set_controller_family(nickel_ui::ControllerFamily::Xbox);
+        coordinator.step_slot_changes(
+            launcher,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Controller(
+                    nickel_ui::ControllerAction::Cancel,
+                )],
+                ..HostBatch::default()
+            },
+        );
+        assert!(!coordinator.visible(launcher));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crate::session::{
     state::{ClientState, SurfaceBufferCommit},
 };
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
+    backend::{allocator::Buffer, renderer::utils::on_commit_buffer_handler},
     reexports::wayland_server::{
         Client, Resource,
         protocol::{wl_buffer, wl_surface::WlSurface},
@@ -130,6 +130,31 @@ impl CompositorHandler for NickelSession {
 
 impl BufferHandler for NickelSession {
     fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+}
+
+impl smithay::wayland::dmabuf::DmabufHandler for NickelSession {
+    fn dmabuf_state(&mut self) -> &mut smithay::wayland::dmabuf::DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &smithay::wayland::dmabuf::DmabufGlobal,
+        dmabuf: smithay::backend::allocator::dmabuf::Dmabuf,
+        notifier: smithay::wayland::dmabuf::ImportNotifier,
+    ) {
+        #[cfg(feature = "backend-udev")]
+        if let Some(native) = self.native.as_mut()
+            && !native.import_dmabuf(&dmabuf)
+        {
+            tracing::warn!(format = ?dmabuf.format(), "rejected client DMA-BUF that the primary renderer could not import");
+            notifier.failed();
+            return;
+        }
+        if notifier.successful::<Self>().is_err() {
+            tracing::debug!("DMA-BUF client disconnected before wl_buffer creation");
+        }
+    }
 }
 
 impl ShmHandler for NickelSession {

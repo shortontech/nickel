@@ -1795,6 +1795,7 @@ use smithay::{
         compositor::{
             CompositorClientState, CompositorState, get_parent, send_surface_state, with_states,
         },
+        dmabuf::{DmabufGlobal, DmabufState},
         fractional_scale::{FractionalScaleManagerState, with_fractional_scale},
         idle_inhibit::IdleInhibitManagerState,
         image_capture_source::{ImageCaptureSourceState, OutputCaptureSourceState},
@@ -2480,6 +2481,8 @@ pub struct NickelSession {
 
     // Smithay State
     pub compositor_state: CompositorState,
+    pub dmabuf_state: DmabufState,
+    pub dmabuf_global: Option<DmabufGlobal>,
     pub fractional_scale_manager_state: FractionalScaleManagerState,
     // Fractional-scale clients require wp_viewporter to submit buffers at the
     // advertised non-integer scale. Without it they fall back to wl_output's
@@ -2665,6 +2668,7 @@ pub struct NickelSession {
     x11_fullscreen_restore: HashMap<u32, smithay::utils::Rectangle<i32, Logical>>,
     pub last_titlebar_click: Option<(ObjectId, u32, Point<f64, Logical>)>,
     pub suppress_left_button_release: bool,
+    pub suppress_secondary_button_release: bool,
     pub idle_inhibitors: HashMap<WlSurface, usize>,
     pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
     idle_controller: IdleController,
@@ -5518,6 +5522,68 @@ impl NickelSession {
         true
     }
 
+    /// Route event-driven native controller actions into the compositor-owned shell.
+    pub(crate) fn handle_native_controller_action(
+        &mut self,
+        action: nickel_ui::ControllerAction,
+        family: nickel_ui::ControllerFamily,
+    ) {
+        use crate::winit_shell::SurfaceRole;
+
+        self.cancel_remote_pointer();
+        self.cancel_remote_keyboard();
+        if let Some(shell) = self.internal_shell.as_mut() {
+            shell.set_controller_family(family);
+        } else {
+            return;
+        }
+
+        let screenshot_visible = self.internal_shell.as_ref().is_some_and(|shell| {
+            shell
+                .surface(SurfaceRole::Screenshot, None)
+                .is_some_and(|surface| shell.visible(surface.id))
+        });
+        if action == nickel_ui::ControllerAction::Launcher && !screenshot_visible {
+            self.toggle_launcher_from(InvocationSource::Keyboard);
+            return;
+        }
+
+        let role_target = [
+            SurfaceRole::Screenshot,
+            SurfaceRole::OnScreenKeyboard,
+            SurfaceRole::Launcher,
+        ]
+        .into_iter()
+        .find_map(|role| {
+            self.internal_shell.as_ref().and_then(|shell| {
+                shell
+                    .surface(role, None)
+                    .filter(|surface| shell.visible(surface.id))
+                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
+            })
+        });
+        let target = role_target.or_else(|| {
+            let focused = self.internal_ui.focused()?;
+            self.internal_shell_surfaces
+                .values()
+                .any(|runtime| *runtime == focused)
+                .then_some(focused)
+        });
+        let Some(target) = target else {
+            return;
+        };
+        self.internal_ui.step(
+            target,
+            nickel_ui::HostBatch {
+                events: vec![nickel_ui::HostEvent::Controller(action)],
+                ..nickel_ui::HostBatch::default()
+            },
+        );
+        self.flush_internal_shell_input();
+        self.note_input_activity();
+        self.request_output_redraw();
+    }
+
     /// Hide the compositor-hosted launcher because an ordinary client is
     /// about to receive a pointer press. The press itself establishes the new
     /// focus, so do not briefly restore the window displaced when Launcher
@@ -5563,7 +5629,17 @@ impl NickelSession {
                         .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
             })
         });
-        if menu.is_none() && !control_blurred {
+        let window_menu_blurred = self.internal_shell.as_ref().is_some_and(|shell| {
+            shell.surfaces().iter().any(|surface| {
+                surface.role == SurfaceRole::WindowContextMenu
+                    && shell.visible(surface.id)
+                    && self
+                        .internal_shell_surfaces
+                        .get(&surface.id)
+                        .is_some_and(|id| self.internal_ui.is_visible(*id) && focused != Some(*id))
+            })
+        });
+        if menu.is_none() && !control_blurred && !window_menu_blurred {
             return;
         }
         if let Some(menu) = menu {
@@ -5575,6 +5651,9 @@ impl NickelSession {
             }
             if control_blurred {
                 shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter);
+            }
+            if window_menu_blurred {
+                shell.dismiss_ephemeral_on_focus_loss(SurfaceRole::WindowContextMenu);
             }
         }
         self.sync_internal_shell();
@@ -5835,8 +5914,12 @@ impl NickelSession {
                 surface.size = (placement.geometry.2, placement.geometry.3);
                 resized = shell.set_surface_size(surface.id, surface.size);
             }
-            if surface.role == crate::winit_shell::SurfaceRole::WindowContextMenu
-                && let Some((x, y, width, height)) = shell.window_menu_geometry()
+            let transient_geometry = match surface.role {
+                crate::winit_shell::SurfaceRole::WindowContextMenu => shell.window_menu_geometry(),
+                crate::winit_shell::SurfaceRole::WindowPreview => shell.preview_geometry(),
+                _ => None,
+            };
+            if let Some((x, y, width, height)) = transient_geometry
                 && let Some((output, origin_x, origin_y)) = outputs
                     .iter()
                     .find(|(output, ox, oy)| {
@@ -5856,20 +5939,19 @@ impl NickelSession {
                     )
                     .max(1);
                 placement.output = Some(output.name.clone());
+                let y = origin_y.saturating_add(
+                    output.height.saturating_sub(
+                        crate::winit_shell::PANEL_HEIGHT
+                            .saturating_add(height)
+                            .saturating_add(4),
+                    ) as i32,
+                );
                 placement.geometry = (
                     x.clamp(
                         *origin_x,
                         origin_x.saturating_add(output.width.saturating_sub(width) as i32),
                     ),
-                    y.clamp(
-                        *origin_y,
-                        origin_y.saturating_add(
-                            output
-                                .height
-                                .saturating_sub(crate::winit_shell::PANEL_HEIGHT)
-                                .saturating_sub(height) as i32,
-                        ),
-                    ),
+                    y,
                     width,
                     height,
                 );
@@ -6480,6 +6562,28 @@ impl NickelSession {
         })
     }
 
+    pub(crate) fn advertise_dmabuf_formats(
+        &mut self,
+        formats: impl IntoIterator<Item = smithay::backend::allocator::Format>,
+    ) {
+        if self.dmabuf_global.is_some() {
+            return;
+        }
+        let formats = formats.into_iter().collect::<Vec<_>>();
+        if formats.is_empty() {
+            tracing::warn!("renderer exposes no importable DMA-BUF formats");
+            return;
+        }
+        let global = self
+            .dmabuf_state
+            .create_global::<Self>(&self.display_handle, formats.iter().copied());
+        tracing::info!(
+            formats = formats.len(),
+            "advertised renderer DMA-BUF formats"
+        );
+        self.dmabuf_global = Some(global);
+    }
+
     pub fn new(
         event_loop: &mut EventLoop<'static, NickelSession>,
         display: Display<Self>,
@@ -6499,6 +6603,7 @@ impl NickelSession {
         let dh = display.handle();
 
         let compositor_state = CompositorState::new::<Self>(&dh);
+        let dmabuf_state = DmabufState::new();
         super::remote_accessibility::install(&dh);
         let fractional_scale_manager_state = FractionalScaleManagerState::new::<Self>(&dh);
         let viewporter_state = ViewporterState::new::<Self>(&dh);
@@ -6734,6 +6839,8 @@ impl NickelSession {
             socket_name,
 
             compositor_state,
+            dmabuf_state,
+            dmabuf_global: None,
             fractional_scale_manager_state,
             viewporter_state,
             xdg_shell_state,
@@ -6906,6 +7013,7 @@ impl NickelSession {
             x11_fullscreen_restore: HashMap::new(),
             last_titlebar_click: None,
             suppress_left_button_release: false,
+            suppress_secondary_button_release: false,
             idle_inhibitors: HashMap::new(),
             active_touch_slots: HashSet::new(),
             idle_controller,
@@ -7058,6 +7166,17 @@ impl NickelSession {
             !connected.contains_key(&placement.name)
                 || !names.insert(&placement.name)
                 || !(60..=480).contains(&placement.scale_120)
+                || placement.mode.is_some_and(|requested| {
+                    !connected[&placement.name]
+                        .0
+                        .modes()
+                        .into_iter()
+                        .any(|mode| {
+                            mode.size.w == requested.width
+                                && mode.size.h == requested.height
+                                && mode.refresh == requested.refresh_millihz
+                        })
+                })
         }) {
             return Err("layout contains an unknown, duplicate, or invalidly scaled output");
         }
@@ -7088,14 +7207,24 @@ impl NickelSession {
         {
             let scaled_size = |placement: &nickel_session_protocol::OutputPlacement| {
                 let (output, fallback) = &connected[&placement.name];
-                output.current_mode().map_or(*fallback, |mode| {
-                    output
-                        .current_transform()
-                        .transform_size(mode.size)
-                        .to_f64()
-                        .to_logical(f64::from(placement.scale_120) / 120.0)
-                        .to_i32_round()
-                })
+                placement.mode.map_or_else(
+                    || {
+                        output.current_mode().map_or(*fallback, |mode| {
+                            output
+                                .current_transform()
+                                .transform_size(mode.size)
+                                .to_f64()
+                                .to_logical(f64::from(placement.scale_120) / 120.0)
+                                .to_i32_round()
+                        })
+                    },
+                    |mode| {
+                        Size::<i32, smithay::utils::Physical>::from((mode.width, mode.height))
+                            .to_f64()
+                            .to_logical(f64::from(placement.scale_120) / 120.0)
+                            .to_i32_round()
+                    },
+                )
             };
             let left_size = scaled_size(left);
             for right in placements
@@ -7128,6 +7257,23 @@ impl NickelSession {
             self.set_native_output_enabled(&placement.name, false)?;
         }
         for placement in placements.iter().filter(|placement| placement.enabled) {
+            #[cfg(feature = "backend-udev")]
+            if let Some(mode) = placement.mode {
+                self.set_native_output_mode(&placement.name, mode)?;
+            }
+            #[cfg(not(feature = "backend-udev"))]
+            if placement.mode.is_some_and(|requested| {
+                connected[&placement.name]
+                    .0
+                    .current_mode()
+                    .is_none_or(|current| {
+                        current.size.w != requested.width
+                            || current.size.h != requested.height
+                            || current.refresh != requested.refresh_millihz
+                    })
+            }) {
+                return Err("display mode changes require the native DRM backend");
+            }
             let output = self
                 .space
                 .outputs()
@@ -7159,6 +7305,7 @@ impl NickelSession {
         self.reconstrain_all_reactive_popups();
         self.space.refresh();
         self.refresh_surface_scales();
+        self.request_output_redraw();
         self.notify_protocol_snapshot();
         Ok(())
     }
@@ -9749,6 +9896,11 @@ impl NickelSession {
             crate::session::focus::KeyboardFocusTarget::for_window(&window),
             SERIAL_COUNTER.next_serial(),
         );
+        if let Some(surface) = window.x11_surface()
+            && let Err(error) = surface.reassert_keyboard_focus()
+        {
+            tracing::warn!(?error, "failed to reassert X11 keyboard focus");
+        }
         self.space.elements().for_each(|window| {
             if let Some(toplevel) = window.toplevel() {
                 toplevel.send_pending_configure();
@@ -11792,6 +11944,15 @@ mod protocol_tests {
             .id;
         let runtime = session.internal_shell_surfaces[&menu];
         assert_eq!(session.internal_ui.focused(), Some(runtime));
+
+        assert!(
+            !session
+                .internal_ui
+                .pointer_button_with_client((900.0, 200.0), true, true)
+        );
+        session.flush_internal_shell_input();
+        assert!(!session.internal_shell.as_ref().unwrap().visible(menu));
+        assert!(!session.internal_ui.is_visible(runtime));
     }
 
     #[test]
@@ -16573,6 +16734,7 @@ mod protocol_tests {
                         y: 0,
                         enabled: true,
                         scale_120: 180,
+                        mode: None,
                     },
                     nickel_session_protocol::OutputPlacement {
                         name: "normal".into(),
@@ -16580,6 +16742,7 @@ mod protocol_tests {
                         y: 0,
                         enabled: true,
                         scale_120: 120,
+                        mode: None,
                     },
                 ],
             })
@@ -16602,6 +16765,92 @@ mod protocol_tests {
             let runtime = session.internal_shell_surfaces[&surface.id];
             assert_eq!(session.internal_ui.scale_factor(runtime), Some(expected));
         }
+    }
+
+    #[test]
+    fn applying_output_layout_preserves_independent_vertical_offsets() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        for name in ["left", "right"] {
+            session
+                .apply_test_output(TestOutput::Connect {
+                    name: name.into(),
+                    logical_width: 800,
+                    logical_height: 600,
+                    scale_120: 120,
+                    transform: OutputTransform::Normal,
+                })
+                .unwrap();
+        }
+        session
+            .apply_output_layout(nickel_session_protocol::OutputLayout {
+                primary: "left".into(),
+                placements: vec![
+                    nickel_session_protocol::OutputPlacement {
+                        name: "left".into(),
+                        x: 0,
+                        y: 0,
+                        enabled: true,
+                        scale_120: 120,
+                        mode: None,
+                    },
+                    nickel_session_protocol::OutputPlacement {
+                        name: "right".into(),
+                        x: 800,
+                        y: 175,
+                        enabled: true,
+                        scale_120: 120,
+                        mode: None,
+                    },
+                ],
+            })
+            .unwrap();
+
+        let right = session
+            .protocol_outputs()
+            .into_iter()
+            .find(|output| output.name == "right")
+            .unwrap();
+        assert_eq!((right.geometry.x, right.geometry.y), (800, 175));
+    }
+
+    #[cfg(not(feature = "backend-udev"))]
+    #[test]
+    fn nested_backend_rejects_a_mode_it_cannot_apply_without_mutating_output() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "test".into(),
+                logical_width: 1280,
+                logical_height: 720,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        let before = session.protocol_outputs();
+
+        let result = session.apply_output_layout(nickel_session_protocol::OutputLayout {
+            primary: "test".into(),
+            placements: vec![nickel_session_protocol::OutputPlacement {
+                name: "test".into(),
+                x: 0,
+                y: 0,
+                enabled: true,
+                scale_120: 120,
+                mode: Some(nickel_session_protocol::OutputMode {
+                    width: 1024,
+                    height: 768,
+                    refresh_millihz: 60_000,
+                }),
+            }],
+        });
+
+        assert_eq!(
+            result,
+            Err("layout contains an unknown, duplicate, or invalidly scaled output")
+        );
+        assert_eq!(session.protocol_outputs(), before);
     }
 
     #[test]

@@ -21,21 +21,21 @@ pub fn event(event: &Event, identity: Option<ControllerIdentity>) -> Option<Cont
             }),
         },
         EventType::Disconnected => ControllerEvent::Disconnected { id },
-        EventType::ButtonPressed(button, _) => ControllerEvent::Button {
+        EventType::ButtonPressed(button, code) => ControllerEvent::Button {
             id,
-            button: button_kind(button),
+            button: button_kind_with_code(button, code.into_u32()),
             edge: KeyEdge::Pressed,
             repeat: false,
         },
-        EventType::ButtonRepeated(button, _) => ControllerEvent::Button {
+        EventType::ButtonRepeated(button, code) => ControllerEvent::Button {
             id,
-            button: button_kind(button),
+            button: button_kind_with_code(button, code.into_u32()),
             edge: KeyEdge::Pressed,
             repeat: true,
         },
-        EventType::ButtonReleased(button, _) => ControllerEvent::Button {
+        EventType::ButtonReleased(button, code) => ControllerEvent::Button {
             id,
-            button: button_kind(button),
+            button: button_kind_with_code(button, code.into_u32()),
             edge: KeyEdge::Released,
             repeat: false,
         },
@@ -71,6 +71,20 @@ pub fn button_kind(button: Button) -> ControllerButton {
     }
 }
 
+fn button_kind_with_code(button: Button, native_code: u32) -> ControllerButton {
+    #[cfg(target_os = "linux")]
+    {
+        // Individual Joy-Con mappings in SDL_GameControllerDB omit `guide`, but
+        // hid-nintendo still reports Home as EV_KEY/BTN_MODE. Preserve the
+        // semantic shell action when the higher-level mapping is incomplete.
+        const EV_KEY_BTN_MODE: u32 = (1 << 16) | 0x13c;
+        if native_code == EV_KEY_BTN_MODE {
+            return ControllerButton::Guide;
+        }
+    }
+    button_kind(button)
+}
+
 pub fn axis_kind(axis: Axis) -> ControllerAxis {
     match axis {
         Axis::LeftStickX => ControllerAxis::LeftX,
@@ -91,5 +105,14 @@ mod tests {
     fn standard_controls_map_without_application_actions() {
         assert_eq!(button_kind(Button::South), ControllerButton::South);
         assert_eq!(axis_kind(Axis::LeftStickX), ControllerAxis::LeftX);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_btn_mode_remains_guide_when_the_device_mapping_omits_it() {
+        assert_eq!(
+            button_kind_with_code(Button::Unknown, (1 << 16) | 0x13c),
+            ControllerButton::Guide
+        );
     }
 }

@@ -259,16 +259,38 @@ impl ControllerInput {
         window_focused: bool,
         fence: impl FnOnce() -> ControllerFence,
     ) -> Vec<ControllerAction> {
-        self.poll_inner(now, Some((window_focused, fence)))
+        self.poll_inner(now, Some((window_focused, fence)), None)
     }
 
     /// Polls controller input for a session-global owner such as the desktop shell.
     /// Ordinary applications should use [`Self::poll`] so background input is discarded.
     pub fn poll_global(&mut self, now: Instant) -> Vec<ControllerAction> {
-        self.poll_inner::<fn() -> ControllerFence>(now, None)
+        self.poll_inner::<fn() -> ControllerFence>(now, None, None)
     }
 
-    fn poll_inner<F>(&mut self, now: Instant, focused: Option<(bool, F)>) -> Vec<ControllerAction>
+    /// Wait for native controller activity without making the host event loop poll.
+    /// A bounded idle timeout lets an owning worker notice process teardown, while
+    /// held-stick repeats retain their normal low-latency deadline.
+    pub fn wait_global(&mut self, idle_timeout: std::time::Duration) -> Vec<ControllerAction> {
+        let Some(gilrs) = &mut self.gilrs else {
+            std::thread::sleep(idle_timeout);
+            return Vec::new();
+        };
+        let timeout = if self.normalizer.has_pending_repeat() {
+            idle_timeout.min(crate::ControllerPollSchedule::CONNECTED_INTERVAL)
+        } else {
+            idle_timeout
+        };
+        let first = gilrs.next_event_blocking(Some(timeout));
+        self.poll_inner::<fn() -> ControllerFence>(Instant::now(), None, first)
+    }
+
+    fn poll_inner<F>(
+        &mut self,
+        now: Instant,
+        focused: Option<(bool, F)>,
+        first: Option<gilrs::Event>,
+    ) -> Vec<ControllerAction>
     where
         F: FnOnce() -> ControllerFence,
     {
@@ -278,7 +300,9 @@ impl ControllerInput {
         let Some(gilrs) = &mut self.gilrs else {
             return actions;
         };
-        let events: Vec<_> = std::iter::from_fn(|| gilrs.next_event())
+        let events: Vec<_> = first
+            .into_iter()
+            .chain(std::iter::from_fn(|| gilrs.next_event()))
             .take(MAX_EVENTS_PER_POLL)
             .collect();
         self.last_poll_events = events.len();

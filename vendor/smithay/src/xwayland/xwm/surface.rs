@@ -343,6 +343,36 @@ impl std::fmt::Debug for X11IsolatedKeymap {
 }
 
 impl X11Surface {
+    /// Reassert this window as the core X11 keyboard focus target.
+    ///
+    /// This is useful when compositor seat focus has not changed, so a normal
+    /// keyboard enter would otherwise be elided while X11 core focus drifted.
+    pub fn reassert_keyboard_focus(&self) -> Result<(), ConnectionError> {
+        let (set_input_focus, send_take_focus) = match self.input_model() {
+            WmInputModel::None => return Ok(()),
+            WmInputModel::Passive => (true, false),
+            WmInputModel::LocallyActive => (true, true),
+            WmInputModel::GloballyActive => (false, true),
+        };
+        if let Some(release) = &self.focus_release {
+            release.cancel();
+        }
+        let conn = self.conn.upgrade().ok_or(ConnectionError::UnknownError)?;
+        if set_input_focus {
+            conn.set_input_focus(InputFocus::NONE, self.window, x11rb::CURRENT_TIME)?;
+        }
+        if send_take_focus {
+            let event = ClientMessageEvent::new(
+                32,
+                self.window,
+                self.atoms.WM_PROTOCOLS,
+                [self.atoms.WM_TAKE_FOCUS, x11rb::CURRENT_TIME, 0, 0, 0],
+            );
+            conn.send_event(false, self.window, EventMask::NO_EVENT, event)?;
+        }
+        conn.flush()
+    }
+
     /// Snapshot the core map off the compositor thread. This does not modify a device.
     pub fn isolated_keymap(&self) -> Result<X11IsolatedKeymap, ReplyError> {
         use x11rb::protocol::xkb::{ConnectionExt as _, MapPart};

@@ -2950,6 +2950,10 @@ impl<Message: Clone> UiFrame<Message> {
                         ControllerDirection::Left,
                         &mut outcome.messages,
                     )
+                } else if vertical_scope
+                    && state.navigation().controller_scope() == state.navigation().controller_pane()
+                {
+                    self.switch_controller_pane(state, -1)
                 } else if vertical_scope {
                     let scope = state
                         .navigation()
@@ -2962,11 +2966,22 @@ impl<Message: Clone> UiFrame<Message> {
                 {
                     self.switch_controller_pane(state, -1)
                 } else {
-                    self.move_controller_spatial(
+                    let moved = self.move_controller_spatial(
                         state,
                         ControllerDirection::Left,
                         &mut outcome.messages,
-                    )
+                    );
+                    if moved == Invalidation::None {
+                        state
+                            .navigation()
+                            .controller_scope()
+                            .cloned()
+                            .map_or(Invalidation::None, |scope| {
+                                self.leave_controller_scope(state, &scope)
+                            })
+                    } else {
+                        moved
+                    }
                 }
             }
             UiEvent::ControllerRight | UiEvent::KeyboardNavigateRight => {

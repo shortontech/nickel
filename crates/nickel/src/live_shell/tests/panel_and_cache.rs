@@ -190,7 +190,7 @@
     #[test]
     fn panel_render_context_preserves_input_output_and_reuses_each_output_projection() {
         use nickel_session_protocol::{Geometry, OutputSnapshot, OutputTransform, Snapshot, WindowSnapshot, WorkspaceId};
-        let output = |name: &str, x| OutputSnapshot { name: name.into(), model: name.into(), geometry: Geometry { x, y: 0, width: 1000, height: 800 }, work_area: Geometry { x, y: 0, width: 1000, height: 744 }, scale_120: 120, transform: OutputTransform::Normal, physical_width_mm: 1, physical_height_mm: 1, primary: x == 0, enabled: true };
+        let output = |name: &str, x| OutputSnapshot { name: name.into(), model: name.into(), geometry: Geometry { x, y: 0, width: 1000, height: 800 }, work_area: Geometry { x, y: 0, width: 1000, height: 744 }, scale_120: 120, transform: OutputTransform::Normal, physical_width_mm: 1, physical_height_mm: 1, primary: x == 0, enabled: true, modes: Vec::new(), current_mode: None };
         let window = |id, x, title: &str| WindowSnapshot { id: nickel_session_protocol::WindowId(id), application_id: format!("app.{id}"), title: title.into(), active: id == 1, minimized: false, maximized: false, fullscreen: false, geometry: Some(Geometry { x, y: 0, width: 400, height: 400 }), workspace: WorkspaceId(1) };
         let mut shell = LiveShell::new().unwrap();
         shell.launcher = crate::launcher::Launcher::new(Vec::new());

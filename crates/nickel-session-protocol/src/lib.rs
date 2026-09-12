@@ -1403,6 +1403,18 @@ pub struct OutputSnapshot {
     pub physical_height_mm: i32,
     pub primary: bool,
     pub enabled: bool,
+    #[serde(default)]
+    pub modes: Vec<OutputMode>,
+    #[serde(default)]
+    pub current_mode: Option<OutputMode>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct OutputMode {
+    pub width: i32,
+    pub height: i32,
+    /// Vertical refresh rate in millihertz.
+    pub refresh_millihz: i32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1484,6 +1496,9 @@ pub struct OutputPlacement {
     /// Exact desired scale in Wayland fractional-scale units (120 == 100%).
     #[serde(default = "default_output_scale_120")]
     pub scale_120: u32,
+    /// Requested physical scanout mode. Omitted by older clients.
+    #[serde(default)]
+    pub mode: Option<OutputMode>,
 }
 
 const fn default_output_scale_120() -> u32 {
@@ -2192,6 +2207,11 @@ mod tests {
                     y: 37,
                     enabled: true,
                     scale_120: 150,
+                    mode: Some(OutputMode {
+                        width: 1920,
+                        height: 1080,
+                        refresh_millihz: 60_000,
+                    }),
                 }],
             },
         });
@@ -2380,6 +2400,16 @@ mod tests {
                 physical_height_mm: 170,
                 primary: true,
                 enabled: true,
+                modes: vec![OutputMode {
+                    width: 1280,
+                    height: 720,
+                    refresh_millihz: 60_000,
+                }],
+                current_mode: Some(OutputMode {
+                    width: 1280,
+                    height: 720,
+                    refresh_millihz: 60_000,
+                }),
             }],
             windows: vec![WindowSnapshot {
                 id: WindowId(9),
@@ -2576,6 +2606,8 @@ mod tests {
                 physical_height_mm: i32::MAX,
                 primary: index == 0,
                 enabled: true,
+                modes: Vec::new(),
+                current_mode: None,
             })
             .collect();
         let envelope = ServerEnvelope {

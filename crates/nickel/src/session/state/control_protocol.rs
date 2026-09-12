@@ -318,13 +318,13 @@ impl NickelSession {
         self.pending_launch_observations.clear();
         let mut settings =
             nickel_remote_control::RemoteAiControlSettings::load_default().unwrap_or_default();
-        settings.set_requested(false);
+        settings.set_requested(true);
         self.remote_control.emergency_stop_at(settings.generation);
         if let Err(error) = nickel_remote_control::RemoteAiControlSettings::default_path()
             .and_then(|path| settings.save(path))
         {
             self.remote_control.set_diagnostic(format!(
-                "Remote control stopped, but Disabled could not be saved: {error}"
+                "Remote authority stopped, but always-on listener state could not be saved: {error}"
             ));
         }
         let confirmation_until = Instant::now() + Duration::from_secs(3);
@@ -1940,6 +1940,22 @@ impl NickelSession {
                     physical_height_mm: physical.size.h,
                     primary: self.primary_output_name.as_deref() == Some(output.name().as_str()),
                     enabled: true,
+                    modes: output
+                        .modes()
+                        .into_iter()
+                        .map(|mode| nickel_session_protocol::OutputMode {
+                            width: mode.size.w,
+                            height: mode.size.h,
+                            refresh_millihz: mode.refresh,
+                        })
+                        .collect(),
+                    current_mode: output.current_mode().map(|mode| {
+                        nickel_session_protocol::OutputMode {
+                            width: mode.size.w,
+                            height: mode.size.h,
+                            refresh_millihz: mode.refresh,
+                        }
+                    }),
                 })
             })
             .take(nickel_session_protocol::MAX_OUTPUTS)
@@ -1978,6 +1994,20 @@ impl NickelSession {
                     physical_height_mm: physical.size.h,
                     primary: false,
                     enabled: false,
+                    modes: output
+                        .modes()
+                        .into_iter()
+                        .map(|mode| nickel_session_protocol::OutputMode {
+                            width: mode.size.w,
+                            height: mode.size.h,
+                            refresh_millihz: mode.refresh,
+                        })
+                        .collect(),
+                    current_mode: Some(nickel_session_protocol::OutputMode {
+                        width: mode.size.w,
+                        height: mode.size.h,
+                        refresh_millihz: mode.refresh,
+                    }),
                 });
             }
         }

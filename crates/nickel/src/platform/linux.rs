@@ -437,7 +437,59 @@ pub fn system_status_receiver() -> super::status_mailbox::StatusReceiver {
             receiver.keep_alive(watcher);
         }
     }
+    let application_sender = receiver.sender();
+    let (changed_tx, changed_rx) = std::sync::mpsc::sync_channel(1);
+    if let Ok(mut watcher) =
+        notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+            if event
+                .as_ref()
+                .is_ok_and(application_inventory_event_changed)
+            {
+                let _ = changed_tx.try_send(());
+            }
+        })
+    {
+        let mut watching = false;
+        for path in freedesktop_desktop_entry::default_paths().filter(|path| path.is_dir()) {
+            watching |= watcher.watch(&path, RecursiveMode::Recursive).is_ok();
+        }
+        if watching {
+            std::thread::Builder::new()
+                .name("nickel-app-catalog".into())
+                .spawn(move || {
+                    while changed_rx.recv().is_ok() {
+                        while changed_rx
+                            .recv_timeout(std::time::Duration::from_millis(150))
+                            .is_ok()
+                        {}
+                        let discovery = prepare_application_discovery();
+                        if application_sender
+                            .send(std::sync::Arc::new(
+                                super::SystemStatusUpdate::ApplicationInventory(discovery),
+                            ))
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                })
+                .ok();
+            receiver.keep_alive(watcher);
+        }
+    }
     receiver
+}
+
+fn application_inventory_event_changed(event: &notify::Event) -> bool {
+    use notify::EventKind;
+
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) && event.paths.iter().any(|path| {
+        path.extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("desktop"))
+    })
 }
 
 fn shell_settings_event_changed(event: &notify::Event, watched_path: &std::path::Path) -> bool {
@@ -585,6 +637,19 @@ impl NotificationFeed {
             );
         }
         Ok(Self { store, connection })
+    }
+
+    pub(crate) fn notify_internal(&self, request: NotificationRequest) -> u32 {
+        self.store
+            .lock()
+            .map(|mut store| store.notify(0, request, Instant::now()).0)
+            .unwrap_or(0)
+    }
+
+    pub(crate) fn close_internal(&self, id: u32) {
+        if let Ok(mut store) = self.store.lock() {
+            store.close(id, 2);
+        }
     }
 }
 
@@ -2395,6 +2460,27 @@ mod tests {
     }
 
     #[test]
+    fn application_inventory_watch_accepts_only_desktop_file_mutations() {
+        let desktop = Path::new("/tmp/applications/example.desktop");
+        for kind in [
+            EventKind::Create(CreateKind::File),
+            EventKind::Modify(ModifyKind::Any),
+            EventKind::Remove(RemoveKind::File),
+        ] {
+            assert!(super::application_inventory_event_changed(
+                &Event::new(kind).add_path(desktop.into())
+            ));
+        }
+        assert!(!super::application_inventory_event_changed(
+            &Event::new(EventKind::Access(AccessKind::Read)).add_path(desktop.into())
+        ));
+        assert!(!super::application_inventory_event_changed(
+            &Event::new(EventKind::Modify(ModifyKind::Any))
+                .add_path(Path::new("/tmp/applications/mimeinfo.cache").into())
+        ));
+    }
+
+    #[test]
     fn internal_window_feed_has_no_pid_derived_transport() {
         let feed = WindowFeed::internal();
 
@@ -2428,6 +2514,8 @@ mod tests {
             physical_height_mm: 1,
             primary,
             enabled: true,
+            modes: Vec::new(),
+            current_mode: None,
         };
         let outputs = vec![output("left", 0, false), output("right", 100, true)];
         let spanning = Geometry {

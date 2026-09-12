@@ -52,6 +52,17 @@ pub trait SessionHost: Send + Sync {
         platform::copy_temp_image_path(image)
     }
     fn dispatch(&self, command: ShellCommand) -> Result<(), SessionRequestError>;
+    fn remote_pending_leases(&self) -> Vec<nickel_session_protocol::RemotePendingLease> {
+        Vec::new()
+    }
+    fn decide_remote_lease(
+        &self,
+        pending: &nickel_session_protocol::RemotePendingLease,
+        allow: bool,
+    ) -> Result<(), SessionRequestError> {
+        let _ = (pending, allow);
+        Err(SessionRequestError::Send)
+    }
     fn keyboard_snapshot(
         &self,
     ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
@@ -197,10 +208,53 @@ pub(crate) struct InProcessSessionHost {
     projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
     capture: Arc<Mutex<crate::session::InternalCaptureState>>,
     keyboard: Arc<RwLock<Option<nickel_session_protocol::OnScreenKeyboardSnapshot>>>,
+    remote_control: Arc<Mutex<nickel_remote_control::ControlPlane>>,
 }
 
 #[cfg(target_os = "linux")]
 impl SessionHost for InProcessSessionHost {
+    fn remote_pending_leases(&self) -> Vec<nickel_session_protocol::RemotePendingLease> {
+        let control = self.remote_control.lock().unwrap();
+        control
+            .lease_requests()
+            .pending()
+            .map(
+                |(client_id, request)| nickel_session_protocol::RemotePendingLease {
+                    pending_generation: control
+                        .lease_requests()
+                        .pending_generation(client_id)
+                        .expect("pending request has an incarnation"),
+                    client_id: client_id.to_owned(),
+                    client_label: control
+                        .granted_clients()
+                        .find(|client| client.id == client_id)
+                        .map(|client| client.label)
+                        .unwrap_or_else(|| "Connected client".into()),
+                    request: request.into(),
+                    resource_label: None,
+                    changes: control.lease_requests().pending_changes(client_id),
+                },
+            )
+            .collect()
+    }
+
+    fn decide_remote_lease(
+        &self,
+        pending: &nickel_session_protocol::RemotePendingLease,
+        allow: bool,
+    ) -> Result<(), SessionRequestError> {
+        self.sender
+            .send(
+                nickel_session_protocol::Command::DecideRemoteLease {
+                    pending_generation: pending.pending_generation,
+                    client_id: pending.client_id.clone(),
+                    request: pending.request.clone(),
+                    allow,
+                }
+                .into(),
+            )
+            .map_err(|_| SessionRequestError::Send)
+    }
     fn keyboard_snapshot(
         &self,
     ) -> Result<nickel_session_protocol::OnScreenKeyboardSnapshot, SessionRequestError> {
@@ -370,6 +424,7 @@ pub(crate) fn install_in_process_session_host(
     projection_outputs: Arc<RwLock<Vec<nickel_session_protocol::OutputSnapshot>>>,
     capture: Arc<Mutex<crate::session::InternalCaptureState>>,
     keyboard: Arc<RwLock<Option<nickel_session_protocol::OnScreenKeyboardSnapshot>>>,
+    remote_control: Arc<Mutex<nickel_remote_control::ControlPlane>>,
 ) -> Result<
     InProcessSessionHost,
     smithay::reexports::calloop::InsertError<
@@ -390,6 +445,7 @@ pub(crate) fn install_in_process_session_host(
         projection_outputs,
         capture,
         keyboard,
+        remote_control,
     })
 }
 
@@ -507,6 +563,7 @@ mod tests {
             projection_outputs: Arc::new(RwLock::new(Vec::new())),
             capture: Arc::new(Mutex::new(crate::session::InternalCaptureState::Idle)),
             keyboard: Arc::new(RwLock::new(None)),
+            remote_control: Arc::new(Mutex::new(nickel_remote_control::ControlPlane::default())),
         }
     }
 
@@ -526,6 +583,41 @@ mod tests {
             SessionAuthorityRequest::Command(Command::SetShellRoleVisible {
                 role: ShellRole::Notification,
                 visible: true,
+            })
+        );
+    }
+
+    #[test]
+    fn remote_lease_notification_decision_uses_typed_session_authority() {
+        use nickel_session_protocol::{
+            RemoteLeaseRequest, RemoteLeaseRequestChanges, RemotePendingLease, RemoteResourceScope,
+        };
+        let (sender, receiver) = channel();
+        let host = host(sender);
+        let pending = RemotePendingLease {
+            pending_generation: 7,
+            client_id: "client-1".into(),
+            client_label: "Agent".into(),
+            request: RemoteLeaseRequest {
+                renewal: None,
+                scope: RemoteResourceScope::FullSession,
+                duration_seconds: Some(600),
+                allow_resumption: false,
+                full_debug: true,
+            },
+            resource_label: None,
+            changes: RemoteLeaseRequestChanges::default(),
+        };
+
+        host.decide_remote_lease(&pending, true).unwrap();
+
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            SessionAuthorityRequest::Command(Command::DecideRemoteLease {
+                pending_generation: 7,
+                client_id: "client-1".into(),
+                request: pending.request,
+                allow: true,
             })
         );
     }
@@ -608,6 +700,7 @@ mod tests {
             Arc::clone(&session.internal_projection_outputs),
             Arc::clone(&session.internal_capture),
             Arc::clone(&session.internal_keyboard_snapshot),
+            session.remote_control.control(),
         )
         .unwrap();
         session.publish_internal_keyboard_snapshot();
@@ -672,6 +765,8 @@ mod tests {
                 physical_height_mm: 0,
                 primary: true,
                 enabled: true,
+                modes: Vec::new(),
+                current_mode: None,
             });
         assert_eq!(host.projection_outputs().unwrap()[0].name, "DP-1");
     }
