@@ -1048,7 +1048,16 @@ impl X11Wm {
             handle.insert_source(focus_release_source, move |_, _, _| release.dispatch())?;
         }
 
-        let isolated_keyboard = isolated_keyboard::IsolatedKeyboard::create(&conn, win).ok();
+        // Xwayland currently stops delivering its Wayland-seat keyboard to
+        // ordinary X11 clients for as long as an additional XI2 master pair
+        // exists, even when that pair is non-core and each client is pinned to
+        // the virtual-core pointer. Keep the experimental recipient-scoped
+        // injector opt-in until its lifetime is reduced to one transaction;
+        // normal desktop sessions must never sacrifice physical X11 input.
+        let isolated_keyboard = std::env::var_os("NICKEL_EXPERIMENTAL_X11_SCOPED_INPUT")
+            .is_some()
+            .then(|| isolated_keyboard::IsolatedKeyboard::create(&conn, win).ok())
+            .flatten();
         drop(_guard);
         let wm = Self {
             isolated_keyboard,
