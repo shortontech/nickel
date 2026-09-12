@@ -326,6 +326,7 @@ impl ControllerInput {
         self.barrier_unix_ms = fence.barrier_unix_ms;
         for event in events {
             let admitted = fence.admits(event.time);
+            let reported_name = gilrs.gamepad(event.id).name().to_owned();
 
             let identity = matches!(event.event, gilrs::EventType::Connected).then(|| {
                 let gamepad = gilrs.gamepad(event.id);
@@ -341,7 +342,9 @@ impl ControllerInput {
             });
             let disconnected = matches!(event.event, gilrs::EventType::Disconnected)
                 .then_some(ControllerId(usize::from(event.id) as u64));
-            if let Some(event) = nickel_input::gilrs::event(&event, identity) {
+            if let Some(event) =
+                nickel_input::gilrs::event_for_reported_name(&event, identity, &reported_name)
+            {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
                 let was_held = self.normalizer.has_held_input();
                 let signals = self.normalizer.handle(event, now_ms);

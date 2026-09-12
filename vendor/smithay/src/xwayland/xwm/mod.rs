@@ -1048,12 +1048,14 @@ impl X11Wm {
             handle.insert_source(focus_release_source, move |_, _, _| release.dispatch())?;
         }
 
-        // Xwayland currently stops delivering its Wayland-seat keyboard to
-        // ordinary X11 clients for as long as an additional XI2 master pair
-        // exists, even when that pair is non-core and each client is pinned to
-        // the virtual-core pointer. Keep the experimental recipient-scoped
-        // injector opt-in until its lifetime is reduced to one transaction;
-        // normal desktop sessions must never sacrifice physical X11 input.
+        // Chromium's TouchFactory::UpdateDeviceList treats the last enumerated
+        // MasterKeyboard as its virtual core keyboard, then rejects key events
+        // from every other master. A persistent private pair therefore disables
+        // ordinary keyboard input in Chrome and Electron, even with send_core
+        // disabled and clients pinned to the real core pointer. Keep this
+        // experimental injector opt-in until its device lifecycle is compatible
+        // with those clients. Never silently substitute global XTEST input for
+        // recipient-scoped input when the private device is unavailable.
         let isolated_keyboard = std::env::var_os("NICKEL_EXPERIMENTAL_X11_SCOPED_INPUT")
             .is_some()
             .then(|| isolated_keyboard::IsolatedKeyboard::create(&conn, win).ok())

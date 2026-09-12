@@ -31,7 +31,19 @@ impl IsolatedKeyboard {
                 return Err(ConnectionError::UnsupportedExtension.into());
             }
         }
-        let core_pointer = conn.xinput_xi_get_client_pointer(0u32)?.reply()?.deviceid;
+        // A fresh connection may have no ClientPointer yet. In that case
+        // XIGetClientPointer returns set=false/deviceid=0; querying device 0
+        // means AllDevices, and setting a client pointer to 0 is BadDevice.
+        // Resolve the server's implicit core choice before adding another pair.
+        {
+            use x11rb::protocol::xproto::ConnectionExt as _;
+            conn.get_input_focus()?.reply()?;
+        }
+        let pointer = conn.xinput_xi_get_client_pointer(0u32)?.reply()?;
+        if !pointer.set || pointer.deviceid == 0 {
+            return Err(ConnectionError::UnknownError.into());
+        }
+        let core_pointer = pointer.deviceid;
         let core_master = conn
             .xinput_xi_query_device(core_pointer)?
             .reply()?
@@ -41,10 +53,9 @@ impl IsolatedKeyboard {
             .attachment;
         let name = format!("Smithay scoped keyboard {identity}").into_bytes();
         let data = HierarchyChangeDataAddMaster {
-            // This master exists solely for recipient-bound synthetic input.
-            // Advertising it as a core device makes Xwayland route ordinary
-            // physical keyboard events through the isolated hierarchy too,
-            // leaving legacy X11 clients without keyboard input.
+            // This master exists solely for recipient-bound XI2 input. This
+            // flag does not hide it from XIQueryDevice or fix clients that
+            // assume the server exposes only one master keyboard.
             send_core: false,
             enable: true,
             name: name.clone(),
@@ -84,7 +95,18 @@ impl IsolatedKeyboard {
         // XTEST extension-event encoding has only seven device-ID bits.
         // Never leave a newly allocated pair behind when it cannot be used.
         match slave {
-            Some(slave) => Ok(Self { slave, ..keyboard }),
+            Some(slave) => {
+                // New master keyboards default to PointerRoot. An idle private
+                // keyboard must have no recipient until explicitly authorized.
+                if let Err(error) = conn
+                    .xinput_xi_set_focus(x11rb::NONE, x11rb::CURRENT_TIME, master)?
+                    .check()
+                {
+                    keyboard.remove(conn);
+                    return Err(error);
+                }
+                Ok(Self { slave, ..keyboard })
+            }
             None => {
                 keyboard.remove(conn);
                 Err(ConnectionError::UnknownError.into())
@@ -119,5 +141,74 @@ impl IsolatedKeyboard {
             }),
         }]);
         let _ = conn.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use x11rb::protocol::xproto::{ConnectionExt as _, CreateWindowAux, WindowClass};
+
+    #[test]
+    #[ignore = "requires a disposable X server in NICKEL_X11_TEST_DISPLAY"]
+    fn fresh_connection_resolves_core_pointer_and_leaves_private_keyboard_unfocused() {
+        let display = std::env::var("NICKEL_X11_TEST_DISPLAY").expect("use a disposable X server");
+        let (conn, screen) = x11rb::connect(Some(&display)).unwrap();
+        let root = conn.setup().roots[screen].root;
+        let window = conn.generate_id().unwrap();
+        assert!(
+            !conn
+                .xinput_xi_get_client_pointer(0u32)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .set
+        );
+        let keyboard = IsolatedKeyboard::create(&conn, window).unwrap();
+        struct RemoveOnDrop<'a>(&'a RustConnection, IsolatedKeyboard);
+        impl Drop for RemoveOnDrop<'_> {
+            fn drop(&mut self) {
+                self.1.remove(self.0);
+            }
+        }
+        let _cleanup = RemoveOnDrop(&conn, keyboard);
+        conn.create_window(
+            0,
+            window,
+            root,
+            0,
+            0,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new(),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        assert_ne!(keyboard.core_pointer, 0);
+        assert_ne!(keyboard.core_master, keyboard.master);
+        conn.xinput_xi_set_client_pointer(window, keyboard.core_pointer)
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            conn.xinput_xi_get_client_pointer(window)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .deviceid,
+            keyboard.core_pointer,
+        );
+        assert_eq!(
+            conn.xinput_xi_get_focus(keyboard.master)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .focus,
+            x11rb::NONE
+        );
     }
 }
