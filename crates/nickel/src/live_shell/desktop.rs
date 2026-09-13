@@ -16,7 +16,8 @@ use nickel_file::{
 use nickel_input::KeyCode;
 use nickel_ui::{
     Container, FilePlaneItem, FrameOverlay, Image, ImageFit, Insets, Layer, OverlayAnchor,
-    OverlayMenu, OverlayMenuItem, Point, Rect, SemanticRole, Size, Text, UiId, ViewContext,
+    OverlayMenu, OverlayMenuItem, OverlayStyle, Point, Rect, SemanticRole, Size, Text, UiId,
+    ViewContext,
 };
 
 use super::desktop_label_foreground;
@@ -1210,6 +1211,13 @@ impl nickel_ui::Application for DesktopApplication {
                 .separator_before(true)
             };
             let mut menu = OverlayMenu::new("desktop-background-context", anchor)
+                .semantic_style(OverlayStyle {
+                    background: self.palette.surface,
+                    foreground: self.palette.text,
+                    border: self.palette.accent,
+                    selected: self.palette.accent_soft,
+                    radius: 7,
+                })
                 .item(
                     OverlayMenuItem::action(
                         "show-icons",
@@ -1475,6 +1483,13 @@ impl nickel_ui::Application for DesktopApplication {
                 format!("desktop-entry-{}-{}-context", id.0.0, id.0.1),
                 OverlayAnchor::InvocationTarget(anchor),
             )
+            .semantic_style(OverlayStyle {
+                background: self.palette.surface,
+                foreground: self.palette.text,
+                border: self.palette.accent,
+                selected: self.palette.accent_soft,
+                radius: 7,
+            })
             .item(
                 OverlayMenuItem::action("open", "Open", DesktopMessage::Activate(id))
                     .shortcut("Enter"),

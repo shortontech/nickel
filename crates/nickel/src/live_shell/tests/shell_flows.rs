@@ -960,6 +960,9 @@
         let mut application = super::LockApplication {
             password: zeroize::Zeroizing::new(String::new()),
             status: None,
+            palette: nickel_core::theme::ThemePalette::from_appearance(
+                nickel_core::theme::Appearance::default(),
+            ),
             effects: Vec::new(),
         };
         nickel_ui::Application::update(

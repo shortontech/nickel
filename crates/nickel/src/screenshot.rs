@@ -12,8 +12,7 @@ use nickel_ui::backend::PaintCommand;
 use nickel_ui::{
     Align, Application, Button, ButtonPresentation, Column, Completion, CompletionFailure,
     CompletionFailureKind, Container, EffectEvidence, FrameOverlay, HostBatch, HostEvent, Image,
-    ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, Tone, UiEvent, UiHost,
-    ViewContext,
+    ImageFit, Insets, Point, Rect, Row, SemanticTheme, Spacer, Text, UiEvent, UiHost, ViewContext,
 };
 
 const TOOLBAR_HEIGHT: f32 = 70.0;
@@ -823,7 +822,7 @@ fn screenshot_view(
         .gap(8.0)
         .align_items(Align::Center)
         .background(palette.panel)
-        .child(Text::new(&app.status).tone(Tone::Muted).ellipsis(true))
+        .child(Text::new(&app.status).color(palette.muted).ellipsis(true))
         .child(Spacer::flex());
     if app.confirmed {
         toolbar = toolbar

@@ -1504,6 +1504,21 @@ impl<Message> TextField<Message> {
         self
     }
 
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.text.0 = self.text.0.background(background);
+        self
+    }
+
+    pub fn focus_background_tint(mut self, color: Color) -> Self {
+        self.text.0 = self.text.0.focus_background_tint(color);
+        self
+    }
+
+    pub fn controller_focus_background_tint(mut self, color: Color) -> Self {
+        self.text.0 = self.text.0.controller_focus_background_tint(color);
+        self
+    }
+
     pub fn wrap(mut self, wrap: bool) -> Self {
         self.text = self.text.wrap(wrap);
         self

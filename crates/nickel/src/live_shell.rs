@@ -155,7 +155,10 @@ impl UiApplication for RunApplication {
                 .id("run-command")
                 .accessibility_label("Command")
                 .single_line_height(40.0)
-                .color(self.palette.text),
+                .color(self.palette.text)
+                .background(self.palette.panel)
+                .focus_background_tint(self.palette.accent)
+                .controller_focus_background_tint(self.palette.complement),
             )
             .child(
                 Button::new(RunAction::Submit, "Run")
@@ -258,6 +261,7 @@ enum LockEffect {
 pub struct LockApplication {
     password: Zeroizing<String>,
     status: Option<String>,
+    palette: ThemePalette,
     effects: Vec<LockEffect>,
 }
 
@@ -336,6 +340,7 @@ impl LockApplication {
         Self {
             password: Zeroizing::new(password.to_owned()),
             status,
+            palette: ThemePalette::from_appearance(Appearance::default()),
             effects: Vec::new(),
         }
     }
@@ -368,10 +373,11 @@ impl nickel_ui::Application for LockApplication {
         let height = context.viewport.size.height;
         let username = std::env::var("USER").unwrap_or_else(|_| "Session locked".into());
         let password_color = if self.password.is_empty() {
-            0x8992a6
+            self.palette.muted
         } else {
-            0xffffff
+            self.palette.text
         };
+        let theme = semantic_theme_from_palette(self.palette);
         let mut content = Column::new()
             .width(width)
             .height(height)
@@ -380,7 +386,7 @@ impl nickel_ui::Application for LockApplication {
                 Text::new("Nickel")
                     .height(48.0)
                     .scale(30.0)
-                    .color(0xffffff)
+                    .color(self.palette.text)
                     .align(TextAlign::Center)
                     .bold(true),
             )
@@ -389,7 +395,7 @@ impl nickel_ui::Application for LockApplication {
                 Text::new(username)
                     .height(32.0)
                     .scale(18.0)
-                    .color(0xb8c0d4)
+                    .color(self.palette.muted)
                     .align(TextAlign::Center),
             )
             .child(Spacer::vertical(16.0))
@@ -400,7 +406,7 @@ impl nickel_ui::Application for LockApplication {
                     .width(340.0)
                     .height(46.0)
                     .align_self(nickel_ui::Align::Center)
-                    .background(0x20283a)
+                    .background(self.palette.surface)
                     .radius(10.0)
                     .padding(Insets {
                         top: 9.0,
@@ -419,7 +425,10 @@ impl nickel_ui::Application for LockApplication {
                         .accessibility_label("Password")
                         .scale(18.0)
                         .single_line_height(28.0)
-                        .color(password_color),
+                        .color(password_color)
+                        .background(self.palette.surface)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus),
                     ),
             );
         if let Some(status) = &self.status {
@@ -427,14 +436,14 @@ impl nickel_ui::Application for LockApplication {
                 Text::new(status)
                     .height(28.0)
                     .scale(15.0)
-                    .color(0xff9a9a)
+                    .color(theme.text.danger)
                     .align(TextAlign::Center),
             );
         }
         Container::new()
             .id("lock-screen")
             .accessibility_label("Session locked")
-            .background(0x080b12)
+            .background(self.palette.background)
             .width(width)
             .height(height)
             .child(content)
@@ -925,6 +934,7 @@ impl LiveShell {
             LockApplication {
                 password: Zeroizing::new(String::new()),
                 status: None,
+                palette,
                 effects: Vec::new(),
             },
             1920,
@@ -1500,6 +1510,7 @@ impl LiveShell {
             ThemePalette::from_appearance(shell_settings.resolve_appearance(Appearance::default()));
         if palette != self.palette {
             self.palette = palette;
+            self.lock_host.application_mut().palette = palette;
             self.launcher_icons.begin_visual_generation();
             if let Some(icon) = crate::icons::load_svg_bytes(
                 include_bytes!("../../../assets/icons/nickel-start.svg"),

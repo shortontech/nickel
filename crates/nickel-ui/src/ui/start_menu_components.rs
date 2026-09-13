@@ -1029,6 +1029,9 @@ impl<Message> LauncherSearchField<Message> {
             .child(
                 TextField::on_change_with_placeholder(&displayed, &placeholder, on_change)
                     .color(theme.text.primary)
+                    .background(theme.surfaces.raised)
+                    .focus_background_tint(theme.borders.focus)
+                    .controller_focus_background_tint(theme.borders.controller_focus)
                     .grow(1.0),
             );
         let content = if direction == ReadingDirection::RightToLeft {

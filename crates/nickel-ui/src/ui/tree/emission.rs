@@ -222,6 +222,23 @@ pub(super) fn emit_element<Message: Clone>(
             initial: input_value.clone().unwrap_or_else(|| value.clone()),
             map,
             secure,
+            context_menu_style: crate::OverlayStyle {
+                background: match element.style.background {
+                    Some(Background::Solid(color)) => color,
+                    _ => crate::theme::FALLBACK_FOCUS_SURFACE,
+                },
+                foreground: element.style.foreground.unwrap_or(0xe8edf4),
+                border: element
+                    .style
+                    .focus_background_tint
+                    .unwrap_or(crate::theme::FALLBACK_KEYBOARD_FOCUS_CUE),
+                selected: element
+                    .style
+                    .controller_focus_background_tint
+                    .or(element.style.focus_background_tint)
+                    .unwrap_or(crate::theme::FALLBACK_CONTROLLER_FOCUS_CUE),
+                radius: 7,
+            },
         });
         if element.message.is_none()
             && let Some(hit_rect) = node

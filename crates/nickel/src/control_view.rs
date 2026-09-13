@@ -11,8 +11,6 @@ use nickel_ui::{
     Switch, SwitchState, Text, UiHost, VerticalScroll, ViewContext,
 };
 
-const GOOD: u32 = 0x6ee7a8;
-const WARNING: u32 = 0xf6c76e;
 const HEADER: f32 = 66.0;
 const ROW: f32 = 46.0;
 
@@ -27,8 +25,8 @@ fn control_theme(palette: ThemePalette) -> SemanticTheme {
         palette.muted,
         palette.accent,
         palette.surface,
-        palette.accent,
-        WARNING,
+        palette.complement,
+        palette.complement,
     ))
 }
 
@@ -541,7 +539,11 @@ fn status_row(
             Text::new(detail)
                 .height(15.0)
                 .scale(0.8)
-                .color(if selected { GOOD } else { palette.muted }),
+                .color(if selected {
+                    palette.complement
+                } else {
+                    palette.muted
+                }),
         );
     match message {
         Some(message) => AnyView::new(
@@ -745,7 +747,11 @@ fn audio_view(palette: ThemePalette, status: &AudioStatus, expanded: bool) -> Ca
             palette,
             "Audio",
             detail,
-            if status.muted { WARNING } else { palette.muted },
+            if status.muted {
+                palette.complement
+            } else {
+                palette.muted
+            },
         ),
         AnyView::new(
             Slider::on_change(volume, f32::from(status.volume_percent) / 100.0)
@@ -803,7 +809,7 @@ fn workspaces_view(palette: ThemePalette, workspaces: &[WorkspaceSummary]) -> Ca
                 .width(34.0)
                 .height(28.0)
                 .background(if workspace.active {
-                    0x9f3f4a
+                    palette.accent
                 } else {
                     palette.surface_hover
                 }),
@@ -892,7 +898,7 @@ fn session_view(palette: ThemePalette, pending: Option<SessionAction>) -> Card {
                                 .id("session-confirm")
                                 .width(118.0)
                                 .height(30.0)
-                                .background(0x9f3f4a),
+                                .background(control_theme(palette).text.danger),
                         ),
                 ),
             ],

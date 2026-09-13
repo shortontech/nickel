@@ -433,6 +433,10 @@ impl SettingsApp {
                             SettingsMessage::PeripheralAddressChanged,
                         )
                         .id("peripheral-printer-address")
+                        .color(theme.text.primary)
+                        .background(theme.surfaces.raised)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus)
                         .width(360.0),
                     )
                     .child(
@@ -734,7 +738,11 @@ impl SettingsApp {
                 <Container width={310.0} padding={Insets::all(6.0)}>
                     {TextField::on_change_with_placeholder(&self.codex_executable_path,
                         "/path/to/codex", SettingsMessage::CodexExecutablePathChanged)
-                        .id("optional-feature-codex-executable")}
+                        .id("optional-feature-codex-executable")
+                        .color(theme.text.primary)
+                        .background(theme.surfaces.raised)
+                        .focus_background_tint(theme.borders.focus)
+                        .controller_focus_background_tint(theme.borders.controller_focus)}
                 </Container>
                 {Button::semantic(theme, SettingsMessage::ApplyCodexExecutable,
                     "Use", ButtonPresentation::Secondary).width(76.0)}
@@ -906,6 +914,9 @@ impl SettingsApp {
                     .id("on-screen-keyboard-preview")
                     .accessibility_label("Keyboard test")
                     .color(theme.text.primary)
+                    .background(theme.surfaces.raised)
+                    .focus_background_tint(theme.borders.focus)
+                    .controller_focus_background_tint(theme.borders.controller_focus)
                     .height(40.0),
                 ),
         )
@@ -1117,7 +1128,11 @@ impl SettingsApp {
                             SettingsMessage::RemoteLeaseCustomMinutesChanged)
                             .id(format!("remote-lease-minutes-{}", pending.client_id))
                             .accessibility_label("Custom approval duration in minutes")
-                            .color(theme.text.primary).width(150.0).height(40.0)}
+                            .color(theme.text.primary)
+                            .background(theme.surfaces.raised)
+                            .focus_background_tint(theme.borders.focus)
+                            .controller_focus_background_tint(theme.borders.controller_focus)
+                            .width(150.0).height(40.0)}
                         {duration_button("Allow custom duration".into(), custom_seconds)
                             .enabled(custom_seconds.is_some()).width(200.0)}
                     </Row> })
@@ -2864,6 +2879,9 @@ impl SettingsApp {
                                 .id(id)
                                 .accessibility_label(label)
                                 .color(theme.text.primary)
+                                .background(theme.surfaces.raised)
+                                .focus_background_tint(theme.borders.focus)
+                                .controller_focus_background_tint(theme.borders.controller_focus)
                                 .height(34.0),
                             ),
                     )

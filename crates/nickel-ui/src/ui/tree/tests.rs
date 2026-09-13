@@ -2974,6 +2974,45 @@ fn pointer_drag_selects_visible_text_and_caret_blink_only_changes_paint() {
 }
 
 #[test]
+fn focused_text_field_transforms_its_explicit_surface() {
+    const SURFACE: Color = 0xe7e9ed;
+    const FOREGROUND: Color = 0x17191d;
+    const FOCUS: Color = 0x7040bb;
+
+    fn query(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+
+    let field = || {
+        TextField::on_change("theme input", query)
+            .id("query")
+            .color(FOREGROUND)
+            .background(SURFACE)
+            .focus_background_tint(FOCUS)
+    };
+    let mut state = UiStateStore::default();
+    let initial = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    initial.handle_event(&mut state, UiEvent::FocusNext);
+    let focused = UiFrame::layout_with_state(field(), Rect::new(0.0, 0.0, 200.0, 32.0), &mut state);
+    let expected = crate::focused_surface_with_foreground(SURFACE, FOCUS, FOREGROUND);
+    assert!(
+        focused.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == expected)
+        )
+    );
+    let fallback = crate::focused_surface_with_foreground(
+        crate::theme::FALLBACK_FOCUS_SURFACE,
+        FOCUS,
+        FOREGROUND,
+    );
+    assert!(
+        !focused.commands().iter().any(
+            |command| matches!(command, PaintCommand::Fill { color, .. } if *color == fallback)
+        )
+    );
+}
+
+#[test]
 fn document_selection_crosses_text_runs_and_skips_buttons() {
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(

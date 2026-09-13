@@ -373,6 +373,9 @@ impl<Message> SettingsSearchField<Message> {
                                 .grow(1.0)
                                 .scale(0.9)
                                 .color(text_color)
+                                .background(theme.surfaces.raised)
+                                .focus_background_tint(theme.borders.focus)
+                                .controller_focus_background_tint(theme.borders.controller_focus)
                                 .wrap(false),
                         ),
                 ),

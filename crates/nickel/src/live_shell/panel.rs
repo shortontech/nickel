@@ -9,7 +9,8 @@ use nickel_core::theme::ThemePalette;
 use nickel_ui::Rect;
 use nickel_ui::{
     AnyView, Column, Container, DragGesture, DragPhase, FrameOverlay, Image, Insets, OverlayAnchor,
-    OverlayMenu, OverlayMenuItem, Row, SemanticRole, Spacer, Text, TextAlign, UiId, ViewContext,
+    OverlayMenu, OverlayMenuItem, OverlayStyle, Row, SemanticRole, Spacer, Text, TextAlign, UiId,
+    ViewContext,
 };
 
 #[cfg(test)]
@@ -180,7 +181,14 @@ impl nickel_ui::Application for PanelApplication {
                 let mut menu = OverlayMenu::new(
                     format!("panel-task-menu-{id}"),
                     OverlayAnchor::InvocationTarget(UiId::new(format!("panel-task-{index}"))),
-                );
+                )
+                .semantic_style(OverlayStyle {
+                    background: self.palette.surface,
+                    foreground: self.palette.text,
+                    border: self.palette.accent,
+                    selected: self.palette.accent_soft,
+                    radius: 7,
+                });
                 if task.pinned {
                     if index > 0 {
                         menu = menu.item(OverlayMenuItem::action(

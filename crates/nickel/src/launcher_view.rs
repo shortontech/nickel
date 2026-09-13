@@ -1260,7 +1260,7 @@ fn launcher_status(theme: SemanticTheme, status: &str) -> Container<LauncherActi
         .radius(theme.radii.control)
         .background(theme.surfaces.raised)
         .accessibility_label("Launcher status")
-        .child(Text::new(status).color(0xd98a32).wrap(true))
+        .child(Text::new(status).color(theme.text.warning).wrap(true))
 }
 
 #[allow(dead_code)]

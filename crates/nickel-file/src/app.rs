@@ -3016,15 +3016,23 @@ impl Application for FileApp {
                     radius: 8,
                 },
             );
-            overlays.push(FrameOverlay::surface(surface, ui! {
-                <Column gap={8.0} padding={Insets::all(10.0)}>
-                    {TextField::on_change(&editor.text, FileMessage::RenameChanged).id("file-rename-field").color(palette.text)}
-                    <Row gap={8.0}>
-                        <Button on_press={FileMessage::CommitRename}>{"Rename"}</Button>
-                        <Button on_press={FileMessage::CancelRename}>{"Cancel"}</Button>
-                    </Row>
-                </Column>
-            }));
+            overlays.push(FrameOverlay::surface(
+                surface,
+                ui! {
+                    <Column gap={8.0} padding={Insets::all(10.0)}>
+                        {TextField::on_change(&editor.text, FileMessage::RenameChanged)
+                            .id("file-rename-field")
+                            .color(palette.text)
+                            .background(palette.surface)
+                            .focus_background_tint(palette.accent)
+                            .controller_focus_background_tint(palette.complement)}
+                        <Row gap={8.0}>
+                            <Button on_press={FileMessage::CommitRename}>{"Rename"}</Button>
+                            <Button on_press={FileMessage::CancelRename}>{"Cancel"}</Button>
+                        </Row>
+                    </Column>
+                },
+            ));
         }
         if let Some(pending) = &self.pending_transfer_conflict {
             let surface = TransientSurface::dialog(

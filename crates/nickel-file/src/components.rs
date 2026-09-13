@@ -179,7 +179,10 @@ pub(crate) fn navigation_toolbar(
                 {TextField::on_change(&app.address_text, address_changed)
                     .id("file-address-field")
                     .accessibility_label("Location")
-                    .color(palette.text)}
+                    .color(palette.text)
+                    .background(palette.background)
+                    .focus_background_tint(palette.accent)
+                    .controller_focus_background_tint(palette.complement)}
             </Container>
         })
     } else {
@@ -498,7 +501,11 @@ pub(crate) fn command_surface(
                         &app.command_query,
                         "Type a command…",
                         command_query_message,
-                    ).id("file-command-query").color(palette.text)}
+                    ).id("file-command-query")
+                        .color(palette.text)
+                        .background(palette.surface)
+                        .focus_background_tint(palette.accent)
+                        .controller_focus_background_tint(palette.complement)}
                 </Container>
                 {results}
             </Column>

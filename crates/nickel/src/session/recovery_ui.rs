@@ -1,9 +1,14 @@
 use nickel_ui::{
-    ActionKind, Application, Border, Button, Column, Insets, Point, Row, Shortcut,
+    ActionKind, Application, Border, Button, Column, Insets, Point, Row, SemanticTheme, Shortcut,
     SoftwareRenderer, Text, UiEvent, UiHost, ViewContext,
 };
 
 use crate::session::shell_layout::Geometry;
+use crate::window_preview::semantic_theme_from_palette;
+use nickel_core::{
+    shell_settings::ShellSettings,
+    theme::{Appearance, ThemePalette},
+};
 use smithay::{
     backend::{allocator::Fourcc, renderer::element::memory::MemoryRenderBuffer},
     utils::Transform,
@@ -19,9 +24,9 @@ pub enum RecoveryAction {
     Exit,
 }
 
-#[derive(Default)]
 struct RecoveryApplication {
     pending: Option<RecoveryAction>,
+    theme: SemanticTheme,
 }
 
 impl Application for RecoveryApplication {
@@ -41,6 +46,7 @@ impl Application for RecoveryApplication {
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {
+        let theme = self.theme;
         Column::new()
             .width(WIDTH as f32)
             .height(HEIGHT as f32)
@@ -51,18 +57,18 @@ impl Application for RecoveryApplication {
                 left: 28.0,
             })
             .gap(8.0)
-            .background(0x24191c)
-            .border_value(Border::new(0xd05a68, 1.0))
+            .background(theme.surfaces.raised)
+            .border_value(Border::new(theme.text.danger, 1.0))
             .radius(14.0)
             .child(
                 Text::new("Nickel shell needs attention")
                     .scale(1.25)
                     .bold(true)
-                    .color(0xfff4f5),
+                    .color(theme.text.primary),
             )
             .child(
                 Text::new("The compositor is still running and your applications are safe.")
-                    .color(0xe8c9cd),
+                    .color(theme.text.secondary),
             )
             .child(
                 Row::new()
@@ -74,9 +80,10 @@ impl Application for RecoveryApplication {
                             .height(30.0)
                             .padding(Insets::symmetric(5.0, 12.0))
                             .radius(7.0)
-                            .background(0x9d3444)
-                            .color(0xffffff)
-                            .focus_background_tint(0xff9aa7),
+                            .background(theme.accent.ordinary)
+                            .color(theme.accent.on_accent)
+                            .focus_background_tint(theme.borders.focus)
+                            .controller_focus_background_tint(theme.borders.controller_focus),
                     )
                     .child(
                         Button::new(RecoveryAction::Exit, "Esc  Log out safely")
@@ -85,10 +92,11 @@ impl Application for RecoveryApplication {
                             .height(30.0)
                             .padding(Insets::symmetric(5.0, 12.0))
                             .radius(7.0)
-                            .background(0x37272b)
-                            .border(0x6b4b52, 1.0)
-                            .color(0xe8c9cd)
-                            .focus_background_tint(0xff9aa7),
+                            .background(theme.surfaces.card)
+                            .border(theme.borders.ordinary, 1.0)
+                            .color(theme.text.secondary)
+                            .focus_background_tint(theme.borders.focus)
+                            .controller_focus_background_tint(theme.borders.controller_focus),
                     ),
             )
     }
@@ -126,10 +134,32 @@ const RECOVERY_RASTER_BYTES: usize = WIDTH as usize * HEIGHT as usize * 4;
 
 impl RecoveryUi {
     pub fn new() -> Self {
+        let settings = ShellSettings::load_default();
+        let palette =
+            ThemePalette::from_appearance(settings.resolve_appearance(Appearance::default()));
         Self {
-            host: UiHost::new(RecoveryApplication::default(), WIDTH, HEIGHT),
+            host: UiHost::new(
+                RecoveryApplication {
+                    pending: None,
+                    theme: semantic_theme_from_palette(palette),
+                },
+                WIDTH,
+                HEIGHT,
+            ),
             raster: RefCell::new(RecoveryRasterCache::default()),
         }
+    }
+
+    pub fn set_theme(&mut self, theme: SemanticTheme) {
+        if self.host.application_mut().theme == theme {
+            return;
+        }
+        self.host.application_mut().theme = theme;
+        self.host.step(nickel_ui::HostBatch {
+            application_changed: true,
+            ..Default::default()
+        });
+        self.invalidate_raster();
     }
 
     pub fn panel_geometry(output: Geometry) -> Geometry {

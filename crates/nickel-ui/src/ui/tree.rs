@@ -75,6 +75,7 @@ struct TextInputRegion<Message> {
     initial: String,
     map: fn(String) -> Message,
     secure: bool,
+    context_menu_style: crate::OverlayStyle,
 }
 
 #[derive(Clone, Debug)]
@@ -1476,7 +1477,8 @@ impl<Message: Clone> UiFrame<Message> {
             session.anchor,
             &editor,
             policy,
-        );
+        )
+        .semantic_style(input.context_menu_style);
         let _ = self.present_menu(state, menu);
     }
 

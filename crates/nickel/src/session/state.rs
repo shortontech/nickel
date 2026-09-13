@@ -5237,6 +5237,9 @@ impl NickelSession {
             .internal_shell
             .as_ref()
             .map(crate::internal_shell::InternalShellCoordinator::semantic_theme);
+        if let Some(theme) = theme {
+            self.recovery_ui.set_theme(theme);
+        }
         if let (Some(theme), Some(mut codex)) = (theme, self.internal_codex.take()) {
             changed.extend(codex.set_theme(&mut self.internal_ui, theme));
             self.internal_codex = Some(codex);
