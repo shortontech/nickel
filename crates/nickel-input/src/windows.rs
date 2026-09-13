@@ -517,9 +517,7 @@ mod native_runtime {
 
     static CALLBACKS: OnceLock<Mutex<Option<NativeHookCallbacks>>> = OnceLock::new();
     static REGISTERED_HOTKEY_ID: AtomicUsize = AtomicUsize::new(0);
-    static SUPER_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
     static ALT_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
-    const SUPER_RELEASE_TIMER: usize = 0x4e04;
     const ALT_RELEASE_TIMER: usize = 0x4e05;
 
     fn callbacks() -> &'static Mutex<Option<NativeHookCallbacks>> {
@@ -546,9 +544,11 @@ mod native_runtime {
         };
         if edge == KeyEdge::Released {
             let timer = match native_modifier_release(native.vkCode) {
-                Some(NativeModifierRelease::SuperOwned) => {
-                    Some((SUPER_RELEASE_TIMER, &SUPER_RELEASE_TIMER_ID, true))
-                }
+                // Super has distinct left/right virtual keys. Deliver its real release edge to
+                // the shortcut engine immediately; it already waits for the aggregate modifier
+                // to clear when both sides are held. Deferring this edge through a window timer
+                // can strand bare-Super state when focus changes as Launcher is activated.
+                Some(NativeModifierRelease::SuperOwned) => None,
                 Some(NativeModifierRelease::AltForwarded) => {
                     Some((ALT_RELEASE_TIMER, &ALT_RELEASE_TIMER_ID, false))
                 }
@@ -559,16 +559,11 @@ mod native_runtime {
                 let timer_id = unsafe { SetTimer(None, requested, 10, None) };
                 retained.store(timer_id, Ordering::Release);
                 if timer_id == 0 {
-                    let modifier = if requested == SUPER_RELEASE_TIMER {
-                        AggregateModifier::Super
-                    } else {
-                        AggregateModifier::Alt
-                    };
-                    with_callbacks(|callbacks| (callbacks.modifier_released)(modifier));
+                    with_callbacks(|callbacks| {
+                        (callbacks.modifier_released)(AggregateModifier::Alt)
+                    });
                 }
-                // Nickel owns the Super chord from press through release, preventing the native
-                // Start menu from racing the deferred bare-Super decision. Alt remains visible to
-                // applications while its two physical sides settle.
+                // Alt remains visible to applications while its two physical sides settle.
                 if suppress {
                     return LRESULT(1);
                 }
@@ -637,13 +632,10 @@ mod native_runtime {
     }
 
     fn reconcile_modifier_release(timer: usize) {
-        let super_timer = SUPER_RELEASE_TIMER_ID.load(Ordering::Acquire);
         let alt_timer = ALT_RELEASE_TIMER_ID.load(Ordering::Acquire);
         // SAFETY: these are read-only physical key-state queries on the hook thread.
         let released = unsafe {
-            if timer == super_timer && super_timer != 0 {
-                GetAsyncKeyState(0x5b) >= 0 && GetAsyncKeyState(0x5c) >= 0
-            } else if timer == alt_timer && alt_timer != 0 {
+            if timer == alt_timer && alt_timer != 0 {
                 GetAsyncKeyState(0x12) >= 0
             } else {
                 return;
@@ -656,14 +648,8 @@ mod native_runtime {
         unsafe {
             let _ = KillTimer(None, timer);
         }
-        let modifier = if timer == super_timer {
-            SUPER_RELEASE_TIMER_ID.store(0, Ordering::Release);
-            AggregateModifier::Super
-        } else {
-            ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
-            AggregateModifier::Alt
-        };
-        with_callbacks(|callbacks| (callbacks.modifier_released)(modifier));
+        ALT_RELEASE_TIMER_ID.store(0, Ordering::Release);
+        with_callbacks(|callbacks| (callbacks.modifier_released)(AggregateModifier::Alt));
     }
 
     pub fn run_native_hook_loop(

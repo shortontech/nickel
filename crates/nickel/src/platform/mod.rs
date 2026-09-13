@@ -1144,10 +1144,10 @@ pub use windows::{
     configure_volume_osd_window, configured_primary_output, copy_image_to_clipboard,
     copy_temp_image_path, execute_run_command, handle_consumer_control, handle_focused_shortcut,
     launch_application, launcher_has_foreground_focus, launcher_hotkey_receiver,
-    launcher_visibility_applied, network_status, register_session_shell, release_panel_window,
-    release_pointer, select_audio_device, send_shell_command, set_audio_volume,
-    set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled, show_window_system_menu,
-    toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
+    launcher_visibility_applied, launcher_window_visible, network_status, register_session_shell,
+    release_panel_window, release_pointer, select_audio_device, send_shell_command,
+    set_audio_volume, set_bluetooth_discovery, set_bluetooth_powered, set_wifi_enabled,
+    show_window_system_menu, toggle_bluetooth_device, update_panel_fullscreen_state, wallpaper,
 };
 
 #[cfg(not(any(target_os = "linux", target_os = "windows")))]

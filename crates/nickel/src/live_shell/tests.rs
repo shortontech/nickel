@@ -79,6 +79,16 @@ fn unchanged_system_feed_events_are_idle_and_do_not_schedule_polling() {
     assert_eq!(shell.next_host_deadline(), before);
 }
 
+#[test]
+fn launcher_focus_loss_dismisses_the_ephemeral_surface() {
+    let mut shell = LiveShell::new().expect("live shell");
+    shell.apply_session_launcher_visibility(true);
+
+    assert!(shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::Launcher));
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
+    assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::Launcher));
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn pending_remote_lease_becomes_persistent_shell_notification() {

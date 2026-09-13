@@ -2119,7 +2119,27 @@ pub fn configure_launcher_window(window: &impl raw_window_handle::HasWindowHandl
         return false;
     };
     LAUNCHER_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
-    true
+    // The launcher is a transient shell surface: keep it out of Alt+Tab while allowing it to
+    // receive keyboard focus, and place it above fullscreen applications when explicitly opened.
+    // Unlike previews it must not use WS_EX_NOACTIVATE because typing belongs to the launcher.
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
+        SetWindowLongPtrW(
+            hwnd,
+            GWL_EXSTYLE,
+            ((style | WS_EX_TOOLWINDOW.0) & !WS_EX_APPWINDOW.0 & !WS_EX_NOACTIVATE.0) as isize,
+        );
+        SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+        )
+        .is_ok()
+    }
 }
 
 pub fn configure_preview_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {
@@ -2270,6 +2290,13 @@ pub fn launcher_has_foreground_focus() -> bool {
 
     let launcher = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);
     launcher != 0 && unsafe { GetForegroundWindow().0 as isize == launcher }
+}
+
+pub fn launcher_window_visible() -> bool {
+    use std::sync::atomic::Ordering;
+
+    let launcher = LAUNCHER_WINDOW_HANDLE.load(Ordering::Relaxed);
+    launcher != 0 && unsafe { IsWindowVisible(HWND(launcher as *mut c_void)).as_bool() }
 }
 
 pub fn configure_panel_window(window: &impl raw_window_handle::HasWindowHandle) -> bool {

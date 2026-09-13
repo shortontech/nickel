@@ -2417,6 +2417,8 @@ pub fn run() -> Result<(), String> {
         #[cfg(target_os = "windows")]
         let timeout = timeout.min(Duration::from_millis(100));
         let event = shell.wait_event_timeout(timeout);
+        #[cfg(target_os = "windows")]
+        platform::update_panel_fullscreen_state();
         if diagnostic_loop_started.elapsed() >= Duration::from_secs(1) {
             if diagnostic_loop_iterations >= 1 {
                 tracing::info!(
@@ -2525,6 +2527,17 @@ pub fn run() -> Result<(), String> {
             },
             Some(ShellEvent::GlobalShortcut(shortcut)) => {
                 tracing::debug!(?shortcut, "handling global shortcut");
+                #[cfg(target_os = "windows")]
+                let shortcut = if shortcut == platform::GlobalShortcut::ToggleLauncher
+                    && platform::launcher_window_visible()
+                {
+                    // Focus loss can be delivered before Winit has reconciled a direct Win32
+                    // visibility change. Native HWND visibility is authoritative for a Windows
+                    // key toggle: a launcher the user can see must always close.
+                    platform::GlobalShortcut::HideLauncher
+                } else {
+                    shortcut
+                };
                 shell.begin_input_observation(Instant::now());
                 #[cfg(not(target_os = "linux"))]
                 if matches!(
@@ -2611,6 +2624,19 @@ pub fn run() -> Result<(), String> {
                 .is_some_and(|entry| entry.role() == SurfaceRole::Screenshot) =>
             {
                 if state.hide_overlay(SurfaceRole::Screenshot) {
+                    sync_visibility(&mut shell, &state);
+                }
+            }
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::Launcher) =>
+            {
+                shell.stop_text_input(surface);
+                if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher) {
+                    platform::launcher_visibility_applied(false);
                     sync_visibility(&mut shell, &state);
                 }
             }

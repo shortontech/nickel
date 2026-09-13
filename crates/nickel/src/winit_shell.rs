@@ -1555,6 +1555,10 @@ impl WinitShell {
         }
         let shown = self.surfaces.get_mut(index).is_some_and(|surface| {
             if surface.visible {
+                // Platform adapters may have changed native visibility directly while acquiring
+                // foreground focus. Reassert the requested state even when our bookkeeping is
+                // already current so native and shell visibility cannot diverge.
+                surface.window.set_visible(true);
                 return false;
             }
             surface.visible = true;
@@ -1587,6 +1591,10 @@ impl WinitShell {
         let hidden = {
             let surface = &mut self.surfaces[index];
             if !surface.visible {
+                // Windows launcher focus acquisition uses direct Win32 visibility calls. A
+                // subsequent focus-loss dismissal can therefore arrive while this flag still
+                // says hidden; enforce the native state instead of treating that as a no-op.
+                surface.window.set_visible(false);
                 return false;
             }
             surface.visible = false;

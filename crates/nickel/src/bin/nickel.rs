@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 #[global_allocator]
 static GLOBAL_ALLOCATOR: nickel_shell::allocation_counter::CountingSystemAllocator =
     nickel_shell::allocation_counter::CountingSystemAllocator;

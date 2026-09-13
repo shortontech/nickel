@@ -28,6 +28,9 @@ use nickel_ui::{
     TextAlign, TextField, UiEvent, UiHostViewport, ViewContext,
 };
 
+#[cfg(any(target_os = "linux", test))]
+use crate::notification::{NotificationAction, NotificationRequest};
+
 use crate::{
     control_view::{ControlAction, ControlCenterApp, ControlCenterHost},
     file_window_host::{FileWindowHost, default_file_window_host},
@@ -37,7 +40,7 @@ use crate::{
         LauncherViewState, reduce_launcher_action,
     },
     model::{Application, OpenWindow, TrayItem, WindowGroup},
-    notification::{DesktopNotification, NotificationAction, NotificationRequest},
+    notification::DesktopNotification,
     notification_view::{NotificationApp, NotificationEffect, NotificationHost},
     platform::{
         self, AudioStatus, BluetoothStatus, FeedState, FeedStatus, NetworkStatus, NotificationFeed,
