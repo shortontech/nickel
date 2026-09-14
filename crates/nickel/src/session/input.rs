@@ -2087,12 +2087,9 @@ impl NickelSession {
                     self.request_output_redraw();
                     return None;
                 }
-                let Some(client_slot) = self
+                let client_slot = self
                     .client_touch_slots
-                    .get(&event.device().id(), event.slot())
-                else {
-                    return None;
-                };
+                    .get(&event.device().id(), event.slot())?;
                 self.record_interaction_output(location);
                 let touch = self.seat.get_touch().unwrap();
                 touch.motion(
@@ -2123,12 +2120,9 @@ impl NickelSession {
                     self.request_output_redraw();
                     return None;
                 }
-                let Some(client_slot) = self
+                let client_slot = self
                     .client_touch_slots
-                    .get(&event.device().id(), event.slot())
-                else {
-                    return None;
-                };
+                    .get(&event.device().id(), event.slot())?;
                 self.active_touch_slots.remove(&client_slot);
                 let touch = self.seat.get_touch().unwrap();
                 touch.up(
