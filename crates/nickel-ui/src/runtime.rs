@@ -2516,7 +2516,15 @@ impl<A: Application> UiHost<A> {
     }
 
     pub fn open_transient(&mut self, id: OverlayId, invocation_target: UiId) -> HostEventOutcome {
-        let invalidation = self.state.open_overlay(id, invocation_target);
+        let prior_state = self.state.clone();
+        let prior_tree = self.tree.clone();
+        let prior_dispatcher = self.input_dispatcher.clone();
+        let prior_pending_long_press = self.pending_long_press.clone();
+        let prior_overlay_failures = self.overlay_failures.clone();
+        let prior_frame_generation = self.frame_generation;
+        let invalidation = self
+            .state
+            .open_overlay(id.clone(), invocation_target.clone());
         let changed = invalidation != Invalidation::None;
         let mut outcome = HostEventOutcome {
             changed,
@@ -2526,6 +2534,27 @@ impl<A: Application> UiHost<A> {
         if outcome.changed {
             let (_, _, cancellation) = self.rebuild_timed();
             outcome.merge(cancellation);
+            if let Some(failure) = self
+                .overlay_failures
+                .iter()
+                .find(|failure| failure.overlay == id)
+                .cloned()
+            {
+                self.state = prior_state;
+                self.tree = prior_tree;
+                self.input_dispatcher = prior_dispatcher;
+                self.pending_long_press = prior_pending_long_press;
+                self.overlay_failures = prior_overlay_failures;
+                self.frame_generation = prior_frame_generation;
+                outcome = HostEventOutcome {
+                    disposition: crate::EventDisposition::Rejected("overlay declaration failed"),
+                    semantic_failures: vec![SemanticActionFailure {
+                        target: invocation_target,
+                        error: failure.error,
+                    }],
+                    ..HostEventOutcome::default()
+                };
+            }
         }
         outcome.effects = self.application.take_effect_evidence();
         outcome.pointer_icon = self.pointer_icon;
@@ -3649,7 +3678,8 @@ impl<A: Application> UiHost<A> {
         let mut staged_tree =
             UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
         overlay_interaction.restore_before_overlay(&mut staged_state);
-        let overlay_failures = apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
+        let mut overlay_failures =
+            apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
         overlay_interaction.restore(&mut staged_state, &staged_tree);
         staged_tree.reconcile_transient_focus(&mut staged_state);
         staged_tree.finalize_transient_layers(&staged_state);
@@ -3667,9 +3697,20 @@ impl<A: Application> UiHost<A> {
                     .is_none_or(|owner| !self.tree.is_descendant_or_self(overlay.as_ui_id(), owner))
             }) {
             let cancellation = self.arbitrate_touch_ownership();
-            staged_state.set_pressed(None);
-            staged_state.set_capture(None);
-            staged_tree.apply_interaction_state(&staged_state);
+            // Cancellation messages can synchronously alter both the base view
+            // and overlay declarations. Only a freshly resolved candidate from
+            // that post-cancellation application state may be committed.
+            let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+            let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
+            let view = self.application.view(context.clone());
+            let overlays = self.application.frame_overlays(context);
+            staged_state = self.state.clone();
+            staged_tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
+            overlay_interaction.restore_before_overlay(&mut staged_state);
+            overlay_failures = apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
+            overlay_interaction.restore(&mut staged_state, &staged_tree);
+            staged_tree.reconcile_transient_focus(&mut staged_state);
+            staged_tree.finalize_transient_layers(&staged_state);
             cancellation
         } else {
             HostEventOutcome::default()
@@ -4975,6 +5016,76 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    enum CancellationViewMessage {
+        Activate,
+        Drag(crate::DragPhase),
+    }
+
+    fn cancellation_view_drag(
+        _seed: CancellationViewMessage,
+        gesture: crate::DragGesture,
+    ) -> CancellationViewMessage {
+        CancellationViewMessage::Drag(gesture.phase)
+    }
+
+    struct CancellationViewApplication {
+        cancelled: bool,
+    }
+
+    impl Application for CancellationViewApplication {
+        type Message = CancellationViewMessage;
+
+        fn update(&mut self, message: Self::Message) {
+            if matches!(
+                message,
+                CancellationViewMessage::Drag(crate::DragPhase::Cancelled)
+            ) {
+                self.cancelled = true;
+            }
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            let label = if self.cancelled {
+                "After cancel"
+            } else {
+                "Before cancel"
+            };
+            Container::new()
+                .id("anchor")
+                .semantic_role(SemanticRole::Button)
+                .accessibility_label(label)
+                .message(CancellationViewMessage::Activate)
+                .on_drag((CancellationViewMessage::Activate, cancellation_view_drag))
+                .child(crate::Text::new(label))
+        }
+
+        fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+            vec![FrameOverlay::surface(
+                crate::TransientSurface::dialog(
+                    "modal",
+                    crate::OverlayAnchor::Node(UiId::from("anchor")),
+                    crate::Size::new(120.0, 80.0),
+                    crate::OverlayStyle {
+                        background: 0x111111,
+                        foreground: 0xffffff,
+                        border: 0x888888,
+                        selected: 0x333333,
+                        radius: 8,
+                    },
+                ),
+                Button::new(
+                    CancellationViewMessage::Activate,
+                    if self.cancelled {
+                        "Fresh dialog"
+                    } else {
+                        "Stale dialog"
+                    },
+                ),
+            )]
+        }
+    }
+
     #[derive(Default)]
     struct FocusRequestApplication {
         requested: Option<UiId>,
@@ -6055,7 +6166,7 @@ mod tests {
         let mut host = UiHost::new(
             ModalGestureApplication {
                 declare_dialog: true,
-                valid_anchor: false,
+                valid_anchor: true,
                 invoked: 0,
             },
             320,
@@ -6073,25 +6184,70 @@ mod tests {
         };
         host.handle_event(UiEvent::PointerPressed(point));
         assert_eq!(host.state.captured(), Some(&anchor.id));
+        host.application_mut().valid_anchor = false;
 
         let failed = host.open_transient(OverlayId::new("modal"), anchor.id.clone());
-        assert_eq!(failed.disposition, crate::EventDisposition::Unhandled);
+        assert_eq!(
+            failed.disposition,
+            crate::EventDisposition::Rejected("overlay declaration failed")
+        );
+        assert!(!failed.changed);
+        assert_eq!(failed.semantic_failures.len(), 1);
+        assert_eq!(
+            failed.semantic_failures[0].error,
+            SemanticActionError::MissingTarget
+        );
         assert_eq!(host.state.captured(), Some(&anchor.id));
         assert_eq!(host.state.pressed(), Some(&anchor.id));
-        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("modal")));
+        assert_eq!(host.inspect().open_overlay, None);
         assert!(
             host.query(&crate::SemanticSelector::Role(SemanticRole::Dialog))
                 .is_empty()
         );
-        assert_eq!(host.inspect().overlay_failures.len(), 1);
-        assert_eq!(
-            host.inspect().overlay_failures[0].error,
-            SemanticActionError::MissingTarget
-        );
+        assert!(host.inspect().overlay_failures.is_empty());
 
-        let release = host.handle_event(UiEvent::PointerReleased(point));
-        assert_eq!(release.messages.len(), 1);
-        assert_eq!(host.application().invoked, 1);
+        assert_eq!(host.application().invoked, 0);
+    }
+
+    #[test]
+    fn modal_commit_revalidates_cancellation_driven_view_changes() {
+        let mut host = UiHost::new(CancellationViewApplication { cancelled: false }, 320, 200);
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Before cancel".into(),
+            })
+            .unwrap();
+        let point = crate::Point {
+            x: anchor.bounds.origin.x + anchor.bounds.size.width / 2.0,
+            y: anchor.bounds.origin.y + anchor.bounds.size.height / 2.0,
+        };
+        host.handle_event(UiEvent::PointerPressed(point));
+
+        let opened = host.open_transient(OverlayId::new("modal"), anchor.id);
+        assert!(opened.changed);
+        assert!(host.application().cancelled);
+        assert!(
+            host.query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "After cancel".into(),
+            })
+            .is_ok()
+        );
+        assert!(
+            host.query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Fresh dialog".into(),
+            })
+            .is_ok()
+        );
+        assert!(
+            host.query(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Stale dialog".into(),
+            })
+            .is_empty()
+        );
     }
 
     #[test]
