@@ -512,10 +512,16 @@ struct AdmittedNormalizedInput {
     authority: NormalizedIngressAuthority,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContinuousQueueOutcome {
+    Queued,
+    ResetRequired,
+}
+
 fn queue_continuous_input(
     pending: &mut Vec<AdmittedNormalizedInput>,
     mut sample: AdmittedNormalizedInput,
-) {
+) -> ContinuousQueueOutcome {
     const MAX_PENDING_CONTINUOUS_INPUT: usize = 256;
     if pending.len() >= MAX_PENDING_CONTINUOUS_INPUT {
         let order = sample.envelope.admission.order;
@@ -530,7 +536,7 @@ fn queue_continuous_input(
         reset.envelope.recipient = recipient;
         pending.clear();
         pending.push(reset);
-        return;
+        return ContinuousQueueOutcome::ResetRequired;
     }
     let event = sample.envelope.input;
     let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
@@ -542,7 +548,7 @@ fn queue_continuous_input(
     else {
         sample.envelope.input = event;
         pending.push(sample);
-        return;
+        return ContinuousQueueOutcome::Queued;
     };
     if let Some(queued) = pending.last_mut()
         && let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
@@ -565,7 +571,7 @@ fn queue_continuous_input(
             (previous, None) => previous,
         };
         queued.envelope.admission = sample.envelope.admission;
-        return;
+        return ContinuousQueueOutcome::Queued;
     }
     sample.envelope.input = nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
         device,
@@ -574,6 +580,31 @@ fn queue_continuous_input(
         delta,
     });
     pending.push(sample);
+    ContinuousQueueOutcome::Queued
+}
+
+fn transform_is_current(sample: &AdmittedNormalizedInput, current_generation: u64) -> bool {
+    sample.envelope.transform_generation == Some(current_generation)
+        && sample.authority.transform_generation == Some(current_generation)
+}
+
+fn revoke_native_ingress(
+    recipient: &mut NormalizedRecipientBinding,
+    stream_generation: &mut u64,
+    reset_generation: u64,
+) {
+    *stream_generation = reset_generation;
+    *recipient = NormalizedRecipientBinding {
+        lease: 0,
+        lifetime: reset_generation,
+    };
+}
+
+fn grant_native_ingress(recipient: &mut NormalizedRecipientBinding, focus_generation: u64) {
+    *recipient = NormalizedRecipientBinding {
+        lease: focus_generation,
+        lifetime: focus_generation,
+    };
 }
 
 #[cfg(target_os = "linux")]
@@ -3106,6 +3137,7 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     normalized_ingress_epoch: Instant,
     native_host_generation: u64,
     standalone_recipient: NormalizedRecipientBinding,
+    native_stream_reset_pending: bool,
 }
 
 impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
@@ -3184,6 +3216,18 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         }
     }
 
+    fn revoke_native_ingress_after_reset(&mut self) {
+        let reset_generation = NEXT_NATIVE_HOST_GENERATION
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        revoke_native_ingress(
+            &mut self.standalone_recipient,
+            &mut self.native_host_generation,
+            reset_generation,
+        );
+        self.native_stream_reset_pending = true;
+    }
+
     fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
         let native_host_generation = NEXT_NATIVE_HOST_GENERATION
@@ -3231,6 +3275,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 lease: 0,
                 lifetime: native_host_generation,
             },
+            native_stream_reset_pending: false,
         }
     }
 
@@ -3292,10 +3337,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     let generation = NEXT_NATIVE_HOST_GENERATION
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         .max(1);
-                    self.standalone_recipient = NormalizedRecipientBinding {
-                        lease: generation,
-                        lifetime: generation,
-                    };
+                    grant_native_ingress(&mut self.standalone_recipient, generation);
                 }
                 self.normalized_admission_order =
                     self.normalized_admission_order.wrapping_add(1).max(1);
@@ -3417,11 +3459,17 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             return;
         }
         let samples = std::mem::take(&mut self.pending_continuous_input);
+        self.native_stream_reset_pending = false;
         let mut events = Vec::new();
         let mut authorities = Vec::new();
         let mut changed = false;
         let mut exit = false;
         for sample in samples {
+            if sample.envelope.recipient.lease == 0
+                || !transform_is_current(&sample, self.transform_generation)
+            {
+                continue;
+            }
             match self.adapter.normalized_input(
                 self.host.as_mut().unwrap(),
                 &sample.envelope.input,
@@ -3819,6 +3867,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                 return;
             }
             WindowEvent::Resized(size) => {
+                self.transform_generation = self.transform_generation.wrapping_add(1).max(1);
                 let logical = size.to_logical::<u32>(window.scale_factor());
                 if let Some(host) = &mut self.host {
                     host.resize(logical.width, logical.height);
@@ -3893,8 +3942,18 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                         | nickel_input::PointerEvent::Motion { .. }
                 )
             ) {
+                if self.native_stream_reset_pending {
+                    continue;
+                }
                 let sample = self.admit_continuous_input(normalized);
-                queue_continuous_input(&mut self.pending_continuous_input, sample);
+                if sample.envelope.recipient.lease == 0 {
+                    continue;
+                }
+                if queue_continuous_input(&mut self.pending_continuous_input, sample)
+                    == ContinuousQueueOutcome::ResetRequired
+                {
+                    self.revoke_native_ingress_after_reset();
+                }
                 self.scheduler.invalidate();
                 continue;
             }
@@ -3959,12 +4018,13 @@ mod tests {
     use super::SessionControllerSource;
     use super::{
         AdmittedNormalizedInput, Application, Completion, CompletionFailure, CompletionFailureKind,
-        ControllerDiscoveryMode, ControllerPollSchedule, ControllerRole, ControllerRoleLease,
-        EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
-        HostFailureStage, MessageEvidence, NormalizedAdmissionBinding, NormalizedInputEnvelope,
-        NormalizedRecipientBinding, NormalizedSourceBinding, PresentScheduler, Shortcut,
-        ShortcutOutcome, UiHost, ViewContext, local_controller_poll_lease, queue_continuous_input,
-        wait_duration,
+        ContinuousQueueOutcome, ControllerDiscoveryMode, ControllerPollSchedule, ControllerRole,
+        ControllerRoleLease, EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent,
+        HostFailure, HostFailureStage, MessageEvidence, NormalizedAdmissionBinding,
+        NormalizedInputEnvelope, NormalizedRecipientBinding, NormalizedSourceBinding,
+        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext, grant_native_ingress,
+        local_controller_poll_lease, queue_continuous_input, revoke_native_ingress,
+        transform_is_current, wait_duration,
     };
 
     #[test]
@@ -4365,8 +4425,9 @@ mod tests {
             }
         };
         let mut pending = Vec::new();
+        let mut reset_required = false;
         for order in 1..=300 {
-            queue_continuous_input(
+            reset_required |= queue_continuous_input(
                 &mut pending,
                 admitted(InputEvent::Pointer(PointerEvent::Motion {
                     device: DeviceId(order % 2),
@@ -4377,14 +4438,58 @@ mod tests {
                     },
                     delta: None,
                 })),
-            );
+            ) == ContinuousQueueOutcome::ResetRequired;
         }
+        assert!(reset_required);
         assert!(pending.len() <= 256);
         assert!(
             pending
                 .iter()
                 .any(|event| matches!(event.envelope.input, InputEvent::FocusLost { .. }))
         );
+    }
+
+    #[test]
+    fn overflow_reset_revokes_recipient_and_rotates_stream_generation() {
+        let mut recipient = NormalizedRecipientBinding {
+            lease: 41,
+            lifetime: 41,
+        };
+        let mut stream_generation = 41;
+
+        revoke_native_ingress(&mut recipient, &mut stream_generation, 42);
+
+        assert_eq!(stream_generation, 42);
+        assert_eq!(recipient.lease, 0);
+        assert_eq!(recipient.lifetime, 42);
+
+        grant_native_ingress(&mut recipient, 43);
+        assert_eq!(recipient.lease, 43);
+        assert_eq!(recipient.lifetime, 43);
+    }
+
+    #[test]
+    fn continuous_sample_is_rejected_after_transform_changes() {
+        let HostEvent::NormalizedIngress(mut envelope) = synthetic_normalized(
+            InputEvent::Pointer(PointerEvent::Motion {
+                device: DeviceId(7),
+                order: EventOrder(1),
+                position: Point { x: 2.0, y: 3.0 },
+                delta: None,
+            }),
+            None,
+        ) else {
+            unreachable!()
+        };
+        envelope.transform_generation = Some(8);
+        let authority = envelope.execution_authority();
+        let sample = AdmittedNormalizedInput {
+            envelope,
+            authority,
+        };
+
+        assert!(transform_is_current(&sample, 8));
+        assert!(!transform_is_current(&sample, 9));
     }
 
     #[test]
