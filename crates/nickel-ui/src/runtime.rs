@@ -103,6 +103,24 @@ enum SessionControllerPhase {
 
 #[cfg(any(unix, windows))]
 impl SessionControllerSource {
+    fn recipient_binding(&self) -> Option<NormalizedRecipientBinding> {
+        match self {
+            Self::Attached {
+                connection_generation,
+                lease: Some(lease),
+                ..
+            } => Some(NormalizedRecipientBinding {
+                lease: lease.0,
+                lifetime: connection_generation.0,
+            }),
+            _ => None,
+        }
+    }
+
+    fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+
     const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
     fn discover() -> (
@@ -2446,9 +2464,10 @@ impl<A: Application> UiHost<A> {
                     input,
                     clipboard_text,
                 } => self.dispatch_input(&input, clipboard_text.as_deref()),
-                HostEvent::NormalizedIngress(envelope) => {
+                HostEvent::NormalizedIngress(envelope) if envelope.recipient.lease != 0 => {
                     self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
                 }
+                HostEvent::NormalizedIngress(_) => HostEventOutcome::default(),
                 HostEvent::Poll => {
                     let changed = self.application.poll();
                     self.next_application_deadline = self
@@ -3015,7 +3034,26 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 self.normalized_admission_order =
                     self.normalized_admission_order.wrapping_add(1).max(1);
                 let device_generation = input.device().map_or(0, |device| device.0);
-                let recipient = self.host.as_ref().map(|host| host.inspect());
+                #[cfg(any(unix, windows))]
+                let recipient = self.session_controller.recipient_binding().or_else(|| {
+                    self.session_controller.is_absent().then(|| {
+                        self.host.as_ref().map_or(
+                            NormalizedRecipientBinding {
+                                lease: 0,
+                                lifetime: 0,
+                            },
+                            |host| NormalizedRecipientBinding {
+                                lease: u64::from(host.inspect().window_focused),
+                                lifetime: host.inspect().frame_generation,
+                            },
+                        )
+                    })
+                });
+                #[cfg(not(any(unix, windows)))]
+                let recipient = self.host.as_ref().map(|host| NormalizedRecipientBinding {
+                    lease: u64::from(host.inspect().window_focused),
+                    lifetime: host.inspect().frame_generation,
+                });
                 events.push(HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                     input,
                     clipboard_text: clipboard_text.clone(),
@@ -3033,10 +3071,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                             .saturating_duration_since(self.normalized_ingress_epoch)
                             .as_micros() as u64,
                     },
-                    recipient: NormalizedRecipientBinding {
-                        lease: recipient.as_ref().is_some_and(|state| state.window_focused) as u64,
-                        lifetime: recipient.map_or(0, |state| state.frame_generation),
-                    },
+                    recipient: recipient.unwrap_or(NormalizedRecipientBinding {
+                        lease: 0,
+                        lifetime: 0,
+                    }),
                     operation: None,
                     transform_generation: Some(self.scale.to_bits().into()),
                     text_transaction: None,
