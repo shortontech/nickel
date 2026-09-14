@@ -3619,7 +3619,8 @@ mod tests {
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
         ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
-        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
+        NormalizedSourceBinding, PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
         local_controller_poll_lease, queue_continuous_input, wait_duration,
     };
 
@@ -3645,6 +3646,33 @@ mod tests {
             None,
             "a session role lease cannot authorize the standalone device reader"
         );
+    }
+
+    fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostEvent {
+        let device_generation = input.device().map_or(0, |device| device.0);
+        HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input,
+            clipboard_text,
+            source: NormalizedSourceBinding {
+                seat: 0,
+                backend_stream: "runtime-unit-test".into(),
+                stream_generation: 1,
+                device_generation,
+                identity_capability: "synthetic-fixture".into(),
+                reconnect_generation: device_generation,
+            },
+            admission: NormalizedAdmissionBinding {
+                order: 1,
+                monotonic_micros: 0,
+            },
+            recipient: NormalizedRecipientBinding {
+                lease: 1,
+                lifetime: 1,
+            },
+            operation: None,
+            transform_generation: None,
+            text_transaction: None,
+        })
     }
     use crate::{
         ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
@@ -4750,24 +4778,24 @@ mod tests {
         });
         let touch_outcome = touch.step(HostBatch {
             events: vec![
-                HostEvent::Normalized {
-                    input: InputEvent::Touch(TouchEvent::Started {
+                synthetic_normalized(
+                    InputEvent::Touch(TouchEvent::Started {
                         device: DeviceId(4),
                         order: EventOrder(1),
                         contact: TouchId(1),
                         position: Point { x: 40.0, y: 20.0 },
                     }),
-                    clipboard_text: None,
-                },
-                HostEvent::Normalized {
-                    input: InputEvent::Touch(TouchEvent::Ended {
+                    None,
+                ),
+                synthetic_normalized(
+                    InputEvent::Touch(TouchEvent::Ended {
                         device: DeviceId(4),
                         order: EventOrder(2),
                         contact: TouchId(1),
                         position: Point { x: 40.0, y: 20.0 },
                     }),
-                    clipboard_text: None,
-                },
+                    None,
+                ),
             ],
             ..HostBatch::default()
         });
@@ -4907,15 +4935,15 @@ mod tests {
         let mut host = UiHost::new(ControllerApplication, 160, 48);
         let started = host.step(HostBatch {
             now: Some(origin),
-            events: vec![HostEvent::Normalized {
-                input: InputEvent::Touch(TouchEvent::Started {
+            events: vec![synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Started {
                     device: DeviceId(4),
                     order: EventOrder(1),
                     contact: TouchId(1),
                     position: Point { x: 40.0, y: 20.0 },
                 }),
-                clipboard_text: None,
-            }],
+                None,
+            )],
             ..HostBatch::default()
         });
         assert_eq!(
@@ -5266,61 +5294,46 @@ mod tests {
             .expect("editor semantic target")
             .id;
         let events = vec![
-            HostEvent::Normalized {
-                input: focus_event(),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: InputEvent::Text(TextEvent::Preedit {
+            synthetic_normalized(focus_event(), None),
+            synthetic_normalized(
+                InputEvent::Text(TextEvent::Preedit {
                     device: DeviceId(1),
                     order: EventOrder(2),
                     text: "世".into(),
                     selection: Some((0, 3)),
                 }),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: InputEvent::Text(TextEvent::Commit {
+                None,
+            ),
+            synthetic_normalized(
+                InputEvent::Text(TextEvent::Commit {
                     device: DeviceId(1),
                     order: EventOrder(3),
                     text: "world".into(),
                 }),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: command_key(4, KeyCode::KeyA, "a"),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: command_key(5, KeyCode::KeyC, "c"),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: command_key(6, KeyCode::KeyX, "x"),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: command_key(7, KeyCode::KeyV, "v"),
-                clipboard_text: Some("pasted".into()),
-            },
-            HostEvent::Normalized {
-                input: InputEvent::Touch(TouchEvent::Started {
+                None,
+            ),
+            synthetic_normalized(command_key(4, KeyCode::KeyA, "a"), None),
+            synthetic_normalized(command_key(5, KeyCode::KeyC, "c"), None),
+            synthetic_normalized(command_key(6, KeyCode::KeyX, "x"), None),
+            synthetic_normalized(command_key(7, KeyCode::KeyV, "v"), Some("pasted".into())),
+            synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Started {
                     device: DeviceId(4),
                     order: EventOrder(8),
                     contact: TouchId(1),
                     position: Point { x: 8.0, y: 8.0 },
                 }),
-                clipboard_text: None,
-            },
-            HostEvent::Normalized {
-                input: InputEvent::Touch(TouchEvent::Ended {
+                None,
+            ),
+            synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Ended {
                     device: DeviceId(4),
                     order: EventOrder(9),
                     contact: TouchId(1),
                     position: Point { x: 8.0, y: 8.0 },
                 }),
-                clipboard_text: None,
-            },
+                None,
+            ),
             HostEvent::Controller(ControllerAction::Down),
             HostEvent::Accessibility {
                 target: editor,

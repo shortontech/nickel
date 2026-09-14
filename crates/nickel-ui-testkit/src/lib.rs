@@ -9,11 +9,40 @@ use std::{
 use nickel_input::{DeviceId, EventOrder, InputEvent, TouchEvent, TouchId};
 use nickel_ui::{
     AccessibilityNode, ActionKind, Application, Completion, ControllerAction, ControllerFamily,
-    HostBatch, HostEvent, HostEventOutcome, HostInspection, InputModality, Point, SemanticAction,
-    SemanticNodeSnapshot, SemanticQueryError, SemanticRole, SemanticSelector as ProductionSelector,
-    SemanticValueInput, SemanticValueSnapshot, SoftwareRenderer, UiEvent, UiHost, UiId,
+    HostBatch, HostEvent, HostEventOutcome, HostInspection, InputModality,
+    NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
+    NormalizedSourceBinding, Point, SemanticAction, SemanticNodeSnapshot, SemanticQueryError,
+    SemanticRole, SemanticSelector as ProductionSelector, SemanticValueInput,
+    SemanticValueSnapshot, SoftwareRenderer, UiEvent, UiHost, UiId,
 };
 use serde::{Deserialize, Serialize};
+
+fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostEvent {
+    let device_generation = input.device().map_or(0, |device| device.0);
+    HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+        input,
+        clipboard_text,
+        source: NormalizedSourceBinding {
+            seat: 0,
+            backend_stream: "nickel-ui-testkit".into(),
+            stream_generation: 1,
+            device_generation,
+            identity_capability: "synthetic-fixture".into(),
+            reconnect_generation: device_generation,
+        },
+        admission: NormalizedAdmissionBinding {
+            order: 1,
+            monotonic_micros: 0,
+        },
+        recipient: NormalizedRecipientBinding {
+            lease: 1,
+            lifetime: 1,
+        },
+        operation: None,
+        transform_generation: None,
+        text_transaction: None,
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HeadlessRaster {
@@ -2717,10 +2746,7 @@ impl<A: Application> Scenario<A> {
 
     fn normalized_touch(&mut self, event: TouchEvent) -> HostEventOutcome {
         self.host.step(HostBatch {
-            events: vec![HostEvent::Normalized {
-                input: InputEvent::Touch(event),
-                clipboard_text: None,
-            }],
+            events: vec![synthetic_normalized(InputEvent::Touch(event), None)],
             ..HostBatch::default()
         })
     }
