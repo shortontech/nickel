@@ -1468,11 +1468,18 @@ struct NativeWindowLifetime {
 type RetainedSettlementKey = (NativeWindowLifetime, NativeRequestId);
 
 const MAX_RETAINED_WINDOW_SETTLEMENTS: usize = 64;
+const MAX_TERMINAL_SETTLEMENT_OUTCOMES: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TerminalSettlementOutcome {
+    key: RetainedSettlementKey,
+    status: SettlementStatus,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SettlementRetentionOutcome {
     Retained,
-    EvictedOldest { evicted: RetainedSettlementKey },
+    EvictedOldest { terminal: TerminalSettlementOutcome },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1491,6 +1498,7 @@ struct WindowDragCoordinator {
     current_lifetimes: HashMap<isize, NativeWindowLifetime>,
     retained_settlements: HashMap<RetainedSettlementKey, RetainedNativeSettlement>,
     retained_order: VecDeque<RetainedSettlementKey>,
+    terminal_settlement_outcomes: VecDeque<TerminalSettlementOutcome>,
     last_retention_outcome: Option<SettlementRetentionOutcome>,
     last_terminal_apply: Option<NativeApplyState>,
 }
@@ -1506,6 +1514,20 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn record_terminal_settlement(
+        &mut self,
+        key: RetainedSettlementKey,
+        status: SettlementStatus,
+    ) -> TerminalSettlementOutcome {
+        debug_assert_ne!(status, SettlementStatus::Pending);
+        let outcome = TerminalSettlementOutcome { key, status };
+        if self.terminal_settlement_outcomes.len() >= MAX_TERMINAL_SETTLEMENT_OUTCOMES {
+            self.terminal_settlement_outcomes.pop_front();
+        }
+        self.terminal_settlement_outcomes.push_back(outcome);
+        outcome
+    }
+
     fn lifetime_is_current(&self, lifetime: NativeWindowLifetime) -> bool {
         self.current_lifetimes
             .get(&lifetime.fingerprint.window)
@@ -1522,7 +1544,12 @@ impl WindowDragCoordinator {
                 .retained_order
                 .pop_front()
                 .expect("a full retained-settlement map has an order entry");
-            self.retained_settlements.remove(&evicted);
+            let mut displaced = self
+                .retained_settlements
+                .remove(&evicted)
+                .expect("a retained-settlement order entry has a settlement");
+            displaced.settlement.fail();
+            let terminal = self.record_terminal_settlement(evicted, displaced.settlement.status);
             if self.current_lifetimes.get(&evicted.0.fingerprint.window) == Some(&evicted.0) {
                 self.current_lifetimes.remove(&evicted.0.fingerprint.window);
             }
@@ -1530,7 +1557,7 @@ impl WindowDragCoordinator {
                 ?evicted,
                 "evicted oldest pending native settlement at capacity"
             );
-            SettlementRetentionOutcome::EvictedOldest { evicted }
+            SettlementRetentionOutcome::EvictedOldest { terminal }
         } else {
             SettlementRetentionOutcome::Retained
         };
@@ -4754,12 +4781,13 @@ mod tests {
     use super::{
         DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, NativeWindowFingerprint,
         NativeWindowLifetime, RetainedNativeSettlement, SettlementRetentionOutcome,
-        TrayNotifyIconData, WindowDrag, WindowDragAdmission, WindowDragCoordinator,
-        application_icon, clamp_preview_x, classify_window_drag_observation, contain_rect,
-        contested_authority, executable_icon, is_nickel_host_terminal, is_shell_infrastructure,
-        native_hotkey_requests, parse_windows_command, permits_contested_workflow,
-        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
-        restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
+        TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag, WindowDragAdmission,
+        WindowDragCoordinator, application_icon, clamp_preview_x, classify_window_drag_observation,
+        contain_rect, contested_authority, executable_icon, is_nickel_host_terminal,
+        is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
+        permits_contested_workflow, project_native_preview_diagnostics, project_windows_shortcuts,
+        rectangle_covers, restore_legacy_icon_alpha, should_restore_on_activation,
+        windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -5058,8 +5086,22 @@ mod tests {
         assert_eq!(
             coordinator.last_retention_outcome,
             Some(SettlementRetentionOutcome::EvictedOldest {
-                evicted: first_key.unwrap(),
+                terminal: TerminalSettlementOutcome {
+                    key: first_key.unwrap(),
+                    status: SettlementStatus::Failed,
+                },
             })
+        );
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key: first_key.unwrap(),
+                status: SettlementStatus::Failed,
+            })
+        );
+        assert!(
+            coordinator.terminal_settlement_outcomes.len()
+                <= super::MAX_TERMINAL_SETTLEMENT_OUTCOMES
         );
     }
 
@@ -5080,6 +5122,33 @@ mod tests {
         coordinator.current_lifetimes.insert(44, replacement);
         assert!(!coordinator.lifetime_is_current(old));
         assert!(coordinator.lifetime_is_current(replacement));
+    }
+
+    #[test]
+    fn terminal_settlement_history_is_bounded_per_request() {
+        let mut coordinator = WindowDragCoordinator::default();
+        for generation in 1..=super::MAX_TERMINAL_SETTLEMENT_OUTCOMES + 1 {
+            let lifetime = NativeWindowLifetime {
+                fingerprint: fingerprint(generation as isize, 13),
+                generation: generation as u64,
+            };
+            coordinator.record_terminal_settlement(
+                (lifetime, NativeRequestId(generation as u64)),
+                SettlementStatus::Unconfirmed,
+            );
+        }
+
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.len(),
+            super::MAX_TERMINAL_SETTLEMENT_OUTCOMES
+        );
+        assert_eq!(
+            coordinator
+                .terminal_settlement_outcomes
+                .front()
+                .map(|outcome| outcome.key.1),
+            Some(NativeRequestId(2))
+        );
     }
 
     #[test]
