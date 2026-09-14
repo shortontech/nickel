@@ -53,8 +53,8 @@ use nickel_input::{
     AggregateModifier, InputEvent, KeyEdge, LogicalKey, NamedKey, PointerButton, PointerEvent,
 };
 use nickel_ui::{
-    Application, ControllerAction, ControllerInput, HostBatch, HostChangeToken, HostEvent,
-    HostEventOutcome, HostFailure, HostFailureStage, UiHost,
+    Application, ControllerAction, HostBatch, HostChangeToken, HostEvent, HostEventOutcome,
+    HostFailure, HostFailureStage, UiHost,
 };
 use std::{
     collections::HashSet,
@@ -2346,7 +2346,9 @@ pub fn run() -> Result<(), String> {
         Duration::from_secs(10),
     );
     let mut hover_repaint: Option<(SurfaceRole, Instant)> = None;
-    let mut controller = ControllerInput::new();
+    #[cfg(not(target_os = "windows"))]
+    let mut controller = nickel_ui::ControllerInput::new();
+    #[cfg(not(target_os = "windows"))]
     let mut controller_schedule = nickel_ui::ControllerPollSchedule::new(Instant::now());
     let mut diagnostic_loop_started = Instant::now();
     let mut diagnostic_loop_iterations = 0_u64;
@@ -2360,6 +2362,7 @@ pub fn run() -> Result<(), String> {
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
         let now = Instant::now();
+        #[cfg(not(target_os = "windows"))]
         if controller_schedule.is_due(now) {
             for action in controller.poll_global(now) {
                 #[cfg(target_os = "windows")]

@@ -5871,6 +5871,9 @@ impl NickelSession {
             ControllerHostRequest::RequestLease {
                 connection_generation,
             } => {
+                if !self.controller_host_is_current_recipient(peer_pid) {
+                    return ServerMessage::ControllerHost(ControllerHostResponse::LeaseFailed);
+                }
                 let status = self.controller_broker.begin_transfer(
                     host,
                     connection_generation,
@@ -5910,6 +5913,13 @@ impl NickelSession {
                 .controller_broker
                 .is_attached(host, connection_generation) =>
             {
+                if !self.controller_host_is_current_recipient(peer_pid) {
+                    self.controller_broker.detach(host, connection_generation);
+                    return ServerMessage::ControllerHost(ControllerHostResponse::Messages {
+                        lease_epoch: None,
+                        messages: Vec::new(),
+                    });
+                }
                 let lease_epoch = self
                     .controller_broker
                     .active_lease()
@@ -5941,6 +5951,24 @@ impl NickelSession {
             }
         };
         ServerMessage::ControllerHost(response)
+    }
+
+    /// A session-attached reader may own input only for the exact currently
+    /// focused Wayland client lifetime. Internal roles and X11 uncertainty fail closed.
+    fn controller_host_is_current_recipient(&self, peer_pid: u32) -> bool {
+        if self.internal_ui.focused().is_some() {
+            return false;
+        }
+        self.seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus())
+            .and_then(|focus| match focus {
+                super::focus::KeyboardFocusTarget::Wayland(surface) => surface.client(),
+                super::focus::KeyboardFocusTarget::X11(_) => None,
+            })
+            .and_then(|client| client.get_credentials(&self.display_handle).ok())
+            .and_then(|credentials| u32::try_from(credentials.pid).ok())
+            == Some(peer_pid)
     }
 
     /// Hide the compositor-hosted launcher because an ordinary client is
@@ -17914,6 +17942,37 @@ mod protocol_tests {
             "the first transition must invalidate, not retarget, the queued second action"
         );
         assert!(session.controller_routing_epoch >= 2);
+    }
+
+    #[test]
+    fn controller_host_lease_fails_closed_without_exact_focused_client() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let peer = 424_242;
+        let attached = session.handle_controller_host_request(
+            peer,
+            nickel_session_protocol::ControllerHostRequest::Attach,
+        );
+        let generation = match attached {
+            nickel_session_protocol::ServerMessage::ControllerHost(
+                nickel_session_protocol::ControllerHostResponse::Attached {
+                    connection_generation,
+                    ..
+                },
+            ) => connection_generation,
+            other => panic!("unexpected attach response: {other:?}"),
+        };
+        assert!(matches!(
+            session.handle_controller_host_request(
+                peer,
+                nickel_session_protocol::ControllerHostRequest::RequestLease {
+                    connection_generation: generation,
+                },
+            ),
+            nickel_session_protocol::ServerMessage::ControllerHost(
+                nickel_session_protocol::ControllerHostResponse::LeaseFailed
+            )
+        ));
     }
 
     #[test]
