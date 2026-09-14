@@ -680,7 +680,7 @@ impl InternalShellCoordinator {
     pub fn step_slot_changes(
         &mut self,
         id: InternalSurfaceId,
-        batch: HostBatch,
+        mut batch: HostBatch,
     ) -> Vec<InternalSurfaceId> {
         if self.select_desktop_viewport(id).is_none() {
             return Vec::new();
@@ -688,6 +688,20 @@ impl InternalShellCoordinator {
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
             return Vec::new();
         };
+        // The caller-selected internal slot is the current recipient
+        // authority. A winit host or session adapter cannot know this identity
+        // before the coordinator resolves the role-specific route.
+        for event in &mut batch.events {
+            bind_internal_ingress_recipient(event, id);
+        }
+        batch.normalized_authorities.extend(batch.events.iter().filter_map(|event| {
+            match event {
+                nickel_ui::HostEvent::NormalizedIngress(envelope) => {
+                    Some(envelope.execution_authority())
+                }
+                _ => None,
+            }
+        }));
         let visibility = self
             .entries
             .iter()
@@ -1138,6 +1152,79 @@ mod tests {
     use crate::platform::{SessionRequestError, ShellCommand};
     use nickel_core::hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge};
     use std::sync::atomic::{AtomicU8, Ordering};
+
+    #[test]
+    fn internal_route_rebinds_only_recipient_authority() {
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            x: 0,
+            y: 0,
+            name: "authority".into(),
+            width: 800,
+            height: 600,
+            scale: 1.0,
+        }]);
+        let recipient = coordinator
+            .surface(SurfaceRole::Desktop, Some("authority"))
+            .expect("desktop route")
+            .id;
+        let mut event =
+            nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+                input: nickel_input::InputEvent::FocusLost {
+                    order: nickel_input::EventOrder(17),
+                },
+                clipboard_text: None,
+                source: nickel_ui::NormalizedSourceBinding {
+                    seat: 4,
+                    backend_stream: "nested-compositor".into(),
+                    stream_generation: 5,
+                    device_generation: 6,
+                    identity_capability: "native-device".into(),
+                    reconnect_generation: 7,
+                },
+                admission: nickel_ui::NormalizedAdmissionBinding {
+                    order: 8,
+                    monotonic_micros: 9,
+                },
+                recipient: nickel_ui::NormalizedRecipientBinding {
+                    lease: 10,
+                    lifetime: 11,
+                },
+                operation: Some(12),
+                transform_generation: Some(13),
+                text_transaction: Some(14),
+                transfer_cutoff: Some(20),
+                broker_event_id: Some(19),
+                host_connection_generation: 15,
+                operation_epoch: Some(16),
+                role: "desktop".into(),
+                coordinate_meaning: "surface-logical".into(),
+                composition_recipient_epoch: Some(18),
+            });
+        bind_internal_ingress_recipient(&mut event, recipient);
+
+        let nickel_ui::HostEvent::NormalizedIngress(bound) = event else {
+            panic!("normalized ingress preserved");
+        };
+        assert_eq!(
+            bound.recipient,
+            nickel_ui::NormalizedRecipientBinding {
+                lease: recipient.snapshot_token(),
+                lifetime: recipient.snapshot_token(),
+            }
+        );
+        assert_eq!(bound.source.seat, 4);
+        assert_eq!(bound.source.backend_stream, "nested-compositor");
+        assert_eq!(bound.source.stream_generation, 5);
+        assert_eq!(bound.source.device_generation, 6);
+        assert_eq!(bound.source.identity_capability, "native-device");
+        assert_eq!(bound.source.reconnect_generation, 7);
+        assert_eq!(bound.admission.order, 8);
+        assert_eq!(bound.admission.monotonic_micros, 9);
+        assert_eq!(bound.operation, Some(12));
+        assert_eq!(bound.transform_generation, Some(13));
+        assert_eq!(bound.text_transaction, Some(14));
+    }
 
     #[test]
     fn ephemeral_focus_loss_hides_control_center_without_requesting_focus_restoration() {

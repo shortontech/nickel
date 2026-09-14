@@ -17,6 +17,9 @@ use nickel_ui::{
 };
 use serde::{Deserialize, Serialize};
 
+static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
 fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostEvent {
     let device_generation = input.device().map_or(0, |device| device.0);
     HostEvent::NormalizedIngress(NormalizedInputEnvelope {
@@ -31,7 +34,7 @@ fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> Ho
             reconnect_generation: device_generation,
         },
         admission: NormalizedAdmissionBinding {
-            order: 1,
+            order: SYNTHETIC_INGRESS_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             monotonic_micros: 0,
         },
         recipient: NormalizedRecipientBinding {
@@ -41,6 +44,13 @@ fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> Ho
         operation: None,
         transform_generation: None,
         text_transaction: None,
+        transfer_cutoff: None,
+        broker_event_id: None,
+        host_connection_generation: 1,
+        operation_epoch: None,
+        role: "synthetic-test".into(),
+        coordinate_meaning: "host-logical".into(),
+        composition_recipient_epoch: None,
     })
 }
 

@@ -263,6 +263,13 @@ impl super::state::NickelSession {
                 operation: None,
                 transform_generation: None,
                 text_transaction: Some(order),
+                transfer_cutoff: None,
+                broker_event_id: None,
+                host_connection_generation: recipient,
+                operation_epoch: None,
+                role: "session-native-clipboard".into(),
+                coordinate_meaning: "not-applicable".into(),
+                composition_recipient_epoch: Some(recipient),
             })
         };
         self.internal_ui.step(

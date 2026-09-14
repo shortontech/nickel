@@ -2167,6 +2167,18 @@ impl InternalUiRuntime {
 
     pub fn step(&mut self, id: InternalSurfaceId, mut batch: HostBatch) -> bool {
         batch.clipboard_text_limit = Some(self.clipboard_limit);
+        for event in &mut batch.events {
+            if let HostEvent::NormalizedIngress(envelope) = event {
+                envelope.recipient = nickel_ui::NormalizedRecipientBinding {
+                    lease: id.snapshot_token(),
+                    lifetime: id.snapshot_token(),
+                };
+                envelope.host_connection_generation = id.snapshot_token();
+                batch
+                    .normalized_authorities
+                    .push(envelope.execution_authority());
+            }
+        }
         if batch.window_focused == Some(false) {
             self.clear_desktop_pressed_keys();
         }

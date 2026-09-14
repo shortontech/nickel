@@ -53,6 +53,13 @@ pub(crate) fn internal_normalized_ingress(
         operation: None,
         transform_generation,
         text_transaction: None,
+        transfer_cutoff: None,
+        broker_event_id: None,
+        host_connection_generation: recipient.frame_generation,
+        operation_epoch: None,
+        role: owner.into(),
+        coordinate_meaning: "host-logical".into(),
+        composition_recipient_epoch: None,
     })
 }
 

@@ -10,6 +10,7 @@ use std::{
 };
 
 static NEXT_LOCAL_CONTROLLER_LEASE: AtomicU64 = AtomicU64::new(1);
+static NEXT_NATIVE_HOST_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ControllerDiscoveryMode {
@@ -1039,6 +1040,7 @@ pub struct UiHost<A: Application> {
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
     admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
+    normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
 /// Runtime-owned state for one independently presented viewport of an application.
@@ -1060,6 +1062,7 @@ pub struct UiHostViewport<Message> {
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
     admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
+    normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
 impl<Message> UiHostViewport<Message> {
@@ -1232,6 +1235,44 @@ pub struct NormalizedInputEnvelope {
     pub operation: Option<u64>,
     pub transform_generation: Option<u64>,
     pub text_transaction: Option<u64>,
+    pub transfer_cutoff: Option<u64>,
+    pub broker_event_id: Option<u64>,
+    pub host_connection_generation: u64,
+    pub operation_epoch: Option<u64>,
+    pub role: String,
+    pub coordinate_meaning: String,
+    pub composition_recipient_epoch: Option<u64>,
+}
+
+impl NormalizedInputEnvelope {
+    pub fn execution_authority(&self) -> NormalizedIngressAuthority {
+        NormalizedIngressAuthority {
+            source: self.source.clone(),
+            recipient: self.recipient,
+            transfer_cutoff: self.transfer_cutoff,
+            host_connection_generation: self.host_connection_generation,
+            operation_epoch: self.operation_epoch,
+            transform_generation: self.transform_generation,
+            text_transaction: self.text_transaction,
+            composition_recipient_epoch: self.composition_recipient_epoch,
+            role: self.role.clone(),
+            coordinate_meaning: self.coordinate_meaning.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NormalizedIngressAuthority {
+    pub source: NormalizedSourceBinding,
+    pub recipient: NormalizedRecipientBinding,
+    pub transfer_cutoff: Option<u64>,
+    pub host_connection_generation: u64,
+    pub operation_epoch: Option<u64>,
+    pub transform_generation: Option<u64>,
+    pub text_transaction: Option<u64>,
+    pub composition_recipient_epoch: Option<u64>,
+    pub role: String,
+    pub coordinate_meaning: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1437,6 +1478,7 @@ pub struct HostBatch {
     pub completions: Vec<Completion>,
     /// Current session authority revalidated at the final host execution boundary.
     pub controller_authority: Option<ControllerExecutionAuthority>,
+    pub normalized_authorities: Vec<NormalizedIngressAuthority>,
     /// Failures observed by the transport while servicing this batch.  They
     /// are evidence, not application input: reporting one must not mutate or
     /// short-circuit the canonical UI transition.
@@ -1751,6 +1793,7 @@ impl<A: Application> UiHost<A> {
                 .map(|interval| Instant::now() + interval),
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
+            normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
 
@@ -1792,6 +1835,10 @@ impl<A: Application> UiHost<A> {
             admitted_controller_presses: std::mem::replace(
                 &mut self.admitted_controller_presses,
                 viewport.admitted_controller_presses,
+            ),
+            normalized_source_orders: std::mem::replace(
+                &mut self.normalized_source_orders,
+                viewport.normalized_source_orders,
             ),
         }
     }
@@ -1849,6 +1896,7 @@ impl<A: Application> UiHost<A> {
             next_application_deadline,
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
+            normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2260,6 +2308,20 @@ impl<A: Application> UiHost<A> {
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
+        let mut normalized_authorities = batch.normalized_authorities;
+        normalized_authorities.extend(batch.events.iter().filter_map(|event| {
+            match event {
+                HostEvent::NormalizedIngress(envelope)
+                    if envelope
+                        .source
+                        .identity_capability
+                        .starts_with("synthetic-") =>
+                {
+                    Some(envelope.execution_authority())
+                }
+                _ => None,
+            }
+        }));
         self.state.clipboard_rejected = false;
         let step_started = Instant::now();
         let now = batch.now.unwrap_or_else(Instant::now);
@@ -2470,7 +2532,9 @@ impl<A: Application> UiHost<A> {
                     input,
                     clipboard_text,
                 } => self.dispatch_input(&input, clipboard_text.as_deref()),
-                HostEvent::NormalizedIngress(envelope) if envelope.recipient.lease != 0 => {
+                HostEvent::NormalizedIngress(envelope)
+                    if self.admits_normalized_ingress(&envelope, &normalized_authorities) =>
+                {
                     self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
                 }
                 HostEvent::NormalizedIngress(_) => HostEventOutcome::default(),
@@ -2805,6 +2869,57 @@ impl<A: Application> UiHost<A> {
         combined
     }
 
+    fn admits_normalized_ingress(
+        &mut self,
+        envelope: &NormalizedInputEnvelope,
+        authorities: &[NormalizedIngressAuthority],
+    ) -> bool {
+        let authorized = authorities.iter().any(|authority| {
+            authority.source == envelope.source
+                && authority.recipient == envelope.recipient
+                && authority.transfer_cutoff == envelope.transfer_cutoff
+                && authority.host_connection_generation == envelope.host_connection_generation
+                && authority.operation_epoch == envelope.operation_epoch
+                && authority.transform_generation == envelope.transform_generation
+                && authority.text_transaction == envelope.text_transaction
+                && authority.composition_recipient_epoch == envelope.composition_recipient_epoch
+                && authority.role == envelope.role
+                && authority.coordinate_meaning == envelope.coordinate_meaning
+        });
+        if !authorized {
+            return false;
+        }
+        if envelope.recipient.lease == 0
+            || envelope
+                .transfer_cutoff
+                .is_some_and(|cutoff| envelope.broker_event_id.is_none_or(|event| event > cutoff))
+        {
+            return false;
+        }
+        let key = (envelope.source.seat, envelope.source.backend_stream.clone());
+        let generation = (
+            envelope.source.stream_generation,
+            envelope.source.reconnect_generation,
+        );
+        match self.normalized_source_orders.get_mut(&key) {
+            Some((stream, reconnect, last_order)) if (*stream, *reconnect) == generation => {
+                if envelope.admission.order <= *last_order {
+                    return false;
+                }
+                *last_order = envelope.admission.order;
+            }
+            slot => {
+                let value = (generation.0, generation.1, envelope.admission.order);
+                if let Some(slot) = slot {
+                    *slot = value;
+                } else {
+                    self.normalized_source_orders.insert(key, value);
+                }
+            }
+        }
+        true
+    }
+
     fn rebuild(&mut self) {
         let _ = self.rebuild_timed();
     }
@@ -2935,16 +3050,21 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     scheduler: PresentScheduler,
     pointer_icon: PointerIcon,
     scale: f32,
+    transform_generation: u64,
     stopped: bool,
     error: Option<Box<dyn Error>>,
     pending_continuous_input: Vec<nickel_input::InputEvent>,
     normalized_admission_order: u64,
     normalized_ingress_epoch: Instant,
+    native_host_generation: u64,
 }
 
 impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
     fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
+        let native_host_generation = NEXT_NATIVE_HOST_GENERATION
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .max(1);
         let next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
         #[cfg(any(unix, windows))]
         let (controller_discovery, controller, local_controller_lease, session_controller) =
@@ -2976,11 +3096,13 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             scheduler: PresentScheduler::default(),
             pointer_icon: PointerIcon::Default,
             scale: 1.0,
+            transform_generation: 1,
             stopped: false,
             error: None,
             pending_continuous_input: Vec::new(),
             normalized_admission_order: 0,
             normalized_ingress_epoch: now,
+            native_host_generation,
         }
     }
 
@@ -3055,18 +3177,30 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         )
                     })
                 });
+                #[cfg(any(unix, windows))]
+                let recipient_role = if self.session_controller.is_absent() {
+                    "standalone-window"
+                } else {
+                    "session-attached-window"
+                };
                 #[cfg(not(any(unix, windows)))]
                 let recipient = self.host.as_ref().map(|host| NormalizedRecipientBinding {
-                    lease: u64::from(host.inspect().window_focused),
-                    lifetime: host.inspect().frame_generation,
+                    lease: if host.inspect().window_focused {
+                        self.native_host_generation
+                    } else {
+                        0
+                    },
+                    lifetime: self.native_host_generation,
                 });
+                #[cfg(not(any(unix, windows)))]
+                let recipient_role = "standalone-window";
                 events.push(HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                     input,
                     clipboard_text: clipboard_text.clone(),
                     source: NormalizedSourceBinding {
                         seat: 0,
                         backend_stream: "winit".into(),
-                        stream_generation: 1,
+                        stream_generation: self.native_host_generation,
                         device_generation,
                         identity_capability: "backend_generation".into(),
                         reconnect_generation: device_generation,
@@ -3082,8 +3216,15 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         lifetime: 0,
                     }),
                     operation: None,
-                    transform_generation: Some(self.scale.to_bits().into()),
+                    transform_generation: Some(self.transform_generation),
                     text_transaction: None,
+                    transfer_cutoff: None,
+                    broker_event_id: None,
+                    host_connection_generation: recipient.map_or(0, |binding| binding.lifetime),
+                    operation_epoch: None,
+                    role: recipient_role.into(),
+                    coordinate_meaning: "window-logical".into(),
+                    composition_recipient_epoch: recipient.map(|binding| binding.lifetime),
                 }));
             }
         }
@@ -3094,8 +3235,16 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             return;
         }
         let Some(host) = &mut self.host else { return };
+        let normalized_authorities = events
+            .iter()
+            .filter_map(|event| match event {
+                HostEvent::NormalizedIngress(envelope) => Some(envelope.execution_authority()),
+                _ => None,
+            })
+            .collect();
         let outcome = host.step(HostBatch {
             events,
+            normalized_authorities,
             application_changed: adapter_changed,
             ..HostBatch::default()
         });
@@ -3388,6 +3537,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             }
         };
         self.scale = window.scale_factor() as f32;
+        self.transform_generation = self.transform_generation.wrapping_add(1).max(1);
         self.input.set_scale_factor(window.scale_factor());
         let logical = window.inner_size().to_logical::<u32>(window.scale_factor());
         let mut host = UiHost::new(
@@ -3496,6 +3646,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale = *scale_factor as f32;
+                self.transform_generation = self.transform_generation.wrapping_add(1).max(1);
                 self.input.set_scale_factor(*scale_factor);
                 let logical = window.inner_size().to_logical::<u32>(*scale_factor);
                 if let Some(host) = &mut self.host {
@@ -3613,6 +3764,8 @@ fn is_clipboard_paste(input: &nickel_input::InputEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1);
     use nickel_input::{
         DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
         Modifier, ModifierState, NamedKey, PhysicalKey, Point, PointerButton, PointerEvent,
@@ -3669,7 +3822,10 @@ mod tests {
                 reconnect_generation: device_generation,
             },
             admission: NormalizedAdmissionBinding {
-                order: 1,
+                order: SYNTHETIC_INGRESS_ORDER.fetch_add(
+                    1,
+                    std::sync::atomic::Ordering::Relaxed,
+                ),
                 monotonic_micros: 0,
             },
             recipient: NormalizedRecipientBinding {
@@ -3679,6 +3835,13 @@ mod tests {
             operation: None,
             transform_generation: None,
             text_transaction: None,
+            transfer_cutoff: None,
+            broker_event_id: None,
+            host_connection_generation: 1,
+            operation_epoch: None,
+            role: "synthetic-test".into(),
+            coordinate_meaning: "host-logical".into(),
+            composition_recipient_epoch: None,
         })
     }
     use crate::{
@@ -3709,6 +3872,24 @@ mod tests {
             &mut AsyncControllerConnection,
             nickel_session_protocol::controller_broker::ConnectionGeneration,
         ) -> std::io::Result<()> = AsyncControllerConnection::relinquish;
+    }
+
+    #[test]
+    fn normalized_execution_rejects_replay_and_spoofed_recipient() {
+        let HostEvent::NormalizedIngress(mut envelope) = synthetic_normalized(
+            InputEvent::FocusGained { order: EventOrder(1) },
+            None,
+        ) else {
+            unreachable!()
+        };
+        envelope.source.identity_capability = "native-device".into();
+        let authority = envelope.execution_authority();
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        assert!(host.admits_normalized_ingress(&envelope, std::slice::from_ref(&authority)));
+        assert!(!host.admits_normalized_ingress(&envelope, std::slice::from_ref(&authority)));
+        envelope.admission.order += 1;
+        envelope.recipient.lifetime += 1;
+        assert!(!host.admits_normalized_ingress(&envelope, &[authority]));
     }
 
     #[derive(Clone)]

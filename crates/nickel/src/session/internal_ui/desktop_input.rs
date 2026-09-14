@@ -752,6 +752,13 @@ impl InternalUiRuntime {
             operation: None,
             transform_generation: None,
             text_transaction: None,
+            transfer_cutoff: None,
+            broker_event_id: None,
+            host_connection_generation: recipient.snapshot_token(),
+            operation_epoch: None,
+            role: "session-internal-surface".into(),
+            coordinate_meaning: "surface-logical".into(),
+            composition_recipient_epoch: None,
         })
     }
 
