@@ -383,6 +383,15 @@ impl NickelSession {
                 },
                 x11_client_request_causality(),
             );
+            self.admit_managed_x11_geometry(
+                id,
+                shell_layout::Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w.max(1),
+                    height: geometry.size.h.max(1),
+                },
+            );
             if !self.locked {
                 self.space.elements().for_each(|candidate| {
                     candidate.set_activated(candidate == &window);

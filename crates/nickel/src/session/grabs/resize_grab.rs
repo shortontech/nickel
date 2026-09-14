@@ -150,7 +150,7 @@ pub(crate) fn xdg_commit_causality(
     if incorporated == current {
         Some(nickel_core::geometry_authority::ObservationCausality::Correlated(request))
     } else {
-        Some(nickel_core::geometry_authority::ObservationCausality::Independent)
+        None
     }
 }
 
@@ -352,6 +352,17 @@ impl ResizeSurfaceState {
         *self = Self::Idle;
     }
 
+    fn extend_terminal_correlation(&mut self, serial: smithay::utils::Serial) {
+        if let Self::WaitingForLastCommit {
+            terminal_configures,
+            ..
+        } = self
+            && !terminal_configures.contains(&serial)
+        {
+            terminal_configures.push(serial);
+        }
+    }
+
     fn with<F, T>(surface: &WlSurface, cb: F) -> T
     where
         F: FnOnce(&mut Self) -> T,
@@ -400,6 +411,15 @@ pub(crate) fn current_resize_edges(surface: &WlSurface) -> Option<ResizeEdge> {
 
 pub(crate) fn clear_resize_correlation(surface: &WlSurface) {
     ResizeSurfaceState::with(surface, ResizeSurfaceState::clear);
+}
+
+pub(crate) fn extend_terminal_resize_correlation(
+    surface: &WlSurface,
+    serial: smithay::utils::Serial,
+) {
+    ResizeSurfaceState::with(surface, |state| {
+        state.extend_terminal_correlation(serial);
+    });
 }
 
 /// Should be called on `WlSurface::commit`
@@ -528,7 +548,7 @@ mod tests {
                 NativeRequestId(7),
                 authority.revisions()
             ),
-            Some(ObservationCausality::Independent)
+            None
         );
         assert_eq!(
             xdg_commit_causality(
@@ -590,6 +610,19 @@ mod tests {
             assert_eq!(state.commit(Some(acknowledged.into())).is_some(), retired);
             assert_eq!(state == ResizeSurfaceState::Idle, retired);
         }
+    }
+
+    #[test]
+    fn later_configure_can_join_terminal_resize_correlation() {
+        let mut state = ResizeSurfaceState::WaitingForLastCommit {
+            edges: ResizeEdge::TOP_LEFT,
+            initial_rect: initial_rect(),
+            terminal_configures: vec![12_u32.into()],
+        };
+        state.extend_terminal_correlation(13_u32.into());
+
+        assert!(state.commit(Some(13_u32.into())).is_some());
+        assert_eq!(state, ResizeSurfaceState::Idle);
     }
 
     #[test]

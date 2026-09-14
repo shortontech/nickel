@@ -352,6 +352,15 @@ impl GeometryAuthority {
         self.constrained_proposal = constraints.constrain(placement);
     }
 
+    /// Adopts a native placement as the managed baseline at an explicit
+    /// lifecycle admission boundary.
+    pub fn admit_managed_placement(&mut self, placement: LogicalRect) {
+        self.base_placement.value = placement;
+        self.base_placement.revision = self.base_placement.revision.next();
+        self.base_placement.owner = FieldOwner::Nickel;
+        self.constrained_proposal = placement;
+    }
+
     /// Publishes a desired revision before native realization, including equal-valued writes.
     pub fn authorize_placement(
         &mut self,
@@ -730,6 +739,31 @@ mod tests {
             assert_eq!(authority.base_placement.revision, revision);
             assert_eq!(authority.base_placement.value, rect(90));
         }
+    }
+
+    #[test]
+    fn managed_admission_reclaims_an_independently_observed_baseline() {
+        let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+        authority.observe(
+            TaggedGeometry {
+                rect: rect(120),
+                meaning: GeometryMeaning::CanonicalManagedBounds,
+                units: CoordinateUnits::CanonicalLogical,
+                topology_version: 1,
+            },
+            ObservationCausality::Independent,
+        );
+        assert_eq!(authority.base_placement.owner, FieldOwner::External);
+
+        authority.admit_managed_placement(rect(120));
+
+        assert_eq!(authority.base_placement.owner, FieldOwner::Nickel);
+        assert_eq!(authority.base_placement.value, rect(120));
+        assert!(
+            authority
+                .try_authorize_placement(rect(130), constraints(200))
+                .is_some()
+        );
     }
 
     #[test]

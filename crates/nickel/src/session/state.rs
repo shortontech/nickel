@@ -2692,6 +2692,22 @@ fn xdg_configure_extends_existing_request(
         && record.settlement.request.placement == placement
 }
 
+fn xdg_configure_matches_existing_desired(
+    record: &XdgConfigureSettlement,
+    revisions: nickel_core::geometry_authority::DesiredRevisions,
+    placement: Geometry,
+) -> bool {
+    record.settlement.request.desired == revisions
+        && record.settlement.request.placement == placement
+}
+
+fn xdg_settlement_requires_resize_cleanup(record: &XdgConfigureSettlement) -> bool {
+    record
+        .configures
+        .iter()
+        .any(|(_, _, edges)| edges.is_some())
+}
+
 fn fail_x11_settlement_on_timer_registration(
     settlement: &mut nickel_core::geometry_authority::Settlement,
     request_id: nickel_core::geometry_authority::NativeRequestId,
@@ -10958,6 +10974,19 @@ impl NickelSession {
             .xdg_geometry_settlements
             .get(&id)
             .is_some_and(|record| {
+                xdg_configure_matches_existing_desired(record, desired_revisions, desired)
+            })
+            && let Some(surface) = window.toplevel()
+        {
+            crate::session::grabs::resize_grab::extend_terminal_resize_correlation(
+                surface.wl_surface(),
+                configure,
+            );
+        }
+        if self
+            .xdg_geometry_settlements
+            .get(&id)
+            .is_some_and(|record| {
                 xdg_configure_extends_existing_request(record, desired_revisions, desired)
             })
         {
@@ -10999,16 +11028,18 @@ impl NickelSession {
             smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
             move |_, _, state| {
                 let mut expired = false;
+                let mut requires_resize_cleanup = false;
                 if let Some(record) = state.xdg_geometry_settlements.get_mut(&id)
                     && record.settlement.request.id == request_id
                 {
+                    requires_resize_cleanup = xdg_settlement_requires_resize_cleanup(record);
                     record
                         .settlement
                         .expire(record.settlement.limits.deadline_tick);
                     expired = record.settlement.status
                         == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
                 }
-                if expired {
+                if expired && requires_resize_cleanup {
                     state.clear_xdg_resize_operation(id);
                 }
                 smithay::reexports::calloop::timer::TimeoutAction::Drop
@@ -11021,7 +11052,11 @@ impl NickelSession {
         {
             record.settlement.fail();
         }
-        if timer_failed {
+        let requires_resize_cleanup = self
+            .xdg_geometry_settlements
+            .get(&id)
+            .is_some_and(xdg_settlement_requires_resize_cleanup);
+        if timer_failed && requires_resize_cleanup {
             self.clear_xdg_resize_operation(id);
         }
     }
@@ -11179,6 +11214,12 @@ impl NickelSession {
         causality: nickel_core::geometry_authority::ObservationCausality,
     ) {
         self.observe_x11_geometry(id, desired, causality);
+    }
+
+    pub(crate) fn admit_managed_x11_geometry(&mut self, id: WindowId, placement: Geometry) {
+        if let Some(authority) = self.geometry_authorities.get_mut(&id) {
+            authority.admit_managed_placement(placement);
+        }
     }
 
     pub(crate) fn record_x11_interactive_final(
@@ -14429,6 +14470,7 @@ mod protocol_tests {
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke, xdg_configure_extends_existing_request,
+        xdg_configure_matches_existing_desired, xdg_settlement_requires_resize_cleanup,
     };
 
     #[test]
@@ -14510,10 +14552,24 @@ mod protocol_tests {
         assert!(xdg_configure_extends_existing_request(
             &record, revisions, first
         ));
+        assert!(xdg_configure_matches_existing_desired(
+            &record, revisions, first
+        ));
+        assert!(!xdg_settlement_requires_resize_cleanup(&record));
+        record.configures.push_back((
+            12_u32.into(),
+            revisions,
+            Some(crate::session::grabs::resize_grab::ResizeEdge::LEFT),
+        ));
+        assert!(xdg_settlement_requires_resize_cleanup(&record));
         record.settlement.fail();
         assert!(!xdg_configure_extends_existing_request(
             &record, revisions, first
         ));
+        assert!(
+            xdg_configure_matches_existing_desired(&record, revisions, first),
+            "a terminal request still identifies later configures carrying its desired fields"
+        );
         record.settlement.status = nickel_core::geometry_authority::SettlementStatus::Pending;
         record.settlement.expire(750);
         assert!(!xdg_configure_extends_existing_request(
