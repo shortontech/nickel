@@ -24,7 +24,7 @@ use crate::{
     SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum SessionControllerSource {
     Absent,
     Connecting {
@@ -40,14 +40,14 @@ enum SessionControllerSource {
     Failed,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 enum SessionControllerPhase {
     Lease,
     Poll,
     Acknowledge,
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl SessionControllerSource {
     fn discover() -> (Option<ControllerInput>, Self) {
         use nickel_session_protocol::client::AsyncControllerConnection;
@@ -244,7 +244,7 @@ impl SessionControllerSource {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn controller_action_from_message(
     action: nickel_session_protocol::ControllerActionMessage,
 ) -> ControllerAction {
@@ -263,7 +263,7 @@ fn controller_action_from_message(
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn controller_family_from_message(
     family: nickel_session_protocol::ControllerFamilyMessage,
 ) -> ControllerFamily {
@@ -2630,7 +2630,7 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     input: nickel_input::winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
     controller: Option<ControllerInput>,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     session_controller: SessionControllerSource,
     controller_schedule: ControllerPollSchedule,
     next_caret_blink: Instant,
@@ -2647,9 +2647,9 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
     fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
         let next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let (controller, session_controller) = SessionControllerSource::discover();
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let controller = Some(ControllerInput::new());
         Self {
             host: None,
@@ -2662,7 +2662,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             input: nickel_input::winit::Adapter::default(),
             clipboard: arboard::Clipboard::new().ok(),
             controller,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             session_controller,
             controller_schedule: ControllerPollSchedule::new(now),
             next_caret_blink: now + Duration::from_millis(500),
@@ -2896,7 +2896,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     .collect();
                 (actions, controller.connected())
             } else {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 {
                     let connected = matches!(
                         self.session_controller,
@@ -2905,7 +2905,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     );
                     (self.session_controller.poll_actions(), connected)
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 {
                     (Vec::new(), false)
                 }
@@ -3252,6 +3252,24 @@ mod tests {
         SemanticActionError, SemanticRole, SemanticValueInput, TextField, UiEvent, UiId,
         UiStateStore,
     };
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn session_controller_clients_share_the_nonblocking_runtime_contract() {
+        use nickel_session_protocol::{
+            ControllerHostRequest, ControllerHostResponse, client::AsyncControllerConnection,
+        };
+
+        let _begin: fn(Duration) -> std::io::Result<Option<AsyncControllerConnection>> =
+            AsyncControllerConnection::begin_from_environment;
+        let _send: fn(
+            &mut AsyncControllerConnection,
+            ControllerHostRequest,
+        ) -> std::io::Result<()> = AsyncControllerConnection::send;
+        let _receive: fn(
+            &mut AsyncControllerConnection,
+        ) -> std::io::Result<Option<ControllerHostResponse>> = AsyncControllerConnection::receive;
+    }
 
     #[derive(Clone)]
     enum Message {

@@ -18,7 +18,7 @@ use std::{
 };
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HANDLE},
+        Foundation::{CloseHandle, ERROR_NO_DATA, ERROR_PIPE_LISTENING, HANDLE},
         Storage::FileSystem::{
             CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE,
             FILE_SHARE_NONE, OPEN_EXISTING, ReadFile, WriteFile,
@@ -30,6 +30,134 @@ use windows::{
 
 static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 const RETRY_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Nonblocking authenticated controller channel for UI event loops.
+pub struct AsyncControllerConnection {
+    pipe: NamedPipe,
+    token: String,
+    pending: Option<PendingRequest>,
+    timeout: Duration,
+}
+
+struct PendingRequest {
+    id: u64,
+    started: Instant,
+    frame: Vec<u8>,
+    written: usize,
+    reply: Vec<u8>,
+    reply_bytes: Option<usize>,
+}
+
+impl AsyncControllerConnection {
+    /// Starts attachment without waiting for the pipe or its server response. `Ok(None)` means no
+    /// session was advertised; every advertised-session setup failure is an error.
+    pub fn begin_from_environment(timeout: Duration) -> io::Result<Option<Self>> {
+        let Some(advertisement) = crate::local_transport::advertisement_from_environment()? else {
+            return Ok(None);
+        };
+        let mut connection = Self {
+            pipe: NamedPipe::connect_now(&advertisement.endpoint)?,
+            token: advertisement.capability,
+            pending: None,
+            timeout,
+        };
+        connection.send(ControllerHostRequest::Attach)?;
+        Ok(Some(connection))
+    }
+
+    pub fn send(&mut self, request: ControllerHostRequest) -> io::Result<()> {
+        if self.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "controller request already outstanding",
+            ));
+        }
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let frame = crate::encode(&ClientEnvelope {
+            token: self.token.clone(),
+            request_id: id,
+            request: Request::ControllerHost(request),
+        })
+        .map_err(io::Error::other)?;
+        self.pending = Some(PendingRequest {
+            id,
+            started: Instant::now(),
+            frame,
+            written: 0,
+            reply: Vec::with_capacity(FRAME_HEADER_BYTES),
+            reply_bytes: None,
+        });
+        self.progress_write()
+    }
+
+    pub fn receive(&mut self) -> io::Result<Option<ControllerHostResponse>> {
+        let Some(pending) = self.pending.as_ref() else {
+            return Ok(None);
+        };
+        if pending.started.elapsed() >= self.timeout {
+            self.pending = None;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "session controller request timed out",
+            ));
+        }
+        self.progress_write()?;
+        let Some(pending) = self.pending.as_mut() else {
+            unreachable!("pending request exists while receiving")
+        };
+        if pending.written < pending.frame.len() {
+            return Ok(None);
+        }
+        loop {
+            let limit = pending.reply_bytes.unwrap_or(FRAME_HEADER_BYTES);
+            if pending.reply.len() == limit {
+                if pending.reply_bytes.is_none() {
+                    let payload = u32::from_le_bytes(
+                        pending.reply[6..10].try_into().expect("fixed frame header"),
+                    ) as usize;
+                    let total = FRAME_HEADER_BYTES.saturating_add(payload);
+                    if total > MAX_FRAME_BYTES {
+                        self.pending = None;
+                        return Err(invalid_data("named-pipe frame exceeds size limit"));
+                    }
+                    pending.reply_bytes = Some(total);
+                    if total != pending.reply.len() {
+                        pending.reply.reserve(total - pending.reply.len());
+                        continue;
+                    }
+                }
+                let pending = self.pending.take().expect("pending response");
+                let envelope =
+                    crate::decode::<ServerEnvelope>(&pending.reply).map_err(io::Error::other)?;
+                if envelope.request_id != pending.id {
+                    return Err(invalid_data("controller response correlation mismatch"));
+                }
+                return match envelope.message {
+                    ServerMessage::ControllerHost(response) => Ok(Some(response)),
+                    ServerMessage::Error { message, .. } => Err(io::Error::other(message)),
+                    _ => Err(invalid_data("invalid controller response")),
+                };
+            }
+            let mut buffer = [0_u8; 4096];
+            let wanted = (limit - pending.reply.len()).min(buffer.len());
+            match self.pipe.try_read(&mut buffer[..wanted])? {
+                Some(read) => pending.reply.extend_from_slice(&buffer[..read]),
+                None => return Ok(None),
+            }
+        }
+    }
+
+    fn progress_write(&mut self) -> io::Result<()> {
+        let pending = self.pending.as_mut().expect("request is pending");
+        while pending.written < pending.frame.len() {
+            match self.pipe.try_write(&pending.frame[pending.written..])? {
+                Some(written) => pending.written += written,
+                None => break,
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Persistent authenticated controller channel for a session-managed host.
 ///
@@ -172,12 +300,24 @@ struct NamedPipe {
 }
 
 impl NamedPipe {
+    fn connect_now(endpoint: &OsStr) -> io::Result<Self> {
+        Self::open(endpoint, Duration::ZERO)
+    }
+
     fn connect(endpoint: &OsStr, timeout: Duration) -> io::Result<Self> {
         let endpoint = wide(endpoint);
         let timeout_ms = duration_ms(timeout);
         if !unsafe { WaitNamedPipeW(PCWSTR(endpoint.as_ptr()), timeout_ms) }.as_bool() {
             return Err(io::Error::last_os_error());
         }
+        Self::open_wide(&endpoint, timeout)
+    }
+
+    fn open(endpoint: &OsStr, timeout: Duration) -> io::Result<Self> {
+        Self::open_wide(&wide(endpoint), timeout)
+    }
+
+    fn open_wide(endpoint: &[u16], timeout: Duration) -> io::Result<Self> {
         let handle = unsafe {
             CreateFileW(
                 PCWSTR(endpoint.as_ptr()),
@@ -196,6 +336,26 @@ impl NamedPipe {
             return Err(io::Error::other(error.to_string()));
         }
         Ok(Self { handle, timeout })
+    }
+
+    fn try_write(&mut self, bytes: &[u8]) -> io::Result<Option<usize>> {
+        let mut written = 0;
+        match unsafe { WriteFile(self.handle, Some(bytes), Some(&mut written), None) } {
+            Ok(()) if written > 0 => Ok(Some(written as usize)),
+            Ok(()) => Ok(None),
+            Err(error) if is_pipe_would_block(&error) => Ok(None),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
+    }
+
+    fn try_read(&mut self, bytes: &mut [u8]) -> io::Result<Option<usize>> {
+        let mut read = 0;
+        match unsafe { ReadFile(self.handle, Some(bytes), Some(&mut read), None) } {
+            Ok(()) if read > 0 => Ok(Some(read as usize)),
+            Ok(()) => Ok(None),
+            Err(error) if is_pipe_would_block(&error) => Ok(None),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
     }
 
     fn write_all(&mut self, mut bytes: &[u8]) -> io::Result<()> {
@@ -250,6 +410,11 @@ impl NamedPipe {
         }
         Ok(())
     }
+}
+
+fn is_pipe_would_block(error: &windows::core::Error) -> bool {
+    error.code() == windows::core::HRESULT::from_win32(ERROR_NO_DATA.0)
+        || error.code() == windows::core::HRESULT::from_win32(ERROR_PIPE_LISTENING.0)
 }
 
 impl Drop for NamedPipe {
