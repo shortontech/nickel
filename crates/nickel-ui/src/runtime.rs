@@ -2804,6 +2804,25 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
+            let semantic_conflicts_with_touch = match &event {
+                HostEvent::Semantic { target, action }
+                | HostEvent::Accessibility { target, action }
+                | HostEvent::ControllerSemantic { target, action }
+                    if *action == SemanticAction::Invoke(ActionKind::Activate) =>
+                {
+                    let touch_target = self
+                        .pending_long_press
+                        .as_ref()
+                        .and_then(|pending| pending.target.as_ref())
+                        .or_else(|| self.state.captured());
+                    touch_target.is_some_and(|owner| owner != target)
+                        && self
+                            .tree
+                            .resolve_effective_target(target, ActionKind::Activate)
+                            .is_ok()
+                }
+                _ => false,
+            };
             let normalized_input = match &event {
                 HostEvent::Normalized { input, .. } => Some(input),
                 HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
@@ -2822,14 +2841,9 @@ impl<A: Application> UiHost<A> {
                     _ => {}
                 }
             }
-            if matches!(
-                &event,
-                HostEvent::Controller(ControllerAction::Confirm)
-                    | HostEvent::Shortcut(_)
-                    | HostEvent::Semantic { .. }
-                    | HostEvent::Accessibility { .. }
-                    | HostEvent::ControllerSemantic { .. }
-            ) {
+            if matches!(&event, HostEvent::Controller(ControllerAction::Confirm))
+                || semantic_conflicts_with_touch
+            {
                 combined.merge(self.arbitrate_touch_ownership());
             }
             let mut outcome = match event {
@@ -2963,15 +2977,6 @@ impl<A: Application> UiHost<A> {
                 HostEvent::NormalizedIngress(envelope) => {
                     if self.admits_normalized_ingress(&envelope, &normalized_authorities) {
                         self.update_admitted_long_press(&envelope, now);
-                        if matches!(
-                            envelope.input,
-                            nickel_input::InputEvent::Key(nickel_input::KeyEvent {
-                                edge: nickel_input::KeyEdge::Pressed,
-                                ..
-                            })
-                        ) {
-                            combined.merge(self.arbitrate_touch_ownership());
-                        }
                         self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
                     } else {
                         HostEventOutcome::default()
@@ -6445,6 +6450,54 @@ mod tests {
             ..HostBatch::default()
         });
         assert!(ended.messages.is_empty());
+    }
+
+    #[test]
+    fn unrelated_or_invalid_events_preserve_active_touch_ownership() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.step(HostBatch {
+            events: vec![synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                None,
+            )],
+            ..HostBatch::default()
+        });
+
+        host.step(HostBatch {
+            events: vec![HostEvent::Shortcut(Shortcut::Submit)],
+            ..HostBatch::default()
+        });
+        assert!(host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_some());
+
+        let stale = host.step(HostBatch {
+            events: vec![HostEvent::Accessibility {
+                target: UiId::from("missing"),
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            }],
+            ..HostBatch::default()
+        });
+        assert!(!stale.semantic_failures.is_empty());
+        assert!(host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_some());
+
+        host.step(HostBatch {
+            events: vec![HostEvent::Normalized {
+                input: InputEvent::Text(nickel_input::TextEvent::Commit {
+                    device: DeviceId(8),
+                    order: EventOrder(2),
+                    text: "x".into(),
+                }),
+                clipboard_text: None,
+            }],
+            ..HostBatch::default()
+        });
+        assert!(host.input_dispatcher.touch_active());
     }
 
     #[test]
