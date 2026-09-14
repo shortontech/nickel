@@ -2606,6 +2606,15 @@ struct XdgConfigureSettlement {
     settlement: nickel_core::geometry_authority::Settlement,
 }
 
+fn xdg_configure_extends_existing_request(
+    record: &XdgConfigureSettlement,
+    revisions: nickel_core::geometry_authority::DesiredRevisions,
+    placement: Geometry,
+) -> bool {
+    record.settlement.request.desired == revisions
+        && record.settlement.request.placement == placement
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InteractiveResizeToken {
     window: WindowId,
@@ -10475,7 +10484,18 @@ impl NickelSession {
             desired,
             revision: authority.base_placement.revision,
         };
-        if authority.base_placement.value != desired || !authority.permits_placement(placement) {
+        if authority.constrained_proposal != desired || !authority.permits_placement(placement) {
+            return;
+        }
+        let desired_revisions = authority.revisions();
+        if self
+            .xdg_geometry_settlements
+            .get(&id)
+            .is_some_and(|record| {
+                xdg_configure_extends_existing_request(record, desired_revisions, desired)
+            })
+        {
+            self.record_xdg_configure_incorporation(window, configure);
             return;
         }
         self.x11_next_native_request = self
@@ -10483,7 +10503,6 @@ impl NickelSession {
             .checked_add(1)
             .expect("native geometry request identity exhausted");
         let request_id = NativeRequestId(self.x11_next_native_request);
-        let desired_revisions = self.geometry_authorities[&id].revisions();
         let now = self
             .start_time
             .elapsed()
@@ -10634,7 +10653,7 @@ impl NickelSession {
             if let Some(desired) = self
                 .window_geometry_authority_id(&window)
                 .and_then(|id| self.geometry_authorities.get(&id))
-                .map(|authority| authority.base_placement.value)
+                .map(|authority| authority.constrained_proposal)
             {
                 self.record_xdg_desired_geometry(&window, desired, serial);
             } else {
@@ -10653,7 +10672,7 @@ impl NickelSession {
             && let Some(desired) = self
                 .window_geometry_authority_id(&window)
                 .and_then(|id| self.geometry_authorities.get(&id))
-                .map(|authority| authority.base_placement.value)
+                .map(|authority| authority.constrained_proposal)
         {
             self.record_xdg_desired_geometry(&window, desired, serial);
         }
@@ -13891,21 +13910,72 @@ mod protocol_tests {
         ExternalControllerLeaseBinding, PREVIEW_BYTE_CAPACITY,
         PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER, PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES,
         PendingLaunchObservation, PendingLaunchWindowDisposition, RegisteredShellRole,
-        ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
-        apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
-        clamp_window_location, clamped_restore_geometry, command_requires_shell_identity,
-        drag_icon_location, external_controller_surface_changed, identification_expiry_is_current,
-        internal_restore_is_current, maximized_content_geometry, output_contains_logical_point,
-        output_index_for_shell_surface, output_rescue_revision_is_current,
-        pending_launch_window_disposition, placement_restore_is_current,
-        prepare_shell_behavior_update, preview_mapping_has_exact_size,
-        protocol_preview_from_cached, record_preview_capture_attempt,
-        restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
-        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        ShellRegistrationRejection, XdgConfigureSettlement, admitted_preview_ids,
+        advance_preview_content_generation, apply_shell_behavior_value, bounded_preview_ids,
+        clamp_decorated_content_to_work_area, clamp_window_location, clamped_restore_geometry,
+        command_requires_shell_identity, drag_icon_location, external_controller_surface_changed,
+        identification_expiry_is_current, internal_restore_is_current, maximized_content_geometry,
+        output_contains_logical_point, output_index_for_shell_surface,
+        output_rescue_revision_is_current, pending_launch_window_disposition,
+        placement_restore_is_current, prepare_shell_behavior_update,
+        preview_mapping_has_exact_size, protocol_preview_from_cached,
+        record_preview_capture_attempt, restored_drag_content_geometry,
+        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
+        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
-        test_control_may_invoke,
+        test_control_may_invoke, xdg_configure_extends_existing_request,
     };
+
+    #[test]
+    fn repeated_xdg_configure_extends_only_the_same_desired_request() {
+        use nickel_core::geometry_authority::{
+            GeometryAuthority, NativeRequest, NativeRequestId, Presentation, Settlement,
+            SettlementLimits,
+        };
+        let first = nickel_core::geometry::LogicalRect {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        let mut authority = GeometryAuthority::new(first, Presentation::Normal);
+        let revisions = authority.revisions();
+        let record = XdgConfigureSettlement {
+            configures: std::collections::VecDeque::new(),
+            settlement: Settlement::new(
+                NativeRequest {
+                    id: NativeRequestId(1),
+                    mapping_generation: 7,
+                    desired: revisions,
+                    placement: first,
+                },
+                SettlementLimits {
+                    deadline_tick: 750,
+                    max_corrections: 1,
+                },
+            ),
+        };
+        assert!(xdg_configure_extends_existing_request(
+            &record, revisions, first
+        ));
+
+        let newer = nickel_core::geometry::LogicalRect { x: 11, ..first };
+        authority.authorize_placement(
+            newer,
+            nickel_core::geometry_authority::GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        );
+        assert!(!xdg_configure_extends_existing_request(
+            &record,
+            authority.revisions(),
+            newer
+        ));
+    }
 
     #[test]
     fn external_controller_lease_is_bound_to_exact_surface_generation() {

@@ -220,3 +220,55 @@ fn xdg_configures_and_repeated_x11_client_requests_use_typed_tracking() {
     assert!(client_fact.contains("observe_x11_geometry"));
     assert!(!client_fact.contains("record_x11_desired_geometry"));
 }
+
+#[test]
+fn xdg_tracking_extends_equal_revision_requests_and_uses_effective_placement() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let record = state
+        .split("pub(crate) fn record_xdg_desired_geometry")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn observe_xdg_geometry_commit")
+        .next()
+        .unwrap();
+
+    assert!(record.contains("xdg_configure_extends_existing_request"));
+    assert!(
+        record.find("record_xdg_configure_incorporation").unwrap()
+            < record
+                .find("NativeRequestId(self.x11_next_native_request)")
+                .unwrap(),
+        "an unchanged desired revision must extend serial incorporation before allocating a request"
+    );
+    assert!(
+        state
+            .matches(".map(|authority| authority.constrained_proposal)")
+            .count()
+            >= 2
+    );
+}
+
+#[test]
+fn independent_x11_configure_revokes_an_active_operation_before_native_apply() {
+    let root = workspace_root();
+    let x11 =
+        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+    let accepted = x11
+        .split("diagnostic: X11 configure accepted")
+        .nth(1)
+        .unwrap()
+        .split("fn configure_notify")
+        .next()
+        .unwrap();
+    let cancel = accepted
+        .find("CancellationReason::Superseded")
+        .expect("independent geometry must supersede an overlapping operation");
+    let observe = accepted
+        .find("record_x11_client_desired_geometry")
+        .expect("independent geometry must revoke Nickel authority");
+    let apply = accepted
+        .find("window.configure(geometry)")
+        .expect("accepted geometry must reach XWayland");
+    assert!(cancel < observe && observe < apply);
+}
