@@ -287,9 +287,9 @@ fn unknown_x11_notify_defers_issued_request_failure_to_bounded_reconciliation() 
         .unwrap();
     let pending = notify.find("x11_has_pending_issued_request").unwrap();
     let cancel = notify.find("cancel_geometry_window_operation").unwrap();
-    let observe = notify.find("observe_x11_geometry").unwrap();
+    let observe = notify.find("observe_x11_untrusted_notification").unwrap();
     assert!(pending < cancel && cancel < observe);
-    assert!(notify.contains("x11_configure_observation_causality"));
+    assert!(notify.contains("observe_x11_untrusted_notification"));
 
     let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
     let binding = state
@@ -381,18 +381,20 @@ fn mapped_output_rescue_records_displacement_only_after_success() {
 }
 
 #[test]
-fn x11_notify_correlation_and_drag_deadline_are_bounded() {
+fn x11_notify_stays_unknown_and_drag_deadline_is_bounded() {
     let root = workspace_root();
     let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
     let causality = state
-        .split("pub(crate) fn x11_configure_observation_causality")
+        .split("pub(crate) fn observe_x11_untrusted_notification")
         .nth(1)
         .unwrap()
         .split("pub(crate) fn cancel_geometry_window_operation")
         .next()
         .unwrap();
-    assert!(causality.contains("settlement.request.placement == observed"));
-    assert!(causality.contains("ObservationCausality::Correlated"));
+    assert!(causality.contains("ObservationCausality::Unknown"));
+    assert!(!causality.contains("settlement.request.placement == observed"));
+    assert!(!causality.contains("ObservationCausality::Correlated"));
+    assert!(causality.find("settlement.observe").unwrap() < causality.find("return;").unwrap());
 
     let binding = state
         .split("fn bind_x11_geometry_request")

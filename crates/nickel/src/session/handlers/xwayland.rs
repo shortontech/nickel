@@ -586,16 +586,13 @@ impl XwmHandler for NickelSession {
             self.request_output_redraw();
         }
         if let Some(id) = registry_id {
-            let causality = self.x11_configure_observation_causality(id, observed);
-            if causality == nickel_core::geometry_authority::ObservationCausality::Unknown
-                && !self.x11_has_pending_issued_request(id)
-            {
+            if !self.x11_has_pending_issued_request(id) {
                 self.cancel_geometry_window_operation(
                     id,
                     nickel_core::window_operation::CancellationReason::AuthorityUnknown,
                 );
             }
-            self.observe_x11_geometry(id, observed, causality);
+            self.observe_x11_untrusted_notification(id, observed);
         }
     }
 

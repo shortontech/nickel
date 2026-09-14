@@ -10660,6 +10660,7 @@ impl NickelSession {
             )),
             move |_, _, state| {
                 let mut expired = false;
+                let mut unresolved_fact = None;
                 if let Some(settlement) = state.x11_geometry_settlements.get_mut(&id)
                     && settlement.request.id == request_id
                 {
@@ -10671,8 +10672,19 @@ impl NickelSession {
                     settlement.expire(now);
                     expired = settlement.status
                         == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
+                    if expired {
+                        unresolved_fact = settlement.observed;
+                    }
                 }
                 if expired {
+                    if let Some(fact) = unresolved_fact
+                        && let Some(authority) = state.geometry_authorities.get_mut(&id)
+                    {
+                        authority.observe(
+                            fact,
+                            nickel_core::geometry_authority::ObservationCausality::Unknown,
+                        );
+                    }
                     state.cancel_geometry_window_operation(
                         id,
                         nickel_core::window_operation::CancellationReason::AuthorityUnknown,
@@ -10697,26 +10709,31 @@ impl NickelSession {
             })
     }
 
-    pub(crate) fn x11_configure_observation_causality(
-        &self,
-        id: WindowId,
-        observed: Geometry,
-    ) -> nickel_core::geometry_authority::ObservationCausality {
-        self.x11_geometry_settlements
-            .get(&id)
-            .filter(|settlement| {
-                settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
-                    && settlement.request.mapping_generation == id.0
-                    && settlement.request.placement == observed
-            })
-            .map_or(
+    pub(crate) fn observe_x11_untrusted_notification(&mut self, id: WindowId, observed: Geometry) {
+        use nickel_core::geometry_authority::{CoordinateUnits, GeometryMeaning, TaggedGeometry};
+        let fact = TaggedGeometry {
+            rect: observed,
+            meaning: GeometryMeaning::CanonicalManagedBounds,
+            units: CoordinateUnits::CanonicalLogical,
+            topology_version: self
+                .geometry_authorities
+                .get(&id)
+                .map_or(1, |authority| authority.topology_version),
+        };
+        if let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
+            && settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
+        {
+            settlement.observe(
+                fact,
                 nickel_core::geometry_authority::ObservationCausality::Unknown,
-                |settlement| {
-                    nickel_core::geometry_authority::ObservationCausality::Correlated(
-                        settlement.request.id,
-                    )
-                },
-            )
+            );
+            return;
+        }
+        self.observe_x11_geometry(
+            id,
+            observed,
+            nickel_core::geometry_authority::ObservationCausality::Unknown,
+        );
     }
 
     pub(crate) fn cancel_geometry_window_operation(
