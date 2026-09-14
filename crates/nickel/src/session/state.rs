@@ -2818,6 +2818,7 @@ pub struct NickelSession {
     pub suppress_secondary_button_release: bool,
     pub idle_inhibitors: HashMap<WlSurface, usize>,
     pub(crate) active_touch_slots: HashSet<smithay::backend::input::TouchSlot>,
+    pub(super) client_touch_slots: super::input::ClientTouchSlots,
     idle_controller: IdleController,
     pub dimmed: bool,
     pub frame_cursor: crate::session::window_frame::FrameCursor,
@@ -7540,6 +7541,7 @@ impl NickelSession {
             suppress_secondary_button_release: false,
             idle_inhibitors: HashMap::new(),
             active_touch_slots: HashSet::new(),
+            client_touch_slots: Default::default(),
             idle_controller,
             dimmed: false,
             frame_cursor: crate::session::window_frame::FrameCursor::Arrow,
@@ -10536,8 +10538,9 @@ impl NickelSession {
         }
         // Native target state is authoritative. A completed frame can retain targets even when
         // compositor-side slot bookkeeping is already empty, so cancellation is unconditional.
-        self.active_touch_slots.clear();
         self.seat.get_touch().unwrap().cancel(self);
+        self.active_touch_slots.clear();
+        self.client_touch_slots.cancel_all();
     }
 
     fn unlock_session(&mut self) {

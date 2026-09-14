@@ -39,6 +39,103 @@ use crate::session::{
     window_frame::{self, FramePart},
 };
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ClientTouchContact {
+    device: String,
+    generation: u64,
+    contact: i32,
+}
+
+/// Translates backend-local touch slots into one collision-free Smithay seat domain.
+#[derive(Debug, Default)]
+pub(super) struct ClientTouchSlots {
+    device_generations: std::collections::HashMap<String, u64>,
+    contacts: std::collections::HashMap<ClientTouchContact, smithay::backend::input::TouchSlot>,
+    next_generation: u64,
+    next_slot: u32,
+}
+
+impl ClientTouchSlots {
+    fn generation(&mut self, device: &str) -> u64 {
+        if let Some(generation) = self.device_generations.get(device) {
+            return *generation;
+        }
+        self.next_generation = self
+            .next_generation
+            .checked_add(1)
+            .expect("touch device generation exhausted");
+        self.device_generations
+            .insert(device.to_owned(), self.next_generation);
+        self.next_generation
+    }
+
+    fn device_added(&mut self, device: &str) -> bool {
+        let had_contacts = self.contacts.keys().any(|contact| contact.device == device);
+        self.device_generations.remove(device);
+        self.generation(device);
+        had_contacts
+    }
+
+    fn device_removed(&mut self, device: &str) -> bool {
+        self.device_generations.remove(device);
+        self.contacts.keys().any(|contact| contact.device == device)
+    }
+
+    fn begin(
+        &mut self,
+        device: &str,
+        contact: smithay::backend::input::TouchSlot,
+    ) -> smithay::backend::input::TouchSlot {
+        let key = ClientTouchContact {
+            device: device.to_owned(),
+            generation: self.generation(device),
+            contact: contact.into(),
+        };
+        if let Some(slot) = self.contacts.get(&key) {
+            return *slot;
+        }
+        let slot = Some(self.next_slot).into();
+        self.next_slot = self
+            .next_slot
+            .checked_add(1)
+            .expect("client touch slot exhausted");
+        self.contacts.insert(key, slot);
+        slot
+    }
+
+    fn get(
+        &self,
+        device: &str,
+        contact: smithay::backend::input::TouchSlot,
+    ) -> Option<smithay::backend::input::TouchSlot> {
+        let generation = *self.device_generations.get(device)?;
+        self.contacts
+            .get(&ClientTouchContact {
+                device: device.to_owned(),
+                generation,
+                contact: contact.into(),
+            })
+            .copied()
+    }
+
+    fn end(
+        &mut self,
+        device: &str,
+        contact: smithay::backend::input::TouchSlot,
+    ) -> Option<smithay::backend::input::TouchSlot> {
+        let generation = *self.device_generations.get(device)?;
+        self.contacts.remove(&ClientTouchContact {
+            device: device.to_owned(),
+            generation,
+            contact: contact.into(),
+        })
+    }
+
+    pub(super) fn cancel_all(&mut self) {
+        self.contacts.clear();
+    }
+}
+
 fn physical_emergency_control(
     xkb_code: u32,
     device_id: &str,
@@ -568,13 +665,29 @@ impl NickelSession {
         }
         match &event {
             InputEvent::DeviceAdded { device }
-                if device.has_capability(DeviceCapability::Touch) && device.syspath().is_some() =>
+                if device.has_capability(DeviceCapability::Touch) =>
             {
-                self.on_screen_keyboard.touchscreens.insert(device.id());
+                let device_id = device.id();
+                if self.client_touch_slots.device_added(&device_id) {
+                    self.seat.get_touch().unwrap().cancel(self);
+                    self.active_touch_slots.clear();
+                    self.client_touch_slots.cancel_all();
+                }
+                if device.syspath().is_some() {
+                    self.on_screen_keyboard.touchscreens.insert(device_id);
+                }
             }
             InputEvent::DeviceRemoved { device } => {
-                self.on_screen_keyboard.touchscreens.remove(&device.id());
-                self.internal_ui.remove_desktop_pointer_device(&device.id());
+                let device_id = device.id();
+                self.on_screen_keyboard.touchscreens.remove(&device_id);
+                self.internal_ui.remove_desktop_pointer_device(&device_id);
+                // Smithay exposes seat-wide cancellation, not per-device cancellation. If this
+                // device owned any client contact, close the whole native domain atomically.
+                if self.client_touch_slots.device_removed(&device_id) {
+                    self.seat.get_touch().unwrap().cancel(self);
+                    self.active_touch_slots.clear();
+                    self.client_touch_slots.cancel_all();
+                }
                 self.flush_internal_shell_input();
             }
             _ => {}
@@ -1915,13 +2028,16 @@ impl NickelSession {
                     self.request_on_screen_keyboard();
                 }
                 self.record_interaction_output(location);
-                self.active_touch_slots.insert(event.slot());
+                let client_slot = self
+                    .client_touch_slots
+                    .begin(&event.device().id(), event.slot());
+                self.active_touch_slots.insert(client_slot);
                 let touch = self.seat.get_touch().unwrap();
                 touch.down(
                     self,
                     self.surface_under(location),
                     &DownEvent {
-                        slot: event.slot(),
+                        slot: client_slot,
                         location,
                         serial: SERIAL_COUNTER.next_serial(),
                         time: event.time(),
@@ -1948,13 +2064,19 @@ impl NickelSession {
                     self.request_output_redraw();
                     return None;
                 }
+                let Some(client_slot) = self
+                    .client_touch_slots
+                    .get(&event.device().id(), event.slot())
+                else {
+                    return None;
+                };
                 self.record_interaction_output(location);
                 let touch = self.seat.get_touch().unwrap();
                 touch.motion(
                     self,
                     self.surface_under(location),
                     &TouchMotion {
-                        slot: event.slot(),
+                        slot: client_slot,
                         location,
                         time: event.time(),
                     },
@@ -1978,16 +2100,24 @@ impl NickelSession {
                     self.request_output_redraw();
                     return None;
                 }
-                self.active_touch_slots.remove(&event.slot());
+                let Some(client_slot) = self
+                    .client_touch_slots
+                    .get(&event.device().id(), event.slot())
+                else {
+                    return None;
+                };
+                self.active_touch_slots.remove(&client_slot);
                 let touch = self.seat.get_touch().unwrap();
                 touch.up(
                     self,
                     &UpEvent {
-                        slot: event.slot(),
+                        slot: client_slot,
                         serial: SERIAL_COUNTER.next_serial(),
                         time: event.time(),
                     },
                 );
+                self.client_touch_slots
+                    .end(&event.device().id(), event.slot());
             }
             InputEvent::TouchFrame { .. } => self.seat.get_touch().unwrap().frame(self),
             InputEvent::TouchCancel { .. } => {
@@ -1998,8 +2128,9 @@ impl NickelSession {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();
                 }
-                self.active_touch_slots.clear();
                 self.seat.get_touch().unwrap().cancel(self);
+                self.active_touch_slots.clear();
+                self.client_touch_slots.cancel_all();
             }
             _ => {}
         }
@@ -2226,6 +2357,39 @@ fn recovery_shortcut_from_keysym(sym: Keysym) -> Option<nickel_ui::Shortcut> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn client_touch_slots_separate_equal_contacts_across_devices() {
+        let mut slots = super::ClientTouchSlots::default();
+        let contact = Some(3).into();
+        let first = slots.begin("touch-a", contact);
+        let second = slots.begin("touch-b", contact);
+
+        assert_ne!(first, second);
+        assert_eq!(slots.get("touch-a", contact), Some(first));
+        assert_eq!(slots.get("touch-b", contact), Some(second));
+        assert_eq!(slots.end("touch-a", contact), Some(first));
+        assert_eq!(slots.get("touch-a", contact), None);
+        assert_eq!(slots.get("touch-b", contact), Some(second));
+    }
+
+    #[test]
+    fn client_touch_device_loss_requires_domain_cancel_and_fences_old_generation() {
+        let mut slots = super::ClientTouchSlots::default();
+        let contact = Some(5).into();
+        let old = slots.begin("touch-a", contact);
+
+        assert!(slots.device_removed("touch-a"));
+        slots.cancel_all();
+        assert_eq!(slots.get("touch-a", contact), None);
+
+        assert!(!slots.device_added("touch-a"));
+        let replacement = slots.begin("touch-a", contact);
+        assert_ne!(replacement, old);
+        slots.cancel_all();
+        assert_eq!(slots.get("touch-a", contact), None);
+        assert_eq!(slots.end("touch-a", contact), None);
+    }
+
     #[test]
     fn physical_emergency_positions_exclude_synthetic_and_virtual_devices() {
         use super::physical_emergency_control;
