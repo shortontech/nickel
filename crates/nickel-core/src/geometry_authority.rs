@@ -96,6 +96,13 @@ pub struct DesiredRevisions {
     pub restore_placement: GeometryRevision,
 }
 
+/// Capability returned by the sole desired-state writer before an adapter issues an effect.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AuthorizedPlacement {
+    pub desired: LogicalRect,
+    pub revision: GeometryRevision,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometryConstraints {
     pub min_width: i32,
@@ -343,6 +350,19 @@ impl GeometryAuthority {
         self.base_placement.revision = self.base_placement.revision.next();
         self.base_placement.owner = FieldOwner::Nickel;
         self.constrained_proposal = constraints.constrain(placement);
+    }
+
+    /// Publishes a desired revision before native realization, including equal-valued writes.
+    pub fn authorize_placement(
+        &mut self,
+        placement: LogicalRect,
+        constraints: GeometryConstraints,
+    ) -> AuthorizedPlacement {
+        self.set_placement(placement, constraints);
+        AuthorizedPlacement {
+            desired: self.constrained_proposal,
+            revision: self.base_placement.revision,
+        }
     }
 
     /// Recomputes a temporary effective placement without replacing the user's base placement.
@@ -620,6 +640,17 @@ mod tests {
         let report = authority.compensate(baseline, constraints(200));
         assert_eq!(report.placement, CompensationResult::SkippedSuperseded);
         assert_eq!(authority.base_placement.value, rect(110));
+    }
+
+    #[test]
+    fn equal_valued_newer_write_supersedes_compensation_revision() {
+        let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+        let baseline = authority.baseline();
+        authority.authorize_placement(rect(90), constraints(200));
+
+        let report = authority.compensate(baseline, constraints(200));
+        assert_eq!(report.placement, CompensationResult::SkippedSuperseded);
+        assert_eq!(authority.base_placement.value, rect(90));
     }
 
     #[test]

@@ -3,7 +3,7 @@ nickel-build-support	1
 nickel-codex	12
 nickel-codex-fixture	3
 nickel-codex-ui	8
-nickel-core	30
+nickel-core	34
 nickel-file	18
 nickel-gaze	8
 nickel-i18n	1
@@ -17,7 +17,7 @@ nickel-platform	15
 nickel-remote-control	40
 nickel-render-assets	1
 nickel	160
-nickel-session-protocol	2
+nickel-session-protocol	7
 nickel-settings	11
 nickel-storage	1
 nickel-terminal	3

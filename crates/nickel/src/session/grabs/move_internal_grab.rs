@@ -13,7 +13,6 @@ pub struct MoveInternalSurfaceGrab {
     pub start_data: GrabStartData<NickelSession>,
     pub surface: InternalSurfaceId,
     pub initial_location: Point<i32, Logical>,
-    pub last_location: Point<i32, Logical>,
     pub operation: WindowPointerOperation,
 }
 
@@ -26,15 +25,10 @@ impl PointerGrab<NickelSession> for MoveInternalSurfaceGrab {
 
     fn unset(&mut self, data: &mut NickelSession) {
         self.operation.cancel(&mut data.window_operations);
-        if self
+        let compensate = self
             .operation
-            .requests_conditional_compensation(&data.window_operations)
-            && data.compensate_internal_move(
-                self.surface,
-                self.initial_location,
-                self.last_location,
-            )
-        {
+            .requests_conditional_compensation(&data.window_operations);
+        if data.finish_internal_move(self.surface, compensate) {
             data.request_output_redraw();
         }
     }
@@ -61,8 +55,7 @@ impl PointerGrab<NickelSession> for MoveInternalSurfaceGrab {
         };
         placement.geometry.0 = self.initial_location.x + delta.x.round() as i32;
         placement.geometry.1 = self.initial_location.y + delta.y.round() as i32;
-        self.last_location = (placement.geometry.0, placement.geometry.1).into();
-        if data.internal_ui.relocate(self.surface, placement) {
+        if data.apply_internal_move(self.surface, placement) {
             data.request_output_redraw();
         }
     }

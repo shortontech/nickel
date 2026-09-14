@@ -2761,6 +2761,10 @@ pub struct NickelSession {
     pub workspace_hidden_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     displaced_output_windows: HashMap<String, Vec<DisplacedWindow>>,
     geometry_authorities: HashMap<WindowId, nickel_core::geometry_authority::GeometryAuthority>,
+    internal_move_baselines: HashMap<
+        nickel_ui::InternalSurfaceId,
+        nickel_core::geometry_authority::CompensationBaseline,
+    >,
     pub(crate) x11_geometry_settlements:
         HashMap<WindowId, nickel_core::geometry_authority::Settlement>,
     pub(crate) xdg_geometry_settlements: HashMap<
@@ -6416,20 +6420,87 @@ impl NickelSession {
         removed
     }
 
-    pub(crate) fn compensate_internal_move(
+    pub(crate) fn apply_internal_move(
         &mut self,
         surface: nickel_ui::InternalSurfaceId,
-        initial: smithay::utils::Point<i32, smithay::utils::Logical>,
-        last_owned: smithay::utils::Point<i32, smithay::utils::Logical>,
+        placement: crate::session::InternalSurfacePlacement,
     ) -> bool {
+        let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
+            return false;
+        };
+        let desired = internal_placement_geometry(&placement);
+        if !self.geometry_authorities.contains_key(&id) {
+            let Some(current) = self.internal_ui.placement(surface) else {
+                return false;
+            };
+            self.geometry_authorities.insert(
+                id,
+                nickel_core::geometry_authority::GeometryAuthority::new(
+                    internal_placement_geometry(current),
+                    nickel_core::geometry_authority::Presentation::Normal,
+                ),
+            );
+        }
+        let baseline = self
+            .internal_move_baselines
+            .entry(surface)
+            .or_insert_with(|| self.geometry_authorities[&id].baseline());
+        let constraints = nickel_core::geometry_authority::GeometryConstraints {
+            min_width: 1,
+            min_height: 1,
+            max_width: None,
+            max_height: None,
+        };
+        let write = self
+            .geometry_authorities
+            .get_mut(&id)
+            .expect("internal move authority was installed")
+            .authorize_placement(desired, constraints);
+        baseline.note_owned(
+            nickel_core::geometry_authority::GeometryField::Placement,
+            write.revision,
+        );
+        self.internal_ui.relocate(surface, placement)
+    }
+
+    pub(crate) fn finish_internal_move(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        compensate: bool,
+    ) -> bool {
+        let Some(baseline) = self.internal_move_baselines.remove(&surface) else {
+            return false;
+        };
+        if !compensate {
+            return false;
+        }
+        let Some(id) = self.internal_surface_windows.get(&surface).copied() else {
+            return false;
+        };
+        let constraints = nickel_core::geometry_authority::GeometryConstraints {
+            min_width: 1,
+            min_height: 1,
+            max_width: None,
+            max_height: None,
+        };
+        let report = self
+            .geometry_authorities
+            .get_mut(&id)
+            .expect("internal move baseline has an authority")
+            .compensate(baseline, constraints);
+        if !matches!(
+            report.placement,
+            nickel_core::geometry_authority::CompensationResult::Exact
+                | nickel_core::geometry_authority::CompensationResult::Adjusted
+        ) {
+            return false;
+        }
         let Some(mut placement) = self.internal_ui.placement(surface).cloned() else {
             return false;
         };
-        if (placement.geometry.0, placement.geometry.1) != (last_owned.x, last_owned.y) {
-            return false;
-        }
-        placement.geometry.0 = initial.x;
-        placement.geometry.1 = initial.y;
+        let desired = self.geometry_authorities[&id].base_placement.value;
+        placement.geometry.0 = desired.x;
+        placement.geometry.1 = desired.y;
         self.internal_ui.relocate(surface, placement)
     }
 
@@ -7396,6 +7467,7 @@ impl NickelSession {
             workspace_hidden_windows: HashMap::new(),
             displaced_output_windows: HashMap::new(),
             geometry_authorities: HashMap::new(),
+            internal_move_baselines: HashMap::new(),
             x11_geometry_settlements: HashMap::new(),
             xdg_geometry_settlements: HashMap::new(),
             x11_next_native_request: 0,
@@ -8288,10 +8360,6 @@ impl NickelSession {
         };
         let target =
             smithay::utils::Rectangle::new((x, area.y).into(), (width, area.height).into());
-        if let Some(surface) = window.x11_surface() {
-            let _ = surface.configure(target);
-        }
-        self.map_compositor_moved_window(window, target.loc, true);
         let target_geometry = Geometry {
             x: target.loc.x,
             y: target.loc.y,
@@ -8299,6 +8367,7 @@ impl NickelSession {
             height: target.size.h,
         };
         let last_owned_revision = self.record_desired_geometry(id, target_geometry);
+        self.apply_compositor_moved_window_effect(window, target.loc, true);
         self.shortcut_snap_restore.insert(
             id,
             RevisionedPlacementRestore {
@@ -9722,6 +9791,27 @@ impl NickelSession {
                     .and_then(|surface| self.x11_windows.get(&surface.window_id()).copied())
             });
         let desired_size = window.geometry().size;
+        if let Some(id) = window_id {
+            self.record_desired_geometry(
+                id,
+                Geometry {
+                    x: location.x,
+                    y: location.y,
+                    width: desired_size.w.max(1),
+                    height: desired_size.h.max(1),
+                },
+            );
+        }
+        self.apply_compositor_moved_window_effect(window, location, activate);
+    }
+
+    /// Executes a placement already authorized by `record_desired_geometry`.
+    fn apply_compositor_moved_window_effect(
+        &mut self,
+        window: Window,
+        location: Point<i32, Logical>,
+        activate: bool,
+    ) {
         if let Some(surface) = window.x11_surface()
             && self.x11_windows.contains_key(&surface.window_id())
         {
@@ -9737,17 +9827,6 @@ impl NickelSession {
             .toplevel()
             .map(|surface| surface.wl_surface().clone());
         self.map_buffered_window(window, location, activate);
-        if let Some(id) = window_id {
-            self.record_desired_geometry(
-                id,
-                Geometry {
-                    x: location.x,
-                    y: location.y,
-                    width: desired_size.w.max(1),
-                    height: desired_size.h.max(1),
-                },
-            );
-        }
         if let Some(root) = popup_root {
             self.reconstrain_reactive_popups(&root);
         }
@@ -9770,10 +9849,7 @@ impl NickelSession {
                 nickel_core::geometry_authority::Presentation::Normal,
             )
         });
-        if authority.base_placement.value != desired {
-            authority.set_placement(desired, constraints);
-        }
-        authority.revisions().placement
+        authority.authorize_placement(desired, constraints).revision
     }
 
     pub(crate) fn record_x11_desired_geometry(
@@ -11138,8 +11214,6 @@ impl NickelSession {
                     output: Some(output.name),
                 }
             };
-            self.internal_ui
-                .configure_application(surface, target.clone());
             if restoring.is_some() {
                 self.record_desired_geometry(id, internal_placement_geometry(&target));
                 self.record_normal_presentation(id);
@@ -11163,6 +11237,8 @@ impl NickelSession {
                     },
                 );
             }
+            self.internal_ui
+                .configure_application(surface, target.clone());
             self.sync_internal_window_decorations();
             self.notify_protocol_snapshot();
             self.schedule_internal_ui_frame();
@@ -11444,6 +11520,13 @@ impl NickelSession {
             work_area,
             self.server_decorated.contains(&surface.wl_surface().id()),
         );
+        if let Some(id) = window_id {
+            self.record_presentation_geometry(
+                id,
+                nickel_core::geometry_authority::Presentation::Maximized,
+                geometry,
+            );
+        }
         surface.with_pending_state(|state| {
             state
                 .states
@@ -11452,13 +11535,6 @@ impl NickelSession {
         });
         self.space
             .map_element(window, (geometry.x, geometry.y), true);
-        if let Some(id) = window_id {
-            self.record_presentation_geometry(
-                id,
-                nickel_core::geometry_authority::Presentation::Maximized,
-                geometry,
-            );
-        }
         self.raise_panels();
         surface.send_pending_configure();
         self.notify_protocol_snapshot();
@@ -11484,22 +11560,22 @@ impl NickelSession {
             self.work_area_for_output(output),
             self.server_decorated.contains(&surface.wl_surface().id()),
         );
-        surface.with_pending_state(|state| {
-            state.size = Some(Size::from((geometry.width, geometry.height)));
-        });
-        self.space
-            .map_element(window, (geometry.x, geometry.y), true);
-        if let Some(id) = self
+        let authority_id = self
             .surface_windows
             .get(&surface.wl_surface().id())
-            .copied()
-        {
+            .copied();
+        if let Some(id) = authority_id {
             self.record_presentation_geometry(
                 id,
                 nickel_core::geometry_authority::Presentation::Maximized,
                 geometry,
             );
         }
+        surface.with_pending_state(|state| {
+            state.size = Some(Size::from((geometry.width, geometry.height)));
+        });
+        self.space
+            .map_element(window, (geometry.x, geometry.y), true);
         self.raise_panels();
         self.notify_protocol_snapshot();
         true
@@ -11524,6 +11600,9 @@ impl NickelSession {
             self.presentation_restore_revisions
                 .remove(&(id, nickel_core::geometry_authority::Presentation::Maximized));
             self.record_normal_presentation(id);
+            if restore_is_current {
+                self.record_desired_geometry(id, restore);
+            }
         }
         surface.with_pending_state(|state| {
             state
@@ -11535,9 +11614,6 @@ impl NickelSession {
         });
         if restore_is_current && let Some(window) = self.window_for_surface(surface.wl_surface()) {
             self.map_buffered_window(window, (restore.x, restore.y), true);
-            if let Some(id) = window_id {
-                self.record_desired_geometry(id, restore);
-            }
         }
         self.raise_panels();
         surface.send_pending_configure();
@@ -11572,6 +11648,13 @@ impl NickelSession {
         } else {
             output
         };
+        if let Some(id) = window_id {
+            self.record_presentation_geometry(
+                id,
+                nickel_core::geometry_authority::Presentation::Fullscreen,
+                output,
+            );
+        }
         surface.with_pending_state(|state| {
             state
                 .states
@@ -11580,13 +11663,6 @@ impl NickelSession {
         });
         window.override_z_index(45);
         self.map_buffered_window(window, (output.x, output.y), true);
-        if let Some(id) = window_id {
-            self.record_presentation_geometry(
-                id,
-                nickel_core::geometry_authority::Presentation::Fullscreen,
-                output,
-            );
-        }
         surface.send_pending_configure();
     }
 
@@ -11610,6 +11686,9 @@ impl NickelSession {
                 nickel_core::geometry_authority::Presentation::Fullscreen,
             ));
             self.record_normal_presentation(id);
+            if restore_is_current {
+                self.record_desired_geometry(id, restore);
+            }
         }
         surface.with_pending_state(|state| {
             state
@@ -11623,9 +11702,6 @@ impl NickelSession {
             window.override_z_index(30);
             if restore_is_current {
                 self.map_buffered_window(window, (restore.x, restore.y), true);
-                if let Some(id) = window_id {
-                    self.record_desired_geometry(id, restore);
-                }
             }
         }
         self.raise_panels();
@@ -11665,17 +11741,18 @@ impl NickelSession {
             (bounds.x, bounds.y).into(),
             (bounds.width, bounds.height).into(),
         );
-        let _ = surface.set_fullscreen(true);
-        let _ = surface.configure(geometry);
-        window.override_z_index(45);
-        self.map_buffered_window(window, geometry.loc, true);
-        if let Some(id) = self.x11_windows.get(&surface.window_id()).copied() {
+        let authority_id = self.x11_windows.get(&surface.window_id()).copied();
+        if let Some(id) = authority_id {
             self.record_presentation_geometry(
                 id,
                 nickel_core::geometry_authority::Presentation::Fullscreen,
                 bounds,
             );
         }
+        let _ = surface.set_fullscreen(true);
+        let _ = surface.configure(geometry);
+        window.override_z_index(45);
+        self.map_buffered_window(window, geometry.loc, true);
         self.request_output_redraw();
         self.notify_protocol_snapshot();
     }
@@ -11698,6 +11775,17 @@ impl NickelSession {
                 nickel_core::geometry_authority::Presentation::Fullscreen,
             ));
             self.record_normal_presentation(id);
+            if restore_is_current {
+                self.record_desired_geometry(
+                    id,
+                    Geometry {
+                        x: restore.loc.x,
+                        y: restore.loc.y,
+                        width: restore.size.w,
+                        height: restore.size.h,
+                    },
+                );
+            }
         }
         if restore_is_current {
             let _ = surface.configure(restore);
@@ -11712,17 +11800,6 @@ impl NickelSession {
             window.override_z_index(30);
             if restore_is_current {
                 self.map_buffered_window(window, restore.loc, true);
-                if let Some(id) = window_id {
-                    self.record_desired_geometry(
-                        id,
-                        Geometry {
-                            x: restore.loc.x,
-                            y: restore.loc.y,
-                            width: restore.size.w,
-                            height: restore.size.h,
-                        },
-                    );
-                }
             }
         }
         self.raise_panels();
@@ -11793,13 +11870,10 @@ impl NickelSession {
                 work_area,
                 self.server_decorated.contains(&surface.wl_surface().id()),
             );
-            Self::configure_window(&window, geometry);
             let id = self
                 .surface_windows
                 .get(&surface.wl_surface().id())
                 .copied();
-            self.space
-                .map_element(window, (geometry.x, geometry.y), true);
             if let Some(id) = id {
                 self.record_presentation_geometry(
                     id,
@@ -11807,6 +11881,9 @@ impl NickelSession {
                     geometry,
                 );
             }
+            Self::configure_window(&window, geometry);
+            self.space
+                .map_element(window, (geometry.x, geometry.y), true);
             surface.send_pending_configure();
         }
         let maximized_x11 = self
@@ -11851,8 +11928,6 @@ impl NickelSession {
             (geometry.x, geometry.y).into(),
             (geometry.width, geometry.height).into(),
         );
-        let _ = surface.configure(geometry);
-        self.map_buffered_window(window.clone(), geometry.loc, true);
         if let Some(id) = self.x11_windows.get(&surface.window_id()).copied() {
             self.record_presentation_geometry(
                 id,
@@ -11865,6 +11940,8 @@ impl NickelSession {
                 },
             );
         }
+        let _ = surface.configure(geometry);
+        self.map_buffered_window(window.clone(), geometry.loc, true);
     }
 
     pub(crate) fn restore_maximized_window_for_drag(
@@ -11921,11 +11998,11 @@ impl NickelSession {
                 (geometry.x, geometry.y).into(),
                 (geometry.width, geometry.height).into(),
             );
+            self.record_desired_geometry(id, geometry);
+            self.record_normal_presentation(id);
             let _ = surface.set_maximized(false);
             let _ = surface.configure(rectangle);
             self.map_buffered_window(window.clone(), rectangle.loc, true);
-            self.record_desired_geometry(id, geometry);
-            self.record_normal_presentation(id);
             self.notify_protocol_snapshot();
             return Some(rectangle.loc);
         }
@@ -11960,6 +12037,8 @@ impl NickelSession {
             result = ?geometry,
             "diagnostic: restoring maximized Wayland window for drag"
         );
+        self.record_desired_geometry(id, geometry);
+        self.record_normal_presentation(id);
         surface.with_pending_state(|state| {
             state
                 .states
@@ -11968,8 +12047,6 @@ impl NickelSession {
         });
         self.space
             .map_element(window.clone(), (geometry.x, geometry.y), true);
-        self.record_desired_geometry(id, geometry);
-        self.record_normal_presentation(id);
         surface.send_pending_configure();
         self.notify_protocol_snapshot();
         Some((geometry.x, geometry.y).into())
@@ -11996,10 +12073,6 @@ impl NickelSession {
                     .surface_windows
                     .get(&surface.wl_surface().id())
                     .copied();
-                Self::configure_window(&window, output);
-                window.override_z_index(45);
-                self.space
-                    .map_element(window.clone(), (output.x, output.y), true);
                 if let Some(id) = id {
                     self.record_presentation_geometry(
                         id,
@@ -12007,6 +12080,10 @@ impl NickelSession {
                         output,
                     );
                 }
+                Self::configure_window(&window, output);
+                window.override_z_index(45);
+                self.space
+                    .map_element(window.clone(), (output.x, output.y), true);
                 surface.send_pending_configure();
             } else if let Some(surface) = window.x11_surface() {
                 let id = self.x11_windows.get(&surface.window_id()).copied();
@@ -12014,10 +12091,6 @@ impl NickelSession {
                     (output.x, output.y).into(),
                     (output.width, output.height).into(),
                 );
-                let _ = surface.configure(geometry);
-                window.override_z_index(45);
-                self.space
-                    .map_element(window.clone(), (output.x, output.y), true);
                 if let Some(id) = id {
                     self.record_presentation_geometry(
                         id,
@@ -12025,6 +12098,10 @@ impl NickelSession {
                         output,
                     );
                 }
+                let _ = surface.configure(geometry);
+                window.override_z_index(45);
+                self.space
+                    .map_element(window.clone(), (output.x, output.y), true);
             }
         }
         self.raise_panels();
@@ -14146,23 +14223,29 @@ mod protocol_tests {
             },
             1.0,
         );
+        session
+            .register_internal_application(surface)
+            .expect("internal test application admitted");
         let mut moved = session.internal_ui.placement(surface).unwrap().clone();
         moved.geometry.0 = 80;
         moved.geometry.1 = 90;
-        assert!(session.internal_ui.relocate(surface, moved));
-        assert!(session.compensate_internal_move(surface, (10, 20).into(), (80, 90).into()));
+        assert!(session.apply_internal_move(surface, moved));
+        assert!(session.finish_internal_move(surface, true));
         assert_eq!(
             session.internal_ui.placement(surface).unwrap().geometry.0,
             10
         );
 
-        let mut superseding = session.internal_ui.placement(surface).unwrap().clone();
-        superseding.geometry.0 = 120;
-        assert!(session.internal_ui.relocate(surface, superseding));
-        assert!(!session.compensate_internal_move(surface, (10, 20).into(), (80, 90).into()));
+        let mut moved = session.internal_ui.placement(surface).unwrap().clone();
+        moved.geometry.0 = 80;
+        assert!(session.apply_internal_move(surface, moved));
+        let id = session.internal_surface_windows[&surface];
+        let equal_value = session.geometry_authorities[&id].base_placement.value;
+        session.record_desired_geometry(id, equal_value);
+        assert!(!session.finish_internal_move(surface, true));
         assert_eq!(
             session.internal_ui.placement(surface).unwrap().geometry.0,
-            120
+            80
         );
     }
 

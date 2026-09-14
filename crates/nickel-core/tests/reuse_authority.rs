@@ -148,3 +148,43 @@ fn nickel_core_delegates_configuration_storage_mechanics() {
         );
     }
 }
+
+#[test]
+fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let section = |start: &str, end: &str| {
+        let start = state
+            .find(start)
+            .unwrap_or_else(|| panic!("missing {start}"));
+        let end = state[start..]
+            .find(end)
+            .map(|offset| start + offset)
+            .unwrap_or(state.len());
+        &state[start..end]
+    };
+
+    let mapped = section(
+        "pub(crate) fn map_compositor_moved_window",
+        "fn apply_compositor_moved_window_effect",
+    );
+    assert!(
+        mapped.find("record_desired_geometry").unwrap()
+            < mapped.find("apply_compositor_moved_window_effect").unwrap(),
+        "interactive placement must be authorized before its adapter effect"
+    );
+
+    let internal = section(
+        "pub(crate) fn apply_internal_move",
+        "pub(crate) fn finish_internal_move",
+    );
+    assert!(
+        internal.find("authorize_placement").unwrap()
+            < internal.find("internal_ui.relocate").unwrap(),
+        "internal movement must be authorized before relocation"
+    );
+    assert!(
+        !state.contains("(placement.geometry.0, placement.geometry.1) !="),
+        "rollback must not infer ownership from equal geometry values"
+    );
+}
