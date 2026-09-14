@@ -15,12 +15,13 @@ use winit::{
 };
 
 use crate::{
-    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerFamily, ControllerFence,
-    ControllerInput, DamageRegion, EffectiveHitRoute, FocusedInputDispatcher, FrameRequest,
-    FrameResourceDiagnostics, InputCommand, InputContext, InputModality, InputSource,
-    InteractionIntent, Invalidation, LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect,
-    SemanticAction, SemanticActionError, SemanticNodeSnapshot, SemanticQueryError,
-    SemanticSelector, SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore, View,
+    AccessibilityNode, ActionKind, Color, ControllerAction, ControllerExecutionAuthority,
+    ControllerExecutionBinding, ControllerFamily, ControllerFence, ControllerInput, DamageRegion,
+    EffectiveHitRoute, FocusedInputDispatcher, FrameRequest, FrameResourceDiagnostics,
+    InputCommand, InputContext, InputModality, InputSource, InteractionIntent, Invalidation,
+    LayoutDiagnostic, OverlayId, OverlayMenu, PointerIcon, Rect, SemanticAction,
+    SemanticActionError, SemanticNodeSnapshot, SemanticQueryError, SemanticSelector,
+    SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
 #[derive(Debug, Default)]
@@ -752,6 +753,10 @@ pub struct OverlayDeclarationFailure {
 pub enum HostEvent {
     Ui(UiEvent),
     Controller(ControllerAction),
+    AdmittedController {
+        action: ControllerAction,
+        binding: ControllerExecutionBinding,
+    },
     Shortcut(Shortcut),
     Semantic {
         target: UiId,
@@ -918,6 +923,8 @@ pub struct HostBatch {
     pub scale_factor: Option<f32>,
     pub window_focused: Option<bool>,
     pub completions: Vec<Completion>,
+    /// Current session authority revalidated at the final host execution boundary.
+    pub controller_authority: Option<ControllerExecutionAuthority>,
     /// Failures observed by the transport while servicing this batch.  They
     /// are evidence, not application input: reporting one must not mutate or
     /// short-circuit the canonical UI transition.
@@ -1043,6 +1050,21 @@ pub struct HostEventOutcome {
     pub clipboard_text: Option<String>,
     pub semantic_failures: Vec<SemanticActionFailure>,
     pub global_actions: Vec<GlobalAction>,
+    pub controller_executions: Vec<ControllerExecutionEvidence>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControllerExecutionDisposition {
+    Executed,
+    RejectedStale,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerExecutionEvidence {
+    pub binding: ControllerExecutionBinding,
+    pub disposition: ControllerExecutionDisposition,
+    pub message_count: usize,
+    pub effect_count: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1086,6 +1108,7 @@ impl Default for HostEventOutcome {
             clipboard_text: None,
             semantic_failures: Vec::new(),
             global_actions: Vec::new(),
+            controller_executions: Vec::new(),
         }
     }
 }
@@ -1105,6 +1128,8 @@ impl HostEventOutcome {
         self.completion_failures
             .append(&mut other.completion_failures);
         self.global_actions.append(&mut other.global_actions);
+        self.controller_executions
+            .append(&mut other.controller_executions);
         self.pointer_icon = other.pointer_icon;
         self.text_input_active = other.text_input_active;
         self.accessibility_generation = self
@@ -1714,6 +1739,7 @@ impl<A: Application> UiHost<A> {
 
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
+        let controller_authority = batch.controller_authority;
         self.state.clipboard_rejected = false;
         let step_started = Instant::now();
         let now = batch.now.unwrap_or_else(Instant::now);
@@ -1860,6 +1886,28 @@ impl<A: Application> UiHost<A> {
             let mut outcome = match event {
                 HostEvent::Ui(event) => self.dispatch_ui_event(event),
                 HostEvent::Controller(action) => self.dispatch_controller_action(action),
+                HostEvent::AdmittedController { action, binding } => {
+                    let admitted =
+                        controller_authority.is_some_and(|authority| authority.admits(binding));
+                    let mut outcome = if admitted {
+                        self.dispatch_controller_action(action)
+                    } else {
+                        HostEventOutcome::default()
+                    };
+                    outcome
+                        .controller_executions
+                        .push(ControllerExecutionEvidence {
+                            binding,
+                            disposition: if admitted {
+                                ControllerExecutionDisposition::Executed
+                            } else {
+                                ControllerExecutionDisposition::RejectedStale
+                            },
+                            message_count: outcome.messages.len(),
+                            effect_count: 0,
+                        });
+                    outcome
+                }
                 HostEvent::Shortcut(shortcut) => {
                     let changed = self.application.shortcut(shortcut);
                     HostEventOutcome {
@@ -1950,6 +1998,14 @@ impl<A: Application> UiHost<A> {
             }
         }
         combined.effects = self.application.take_effect_evidence();
+        if let Some(execution) = combined
+            .controller_executions
+            .iter_mut()
+            .rev()
+            .find(|execution| execution.disposition == ControllerExecutionDisposition::Executed)
+        {
+            execution.effect_count = combined.effects.len();
+        }
         if self.state.clipboard_rejected {
             combined.failures.push(HostFailure {
                 surface: self.application.title().into(),
@@ -2912,9 +2968,11 @@ mod tests {
         queue_continuous_input, wait_duration,
     };
     use crate::{
-        ActionKind, Button, Container, ControllerAction, InputModality, Invalidation,
-        NavigationEntry, NavigationScope, OverlayId, SemanticAction, SemanticActionError,
-        SemanticRole, SemanticValueInput, TextField, UiEvent, UiId, UiStateStore,
+        ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
+        ControllerExecutionBinding, ControllerExecutionDisposition, ControllerExecutionEvidence,
+        InputModality, Invalidation, NavigationEntry, NavigationScope, OverlayId, SemanticAction,
+        SemanticActionError, SemanticRole, SemanticValueInput, TextField, UiEvent, UiId,
+        UiStateStore,
     };
 
     #[derive(Clone)]
@@ -3235,6 +3293,75 @@ mod tests {
             "effects must be drained exactly once"
         );
         assert_eq!(idle.change_token, outcome.change_token);
+    }
+
+    #[test]
+    fn admitted_controller_revalidates_identity_at_execution_and_tags_effects() {
+        let binding = ControllerExecutionBinding {
+            routing_epoch: 9,
+            event_id: 41,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+        };
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        let outcome = host.step(HostBatch {
+            window_focused: Some(true),
+            controller_authority: Some(authority),
+            events: vec![
+                HostEvent::Controller(ControllerAction::Down),
+                HostEvent::AdmittedController {
+                    action: ControllerAction::Confirm,
+                    binding,
+                },
+            ],
+            ..HostBatch::default()
+        });
+        assert_eq!(outcome.effects.len(), 1);
+        assert_eq!(
+            outcome.controller_executions,
+            [ControllerExecutionEvidence {
+                binding,
+                disposition: ControllerExecutionDisposition::Executed,
+                message_count: 1,
+                effect_count: 1,
+            }]
+        );
+
+        let stale_repeat = ControllerExecutionBinding {
+            routing_epoch: 8,
+            event_id: 42,
+            cutoff: Some(41),
+            repeat: true,
+            ..binding
+        };
+        let rejected = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: ControllerAction::Confirm,
+                binding: stale_repeat,
+            }],
+            ..HostBatch::default()
+        });
+        assert!(rejected.effects.is_empty());
+        assert_eq!(
+            rejected.controller_executions,
+            [ControllerExecutionEvidence {
+                binding: stale_repeat,
+                disposition: ControllerExecutionDisposition::RejectedStale,
+                message_count: 0,
+                effect_count: 0,
+            }]
+        );
     }
 
     #[test]

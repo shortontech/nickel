@@ -39,6 +39,39 @@ pub struct ControllerEnvelope {
     pub family: ControllerFamily,
 }
 
+/// Immutable execution identity assigned by the session broker and routing
+/// authority. Primitive fields keep the UI crate independent of its transport.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerExecutionBinding {
+    pub routing_epoch: u64,
+    pub event_id: u64,
+    pub lease_epoch: u64,
+    pub connection_generation: u64,
+    pub stream_generation: u64,
+    pub cutoff: Option<u64>,
+    pub repeat: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerExecutionAuthority {
+    pub routing_epoch: u64,
+    pub lease_epoch: u64,
+    pub connection_generation: u64,
+    pub stream_generation: u64,
+    pub cutoff: Option<u64>,
+}
+
+impl ControllerExecutionAuthority {
+    pub fn admits(self, binding: ControllerExecutionBinding) -> bool {
+        self.routing_epoch == binding.routing_epoch
+            && self.lease_epoch == binding.lease_epoch
+            && self.connection_generation == binding.connection_generation
+            && self.stream_generation == binding.stream_generation
+            && self.cutoff == binding.cutoff
+            && self.cutoff.is_none_or(|cutoff| binding.event_id <= cutoff)
+    }
+}
+
 /// Host-supplied admission state for controller events produced by ordinary clients.
 ///
 /// Session-aware hosts use this to prevent controller input from reaching both an

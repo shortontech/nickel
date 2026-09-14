@@ -21,8 +21,8 @@ mod ui;
 #[cfg(target_os = "linux")]
 pub use controller::NativeControllerDevice;
 pub use controller::{
-    ControllerAction, ControllerEnvelope, ControllerFamily, ControllerFence, ControllerInput,
-    ControllerObservation,
+    ControllerAction, ControllerEnvelope, ControllerExecutionAuthority, ControllerExecutionBinding,
+    ControllerFamily, ControllerFence, ControllerInput, ControllerObservation,
 };
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,
@@ -53,12 +53,12 @@ pub use primitives::{
 };
 pub use runtime::{
     AdapterOutcome, Application, BoundedSemanticActionError, Completion, CompletionFailure,
-    CompletionFailureKind, ControllerPollSchedule, DefaultHostAdapter, EffectEvidence,
-    FileDragAction, FileDragEvent, FrameOverlay, GlobalAction, HostAdapter, HostBatch,
-    HostChangeToken, HostEvent, HostEventOutcome, HostFailure, HostFailureStage, HostInspection,
-    HostServices, HostTelemetry, MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure,
-    Popover, SemanticActionFailure, Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run,
-    run_with_adapter,
+    CompletionFailureKind, ControllerExecutionDisposition, ControllerExecutionEvidence,
+    ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragAction, FileDragEvent,
+    FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
+    HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
+    MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure, Popover, SemanticActionFailure,
+    Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
 };
 pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
 pub use text_context_menu::{

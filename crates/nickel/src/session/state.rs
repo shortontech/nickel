@@ -5706,15 +5706,27 @@ impl NickelSession {
             .drain(ControllerHostId(0), self.controller_internal_connection);
         for message in messages {
             if let ControllerBrokerMessage::Deliver(delivery) = message {
-                self.dispatch_brokered_controller(delivery.payload);
+                self.dispatch_brokered_controller(delivery);
             }
         }
         self.controller_broker.set_neutral(neutral);
     }
 
-    fn dispatch_brokered_controller(&mut self, payload: ControllerEnvelopePayload) {
+    fn dispatch_brokered_controller(
+        &mut self,
+        delivery: nickel_session_protocol::controller_broker::Delivery<ControllerEnvelopePayload>,
+    ) {
+        let payload = delivery.payload;
         let binding = self.refresh_controller_route();
         if binding.0 != payload.routing_epoch || self.internal_shell.is_none() {
+            return;
+        }
+        let Some(active_lease) = self.controller_broker.active_lease() else {
+            return;
+        };
+        if active_lease.connection_generation != delivery.connection_generation
+            || active_lease.epoch != delivery.lease_epoch
+        {
             return;
         }
         // Releases and neutral bookkeeping cross the broker and retire held state, but do not
@@ -5734,10 +5746,29 @@ impl NickelSession {
         if action == nickel_ui::ControllerAction::Launcher && binding.1.launcher_intercepted {
             self.toggle_launcher_from(InvocationSource::Keyboard);
         } else if let Some(target) = binding.1.target {
+            let execution_binding = nickel_ui::ControllerExecutionBinding {
+                routing_epoch: payload.routing_epoch,
+                event_id: delivery.event_id.0,
+                lease_epoch: delivery.lease_epoch.0,
+                connection_generation: delivery.connection_generation.0,
+                stream_generation: delivery.stream_generation.0,
+                cutoff: None,
+                repeat: payload.repeat,
+            };
             self.internal_ui.step(
                 target,
                 nickel_ui::HostBatch {
-                    events: vec![nickel_ui::HostEvent::Controller(action)],
+                    controller_authority: Some(nickel_ui::ControllerExecutionAuthority {
+                        routing_epoch: binding.0,
+                        lease_epoch: active_lease.epoch.0,
+                        connection_generation: active_lease.connection_generation.0,
+                        stream_generation: delivery.stream_generation.0,
+                        cutoff: None,
+                    }),
+                    events: vec![nickel_ui::HostEvent::AdmittedController {
+                        action,
+                        binding: execution_binding,
+                    }],
                     ..nickel_ui::HostBatch::default()
                 },
             );
@@ -17045,7 +17076,16 @@ mod protocol_tests {
             family: nickel_ui::ControllerFamily::Xbox,
         };
 
-        session.handle_brokered_controller_batch(vec![event, event], false);
+        session.handle_brokered_controller_batch(
+            vec![
+                event,
+                nickel_ui::ControllerEnvelope {
+                    repeat: true,
+                    ..event
+                },
+            ],
+            false,
+        );
 
         assert!(
             session.internal_shell.as_ref().unwrap().launcher_visible(),

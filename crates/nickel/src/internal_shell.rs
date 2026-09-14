@@ -730,9 +730,19 @@ impl InternalShellCoordinator {
                 entry.size.1,
             );
         }
+        let controller_authority = batch.controller_authority;
         for event in batch.events {
-            if let nickel_ui::HostEvent::Controller(action) = &event {
-                let action = *action;
+            let controller_action = match &event {
+                nickel_ui::HostEvent::Controller(action) => Some(*action),
+                nickel_ui::HostEvent::AdmittedController { action, binding }
+                    if controller_authority.is_some_and(|authority| authority.admits(*binding)) =>
+                {
+                    Some(*action)
+                }
+                nickel_ui::HostEvent::AdmittedController { .. } => None,
+                _ => None,
+            };
+            if let Some(action) = controller_action {
                 match entry.role {
                     SurfaceRole::Panel => dependent_roles.extend([
                         SurfaceRole::Panel,
