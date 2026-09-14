@@ -536,23 +536,17 @@ impl XwmHandler for NickelSession {
             "diagnostic: X11 configure accepted"
         );
         let registry_id = self.x11_window_id(&window);
-        let settlement_request = registry_id.map(|id| {
+        if let Some(id) = registry_id {
             let desired = shell_layout::Geometry {
                 x: geometry.loc.x,
                 y: geometry.loc.y,
                 width: geometry.size.w,
                 height: geometry.size.h,
             };
-            self.record_x11_client_desired_geometry(id, desired, x11_client_request_causality())
-        });
+            self.record_x11_client_desired_geometry(id, desired, x11_client_request_causality());
+        }
         if let Err(error) = window.configure(geometry) {
             tracing::warn!(?error, window = window.window_id(), "X11 configure failed");
-            if let (Some(id), Some(request)) = (registry_id, settlement_request)
-                && let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
-                && settlement.request.id == request
-            {
-                settlement.fail();
-            }
         }
         if let Some(mapped) = self.x11_window(&window) {
             self.space.map_element(mapped, geometry.loc, false);

@@ -2601,6 +2601,7 @@ struct XdgConfigureSettlement {
     configures: std::collections::VecDeque<(
         smithay::utils::Serial,
         nickel_core::geometry_authority::DesiredRevisions,
+        Option<crate::session::grabs::resize_grab::ResizeEdge>,
     )>,
     settlement: nickel_core::geometry_authority::Settlement,
 }
@@ -10191,7 +10192,7 @@ impl NickelSession {
                 .map_element(window.clone(), (desired.x, desired.y), false);
             Some(None)
         } else {
-            let xdg = window.toplevel()?;
+            let xdg = window.toplevel()?.clone();
             xdg.with_pending_state(|state| {
                 if resizing {
                     state.states.set(
@@ -10204,7 +10205,7 @@ impl NickelSession {
                 }
                 state.size = Some((desired.width, desired.height).into());
             });
-            Some(xdg.send_pending_configure())
+            Some(self.send_tracked_xdg_configure(&xdg))
         }
     }
 
@@ -10304,11 +10305,12 @@ impl NickelSession {
         {
             return false;
         }
-        if let Some(surface) = window.toplevel() {
+        let xdg_surface = window.toplevel().cloned();
+        if let Some(surface) = xdg_surface.as_ref() {
             surface.with_pending_state(|state| {
                 state.size = Some((desired.width, desired.height).into());
             });
-            surface.send_pending_configure();
+            self.send_tracked_xdg_configure(surface);
         }
         self.map_buffered_window(window, (desired.x, desired.y), activate);
         true
@@ -10602,7 +10604,10 @@ impl NickelSession {
         if record.configures.len() == MAX_RETAINED_CONFIGURES {
             record.configures.pop_front();
         }
-        record.configures.push_back((serial, revisions));
+        let edges = window.toplevel().and_then(|surface| {
+            crate::session::grabs::resize_grab::current_resize_edges(surface.wl_surface())
+        });
+        record.configures.push_back((serial, revisions, edges));
         if let Some(surface) = window.toplevel() {
             crate::session::grabs::resize_grab::record_terminal_configure(
                 surface.wl_surface(),
@@ -10619,7 +10624,32 @@ impl NickelSession {
         if let Some(serial) = serial
             && let Some(window) = self.xdg_toplevel_window(surface.wl_surface())
         {
-            self.record_xdg_configure_incorporation(&window, serial);
+            if let Some(desired) = self
+                .window_geometry_authority_id(&window)
+                .and_then(|id| self.geometry_authorities.get(&id))
+                .map(|authority| authority.base_placement.value)
+            {
+                self.record_xdg_desired_geometry(&window, desired, serial);
+            } else {
+                self.record_xdg_configure_incorporation(&window, serial);
+            }
+        }
+        serial
+    }
+
+    pub(crate) fn send_tracked_xdg_initial_configure(
+        &mut self,
+        surface: &smithay::wayland::shell::xdg::ToplevelSurface,
+    ) -> smithay::utils::Serial {
+        let serial = surface.send_configure();
+        if let Some(window) = self.xdg_toplevel_window(surface.wl_surface()) {
+            if let Some(desired) = self
+                .window_geometry_authority_id(&window)
+                .and_then(|id| self.geometry_authorities.get(&id))
+                .map(|authority| authority.base_placement.value)
+            {
+                self.record_xdg_desired_geometry(&window, desired, serial);
+            }
         }
         serial
     }
@@ -10640,22 +10670,8 @@ impl NickelSession {
         id: WindowId,
         desired: Geometry,
         causality: nickel_core::geometry_authority::ObservationCausality,
-    ) -> nickel_core::geometry_authority::NativeRequestId {
-        let request = self.record_x11_desired_geometry(id, desired);
-        if let Some(authority) = self.geometry_authorities.get_mut(&id) {
-            authority.base_placement.owner = match causality {
-                nickel_core::geometry_authority::ObservationCausality::Independent => {
-                    nickel_core::geometry_authority::FieldOwner::External
-                }
-                nickel_core::geometry_authority::ObservationCausality::Unknown => {
-                    nickel_core::geometry_authority::FieldOwner::Unknown
-                }
-                nickel_core::geometry_authority::ObservationCausality::Correlated(_) => {
-                    nickel_core::geometry_authority::FieldOwner::Nickel
-                }
-            };
-        }
-        request
+    ) {
+        self.observe_x11_geometry(id, desired, causality);
     }
 
     pub(crate) fn record_x11_interactive_final(
@@ -12188,11 +12204,11 @@ impl NickelSession {
 
     pub fn maximize_toplevel(&mut self, surface: &ToplevelSurface) {
         let Some(window) = self.window_for_surface(surface.wl_surface()) else {
-            surface.send_configure();
+            self.send_tracked_xdg_initial_configure(surface);
             return;
         };
         let Some(output) = self.output_geometry_for_window(&window) else {
-            surface.send_configure();
+            self.send_tracked_xdg_initial_configure(surface);
             return;
         };
         let location = self.space.element_location(&window).unwrap_or_default();
@@ -12317,11 +12333,11 @@ impl NickelSession {
 
     pub fn fullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
         let Some(window) = self.window_for_surface(surface.wl_surface()) else {
-            surface.send_configure();
+            self.send_tracked_xdg_initial_configure(surface);
             return;
         };
         let Some(output) = self.output_geometry_for_window(&window) else {
-            surface.send_configure();
+            self.send_tracked_xdg_initial_configure(surface);
             return;
         };
         let location = self.space.element_location(&window).unwrap_or_default();

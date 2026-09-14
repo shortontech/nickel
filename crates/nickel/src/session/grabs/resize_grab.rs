@@ -131,6 +131,7 @@ pub(crate) fn xdg_commit_causality(
     configured: &[(
         smithay::utils::Serial,
         nickel_core::geometry_authority::DesiredRevisions,
+        Option<ResizeEdge>,
     )],
     acknowledged: smithay::utils::Serial,
     request: nickel_core::geometry_authority::NativeRequestId,
@@ -139,7 +140,7 @@ pub(crate) fn xdg_commit_causality(
     let incorporated = configured
         .iter()
         .rev()
-        .find_map(|(serial, revisions)| (*serial == acknowledged).then_some(*revisions))?;
+        .find_map(|(serial, revisions, _)| (*serial == acknowledged).then_some(*revisions))?;
     if incorporated == current {
         Some(nickel_core::geometry_authority::ObservationCausality::Correlated(request))
     } else {
@@ -205,7 +206,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                 state.states.unset(xdg_toplevel::State::Resizing);
             });
             let terminal_configure =
-                compensation_configure.or_else(|| xdg.send_pending_configure());
+                compensation_configure.or_else(|| data.send_tracked_xdg_configure(xdg));
             ResizeSurfaceState::with(xdg.wl_surface(), |state| {
                 *state = ResizeSurfaceState::WaitingForLastCommit {
                     edges: self.edges,
@@ -304,20 +305,8 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                     xdg.with_pending_state(|state| {
                         state.states.unset(xdg_toplevel::State::Resizing);
                     });
-                    xdg.send_pending_configure()
+                    data.send_tracked_xdg_configure(xdg)
                 });
-                if let Some(final_configure) = authorized_configure {
-                    data.record_xdg_desired_geometry(
-                        &self.window,
-                        crate::session::shell_layout::Geometry {
-                            x: self.last_window_location.x,
-                            y: self.last_window_location.y,
-                            width: self.last_window_size.w.max(1),
-                            height: self.last_window_size.h.max(1),
-                        },
-                        final_configure,
-                    );
-                }
                 ResizeSurfaceState::with(xdg.wl_surface(), |state| {
                     *state = ResizeSurfaceState::WaitingForLastCommit {
                         edges: self.edges,
@@ -393,6 +382,14 @@ impl ResizeSurfaceState {
             Self::Idle => None,
         }
     }
+}
+
+pub(crate) fn current_resize_edges(surface: &WlSurface) -> Option<ResizeEdge> {
+    ResizeSurfaceState::with(surface, |state| match state {
+        ResizeSurfaceState::Resizing { edges, .. }
+        | ResizeSurfaceState::WaitingForLastCommit { edges, .. } => Some(*edges),
+        ResizeSurfaceState::Idle => None,
+    })
 }
 
 pub(crate) fn record_terminal_configure(surface: &WlSurface, serial: smithay::utils::Serial) {
@@ -517,7 +514,7 @@ mod tests {
         let incorporated = authority.revisions();
         assert_eq!(
             xdg_commit_causality(
-                &[(12_u32.into(), incorporated)],
+                &[(12_u32.into(), incorporated, None)],
                 12_u32.into(),
                 NativeRequestId(7),
                 authority.revisions(),
@@ -540,7 +537,7 @@ mod tests {
         );
         assert_eq!(
             xdg_commit_causality(
-                &[(12_u32.into(), incorporated)],
+                &[(12_u32.into(), incorporated, None)],
                 12_u32.into(),
                 NativeRequestId(7),
                 authority.revisions()
@@ -549,7 +546,7 @@ mod tests {
         );
         assert_eq!(
             xdg_commit_causality(
-                &[(12_u32.into(), authority.revisions())],
+                &[(12_u32.into(), authority.revisions(), None)],
                 13_u32.into(),
                 NativeRequestId(7),
                 authority.revisions(),
@@ -560,8 +557,12 @@ mod tests {
         assert_eq!(
             xdg_commit_causality(
                 &[
-                    (12_u32.into(), incorporated),
-                    (13_u32.into(), authority.revisions()),
+                    (12_u32.into(), incorporated, Some(ResizeEdge::RIGHT)),
+                    (
+                        13_u32.into(),
+                        authority.revisions(),
+                        Some(ResizeEdge::RIGHT)
+                    ),
                 ],
                 13_u32.into(),
                 NativeRequestId(7),

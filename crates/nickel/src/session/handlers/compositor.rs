@@ -114,7 +114,10 @@ impl CompositorHandler for NickelSession {
         // receive a configure; looking it up only in Space deadlocks undecorated child
         // windows such as Chromium's portal chooser and Electron confirmation dialogs.
         let toplevel = self.xdg_toplevel_window(surface);
-        xdg_shell::handle_commit(&mut self.popups, toplevel, surface);
+        let initial_configure = xdg_shell::handle_commit(&mut self.popups, toplevel, surface);
+        if let Some(toplevel) = initial_configure {
+            self.send_tracked_xdg_initial_configure(&toplevel);
+        }
         if let Some((window, acked)) = resize_grab::handle_commit(&mut self.space, surface) {
             self.observe_xdg_geometry_commit(&window, acked);
         }

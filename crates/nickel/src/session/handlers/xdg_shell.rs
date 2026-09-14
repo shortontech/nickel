@@ -497,7 +497,7 @@ impl XdgShellHandler for NickelSession {
                 state.states.set(xdg_toplevel::State::Resizing);
             });
 
-            surface.send_pending_configure();
+            self.send_tracked_xdg_configure(&surface);
 
             let grab = ResizeSurfaceGrab::start_with_operation(
                 start_data,
@@ -642,7 +642,7 @@ impl NickelSession {
         if decoration_changed {
             self.reconcile_maximized_toplevel_geometry(&toplevel);
         }
-        toplevel.send_pending_configure();
+        self.send_tracked_xdg_configure(&toplevel);
     }
 }
 
@@ -696,9 +696,13 @@ fn check_grab(
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(popups: &mut PopupManager, window: Option<Window>, surface: &WlSurface) {
+pub fn handle_commit(
+    popups: &mut PopupManager,
+    window: Option<Window>,
+    surface: &WlSurface,
+) -> Option<ToplevelSurface> {
     // Handle toplevel commits.
-    if let Some(window) = window {
+    let initial_toplevel = if let Some(window) = window {
         let initial_configure_sent = with_states(surface, |states| {
             states
                 .data_map
@@ -710,9 +714,13 @@ pub fn handle_commit(popups: &mut PopupManager, window: Option<Window>, surface:
         });
 
         if !initial_configure_sent {
-            window.toplevel().unwrap().send_configure();
+            window.toplevel().cloned()
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
     // Handle popup commits.
     popups.commit(surface);
@@ -728,6 +736,7 @@ pub fn handle_commit(popups: &mut PopupManager, window: Option<Window>, surface:
             PopupKind::InputMethod(ref _input_method) => {}
         }
     }
+    initial_toplevel
 }
 
 impl NickelSession {

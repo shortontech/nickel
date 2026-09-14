@@ -169,7 +169,7 @@ fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
         "fn apply_compositor_moved_window_effect",
     );
     assert!(
-        mapped.find("record_desired_geometry").unwrap()
+        mapped.find("try_authorize_desired_geometry").unwrap()
             < mapped.find("apply_compositor_moved_window_effect").unwrap(),
         "interactive placement must be authorized before its adapter effect"
     );
@@ -187,4 +187,36 @@ fn geometry_effect_entrypoints_publish_desired_state_before_writing() {
         !state.contains("(placement.geometry.0, placement.geometry.1) !="),
         "rollback must not infer ownership from equal geometry values"
     );
+}
+
+#[test]
+fn xdg_configures_and_repeated_x11_client_requests_use_typed_tracking() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let resize =
+        fs::read_to_string(root.join("crates/nickel/src/session/grabs/resize_grab.rs")).unwrap();
+    let xdg =
+        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xdg_shell.rs")).unwrap();
+    let x11 =
+        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+
+    assert_eq!(
+        state.matches("send_pending_configure()").count(),
+        1,
+        "state.rs must emit pending XDG configures only inside the tracked wrapper"
+    );
+    assert!(!resize.contains("xdg.send_pending_configure()"));
+    assert!(!xdg.contains("toplevel.send_pending_configure()"));
+    assert!(state.contains("record_xdg_desired_geometry(&window, desired, serial)"));
+    assert!(state.contains("Option<crate::session::grabs::resize_grab::ResizeEdge>"));
+    assert!(!x11.contains("settlement_request = registry_id.map"));
+    let client_fact = state
+        .split("pub(crate) fn record_x11_client_desired_geometry")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn record_x11_interactive_final")
+        .next()
+        .unwrap();
+    assert!(client_fact.contains("observe_x11_geometry"));
+    assert!(!client_fact.contains("record_x11_desired_geometry"));
 }
