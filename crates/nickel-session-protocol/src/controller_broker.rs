@@ -202,6 +202,29 @@ impl<T> ControllerBroker<T> {
         }
     }
 
+    /// Removes a host after an authenticated orderly execution boundary. Transport loss must use
+    /// `detach`, which deliberately poisons active admission instead.
+    pub fn relinquish(&mut self, host: HostId, connection: ConnectionGeneration) -> TransferStatus {
+        if !self.connection_matches(host, connection) {
+            return TransferStatus::Failed;
+        }
+        if self.transfer.is_some_and(|transfer| {
+            transfer.from.host == host && transfer.from.connection_generation == connection
+        }) {
+            let status = self.acknowledge_verified_termination(host, connection);
+            self.hosts.remove(&host);
+            return status;
+        }
+        self.hosts.remove(&host);
+        if self
+            .active
+            .is_some_and(|lease| lease.host == host && lease.connection_generation == connection)
+        {
+            self.install_reset(EventId(self.next_event));
+        }
+        TransferStatus::Failed
+    }
+
     pub fn grant(&mut self, host: HostId, connection: ConnectionGeneration) -> Option<Lease> {
         if self.exhausted
             || self.active.is_some()
@@ -414,6 +437,10 @@ impl<T> ControllerBroker<T> {
 
     pub fn is_attached(&self, host: HostId, connection: ConnectionGeneration) -> bool {
         self.connection_matches(host, connection)
+    }
+
+    pub fn exhaust(&mut self) {
+        self.fail_closed();
     }
 
     fn try_finish_transfer(&mut self) -> TransferStatus {
@@ -637,6 +664,52 @@ mod tests {
             TransferStatus::Failed
         );
         assert!(broker.grant(HostId(2), successor).is_some());
+    }
+
+    #[test]
+    fn orderly_relinquish_rearms_after_neutral_without_crash_poison() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let old_connection = broker.attach(HostId(1));
+        let successor = broker.attach(HostId(2));
+        broker.grant(HostId(1), old_connection).unwrap();
+
+        assert_eq!(
+            broker.relinquish(HostId(1), old_connection),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(2), successor).is_none());
+        broker.set_neutral(true);
+        assert!(broker.grant(HostId(2), successor).is_some());
+    }
+
+    #[test]
+    fn security_transfer_publishes_cutoff_before_rejecting_new_routing() {
+        let mut broker = ControllerBroker::new(4);
+        let external = broker.attach(HostId(1));
+        let protected = broker.attach(HostId(0));
+        let lease = broker.grant(HostId(1), external).unwrap();
+        assert!(matches!(
+            broker.ingest("before"),
+            IngressDisposition::Delivered { .. }
+        ));
+        let TransferStatus::Pending { cutoff, .. } =
+            broker.begin_transfer(HostId(0), protected, 0, 10)
+        else {
+            panic!("security transfer must revoke the external executor")
+        };
+        assert_eq!(cutoff, EventId(1));
+        assert!(matches!(
+            broker.drain(HostId(1), external).as_slice(),
+            [BrokerMessage::Deliver(_), BrokerMessage::Revoke {
+                connection_generation,
+                lease_epoch,
+                cutoff: EventId(1),
+            }] if *connection_generation == external && *lease_epoch == lease.epoch
+        ));
+        assert!(matches!(
+            broker.ingest("protected"),
+            IngressDisposition::RejectedTransfer { .. }
+        ));
     }
 
     #[test]

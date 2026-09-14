@@ -642,6 +642,11 @@ pub enum ControllerHostRequest {
     Detach {
         connection_generation: controller_broker::ConnectionGeneration,
     },
+    /// Authenticated orderly executor shutdown. Unlike transport loss, receipt proves this host
+    /// crossed its execution boundary before relinquishing authority.
+    Relinquish {
+        connection_generation: controller_broker::ConnectionGeneration,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -157,6 +157,36 @@ impl AsyncControllerConnection {
         }
         Ok(())
     }
+
+    /// Sends an orderly shutdown boundary without waiting for the outstanding poll response.
+    pub fn relinquish(&mut self, connection_generation: ConnectionGeneration) -> io::Result<()> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|pending| pending.written < pending.frame.len())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "controller request write is incomplete",
+            ));
+        }
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let frame = crate::encode(&ClientEnvelope {
+            token: self.token.clone(),
+            request_id: id,
+            request: Request::ControllerHost(ControllerHostRequest::Relinquish {
+                connection_generation,
+            }),
+        })
+        .map_err(io::Error::other)?;
+        match self.pipe.try_write(&frame)? {
+            Some(written) if written == frame.len() => Ok(()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "controller relinquish write would block",
+            )),
+        }
+    }
 }
 
 /// Persistent authenticated controller channel for a session-managed host.
@@ -241,6 +271,12 @@ impl ControllerConnection {
             connection_generation: self.generation,
             lease_epoch: lease,
             cutoff,
+        })
+    }
+
+    pub fn relinquish(&self) -> io::Result<ControllerHostResponse> {
+        self.exchange(ControllerHostRequest::Relinquish {
+            connection_generation: self.generation,
         })
     }
 

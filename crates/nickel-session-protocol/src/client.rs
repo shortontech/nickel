@@ -127,6 +127,22 @@ impl AsyncControllerConnection {
             )),
         }
     }
+
+    /// Sends an orderly shutdown boundary without waiting for the outstanding poll response.
+    /// Datagram framing keeps this request distinct and ordered on the connected local socket.
+    pub fn relinquish(&mut self, connection_generation: ConnectionGeneration) -> io::Result<()> {
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let frame = crate::encode(&ClientEnvelope {
+            token: self.token.clone(),
+            request_id: id,
+            request: Request::ControllerHost(ControllerHostRequest::Relinquish {
+                connection_generation,
+            }),
+        })
+        .map_err(io::Error::other)?;
+        self.socket.send(&frame)?;
+        Ok(())
+    }
 }
 
 /// Persistent authenticated controller channel for a session-managed host.
@@ -244,6 +260,12 @@ impl ControllerConnection {
             connection_generation: self.generation,
             lease_epoch: lease,
             cutoff,
+        })
+    }
+
+    pub fn relinquish(&self) -> io::Result<ControllerHostResponse> {
+        self.exchange(ControllerHostRequest::Relinquish {
+            connection_generation: self.generation,
         })
     }
 

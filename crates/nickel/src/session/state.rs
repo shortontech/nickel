@@ -5755,7 +5755,13 @@ impl NickelSession {
         let route = self.native_controller_route();
         if self.controller_route != Some(route) {
             self.controller_route = Some(route);
-            self.controller_routing_epoch = self.controller_routing_epoch.wrapping_add(1).max(1);
+            let Some(epoch) = self.controller_routing_epoch.checked_add(1) else {
+                tracing::error!("controller routing epoch exhausted; input remains fail closed");
+                self.controller_routing_epoch = u64::MAX;
+                self.controller_broker.exhaust();
+                return (self.controller_routing_epoch, route);
+            };
+            self.controller_routing_epoch = epoch.max(1);
         }
         (self.controller_routing_epoch, route)
     }
@@ -5769,7 +5775,23 @@ impl NickelSession {
     ) {
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         self.controller_broker.expire_transfer(now_ms);
-        let routing_epoch = self.refresh_controller_route().0;
+        let (routing_epoch, route) = self.refresh_controller_route();
+        let protected_route = route
+            .target
+            .is_some_and(|target| self.internal_ui.remote_access_protected(target));
+        if protected_route
+            && self
+                .controller_broker
+                .active_lease()
+                .is_some_and(|lease| lease.host != ControllerHostId(0))
+        {
+            let _ = self.controller_broker.begin_transfer(
+                ControllerHostId(0),
+                self.controller_internal_connection,
+                now_ms,
+                DEFAULT_TRANSFER_DEADLINE_MS,
+            );
+        }
         for event in events {
             let payload = controller_envelope_payload(event, routing_epoch);
             let disposition = self.controller_broker.ingest(payload);
@@ -5955,6 +5977,13 @@ impl NickelSession {
                 connection_generation,
             } => {
                 self.controller_broker.detach(host, connection_generation);
+                ControllerHostResponse::Detached
+            }
+            ControllerHostRequest::Relinquish {
+                connection_generation,
+            } => {
+                self.controller_broker
+                    .relinquish(host, connection_generation);
                 ControllerHostResponse::Detached
             }
         };

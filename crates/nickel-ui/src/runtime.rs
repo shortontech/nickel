@@ -146,6 +146,18 @@ impl SessionControllerSource {
         }
     }
 
+    fn relinquish(&mut self) {
+        let state = std::mem::replace(self, Self::retrying());
+        if let Self::Attached {
+            mut connection,
+            connection_generation,
+            ..
+        } = state
+        {
+            let _ = connection.relinquish(connection_generation);
+        }
+    }
+
     fn poll_actions(
         &mut self,
     ) -> Vec<(
@@ -3472,6 +3484,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
         self.tick(event_loop);
     }
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        #[cfg(any(unix, windows))]
+        self.session_controller.relinquish();
         self.stop();
     }
 }
@@ -3550,6 +3564,10 @@ mod tests {
         let _receive: fn(
             &mut AsyncControllerConnection,
         ) -> std::io::Result<Option<ControllerHostResponse>> = AsyncControllerConnection::receive;
+        let _relinquish: fn(
+            &mut AsyncControllerConnection,
+            nickel_session_protocol::controller_broker::ConnectionGeneration,
+        ) -> std::io::Result<()> = AsyncControllerConnection::relinquish;
     }
 
     #[derive(Clone)]
