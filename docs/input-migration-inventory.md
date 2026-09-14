@@ -27,6 +27,11 @@ It does not mean that the path has been exercised in an installed Linux or Windo
 Native types are expected only in these adapters. Application hosts consume `InputEvent`, typed
 `ControllerAction`, `HostEvent`, or typed shell/global outcomes.
 
+Normalized ingress is admitted against authority owned by the live producer/runtime registry, not
+authority reconstructed from the envelope. Internal surfaces bind renderer runtimes to coordinator
+surface lifetimes and separate opaque nonzero recipient leases; routed desktop, keyboard,
+clipboard, screenshot, overlay and notification batches preserve that authority end to end.
+
 ## Consumers
 
 | Consumer | Routing authority | Cancellation behavior |
@@ -37,7 +42,7 @@ Native types are expected only in these adapters. Application hosts consume `Inp
 | Wayland/XWayland clients | mapped window, native lifetime and mapping generation | source/resource/seat loss, unmap/destroy, lock, suspend and supersession terminate |
 | Internal surfaces/titlebars | internal generation, hit-test kind/subject, initiating button; normalized keyboard and admitted controller events enter the same host identity boundary | removal, grab loss, lock/suspend and matching release terminate; stale controller binding is rejected before host effects |
 | Windows foreign windows | `HWND` mapping lifetime and initiating source/button | takeover, failed apply, missing release or source loss terminate; no exclusive-native claim |
-| Controller hosts | connection + lease + stream generation | revoke/reset invalidates queued and held/repeat state; execution identity fences effects |
+| Controller hosts | live compositor route + surface generation + connection + lease + stream generation | revoke/reset invalidates queued and held/repeat state; execution is rechecked against current route and focus before effects |
 
 ## Window and geometry writers
 

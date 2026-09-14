@@ -16,13 +16,13 @@ nested fixture, historical observation, or the presence of test source.
 | --- | --- | --- | --- | --- | --- |
 | Platform-neutral core | operation identity, admission, completion, handoff, cancellation, tails | pass | pass as dependency | not applicable | none for enumerated transitions |
 | Platform-neutral core | revisioned geometry, compensation, late/superseded fencing | pass | pass as dependency | not applicable | native settlement is platform-specific |
-| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | library tests pass; package gate failed on an unrelated source-count oracle | test build pass | not applicable | reconcile two existing `PaintCommand` references in `live_shell.rs` before claiming package pass |
-| Linux Smithay | physical keyboard/pointer/touch normalization | source tests present; focused tests partly rerun | test build pass | untested | real devices, focus/grab and lock/suspend teardown |
+| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 369 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
+| Linux Smithay | physical keyboard/pointer/touch normalization | pass in serialized session and focused library suites | pass | untested | real devices, focus/grab and lock/suspend teardown |
 | Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
 | Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
 | Linux XWayland | move/resize, unknown-causality settlement and conditional compensation | source tests present, not rerun | test build pass | untested | real request/configure ordering, deadline, focus and teardown |
 | Linux Gilrs | identity, navigation, repeat, disconnect, focus fence | source tests present, not rerun | compiled as dependency | untested | physical controller not used |
-| Unix controller broker/transport | connection/lease/stream generation, transfer/revoke/reset | source tests present, not rerun | compiled as dependency | untested | live transfer and neutral barrier |
+| Unix controller broker/transport | live route/surface plus connection/lease/stream generation, transfer/revoke/reset | pass in protocol and session suites | pass | untested | live transfer and neutral barrier |
 | Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | unavailable on this Linux pass | untested | Windows host, layouts, IME, hook registration/suppression |
 | Windows foreign move/resize | bound source/button, contested control, release/reconciliation/takeover | core reducer pass; cfg tests not rerun | unavailable | untested | hooks, `SetWindowPos`, late effects, DPI, takeover |
 | Windows controller pipe | nonblocking client/server adapters, bounded correlated delivery and generation fencing | source tests present, not rerun | unavailable | untested | live partial I/O, pipe replacement/disconnect and controller |
@@ -30,9 +30,37 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact results from this worktree: the first evidence pass ran at `7b2cd6f`; affected core/UI/session
-checks were repeated or added after rebasing onto final integrated tip `0d4ac47`. `RUSTC_WRAPPER=`
-avoids treating a local compiler-cache failure as product evidence.
+Exact current-tip results below were recorded at `7e79d21`. Older focused evidence remains listed
+after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
+as product evidence.
+
+```sh
+cargo fmt --all --check
+git diff --check
+cargo check --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+```
+
+Pass. The PipeWire build script reported its existing SPA plugindir fallback warning.
+
+```sh
+cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file \
+  -p nickel-ui-testkit --lib -- --test-threads=1
+```
+
+Pass. Reported library totals include `nickel-core` 181/0, `nickel-file` 181/0,
+`nickel-session-protocol` 48/0, `nickel-ui` 369/0 with 2 ignored, and
+`nickel-ui-testkit` 29/0. The testkit touch scenario exercises separately supplied normalized
+authority rather than envelope self-certification.
+
+```sh
+cargo test -p nickel --lib session:: -- --test-threads=1
+```
+
+Pass: 447 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
+nonzero recipient leases, controller execution fencing, touch-generation cancellation, native
+keyboard/clipboard routing, screenshot Escape handling, focus lifecycle, XDG/XWayland operations,
+and geometry ownership. The ignored rows explicitly require live native facilities.
 
 ```sh
 env RUSTC_WRAPPER= cargo test -p nickel-core window_operation -- --nocapture
@@ -63,16 +91,6 @@ env RUSTC_WRAPPER= cargo test -p nickel-core geometry_authority
 
 Pass: 10 tests, 0 failed. This includes conditional compensation revision fencing, unknown-owner
 withdrawal, bounded settlement, no-output revision guards and transform rebasing.
-
-```sh
-env RUSTC_WRAPPER= cargo test -p nickel-ui
-```
-
-Not a package pass. The library ran 363 passed and 2 ignored, and the first three integration-test
-binaries passed (2, 1 and 3 tests, with 2 admission measurements ignored). The
-`declarative_authority` binary then failed 1 of 7 tests because `crates/nickel/src/live_shell.rs`
-contains 2 unadmitted `PaintCommand` references. This source-count governance failure is outside the
-input changes but remains visible rather than being reported as an input package pass.
 
 ```sh
 (cd vendor/smithay && env RUSTC_WRAPPER= cargo test --lib --no-default-features \
