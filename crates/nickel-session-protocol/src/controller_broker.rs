@@ -652,10 +652,22 @@ impl<T> ControllerBroker<T> {
         });
         let Some(host) = self.hosts.get_mut(&lease.host) else {
             self.install_reset(event_id);
+            if !self.exhausted {
+                self.recovery_destination = Some(RecoveryDestination {
+                    host: lease.host,
+                    abandoned_connection: lease.connection_generation,
+                });
+            }
             return IngressDisposition::OverflowReset { event_id };
         };
         if host.outbox.len() >= self.queue_limit {
             self.install_reset(event_id);
+            if !self.exhausted {
+                self.recovery_destination = Some(RecoveryDestination {
+                    host: lease.host,
+                    abandoned_connection: lease.connection_generation,
+                });
+            }
             return IngressDisposition::OverflowReset { event_id };
         }
         host.outbox.push_back(delivery);
@@ -1290,7 +1302,57 @@ mod tests {
         ));
         assert!(broker.grant(HostId(1), connection).is_none());
         assert!(broker.set_neutral(true).is_none());
-        assert!(broker.grant(HostId(1), connection).is_some());
+        assert!(broker.grant(HostId(1), connection).is_none());
+        let replacement = broker.attach(HostId(1));
+        assert!(matches!(
+            broker.begin_transfer(HostId(1), replacement, 0, 10),
+            TransferStatus::Granted(Lease {
+                host: HostId(1),
+                connection_generation,
+                ..
+            }) if connection_generation == replacement
+        ));
+    }
+
+    #[test]
+    fn slow_host_recovers_after_the_257th_event_overflows_its_outbox() {
+        let mut broker = ControllerBroker::new(DEFAULT_CONTROLLER_QUEUE_LIMIT);
+        let connection = broker.attach(HostId(9));
+        broker.grant(HostId(9), connection).unwrap();
+        for payload in 0..DEFAULT_CONTROLLER_QUEUE_LIMIT {
+            assert!(matches!(
+                broker.ingest(payload),
+                IngressDisposition::Delivered { .. }
+            ));
+        }
+        assert!(matches!(
+            broker.ingest(DEFAULT_CONTROLLER_QUEUE_LIMIT),
+            IngressDisposition::OverflowReset {
+                event_id: EventId(257)
+            }
+        ));
+        assert!(matches!(
+            broker.drain(HostId(9), connection).as_slice(),
+            [BrokerMessage::StreamReset {
+                through: EventId(257),
+                ..
+            }]
+        ));
+
+        broker.set_neutral(true);
+        let replacement = broker.attach(HostId(9));
+        assert!(matches!(
+            broker.begin_transfer(HostId(9), replacement, 20, 10),
+            TransferStatus::Granted(Lease {
+                host: HostId(9),
+                connection_generation,
+                ..
+            }) if connection_generation == replacement
+        ));
+        assert!(matches!(
+            broker.ingest(257),
+            IngressDisposition::Delivered { .. }
+        ));
     }
 
     #[test]

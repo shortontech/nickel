@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -2786,6 +2786,7 @@ pub struct NickelSession {
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     controller_route: Option<ControllerRoute>,
     controller_routing_epoch: u64,
+    controller_published_routing_epoch: Arc<AtomicU64>,
     controller_role_lease: Option<ControllerRoleLease>,
     controller_role_security_epoch: u64,
     controller_external_lease_binding: Option<ExternalControllerLeaseBinding>,
@@ -5999,20 +6000,36 @@ impl NickelSession {
                 return (self.controller_routing_epoch, route);
             };
             self.controller_routing_epoch = epoch.max(1);
+            self.controller_published_routing_epoch
+                .store(self.controller_routing_epoch, Ordering::Release);
         }
         (self.controller_routing_epoch, route)
     }
 
     /// Bind one native-reader drain to the current session route. A transition
     /// caused by an earlier event retires the remainder of that old-route batch.
+    #[cfg(test)]
     pub(crate) fn handle_brokered_controller_batch(
         &mut self,
         events: Vec<nickel_ui::ControllerEnvelope>,
         neutral: bool,
     ) {
+        let routing_epoch = self.controller_routing_epoch;
+        self.handle_brokered_controller_batch_for_route(events, neutral, routing_epoch);
+    }
+
+    pub(crate) fn handle_brokered_controller_batch_for_route(
+        &mut self,
+        events: Vec<nickel_ui::ControllerEnvelope>,
+        neutral: bool,
+        ingress_routing_epoch: u64,
+    ) {
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         self.controller_broker.expire_transfer(now_ms);
         let (routing_epoch, route) = self.refresh_controller_route();
+        if ingress_routing_epoch != routing_epoch {
+            return;
+        }
         let surface_generation = route
             .target
             .map(|target| target.snapshot_token())
@@ -6041,6 +6058,8 @@ impl NickelSession {
                 disposition,
                 nickel_session_protocol::controller_broker::IngressDisposition::OverflowReset { .. }
             ) {
+                self.controller_neutral_probe_requested
+                    .store(true, Ordering::Release);
                 tracing::error!(
                     ?disposition,
                     "controller broker overflow installed stream reset"
@@ -6105,6 +6124,10 @@ impl NickelSession {
 
     pub(crate) fn controller_neutral_probe(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.controller_neutral_probe_requested)
+    }
+
+    pub(crate) fn controller_routing_epoch_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.controller_published_routing_epoch)
     }
 
     fn dispatch_brokered_controller(
@@ -7836,6 +7859,7 @@ impl NickelSession {
             internal_shell_surfaces: HashMap::new(),
             controller_route: None,
             controller_routing_epoch: 0,
+            controller_published_routing_epoch: Arc::new(AtomicU64::new(0)),
             controller_role_lease: None,
             controller_role_security_epoch: 0,
             controller_external_lease_binding: None,
@@ -8074,6 +8098,7 @@ impl NickelSession {
             let desktop = session.remote_desktop_authority.clone();
             session.remote_control.apply(&settings, desktop);
         }
+        session.refresh_controller_route();
         session
     }
 
@@ -19595,6 +19620,117 @@ mod protocol_tests {
             "the first transition must invalidate, not retarget, the queued second action"
         );
         assert!(session.controller_routing_epoch >= 2);
+    }
+
+    #[test]
+    fn queued_confirm_keeps_pre_launcher_recipient_epoch_across_batches() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let queued_epoch = session.refresh_controller_route().0;
+        let launcher = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: Some(nickel_ui::ControllerAction::Launcher),
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
+            },
+        };
+        let confirm = nickel_ui::ControllerEnvelope {
+            action: Some(nickel_ui::ControllerAction::Confirm),
+            evidence: nickel_ui::ControllerSourceEvidence {
+                native: nickel_input::NativeCode::Numeric(0),
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::South,
+                ),
+                backend_order: 2,
+                ..launcher.evidence.clone()
+            },
+            ..launcher.clone()
+        };
+
+        session.handle_brokered_controller_batch_for_route(vec![launcher], false, queued_epoch);
+        assert!(session.internal_shell.as_ref().unwrap().launcher_visible());
+        let launcher_surface = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+            .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
+            .copied()
+            .unwrap();
+        assert!(session.focus_internal_surface(launcher_surface));
+        session.refresh_controller_route();
+        assert_ne!(session.controller_routing_epoch, queued_epoch);
+
+        session.handle_brokered_controller_batch_for_route(vec![confirm], false, queued_epoch);
+        assert!(
+            session.internal_shell.as_ref().unwrap().launcher_visible(),
+            "the separately queued confirm must be rejected at the recipient-change barrier"
+        );
+    }
+
+    #[test]
+    fn broker_overflow_requests_neutral_probe_and_rearms_internal_owner() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let event = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: None,
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
+            },
+        };
+        let epoch = session.refresh_controller_route().0;
+        session.handle_brokered_controller_batch_for_route(
+            vec![
+                event;
+                nickel_session_protocol::controller_broker::DEFAULT_CONTROLLER_QUEUE_LIMIT + 1
+            ],
+            false,
+            epoch,
+        );
+        assert!(session.controller_broker.active_lease().is_none());
+        assert!(
+            session
+                .controller_neutral_probe_requested
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+
+        session.handle_brokered_controller_batch_for_route(Vec::new(), true, epoch);
+        assert_eq!(
+            session
+                .controller_broker
+                .active_lease()
+                .map(|lease| lease.host),
+            Some(ControllerHostId(0))
+        );
     }
 
     #[test]

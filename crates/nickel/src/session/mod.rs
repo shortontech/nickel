@@ -61,6 +61,7 @@ struct NativeControllerBatch {
     events: Vec<nickel_ui::ControllerEnvelope>,
     neutral: bool,
     ingress_generation: u64,
+    routing_epoch: u64,
 }
 
 const NATIVE_CONTROLLER_INGRESS_CAPACITY: usize = 8;
@@ -147,6 +148,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
     let controller_neutral_probe_requested = state.controller_neutral_probe();
+    let controller_routing_epoch = state.controller_routing_epoch_handle();
     state.internal_ui.set_renderer_mode(arguments.ui_renderer);
     tracing::info!(
         renderer = ?arguments.ui_renderer,
@@ -262,7 +264,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if !admitted {
                     return;
                 }
-                state.handle_brokered_controller_batch(batch.events, batch.neutral);
+                state.handle_brokered_controller_batch_for_route(
+                    batch.events,
+                    batch.neutral,
+                    batch.routing_epoch,
+                );
             }
         })?;
     thread::Builder::new()
@@ -283,6 +289,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let ingress_generation = controller_ingress_generation.load(Ordering::Acquire);
+                let routing_epoch = controller_routing_epoch.load(Ordering::Acquire);
                 match publish_native_controller_batch(
                     &controller_changed,
                     &controller_ingress_generation,
@@ -290,6 +297,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                         events,
                         neutral,
                         ingress_generation,
+                        routing_epoch,
                     },
                 ) {
                     NativeControllerPublish::Sent => force_observation = false,
@@ -490,6 +498,7 @@ mod tests {
                     events: Vec::new(),
                     neutral: false,
                     ingress_generation: 1,
+                    routing_epoch: 1,
                 },
             ),
             NativeControllerPublish::Sent
@@ -502,6 +511,7 @@ mod tests {
                     events: Vec::new(),
                     neutral: true,
                     ingress_generation: 1,
+                    routing_epoch: 1,
                 },
             ),
             NativeControllerPublish::Overflow
@@ -543,6 +553,7 @@ mod tests {
                     events: Vec::new(),
                     neutral: true,
                     ingress_generation: u64::MAX,
+                    routing_epoch: 1,
                 },
             ),
             NativeControllerPublish::Overflow
