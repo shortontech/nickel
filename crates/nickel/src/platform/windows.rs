@@ -1507,6 +1507,7 @@ enum SettlementRetentionOutcome {
 enum NativeApplyState {
     NotSubmitted,
     AcceptedSettlementUnknown,
+    AppliedSynchronously,
     Rejected,
 }
 
@@ -2630,7 +2631,7 @@ fn apply_window_drag(
             max_height: None,
         },
     );
-    let settlement = Settlement::new(
+    let mut settlement = Settlement::new(
         NativeRequest {
             id: NativeRequestId(request_id),
             mapping_generation,
@@ -2651,17 +2652,46 @@ fn apply_window_drag(
             rectangle.y,
             rectangle.width,
             rectangle.height,
-            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+            SWP_NOZORDER | SWP_NOACTIVATE,
         )
         .is_ok()
     };
     if accepted {
-        // ASYNCWINDOWPOS reports queue admission, not native settlement.
+        // Without ASYNCWINDOWPOS, return means the foreign owner thread has
+        // processed this exact request. Readback inside the same adapter
+        // envelope therefore has request identity; later snapshots do not.
+        let mut applied = RECT::default();
+        let correlated = unsafe { GetWindowRect(window, &mut applied) }.is_ok();
+        if correlated {
+            correlate_synchronous_window_drag(operation, &mut settlement, logical_rect(applied));
+        }
         let displaced = enqueue_issued_settlement(operation, settlement);
-        (NativeApplyState::AcceptedSettlementUnknown, displaced)
+        (
+            if correlated {
+                NativeApplyState::AppliedSynchronously
+            } else {
+                NativeApplyState::AcceptedSettlementUnknown
+            },
+            displaced,
+        )
     } else {
         (NativeApplyState::Rejected, None)
     }
+}
+
+fn correlate_synchronous_window_drag(
+    operation: &mut WindowDrag,
+    settlement: &mut Settlement,
+    observed: LogicalRect,
+) {
+    let request = settlement.request.id;
+    let fact = native_geometry(observed);
+    settlement.observe(fact, ObservationCausality::Correlated(request));
+    operation
+        .authority
+        .observe(fact, ObservationCausality::Correlated(request));
+    operation.last_observed = observed;
+    operation.unknown_since = None;
 }
 
 fn enqueue_issued_settlement(
@@ -2723,9 +2753,9 @@ fn classify_window_drag_observation(
     if observed != operation.last_observed {
         operation
             .authority
-            .observe(fact, ObservationCausality::Independent);
-        operation.authority.base_placement.control = ControlMode::Delegated;
-        return Err(CancellationReason::NativeTakeover);
+            .observe(fact, ObservationCausality::Unknown);
+        operation.unknown_since.get_or_insert(now);
+        return Ok(false);
     }
     Ok(true)
 }
@@ -5051,8 +5081,8 @@ mod tests {
         SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
         WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
         clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
-        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        contested_drag_within_bound, correlate_synchronous_window_drag, enqueue_issued_settlement,
+        executable_icon, is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
         project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
         should_observe_tokenless_geometry, should_restore_on_activation,
@@ -5124,7 +5154,7 @@ mod tests {
     }
 
     #[test]
-    fn independent_native_geometry_revokes_before_another_write() {
+    fn changed_tokenless_geometry_enters_unknown_before_another_write() {
         let mut drag = contested_drag();
         let observed = LogicalRect {
             x: 40,
@@ -5132,13 +5162,40 @@ mod tests {
         };
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 10, false),
-            Err(CancellationReason::NativeTakeover)
+            Ok(false)
         );
-        assert_eq!(drag.authority.base_placement.owner, FieldOwner::External);
-        assert_eq!(
-            drag.authority.base_placement.control,
-            ControlMode::Delegated
-        );
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
+        assert_eq!(drag.unknown_since, Some(10));
+    }
+
+    #[test]
+    fn synchronous_request_evidence_keeps_ordinary_drag_live_past_unknown_bound() {
+        let mut drag = contested_drag();
+        for (tick, request) in (16..=320).step_by(16).zip(1_u64..) {
+            let observed = LogicalRect {
+                x: drag.last_observed.x + 1,
+                ..drag.last_observed
+            };
+            let mut settlement = Settlement::new(
+                NativeRequest {
+                    id: NativeRequestId(request),
+                    mapping_generation: 1,
+                    desired: drag.authority.revisions(),
+                    placement: observed,
+                },
+                SettlementLimits {
+                    deadline_tick: tick + 250,
+                    max_corrections: 0,
+                },
+            );
+            correlate_synchronous_window_drag(&mut drag, &mut settlement, observed);
+            assert!(matches!(
+                settlement.status,
+                SettlementStatus::Applied | SettlementStatus::AppliedWithAdjustment
+            ));
+            assert_eq!(drag.unknown_since, None);
+        }
+        assert_eq!(drag.last_observed.x, 30);
     }
 
     #[test]
