@@ -2741,28 +2741,25 @@ impl<A: Application> UiHost<A> {
                 HostEvent::AdmittedController { action, binding } => {
                     let admitted =
                         controller_authority.is_some_and(|authority| authority.admits(binding));
-                    if let Some(blocked) = self.controller_overflow_fence {
-                        let replacement =
-                            controller_authority.filter(|authority| *authority != blocked);
-                        let neutralized = admitted
-                            && replacement.is_some()
-                            && binding.edge == nickel_input::KeyEdge::Released
-                            && !binding.repeat;
-                        if neutralized {
-                            self.controller_overflow_fence = None;
-                            self.controller_press_authority = replacement;
-                            self.admitted_controller_presses.clear();
-                        }
+                    if let Some(blocked) = self.controller_overflow_fence
+                        && admitted
+                        && controller_authority.is_some_and(|authority| authority != blocked)
+                    {
+                        // A distinct authority can only arrive after the broker acknowledged the
+                        // reset, observed native neutral, and issued a replacement lease. Clear
+                        // the local press fence before dispatch so recovery does not consume the
+                        // first new gesture as though it were the missing old-stream release.
+                        self.controller_overflow_fence = None;
+                        self.controller_press_authority = controller_authority;
+                        self.admitted_controller_presses.clear();
+                    }
+                    if self.controller_overflow_fence.is_some() {
                         let mut outcome = HostEventOutcome::default();
                         outcome
                             .controller_executions
                             .push(ControllerExecutionEvidence {
                                 binding,
-                                disposition: if neutralized {
-                                    ControllerExecutionDisposition::ResetNeutralized
-                                } else {
-                                    ControllerExecutionDisposition::RejectedResetFence
-                                },
+                                disposition: ControllerExecutionDisposition::RejectedResetFence,
                                 message_count: 0,
                                 effect_count: 0,
                             });
@@ -5224,7 +5221,7 @@ mod tests {
             event_id: 301,
             ..stale_repeat
         };
-        let before_neutral = host.step(HostBatch {
+        let first_replacement = host.step(HostBatch {
             controller_authority: Some(replacement),
             events: vec![HostEvent::AdmittedController {
                 action: Some(ControllerAction::Confirm),
@@ -5233,26 +5230,8 @@ mod tests {
             ..HostBatch::default()
         });
         assert_eq!(
-            before_neutral.controller_executions[0].disposition,
-            ControllerExecutionDisposition::RejectedResetFence
-        );
-
-        let neutral = ControllerExecutionBinding {
-            edge: KeyEdge::Released,
-            event_id: 302,
-            ..replacement_press
-        };
-        let neutralized = host.step(HostBatch {
-            controller_authority: Some(replacement),
-            events: vec![HostEvent::AdmittedController {
-                action: Some(ControllerAction::Confirm),
-                binding: neutral,
-            }],
-            ..HostBatch::default()
-        });
-        assert_eq!(
-            neutralized.controller_executions[0].disposition,
-            ControllerExecutionDisposition::ResetNeutralized
+            first_replacement.controller_executions[0].disposition,
+            ControllerExecutionDisposition::Executed
         );
 
         let rearmed = host.step(HostBatch {
@@ -5260,7 +5239,7 @@ mod tests {
             events: vec![HostEvent::AdmittedController {
                 action: Some(ControllerAction::Confirm),
                 binding: ControllerExecutionBinding {
-                    event_id: 303,
+                    event_id: 302,
                     ..replacement_press
                 },
             }],

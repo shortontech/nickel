@@ -5997,16 +5997,21 @@ impl NickelSession {
                 self.dispatch_brokered_controller(delivery);
             }
         }
-        if neutral {
-            let _ = self.controller_broker.rearm_internal_transfer_destination(
+        let transfer_grant = self.controller_broker.set_neutral(neutral);
+        let recovery_grant = if neutral {
+            Some(self.controller_broker.rearm_internal_transfer_destination(
                 ControllerHostId(0),
                 self.controller_internal_connection,
                 now_ms,
                 DEFAULT_TRANSFER_DEADLINE_MS,
-            );
-        }
-        let transfer_grant = self.controller_broker.set_neutral(neutral);
-        if transfer_grant.is_some() {
+            ))
+        } else {
+            None
+        };
+        if transfer_grant.is_some()
+            || recovery_grant
+                .is_some_and(|status| matches!(status, ControllerTransferStatus::Granted(_)))
+        {
             self.controller_recovery = None;
         }
         let recovery = self
@@ -19094,6 +19099,75 @@ mod protocol_tests {
             "the first transition must invalidate, not retarget, the queued second action"
         );
         assert!(session.controller_routing_epoch >= 2);
+    }
+
+    #[test]
+    fn timed_out_security_takeover_rearms_internal_on_same_steady_neutral_batch() {
+        use nickel_session_protocol::controller_broker::{BrokerMessage, HostId, TransferStatus};
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let predecessor_host = HostId(41);
+        let destination_host = HostId(42);
+        let predecessor_connection = session.controller_broker.attach(predecessor_host);
+        let destination_connection = session.controller_broker.attach(destination_host);
+
+        let TransferStatus::Pending { cutoff, .. } = session.controller_broker.begin_transfer(
+            predecessor_host,
+            predecessor_connection,
+            0,
+            100,
+        ) else {
+            panic!("initial external transfer must start");
+        };
+        let internal_lease = session
+            .controller_broker
+            .drain(HostId(0), session.controller_internal_connection)
+            .into_iter()
+            .find_map(|message| match message {
+                BrokerMessage::Revoke { lease_epoch, .. } => Some(lease_epoch),
+                _ => None,
+            })
+            .unwrap();
+        session.controller_broker.acknowledge_quiescence(
+            HostId(0),
+            session.controller_internal_connection,
+            internal_lease,
+            cutoff,
+        );
+        session.controller_broker.set_neutral(true);
+        let predecessor_lease = session.controller_broker.active_lease().unwrap();
+
+        session.controller_broker.set_neutral(false);
+        let TransferStatus::Pending {
+            cutoff: predecessor_cutoff,
+            ..
+        } = session.controller_broker.begin_transfer(
+            destination_host,
+            destination_connection,
+            10,
+            1,
+        )
+        else {
+            panic!("second external transfer must start");
+        };
+        session.controller_broker.expire_transfer(11);
+        session.begin_controller_security_takeover();
+        session.controller_broker.acknowledge_quiescence(
+            predecessor_host,
+            predecessor_connection,
+            predecessor_lease.epoch,
+            predecessor_cutoff,
+        );
+
+        session.handle_brokered_controller_batch(Vec::new(), true);
+        assert_eq!(
+            session
+                .controller_broker
+                .active_lease()
+                .map(|lease| lease.host),
+            Some(HostId(0))
+        );
     }
 
     #[test]
