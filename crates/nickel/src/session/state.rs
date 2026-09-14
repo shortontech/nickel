@@ -2443,6 +2443,12 @@ struct CompatibilityControlState {
     socket_path: PathBuf,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControllerRoute {
+    target: Option<nickel_ui::InternalSurfaceId>,
+    launcher_intercepted: bool,
+}
+
 #[derive(Debug)]
 pub(crate) enum InternalCaptureState {
     Idle,
@@ -2468,6 +2474,8 @@ pub struct NickelSession {
     pub(crate) internal_codex: Option<crate::internal_codex::InternalCodexHost>,
     pub(crate) internal_shell_surfaces:
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
+    controller_route: Option<ControllerRoute>,
+    controller_routing_epoch: u64,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
@@ -5529,32 +5537,14 @@ impl NickelSession {
         true
     }
 
-    /// Route event-driven native controller actions into the compositor-owned shell.
-    pub(crate) fn handle_native_controller_action(
-        &mut self,
-        action: nickel_ui::ControllerAction,
-        family: nickel_ui::ControllerFamily,
-    ) {
+    fn native_controller_route(&self) -> ControllerRoute {
         use crate::winit_shell::SurfaceRole;
-
-        self.cancel_remote_pointer();
-        self.cancel_remote_keyboard();
-        if let Some(shell) = self.internal_shell.as_mut() {
-            shell.set_controller_family(family);
-        } else {
-            return;
-        }
 
         let screenshot_visible = self.internal_shell.as_ref().is_some_and(|shell| {
             shell
                 .surface(SurfaceRole::Screenshot, None)
                 .is_some_and(|surface| shell.visible(surface.id))
         });
-        if action == nickel_ui::ControllerAction::Launcher && !screenshot_visible {
-            self.toggle_launcher_from(InvocationSource::Keyboard);
-            return;
-        }
-
         let role_target = [
             SurfaceRole::Screenshot,
             SurfaceRole::OnScreenKeyboard,
@@ -5576,19 +5566,68 @@ impl NickelSession {
                 .any(|runtime| *runtime == focused)
                 .then_some(focused)
         });
-        let Some(target) = target else {
-            return;
-        };
-        self.internal_ui.step(
+
+        ControllerRoute {
             target,
-            nickel_ui::HostBatch {
-                events: vec![nickel_ui::HostEvent::Controller(action)],
-                ..nickel_ui::HostBatch::default()
-            },
-        );
-        self.flush_internal_shell_input();
-        self.note_input_activity();
-        self.request_output_redraw();
+            launcher_intercepted: self.internal_shell.is_some() && !screenshot_visible,
+        }
+    }
+
+    fn refresh_controller_route(&mut self) -> (u64, ControllerRoute) {
+        let route = self.native_controller_route();
+        if self.controller_route != Some(route) {
+            self.controller_route = Some(route);
+            self.controller_routing_epoch = self.controller_routing_epoch.wrapping_add(1).max(1);
+        }
+        (self.controller_routing_epoch, route)
+    }
+
+    /// Bind one native-reader drain to the current session route. A transition
+    /// caused by an earlier event retires the remainder of that old-route batch.
+    pub(crate) fn handle_native_controller_batch(
+        &mut self,
+        events: Vec<nickel_ui::ControllerEnvelope>,
+    ) {
+        let binding = self.refresh_controller_route();
+        for event in events {
+            if self.refresh_controller_route() != binding {
+                break;
+            }
+            if self.internal_shell.is_none() {
+                break;
+            }
+            if event.edge != nickel_input::KeyEdge::Pressed {
+                continue;
+            }
+            let Some(action) = event.action else {
+                continue;
+            };
+            self.internal_shell
+                .as_mut()
+                .expect("checked above")
+                .set_controller_family(event.family);
+
+            self.cancel_remote_pointer();
+            self.cancel_remote_keyboard();
+            if action == nickel_ui::ControllerAction::Launcher && binding.1.launcher_intercepted {
+                self.toggle_launcher_from(InvocationSource::Keyboard);
+            } else if let Some(target) = binding.1.target {
+                self.internal_ui.step(
+                    target,
+                    nickel_ui::HostBatch {
+                        events: vec![nickel_ui::HostEvent::Controller(action)],
+                        ..nickel_ui::HostBatch::default()
+                    },
+                );
+                self.flush_internal_shell_input();
+                self.note_input_activity();
+                self.request_output_redraw();
+            }
+
+            if self.refresh_controller_route() != binding {
+                break;
+            }
+        }
     }
 
     /// Hide the compositor-hosted launcher because an ordinary client is
@@ -6856,6 +6895,8 @@ impl NickelSession {
             internal_shell: None,
             internal_codex: None,
             internal_shell_surfaces: HashMap::new(),
+            controller_route: None,
+            controller_routing_epoch: 0,
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
@@ -16413,6 +16454,28 @@ mod protocol_tests {
 
         assert!(session.toggle_internal_launcher());
         assert_eq!(session.internal_ui.focused(), Some(application));
+    }
+
+    #[test]
+    fn controller_batch_drops_old_route_tail_after_launcher_changes_recipient() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        assert!(!session.internal_shell.as_ref().unwrap().launcher_visible());
+        let event = nickel_ui::ControllerEnvelope {
+            device: nickel_input::controller::ControllerId(7),
+            action: Some(nickel_ui::ControllerAction::Launcher),
+            edge: nickel_input::KeyEdge::Pressed,
+            repeat: false,
+            family: nickel_ui::ControllerFamily::Xbox,
+        };
+
+        session.handle_native_controller_batch(vec![event, event]);
+
+        assert!(
+            session.internal_shell.as_ref().unwrap().launcher_visible(),
+            "the first transition must invalidate, not retarget, the queued second action"
+        );
+        assert!(session.controller_routing_epoch >= 2);
     }
 
     #[test]

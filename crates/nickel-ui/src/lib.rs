@@ -21,7 +21,8 @@ mod ui;
 #[cfg(target_os = "linux")]
 pub use controller::NativeControllerDevice;
 pub use controller::{
-    ControllerAction, ControllerFamily, ControllerFence, ControllerInput, ControllerObservation,
+    ControllerAction, ControllerEnvelope, ControllerFamily, ControllerFence, ControllerInput,
+    ControllerObservation,
 };
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,

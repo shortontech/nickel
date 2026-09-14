@@ -5,7 +5,7 @@ use std::{
 
 use gilrs::Gilrs;
 use nickel_input::{
-    NativeCode,
+    KeyEdge, NativeCode,
     controller::{
         AxisDirection, ControllerButton, ControllerEvent, ControllerId, ControllerIdentity,
         ControllerNormalizer, ControllerSignal,
@@ -24,6 +24,19 @@ pub enum ControllerAction {
     ContextMenu,
     PreviousPane,
     NextPane,
+}
+
+/// Physical controller evidence retained until the session admission boundary.
+///
+/// `action` is absent for release/neutral bookkeeping which must cross the
+/// queue without executing another semantic action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerEnvelope {
+    pub device: ControllerId,
+    pub action: Option<ControllerAction>,
+    pub edge: KeyEdge,
+    pub repeat: bool,
+    pub family: ControllerFamily,
 }
 
 /// Host-supplied admission state for controller events produced by ordinary clients.
@@ -259,19 +272,37 @@ impl ControllerInput {
         window_focused: bool,
         fence: impl FnOnce() -> ControllerFence,
     ) -> Vec<ControllerAction> {
-        self.poll_inner(now, Some((window_focused, fence)), None)
+        self.poll_envelopes_inner(now, Some((window_focused, fence)), None)
+            .into_iter()
+            .filter_map(|event| event.action)
+            .collect()
     }
 
     /// Polls controller input for a session-global owner such as the desktop shell.
     /// Ordinary applications should use [`Self::poll`] so background input is discarded.
     pub fn poll_global(&mut self, now: Instant) -> Vec<ControllerAction> {
-        self.poll_inner::<fn() -> ControllerFence>(now, None, None)
+        self.poll_envelopes_inner::<fn() -> ControllerFence>(now, None, None)
+            .into_iter()
+            .filter_map(|event| event.action)
+            .collect()
     }
 
     /// Wait for native controller activity without making the host event loop poll.
     /// A bounded idle timeout lets an owning worker notice process teardown, while
     /// held-stick repeats retain their normal low-latency deadline.
     pub fn wait_global(&mut self, idle_timeout: std::time::Duration) -> Vec<ControllerAction> {
+        self.wait_global_envelopes(idle_timeout)
+            .into_iter()
+            .filter_map(|event| event.action)
+            .collect()
+    }
+
+    /// Waits for a bounded native batch while retaining device, edge, repeat,
+    /// and family evidence for the session admission executor.
+    pub fn wait_global_envelopes(
+        &mut self,
+        idle_timeout: std::time::Duration,
+    ) -> Vec<ControllerEnvelope> {
         let Some(gilrs) = &mut self.gilrs else {
             std::thread::sleep(idle_timeout);
             return Vec::new();
@@ -282,23 +313,23 @@ impl ControllerInput {
             idle_timeout
         };
         let first = gilrs.next_event_blocking(Some(timeout));
-        self.poll_inner::<fn() -> ControllerFence>(Instant::now(), None, first)
+        self.poll_envelopes_inner::<fn() -> ControllerFence>(Instant::now(), None, first)
     }
 
-    fn poll_inner<F>(
+    fn poll_envelopes_inner<F>(
         &mut self,
         now: Instant,
         focused: Option<(bool, F)>,
         first: Option<gilrs::Event>,
-    ) -> Vec<ControllerAction>
+    ) -> Vec<ControllerEnvelope>
     where
         F: FnOnce() -> ControllerFence,
     {
-        let mut actions = Vec::new();
+        let mut envelopes = Vec::new();
         self.last_poll_events = 0;
         self.last_poll_activity = false;
         let Some(gilrs) = &mut self.gilrs else {
-            return actions;
+            return envelopes;
         };
         let events: Vec<_> = first
             .into_iter()
@@ -358,9 +389,11 @@ impl ControllerInput {
                     let family = signal_id(&signal)
                         .and_then(|id| self.families.get(&id).copied())
                         .unwrap_or(ControllerFamily::Generic);
-                    if let Some(action) = signal_action_for_family(signal, family) {
-                        self.active_family = Some(family);
-                        actions.push(action);
+                    if let Some(envelope) = signal_envelope(signal, family) {
+                        if envelope.action.is_some() {
+                            self.active_family = Some(family);
+                        }
+                        envelopes.push(envelope);
                     }
                 }
             }
@@ -377,13 +410,38 @@ impl ControllerInput {
             let family = signal_id(&signal)
                 .and_then(|id| self.families.get(&id).copied())
                 .unwrap_or(ControllerFamily::Generic);
-            if let Some(action) = signal_action_for_family(signal, family) {
-                self.active_family = Some(family);
-                actions.push(action);
+            if let Some(envelope) = signal_envelope(signal, family) {
+                if envelope.action.is_some() {
+                    self.active_family = Some(family);
+                }
+                envelopes.push(envelope);
             }
         }
-        actions
+        envelopes
     }
+}
+
+fn signal_envelope(
+    signal: ControllerSignal,
+    family: ControllerFamily,
+) -> Option<ControllerEnvelope> {
+    let (device, edge, repeat) = match &signal {
+        ControllerSignal::Button {
+            id, edge, repeat, ..
+        }
+        | ControllerSignal::Direction {
+            id, edge, repeat, ..
+        } => (*id, *edge, *repeat),
+        _ => return None,
+    };
+    let action = signal_action_for_family(signal, family);
+    Some(ControllerEnvelope {
+        device,
+        action,
+        edge,
+        repeat,
+        family,
+    })
 }
 
 fn uuid_fingerprint(uuid: [u8; 16]) -> String {
@@ -470,7 +528,7 @@ fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
 mod tests {
     use super::{
         ControllerAction, ControllerFamily, ControllerFence, signal_action,
-        signal_action_for_family,
+        signal_action_for_family, signal_envelope,
     };
     use nickel_input::NativeCode;
     use nickel_input::controller::{
@@ -563,6 +621,42 @@ mod tests {
             }),
             Some(ControllerAction::Right)
         );
+    }
+
+    #[test]
+    fn session_envelope_retains_device_edge_repeat_and_family() {
+        let device = ControllerId(41);
+        let released = signal_envelope(
+            ControllerSignal::Button {
+                id: device,
+                button: ControllerButton::South,
+                edge: nickel_input::KeyEdge::Released,
+                repeat: false,
+            },
+            ControllerFamily::PlayStation,
+        )
+        .expect("release bookkeeping crosses the admission queue");
+        assert_eq!(released.device, device);
+        assert_eq!(released.edge, nickel_input::KeyEdge::Released);
+        assert!(!released.repeat);
+        assert_eq!(released.family, ControllerFamily::PlayStation);
+        assert_eq!(released.action, None);
+
+        let repeated = signal_envelope(
+            ControllerSignal::Direction {
+                id: device,
+                direction: AxisDirection::Right,
+                edge: nickel_input::KeyEdge::Pressed,
+                repeat: true,
+            },
+            ControllerFamily::Xbox,
+        )
+        .expect("repeat crosses the admission queue");
+        assert_eq!(repeated.device, device);
+        assert_eq!(repeated.edge, nickel_input::KeyEdge::Pressed);
+        assert!(repeated.repeat);
+        assert_eq!(repeated.family, ControllerFamily::Xbox);
+        assert_eq!(repeated.action, Some(ControllerAction::Right));
     }
 
     #[test]

@@ -177,8 +177,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     event_loop
         .handle()
         .insert_source(controller_events, |event, _, state| {
-            if let smithay::reexports::calloop::channel::Event::Msg((action, family)) = event {
-                state.handle_native_controller_action(action, family);
+            if let smithay::reexports::calloop::channel::Event::Msg(events) = event {
+                state.handle_native_controller_batch(events);
             }
         })?;
     thread::Builder::new()
@@ -186,12 +186,9 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .spawn(move || {
             let mut controller = nickel_ui::ControllerInput::new();
             loop {
-                let actions = controller.wait_global(Duration::from_secs(1));
-                let family = controller.active_family().unwrap_or_default();
-                for action in actions {
-                    if controller_changed.send((action, family)).is_err() {
-                        return;
-                    }
+                let events = controller.wait_global_envelopes(Duration::from_secs(1));
+                if !events.is_empty() && controller_changed.send(events).is_err() {
+                    return;
                 }
             }
         })?;
