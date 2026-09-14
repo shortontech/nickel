@@ -345,6 +345,22 @@ impl GeometryAuthority {
         self.constrained_proposal = constraints.constrain(placement);
     }
 
+    /// Recomputes a temporary effective placement without replacing the user's base placement.
+    pub fn constrain_placement(&mut self, constraints: GeometryConstraints) -> LogicalRect {
+        self.constrained_proposal = constraints.constrain(self.base_placement.value);
+        self.constrained_proposal
+    }
+
+    /// Installs a policy-computed effective placement while retaining the current base placement.
+    pub fn set_constrained_proposal(&mut self, proposal: LogicalRect) {
+        self.constrained_proposal = proposal;
+    }
+
+    pub fn clear_placement_constraint(&mut self) -> LogicalRect {
+        self.constrained_proposal = self.base_placement.value;
+        self.constrained_proposal
+    }
+
     pub fn set_presentation(&mut self, presentation: Presentation) {
         self.presentation.value = presentation;
         self.presentation.revision = self.presentation.revision.next();
@@ -733,5 +749,16 @@ mod tests {
             intent.reconcile(20, 4, GeometryRevision::INITIAL),
             PendingIntentResult::Expired
         );
+    }
+
+    #[test]
+    fn removing_temporary_constraint_uses_newer_user_base_placement() {
+        let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+        authority.set_constrained_proposal(rect(70));
+        authority.set_placement(rect(120), constraints(200));
+        authority.set_constrained_proposal(rect(80));
+
+        assert_eq!(authority.clear_placement_constraint(), rect(120));
+        assert_eq!(authority.constrained_proposal, rect(120));
     }
 }

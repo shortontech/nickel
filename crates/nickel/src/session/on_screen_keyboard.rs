@@ -18,7 +18,7 @@ pub(crate) struct OnScreenKeyboardState {
     pub(crate) height: u32,
     pub(crate) dock_top: bool,
     pub(crate) output_name: Option<String>,
-    pub(crate) displaced: Vec<(Window, crate::session::shell_layout::Geometry)>,
+    pub(crate) displaced: Vec<Window>,
     pub(crate) auto_show_requested: bool,
     pub(crate) touchscreens: std::collections::HashSet<String>,
     controller_barrier_unix_ms: u64,

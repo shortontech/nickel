@@ -2660,6 +2660,7 @@ pub struct NickelSession {
     pub workspaces: Workspaces<WindowId>,
     pub workspace_hidden_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     displaced_output_windows: HashMap<String, Vec<DisplacedWindow>>,
+    geometry_authorities: HashMap<WindowId, nickel_core::geometry_authority::GeometryAuthority>,
     pub preview_highlight: Option<WindowId>,
     pub minimized_windows: HashMap<WindowId, (Window, Point<i32, Logical>)>,
     shortcut_desktop_windows: Vec<WindowId>,
@@ -6196,6 +6197,14 @@ struct DisplacedWindow {
     id: WindowId,
     relative_location: Point<i32, Logical>,
     rescue_location: Point<i32, Logical>,
+    rescue_revision: nickel_core::geometry_authority::GeometryRevision,
+}
+
+fn output_rescue_revision_is_current(
+    authority: &nickel_core::geometry_authority::GeometryAuthority,
+    rescue_revision: nickel_core::geometry_authority::GeometryRevision,
+) -> bool {
+    authority.revisions().placement == rescue_revision
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -7021,6 +7030,7 @@ impl NickelSession {
             workspaces,
             workspace_hidden_windows: HashMap::new(),
             displaced_output_windows: HashMap::new(),
+            geometry_authorities: HashMap::new(),
             preview_highlight: None,
             minimized_windows: HashMap::new(),
             shortcut_desktop_windows: Vec::new(),
@@ -7431,10 +7441,17 @@ impl NickelSession {
                 fallback_geometry,
             );
             self.map_compositor_moved_window(window, rescue_location, false);
+            let rescue_revision = self
+                .geometry_authorities
+                .get(&id)
+                .expect("mapped rescue publishes desired geometry")
+                .revisions()
+                .placement;
             displaced.push(DisplacedWindow {
                 id,
                 relative_location,
                 rescue_location,
+                rescue_revision,
             });
         }
         for (id, (window, location)) in &mut self.minimized_windows {
@@ -7462,10 +7479,35 @@ impl NickelSession {
                 fallback_geometry,
             );
             *location = rescue_location;
+            let rescue_revision = {
+                let desired = Geometry {
+                    x: rescue_location.x,
+                    y: rescue_location.y,
+                    width: size.w.max(1),
+                    height: size.h.max(1),
+                };
+                let constraints = nickel_core::geometry_authority::GeometryConstraints {
+                    min_width: 1,
+                    min_height: 1,
+                    max_width: None,
+                    max_height: None,
+                };
+                let authority = self.geometry_authorities.entry(*id).or_insert_with(|| {
+                    nickel_core::geometry_authority::GeometryAuthority::new(
+                        desired,
+                        nickel_core::geometry_authority::Presentation::Normal,
+                    )
+                });
+                if authority.base_placement.value != desired {
+                    authority.set_placement(desired, constraints);
+                }
+                authority.revisions().placement
+            };
             displaced.push(DisplacedWindow {
                 id: *id,
                 relative_location,
                 rescue_location,
+                rescue_revision,
             });
         }
         for (id, (window, location)) in &mut self.workspace_hidden_windows {
@@ -7493,10 +7535,35 @@ impl NickelSession {
                 fallback_geometry,
             );
             *location = rescue_location;
+            let rescue_revision = {
+                let desired = Geometry {
+                    x: rescue_location.x,
+                    y: rescue_location.y,
+                    width: size.w.max(1),
+                    height: size.h.max(1),
+                };
+                let constraints = nickel_core::geometry_authority::GeometryConstraints {
+                    min_width: 1,
+                    min_height: 1,
+                    max_width: None,
+                    max_height: None,
+                };
+                let authority = self.geometry_authorities.entry(*id).or_insert_with(|| {
+                    nickel_core::geometry_authority::GeometryAuthority::new(
+                        desired,
+                        nickel_core::geometry_authority::Presentation::Normal,
+                    )
+                });
+                if authority.base_placement.value != desired {
+                    authority.set_placement(desired, constraints);
+                }
+                authority.revisions().placement
+            };
             displaced.push(DisplacedWindow {
                 id: *id,
                 relative_location,
                 rescue_location,
+                rescue_revision,
             });
         }
         self.displaced_output_windows
@@ -7517,20 +7584,59 @@ impl NickelSession {
             height: geometry.size.h,
         });
         for displaced in displaced {
+            let still_owned =
+                self.geometry_authorities
+                    .get(&displaced.id)
+                    .is_some_and(|authority| {
+                        output_rescue_revision_is_current(authority, displaced.rescue_revision)
+                    });
             let desired = (
                 geometry.loc.x + displaced.relative_location.x,
                 geometry.loc.y + displaced.relative_location.y,
             )
                 .into();
-            if let Some((window, location)) = self.minimized_windows.get_mut(&displaced.id) {
-                if *location == displaced.rescue_location {
-                    *location = clamp_window_location(desired, window.geometry().size, work_area);
+            if self.minimized_windows.contains_key(&displaced.id) {
+                let restored =
+                    self.minimized_windows
+                        .get_mut(&displaced.id)
+                        .and_then(|(window, location)| {
+                            (still_owned && *location == displaced.rescue_location).then(|| {
+                                *location = clamp_window_location(
+                                    desired,
+                                    window.geometry().size,
+                                    work_area,
+                                );
+                                Geometry {
+                                    x: location.x,
+                                    y: location.y,
+                                    width: window.geometry().size.w.max(1),
+                                    height: window.geometry().size.h.max(1),
+                                }
+                            })
+                        });
+                if let Some(restored) = restored {
+                    self.record_desired_geometry(displaced.id, restored);
                 }
                 continue;
             }
-            if let Some((window, location)) = self.workspace_hidden_windows.get_mut(&displaced.id) {
-                if *location == displaced.rescue_location {
-                    *location = clamp_window_location(desired, window.geometry().size, work_area);
+            if self.workspace_hidden_windows.contains_key(&displaced.id) {
+                let restored = self
+                    .workspace_hidden_windows
+                    .get_mut(&displaced.id)
+                    .and_then(|(window, location)| {
+                        (still_owned && *location == displaced.rescue_location).then(|| {
+                            *location =
+                                clamp_window_location(desired, window.geometry().size, work_area);
+                            Geometry {
+                                x: location.x,
+                                y: location.y,
+                                width: window.geometry().size.w.max(1),
+                                height: window.geometry().size.h.max(1),
+                            }
+                        })
+                    });
+                if let Some(restored) = restored {
+                    self.record_desired_geometry(displaced.id, restored);
                 }
                 continue;
             }
@@ -7542,6 +7648,7 @@ impl NickelSession {
                     == Some(displaced.id)
             });
             if let Some(window) = window.cloned()
+                && still_owned
                 && self.space.element_location(&window) == Some(displaced.rescue_location)
             {
                 let location = clamp_window_location(desired, window.geometry().size, work_area);
@@ -8904,6 +9011,7 @@ impl NickelSession {
             self.remove_window_from_switcher(window_id);
             self.windows.remove(window_id);
             self.remote_window_identities.remove(&window_id);
+            self.geometry_authorities.remove(&window_id);
             self.schedule_remote_resource_retirement();
             self.preview_highlight = self
                 .preview_highlight
@@ -9209,6 +9317,15 @@ impl NickelSession {
         location: Point<i32, Logical>,
         activate: bool,
     ) {
+        let window_id = window
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+            .or_else(|| {
+                window
+                    .x11_surface()
+                    .and_then(|surface| self.x11_windows.get(&surface.window_id()).copied())
+            });
+        let desired_size = window.geometry().size;
         if let Some(surface) = window.x11_surface()
             && self.x11_windows.contains_key(&surface.window_id())
         {
@@ -9224,9 +9341,43 @@ impl NickelSession {
             .toplevel()
             .map(|surface| surface.wl_surface().clone());
         self.map_buffered_window(window, location, activate);
+        if let Some(id) = window_id {
+            self.record_desired_geometry(
+                id,
+                Geometry {
+                    x: location.x,
+                    y: location.y,
+                    width: desired_size.w.max(1),
+                    height: desired_size.h.max(1),
+                },
+            );
+        }
         if let Some(root) = popup_root {
             self.reconstrain_reactive_popups(&root);
         }
+    }
+
+    fn record_desired_geometry(
+        &mut self,
+        id: WindowId,
+        desired: Geometry,
+    ) -> nickel_core::geometry_authority::GeometryRevision {
+        let constraints = nickel_core::geometry_authority::GeometryConstraints {
+            min_width: 1,
+            min_height: 1,
+            max_width: None,
+            max_height: None,
+        };
+        let authority = self.geometry_authorities.entry(id).or_insert_with(|| {
+            nickel_core::geometry_authority::GeometryAuthority::new(
+                desired,
+                nickel_core::geometry_authority::Presentation::Normal,
+            )
+        });
+        if authority.base_placement.value != desired {
+            authority.set_placement(desired, constraints);
+        }
+        authority.revisions().placement
     }
 
     pub fn shell_windows(&self) -> impl Iterator<Item = &Window> {
@@ -10445,7 +10596,7 @@ impl NickelSession {
         } else {
             self.on_screen_keyboard.displaced.clone()
         };
-        for (window, original) in displaced {
+        for window in displaced {
             if !window.alive()
                 || self.space.element_location(&window).is_none()
                 || self.is_fullscreen_window(&window)
@@ -10456,19 +10607,39 @@ impl NickelSession {
             let Some(output) = self.output_geometry_for_window(&window) else {
                 continue;
             };
+            let base = self
+                .window_geometry_authority_id(&window)
+                .and_then(|id| self.geometry_authorities.get(&id))
+                .map(|authority| authority.base_placement.value)
+                .unwrap_or_else(|| {
+                    let location = self.space.element_location(&window).unwrap_or_default();
+                    let size = window.geometry().size;
+                    Geometry {
+                        x: location.x,
+                        y: location.y,
+                        width: size.w.max(1),
+                        height: size.h.max(1),
+                    }
+                });
             let geometry = if hidden {
-                original
+                if let Some(id) = self.window_geometry_authority_id(&window)
+                    && let Some(authority) = self.geometry_authorities.get_mut(&id)
+                {
+                    authority.clear_placement_constraint()
+                } else {
+                    base
+                }
             } else {
                 if !self.keyboard_reserves_output(output) {
                     continue;
                 }
                 shell_layout::fit_keyboard_recipient(
-                    original,
+                    base,
                     self.work_area_for_output(output),
                     self.is_server_decorated(&window),
                 )
             };
-            self.apply_keyboard_window_geometry(&window, geometry);
+            self.apply_keyboard_constraint(&window, geometry);
         }
         self.relayout_maximized_windows();
         self.relayout_fullscreen_windows();
@@ -11288,6 +11459,31 @@ impl NickelSession {
             .map_element(window.clone(), (geometry.x, geometry.y), false);
     }
 
+    fn window_geometry_authority_id(&self, window: &Window) -> Option<WindowId> {
+        window
+            .wl_surface()
+            .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
+            .or_else(|| {
+                window
+                    .x11_surface()
+                    .and_then(|surface| self.x11_windows.get(&surface.window_id()).copied())
+            })
+    }
+
+    fn apply_keyboard_constraint(&mut self, window: &Window, geometry: Geometry) {
+        let Some(id) = self.window_geometry_authority_id(window) else {
+            return;
+        };
+        let authority = self.geometry_authorities.entry(id).or_insert_with(|| {
+            nickel_core::geometry_authority::GeometryAuthority::new(
+                geometry,
+                nickel_core::geometry_authority::Presentation::Normal,
+            )
+        });
+        authority.set_constrained_proposal(geometry);
+        self.apply_keyboard_window_geometry(window, geometry);
+    }
+
     pub(crate) fn fit_window_above_keyboard(&mut self, window: &Window) {
         if self.is_shell_owned_window(window)
             || self.is_fullscreen_window(window)
@@ -11311,23 +11507,28 @@ impl NickelSession {
             width: size.w,
             height: size.h,
         };
+        let base = self
+            .window_geometry_authority_id(window)
+            .and_then(|id| self.geometry_authorities.get(&id))
+            .map_or(content, |authority| authority.base_placement.value);
         let target = shell_layout::fit_keyboard_recipient(
-            content,
+            base,
             self.work_area_for_output(output),
             self.is_server_decorated(window),
         );
         if target != content {
-            if !self
-                .on_screen_keyboard
-                .displaced
-                .iter()
-                .any(|(saved, _)| saved == window)
-            {
-                self.on_screen_keyboard
-                    .displaced
-                    .push((window.clone(), content));
+            if !self.on_screen_keyboard.displaced.contains(window) {
+                if let Some(id) = self.window_geometry_authority_id(window) {
+                    self.geometry_authorities.entry(id).or_insert_with(|| {
+                        nickel_core::geometry_authority::GeometryAuthority::new(
+                            content,
+                            nickel_core::geometry_authority::Presentation::Normal,
+                        )
+                    });
+                }
+                self.on_screen_keyboard.displaced.push(window.clone());
             }
-            self.apply_keyboard_window_geometry(window, target);
+            self.apply_keyboard_constraint(window, target);
         }
     }
 
@@ -11895,11 +12096,11 @@ mod protocol_tests {
         bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
         command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
         maximized_content_geometry, output_contains_logical_point, output_index_for_shell_surface,
-        pending_launch_window_disposition, prepare_shell_behavior_update,
-        preview_mapping_has_exact_size, protocol_preview_from_cached,
-        record_preview_capture_attempt, restored_drag_content_geometry,
-        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
-        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        output_rescue_revision_is_current, pending_launch_window_disposition,
+        prepare_shell_behavior_update, preview_mapping_has_exact_size,
+        protocol_preview_from_cached, record_preview_capture_attempt,
+        restored_drag_content_geometry, retain_live_idle_inhibitors, retire_displaced_window,
+        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke,
@@ -15417,6 +15618,7 @@ mod protocol_tests {
                     id,
                     relative_location: Point::from((10, 20)),
                     rescue_location: Point::from((30, 40)),
+                    rescue_revision: nickel_core::geometry_authority::GeometryRevision::INITIAL,
                 }],
             );
             retire_displaced_window(&mut outputs, id);
@@ -15434,6 +15636,7 @@ mod protocol_tests {
             id,
             relative_location: Point::from((10, 20)),
             rescue_location: Point::from((30, 40)),
+            rescue_revision: nickel_core::geometry_authority::GeometryRevision::INITIAL,
         };
         let mut outputs = HashMap::from([(
             "removed-output".to_owned(),
@@ -18162,6 +18365,40 @@ mod protocol_tests {
             clamp_window_location((-20, -30).into(), (300, 200).into(), work_area),
             (100, 40).into()
         );
+    }
+
+    #[test]
+    fn output_reconnect_does_not_restore_over_a_newer_desired_placement() {
+        use nickel_core::geometry_authority::{
+            GeometryAuthority, GeometryConstraints, Presentation,
+        };
+
+        let rescued = Geometry {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        let mut authority = GeometryAuthority::new(rescued, Presentation::Normal);
+        let rescue_revision = authority.revisions().placement;
+        assert!(output_rescue_revision_is_current(
+            &authority,
+            rescue_revision
+        ));
+
+        authority.set_placement(
+            Geometry { x: 400, ..rescued },
+            GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        );
+        assert!(!output_rescue_revision_is_current(
+            &authority,
+            rescue_revision
+        ));
     }
 
     #[test]
