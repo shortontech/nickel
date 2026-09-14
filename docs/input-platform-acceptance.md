@@ -1,128 +1,111 @@
-# Input platform acceptance matrix
+# Input and window-operation platform acceptance
 
-Updated: 2026-08-30
+Updated: 2026-09-14
 
-This matrix tracks evidence for the input work described by private Specifications 0099–0105.
-`pass` applies only to the evidence class in its column. A build or automated test is never native
-interaction acceptance.
+This matrix records evidence reproducible from the current integrated branch. Automated tests prove
+reducer and adapter contracts; they do not prove native interaction. This pass did not launch a
+compositor, inject live input, restart an installed session, or use a Windows host.
 
-Status vocabulary: `pass`, `failed`, `unavailable`, `unsupported`, `untested`.
+Vocabulary: `pass` (the named command passed), `failed`, `unavailable` (required host/tool absent),
+`unsupported`, and `untested`. A native row never inherits `pass` from a unit test, cross-build,
+nested fixture, historical observation, or the presence of test source.
 
-Current Linux evidence host: Ubuntu 26.04 LTS, Linux 7.0.0-30-generic, x86_64,
-rustc/cargo 1.94.1. Commands are run from the workspace root unless a row says otherwise.
+## Current matrix
 
-| OS | Runtime | Architecture | Layout | Outputs / scale | Device | Capability | Automated | Native build | Nested live | Installed live | Evidence date |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Linux | Smithay nested winit backend | x86_64 | host default | 1200x768, scale 120/120, Flipped180 | keyboard / pointer | focused keys, text, IME, pointer, wheel, focus reset | pass | pass | pass | not applicable | 2026-08-30 |
-| Linux | Smithay nested winit backend | x86_64 | host default | 1200x768, scale 120/120, Flipped180 | keyboard | bare, Alt, and Alt+Shift Print Screen | pass | pass | pass | not applicable | 2026-08-30 |
-| Linux | Smithay nested winit backend | x86_64 | host default | 1200x768 at 120/120 plus virtual 800x600 at 180/120 | keyboard | active-window capture on secondary mixed-scale output | pass | pass | pass (960x614 clipboard image) | not applicable | 2026-08-30 |
-| Linux | Nickel Smithay session | x86_64 | host default | two outputs, scale values not yet recorded | keyboard / pointer / touch | compositor shortcuts, lock/focus transitions, screenshot actions | pass | pass | not applicable | untested | 2026-08-30 |
-| Linux | SDL / Gilrs | x86_64 | not applicable | not applicable | Xbox-class controller | normalized navigation, hysteresis, repeat, disconnect | pass | pass | untested | untested | 2026-08-30 |
-| Windows | SDL / Win32 | x86_64 | untested | untested | keyboard / pointer | focused input and registered global shortcuts | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
-| Windows | SDL / Win32 | x86_64 | untested | untested | Xbox-class controller | normalized navigation | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
-| Windows | Nickel shell | x86_64 | untested | untested | keyboard / pointer | Print Screen crop, clipboard, save, modified capture | pass | pass (cross-build only) | not applicable | untested | 2026-08-30 |
-| BSD | native runtime | untested | untested | untested | all | focused/global/controller/screenshot acceptance | untested | untested | not applicable | unsupported | 2026-08-30 |
+| Platform/runtime | Capability | Automated contract | Build this pass | Native interaction | Evidence gap |
+| --- | --- | --- | --- | --- | --- |
+| Platform-neutral core | operation identity, admission, completion, handoff, cancellation, tails | pass | pass as dependency | not applicable | none for enumerated transitions |
+| Platform-neutral core | revisioned geometry, compensation, late/superseded fencing | pass | pass as dependency | not applicable | native settlement is platform-specific |
+| Platform-neutral UI | active-widget identity and handled/fallback disposition | source tests present, not rerun | untested | not applicable | run full `nickel-ui` suite |
+| Linux Smithay | physical keyboard/pointer/touch normalization | source tests present; focused tests partly rerun | test build pass | untested | real devices, focus/grab and lock/suspend teardown |
+| Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
+| Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
+| Linux XWayland | move/resize and compensation | source tests present, not rerun | test build pass | untested | real XWayland configure/focus/teardown |
+| Linux Gilrs | identity, navigation, repeat, disconnect, focus fence | source tests present, not rerun | compiled as dependency | untested | physical controller not used |
+| Unix controller broker/transport | connection/lease/stream generation, transfer/revoke/reset | source tests present, not rerun | compiled as dependency | untested | live transfer and neutral barrier |
+| Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | unavailable on this Linux pass | untested | Windows host, layouts, IME, hook registration/suppression |
+| Windows foreign move/resize | bound source/button, contested control, release/reconciliation/takeover | core reducer pass; cfg tests not rerun | unavailable | untested | hooks, `SetWindowPos`, late effects, DPI, takeover |
+| Windows controller pipe | bounded authenticated delivery and generation fencing | source tests present, not rerun | unavailable | untested | live pipe replacement/disconnect and controller |
+| BSD native runtime | all capabilities | untested | untested | unsupported | implementation and host |
 
-## Recorded automated and build evidence
+## Commands executed on this branch
 
-- `cargo test -p nickel-input --all-targets --all-features`: pass; 29 deterministic vocabulary,
-  shortcut, registration, SDL/winit key, text, IME, pointer, wheel, touch and focus-gain/loss
-  equivalence, SDL/Gilrs controller equivalence, controller churn, and replay/property tests, plus
-  two source-free replay-tool tests. Focus gain is preserved without resetting held state; focus
-  loss remains the explicit reset edge.
-- `cargo test -p nickel-input --no-default-features`: pass; 16 backend-neutral tests with no
-  operating-system UI feature enabled.
-- `cargo clippy -p nickel-input --all-targets --all-features -- -D warnings`: pass.
-- Strict `-D warnings` clippy across the migrated core, UI, Settings, shell, File, gaze, Shapes, and
-  session-protocol packages: pass. Session passes with only
-  `clippy::items-after-test-module` allowed for a preserved, unrelated XWayland popup-placement edit;
-  no input-epic lint is suppressed.
-- `cargo test -p nickel-core`: pass; 86 unit and semantic scenario tests.
-- `cargo test -p nickel-session --bins --tests`: pass; 89 tests including production Smithay input
-  routing, authenticated screenshot-shell identity, semantic pointer press/release, and session
-  protocol behavior.
-- `cargo test -p nickel-session-protocol`: pass; 13 versioned wire-contract tests including the
-  authenticated screenshot role and screenshot semantic-target round trips.
-- Focused Nickel shell test: pass; screenshot selection start/end/confirm resolve through the live
-  shell's production screenshot geometry and pointer hit-testing path.
-- `cargo test -p nickel-file` and strict package clippy: pass.
-- Nickel gaze-grid and shapes-test checks and strict package clippy: pass after focused input
-  migration.
-- `cargo test -p nickel-settings`: pass; 30 tests, including normalized keyboard and pointer input
-  dispatched through production navigation geometry and reducers.
-- `cargo test -p nickel-ui`: pass; 145 unit tests plus asset and documentation tests. Embedded
-  application hosts share one normalized text, IME, shortcut, and clipboard-command path; focused
-  tests verify commit and submit happen once and copy/cut/paste preserve their payloads.
-- `cargo check -p nickel-shell --bin nickel --target x86_64-pc-windows-gnu`: pass. This is native
-  build evidence only; it is not Windows interaction acceptance. The Windows adapter now waits for
-  its native keyboard hook result before reporting `Available`; startup failure is explicit.
-- `cargo build --release -p nickel-session` and
-  `cargo build --release -p nickel-shell --bin nickel`: pass. These are native optimized build
-  results, not installed-session interaction acceptance.
-- Host availability probe on 2026-08-30 found no `ID_INPUT_JOYSTICK=1` input device and no Wine,
-  QEMU, libvirt, or VirtualBox runtime. The Windows GNU compilation target is installed, but that is
-  not a Windows acceptance runner. Controller and Windows live rows therefore remain explicitly
-  untested rather than inheriting build or fixture results.
-- The running installed Nickel compositor still referenced its previous deleted executable image;
-  its executable bytes differed from the newly built `target/release/nickel-session`. Installed
-  capture acceptance therefore remains pending a coordinated session restart and is not inferred
-  from the nested results.
-- Explicitly test-controlled nested Smithay: bare Print Screen mapped the real screenshot surface and
-  displayed compositor-captured pixels; Alt+Print Screen placed the focused Shapes window pixels on
-  the clipboard; Alt+Shift+Print Screen produced a clipboard path whose PNG reopened successfully.
-  A second 800x600 output at 1.5x scale also captured its focused window as a 960x614 clipboard
-  image. The interactive screenshot surface was also compositor-centered at `0,4 1200x760`; its
-  renderer-owned selection start/end, double-click confirmation, and cancel targets traversed the
-  authenticated production pointer path and cancel unmapped the surface. The live checks retained
-  dimensions and pass/fail only, and deleted the temporary file.
-- The same nested production input path delivered a semantic pointer hover, a `120,-240` v120 wheel
-  frame, and focused Escape to the Rust pointer probe. Its shared winit adapter observed normalized
-  wheel `dx=-1 dy=2 discrete=Some((-1, 2))`; Escape closed the focused probe. No typed text was
-  retained.
-- A development-only Rust input-method client bound `zwp_input_method_v2` on the selected nested
-  session while the focused winit probe enabled `zwp_text_input_v3`. The probe's shared winit adapter
-  observed normalized preedit `"ime-preedit"` with cursor `(11,11)`, the protocol preedit clear, and
-  committed text `"ime-commit"` in order. The fixed markers were discarded and no screenshot was
-  retained. Reproduce with `cargo build -p nickel-session --example input_method_acceptance
-  --example pointer_constraints`, start the input-method example first on the nested
-  `WAYLAND_DISPLAY`, then start the pointer-constraints example.
-- In the nested Settings application, production pointer hit testing focused Search, normalized text
-  input changed the visible result set, Escape cleared it, and a `120,-240` v120 wheel frame visibly
-  scrolled the Appearance screen. In the fixture-backed embedded Codex UI, normalized text and
-  Ctrl+A/C/X/V exercised the production composer selection and clipboard path. Moving focus from
-  Codex to Settings while Control was held, releasing it there, and returning to Codex produced an
-  ordinary `a`, proving focus-loss reset without retaining the entered text or clipboard payload.
-- With Settings focused, bare Meta opened the real launcher; text went only to launcher Search.
-  Escape first cleared its query and then dismissed it, after which text again reached the previously
-  focused Settings field. A semantic click also activated the visible sliver of an overlapped Codex
-  window rather than the center point occupied by Settings, exercising compositor hit testing.
-- A semantic panel hover opened the real Settings window Preview; its production Menu target mapped
-  ContextMenu at `52,564`, normalized Down traversed its keyboard path, and Escape closed both shell
-  overlays and restored Settings as the active ordinary window.
-- Immediately after a launcher map/unmap transition, the first compositor capture contained the
-  complete 1200x768 scene rather than only damaged regions. Bare Print Screen then mapped Screenshot
-  at `0,4 1200x760`, transferred compositor keyboard focus to it, and one focused Escape unmapped it
-  and restored Settings as the active ordinary window. No screenshot was retained.
-- Nested compositor capture was repeated against an idle desktop, one Settings window, and two
-  overlapping Settings windows. Each 1200x768 frame contained the complete wallpaper, panel,
-  client contents, and compositor titlebars; the two immediate repeat captures were byte-identical,
-  and the compositor remained live after every framebuffer read. This specifically exercises a
-  forced full redraw without rendering mapped client surfaces twice. Temporary PNGs were deleted
-  after visual inspection.
+Exact results from this worktree at `7b2cd6f` before the documentation commit. `RUSTC_WRAPPER=`
+avoids treating a local compiler-cache failure as product evidence.
 
-## Evidence still required
+```sh
+env RUSTC_WRAPPER= cargo test -p nickel-core window_operation -- --nocapture
+```
 
-- Persistent nested-Smithay focused text, IME preedit/commit, ordinary clipboard shortcuts,
-  Settings, fixture-backed embedded Codex UI, context-menu keyboard focus, launcher focus
-  isolation/restoration, pointer/wheel normalization, focus-loss reset, and screenshot focus transfer
-  now have live evidence. All three Print Screen bindings have live nested evidence; screenshot
-  selection/confirmation/cancel also has complete nested semantic-path evidence.
-- Installed Nickel multi-output and mixed-scale screenshot workflow, including XWayland focus.
-- Live Windows focused input, registered shortcuts, controller navigation, and screenshot pixels,
-  clipboard, save, and reopen workflow.
-- Xbox-class controller navigation on Linux and Windows.
-- Native BSD implementations and hosts; these remain unsupported rather than inferred
-  from foreign builds.
+Pass: 12 tests, 0 failed. Covered typed cancellation, late acquisition cleanup, admission conflict,
+externally contested control, resize-edge validity, release-before-activation, seat-wide security
+cancel, per-window exclusion, pending-handoff release, source transfer, terminal admission release,
+and unrelated release.
 
-Acceptance artifacts must not retain typed text, clipboard contents, credentials, or private
-screenshots unless the user explicitly selects them.
+```sh
+env RUSTC_WRAPPER= cargo test -p nickel-core --test stateful_interaction_acceptance -- --nocapture
+```
+
+Pass: 3 tests, 0 failed. Generated lifecycles release admission and fence tails; late geometry/focus
+does not revive superseded authority; no-output placement is bounded by time, mapping and revision.
+
+```sh
+env RUSTC_WRAPPER= cargo test -p nickel-core --test interaction_acceptance_oracles -- --nocapture
+```
+
+Pass: 2 tests, 0 failed. Handled launcher background input has no fallback activation, and a stale
+focus tail cannot hide a reopened surface.
+
+```sh
+(cd vendor/smithay && env RUSTC_WRAPPER= cargo test --lib --no-default-features \
+  input::touch::tests::completed_frame_cancel_terminates_changed_and_unchanged_contacts)
+```
+
+Pass: 1 test, 0 failed (43 filtered out). The public Smithay touch boundary cancels both a contact
+changed in the completed frame and an unchanged retained contact, then rejects later motion/up.
+
+```sh
+env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+  'session::grabs::move_grab::tests'
+env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features \
+  removing_internal_surface_cancels_its_active_move_authority -- --nocapture
+```
+
+Pass: the move-grab filter ran 4 tests, 0 failed; the teardown filter ran 1 test, 0 failed. They
+compile production Smithay adapters and exercise shared begin/update/completion, competing admission,
+unexpected native-grab loss, maximized restore threshold, and internal-surface teardown. The first
+build emitted the existing PipeWire SPA plugindir fallback warning. This is not native acceptance.
+
+## Present tests not claimed as executed
+
+The tree also contains focused coverage for `GeometryAuthority`, UI active-widget disposition,
+controller broker transfers, Unix/Windows delivery, XDG/XWayland move/resize, lock/suspend cancel,
+and normalized internal touch cancel. Presence supports the inventory, not a pass result. The
+integration commits from `4a286f2` through `7b2cd6f` contain concise subjects but no embedded test
+transcripts, so this document does not invent command results from those commits.
+
+Suggested focused commands:
+
+```sh
+env RUSTC_WRAPPER= cargo test -p nickel-core geometry_authority
+env RUSTC_WRAPPER= cargo test -p nickel-session-protocol --test controller_broker_stateful
+env RUSTC_WRAPPER= cargo test -p nickel-ui
+env RUSTC_WRAPPER= cargo test -p nickel --lib --all-features session::
+```
+
+## Native acceptance still required
+
+- Linux nested and installed: layouts/IME; device removal; changed and unchanged touch contacts
+  across down/frame/cancel; matching and unrelated release; XDG/XWayland move/resize; titlebar,
+  Super+pointer and internal move; cursor ownership; lock, suspend, output removal and target teardown.
+- Windows: synchronous hook suppression; source/button binding; injected-input rejection; bounded
+  missing-release reconciliation; actual `SetWindowPos` failure/late effects; native takeover;
+  foregrounding, DPI, monitors, destruction; named-pipe disconnect and replacement.
+- Physical controllers on Linux and Windows: reconnect identity, held/repeat, focus fence, transfer,
+  revoke/reset, overflow/backlog and neutral recovery.
+- Mixed-scale/multi-output geometry: transform rebase and compensation without overwriting a newer
+  native or external owner.
+
+Acceptance artifacts retain only opaque identities, counts, dimensions, timing and outcomes. Do not
+retain text, clipboard payloads, credentials, private screenshots, window titles or trace names
+without explicit authorization.

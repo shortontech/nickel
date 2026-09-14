@@ -1,35 +1,100 @@
-# Input migration inventory
+# Input and interaction migration inventory
 
-Updated: 2026-08-30
+Updated: 2026-09-14
 
-This inventory records the backend-to-normalized input boundaries covered by private Specifications
-0099–0104. Application reducers must consume `nickel_input::InputEvent` or typed controller/global
-shortcut outcomes. Native event types are allowed only at the listed adapters and test boundaries.
+This is a source inventory, not a native acceptance record. “Migrated” means the production path
+uses the shared normalized-input, controller-broker, window-operation, or geometry-authority model.
+It does not mean that the path has been exercised in an installed Linux or Windows session.
 
-| Boundary | Native source | Normalized owner | Consumers | Status |
+## Producers and normalization boundaries
+
+| Producer | Production boundary | Identity and order carried forward | Routing / cancellation capability | Status |
 | --- | --- | --- | --- | --- |
-| winit focused input | `winit::event::WindowEvent` | `nickel_input::winit::Adapter` | shell, launcher, screenshot, lock, overlays, embedded Codex surfaces, `nickel-ui` runtime, Settings, Nickel File, Shapes test | migrated; per-surface scale and focus reset preserved |
-| Declarative UI dispatch | normalized focused events | `nickel_ui::input::FocusedInputDispatcher` and `UiHost::handle_input` | typed widget and application messages, standalone and embedded hosts | migrated |
-| Gilrs controllers | `gilrs::Event` | `nickel_input::gilrs` plus `ControllerNormalizer` | `nickel-ui` controller feed | migrated |
-| Smithay compositor shortcuts | XKB keysyms | `CompositorShortcutAdapter` | launcher, task switching, workspaces, screenshot actions | migrated boundary |
-| Windows global shortcuts | `RegisterHotKey` and low-level hook messages | `RegistrationTable` and shared key vocabulary | launcher, Run, task switching, screenshot actions | migrated boundary |
-| Nested semantic test input | authenticated test protocol | compositor production input and hit testing | scenario and live acceptance tools | intentional test boundary |
+| Focused winit keyboard, text/IME, pointer, wheel, touch and focus events | `nickel_input::winit::Adapter` | generated `DeviceId`, monotonic `EventOrder`, key identity, pointer/touch device and contact | focus loss and device removal reset held state; host dispatch returns an explicit disposition | migrated |
+| Smithay libinput keyboard, pointer and touch | `session::input`, Smithay seat, then `InputEvent` for compositor UI | seat/device lifetime, serial/time, button or contact | seat-wide cancel, focus/device/target cancellation; completed-frame touch cancel is forwarded unconditionally | migrated; vendor fix carried in `vendor/smithay` |
+| Smithay compositor shortcuts | `CompositorShortcutAdapter` | normalized key and modifier state | typed shell action; lock/focus teardown cancels repeats and interactions | migrated boundary |
+| Win32 focused winit input | shared winit adapter and `UiHost` | normalized identity as on other winit hosts | focus/device reset and explicit host disposition | migrated |
+| Win32 `RegisterHotKey` and keyboard hook | `WindowsInputAdapter` in `platform::windows` | physical key/scan code and shared modifiers | synchronous hook suppression; typed outcomes delivered once | migrated boundary |
+| Win32 low-level pointer hook | `WindowDragCoordinator` plus `WindowOperationReducer` | window lifetime/generation, source generation, initiating button, operation/acquisition | only matching source/button completes; injected/unrelated events cannot update/complete; missing release/native takeover cancel | migrated, native untested |
+| Gilrs controller reader | `nickel_input::gilrs`, `ControllerNormalizer`, `ControllerInput` | controller lifetime, backend/native identity, fingerprint, family, edge, time | focus fence suppresses held input; disconnect/neutral reset; drain bounded to 256 events/poll | migrated |
+| Unix session controller worker | `ControllerBroker` through local transport | host connection, lease, stream generation and event ID | revoke cutoff, transfer deadline, overflow reset, neutral barrier | migrated |
+| Windows session controller worker | bounded named-pipe transport plus `ControllerBroker` | same broker envelope and authenticated connection | disconnect/replacement resets stream; stale generations/leases rejected | migrated, native untested |
+| Authenticated semantic/test input | session protocol, `session::test_input`, production hit testing/reducers | authenticated scope and semantic target | explicit press/release/cancel and lease teardown; no alternate reducer | intentional test boundary |
+| Remote pointer/keyboard/controller | remote-control admission and session adapters | lease/capability, source generation and execution identity | timeout, focus, disconnect, emergency stop, lock and revocation fence/cancel | migrated |
+| On-screen keyboard / input-method protocol | `session::on_screen_keyboard` and focused Smithay keyboard source | focus-bound auxiliary keyboard source and frame order | source cancellation releases only its own keys; unsupported text fails before partial delivery | migrated boundary |
+| Accessibility semantic invocation | trusted/native accessibility adapters -> semantic UI action | resource/semantic node identity and action execution identity | stale/revoked nodes fail closed; bounded observation and dispatch cancellation | migrated boundary |
 
-The remaining native names found by the inventory search are intentional adapter boundaries:
+Native types are expected only in these adapters. Application hosts consume `InputEvent`, typed
+`ControllerAction`, `HostEvent`, or typed shell/global outcomes.
 
-- Smithay XKB keysyms for compositor-owned shortcuts, virtual-terminal switching, and compositor
-  recovery controls.
-- Win32 `RegisterHotKey` and `KBDLLHOOKSTRUCT` conversion inside the Windows operating-system
-  shortcut adapter and its Windows-only harness.
-- Winit event imports inside the shared adapter or runtime binaries that immediately pass the whole
-  event to that adapter.
-- Gilrs event polling inside the shared controller feed before normalization.
+## Consumers
 
-No application-local SDL, winit, Smithay, Win32, or Gilrs key table remains in the inventoried
-focused consumers. Re-run the following boundary audit when adding a consumer:
+| Consumer | Routing authority | Cancellation behavior |
+| --- | --- | --- |
+| `FocusedInputDispatcher` / `UiHost` | active widget identity and semantic-tree hit testing | focus loss clears capture/preedit/held state; handled disposition prevents fallback activation |
+| Shell, launcher, lock, screenshot, overlays, notifications, task switcher | shell-surface identity and production geometry | overlay dismissal, focus transfer, lock and teardown cancel owned gestures |
+| Settings, File, Gaze, Shapes, embedded Codex | per-host active widget and semantic target | focus loss/device removal; stale widget identity is not retargeted |
+| Wayland/XWayland clients | mapped window, native lifetime and mapping generation | source/resource/seat loss, unmap/destroy, lock, suspend and supersession terminate |
+| Internal surfaces/titlebars | internal generation, hit-test kind/subject, initiating button | removal, grab loss, lock/suspend and matching release terminate |
+| Windows foreign windows | `HWND` mapping lifetime and initiating source/button | takeover, failed apply, missing release or source loss terminate; no exclusive-native claim |
+| Controller hosts | connection + lease + stream generation | revoke/reset invalidates queued and held/repeat state; execution identity fences effects |
+
+## Window and geometry writers
+
+`WindowOperationReducer` admits at most one operation per seat and logical window. Each operation
+binds `WindowMapping` (`WindowId`, `NativeLifetimeId`, `MappingGeneration`), kind, control mode,
+origin/current completion binding, acquisition, resource lease and binding epoch. It distinguishes
+applied input, consumed tails, unrelated input and rejected transitions.
+
+| Writer/path | Shared lifecycle | Control / settlement | Status |
+| --- | --- | --- | --- |
+| XDG client move | `handlers::xdg_shell` -> `WindowPointerOperation` | `Enforced`; compositor placement | migrated |
+| XDG client resize | XDG handler -> operation/resize grab | `Cooperative`; configure acknowledgement protocol-owned | migrated |
+| Titlebar and Super+pointer move | `session::input` -> move grab | `Enforced` | migrated |
+| Internal compositor-surface move | input -> internal move grab | `Enforced`; surface generation bound | migrated |
+| XWayland move/resize | XWayland handler -> shared grabs | `Enforced`; X11 configure/compensation adapter-owned | migrated; native untested |
+| Windows foreign move/resize | `WindowDragCoordinator` | `ExternallyContested`; accepted/rejected apply and observable uncertainty | migrated core; native untested |
+| Temporary/no-output placement, restore placement, presentation | `GeometryAuthority` revisioned desired fields | owner/control/topology/revision-tagged requests and observations | migrated |
+| Renderer/layout projections and configure emission | platform/session adapters consume authority | projections, not independent desired-state writers | retained boundary |
+
+No inventoried production move/resize path owns a second ad-hoc admission state machine. Native grab
+objects, coordinate conversion, `SetWindowPos`, and protocol configure delivery remain adapters.
+
+## Cancellation and stale tails
+
+The reducer names user cancel, completion source/resource/seat loss, lock, suspend, target unmap or
+destroy, supersession, native takeover, unknown authority, acquisition failure and release before
+activation. Handoff retires the old binding, so its later release/disconnect is consumed. Security
+teardown uses `cancel_all`; lock/suspend also cancel Smithay and internal-UI touches, controller
+repeats, remote pointer and remote keyboard. Window teardown cancels before identity reuse.
+
+The vendor touch boundary handles `down -> frame -> cancel`: cancellation walks targets Smithay
+retains even when compositor pending-slot accounting is empty. Contacts changed in the completed
+frame and contacts unchanged in it receive cancel; later motion/up cannot use the retired target.
+
+## Bounded traces and diagnostics
+
+| Facility | Bound / loss signal | Content |
+| --- | --- | --- |
+| `BoundedTrace` | default 128; oldest dropped; `dropped()` exposed | opaque test observations of production effects |
+| Stateful generated traces | finite sequences; synthetic default deadline 2 s | operation/focus/geometry lifecycle and forbidden tails |
+| Controller native drain | 256 events/poll; `backlog` on saturation | payload-free availability/activity/held observation |
+| `ControllerBroker` | queue 256; transfer deadline 750 ms; overflow resets stream | event/connection/lease/stream identity and barriers |
+| Operation, trace, lease, permission audits | 128 events each; oldest evicted | opaque IDs and lifecycle transitions |
+| Desktop events | 128 plus eviction count | semantic desktop diagnostics |
+| Frame trace | 256 records; requested duration 1–60 s; eviction count | frame category/generation/timing |
+| Inventories | 512 windows, 32 outputs, 128 shell surfaces, 32 workspaces, 128 shortcuts | bounded structural observations |
+| Diagnostic response | maximum 1 MiB | bounded serialized snapshot |
+
+## Reproducible source audit
+
+Review every match; native boundary matches are intentional.
 
 ```sh
-rg -n 'winit::keyboard::|gilrs::|KBDLLHOOKSTRUCT|RegisterHotKey|Keysym' \
-  crates/nickel crates/nickel-settings crates/nickel-codex-ui crates/nickel-ui \
-  crates/nickel-file crates/nickel-gaze crates/nickel-session
+rg -n 'winit::keyboard::|gilrs::|KBDLLHOOKSTRUCT|RegisterHotKey|SetWindowPos|Keysym' crates
+rg -n 'WindowOperationReducer|WindowPointerOperation|ControlMode::' crates/nickel-core crates/nickel
+rg -n 'cancel_all|CancellationReason::|cancel_normalized_touches|\.cancel\(self\)' \
+  crates/nickel-core crates/nickel/src/session crates/nickel/src/platform/windows.rs
+rg -n 'MAX_.*(TRACE|EVENT|DIAGNOSTIC)|DEFAULT_.*(LIMIT|DEADLINE)|VecDeque' \
+  crates/nickel-core crates/nickel-ui crates/nickel-session-protocol crates/nickel-remote-control
 ```
