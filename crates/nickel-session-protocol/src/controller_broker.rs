@@ -87,6 +87,7 @@ struct Transfer {
     cutoff: EventId,
     deadline_ms: u64,
     quiescent: bool,
+    destination_rearm_required: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,11 +175,15 @@ impl<T> ControllerBroker<T> {
                 outbox: VecDeque::new(),
             },
         );
+        let rearming_destination = self
+            .transfer
+            .is_some_and(|transfer| transfer.to == host && transfer.destination_rearm_required);
         if replaced.is_some()
             && (self.active.is_some_and(|lease| lease.host == host)
                 || self
                     .transfer
                     .is_some_and(|transfer| transfer.from.host == host || transfer.to == host))
+            && !rearming_destination
         {
             self.poison_executor(EventId(self.next_event));
             self.install_reset(EventId(self.next_event));
@@ -255,6 +260,20 @@ impl<T> ControllerBroker<T> {
         if self.exhausted {
             return TransferStatus::Failed;
         }
+        if let Some(transfer) = self.transfer {
+            if transfer.destination_rearm_required
+                && transfer.to == to
+                && transfer.to_connection != connection
+                && self.connection_matches(to, connection)
+                && timeout_ms != 0
+            {
+                return self.rearm_transfer_destination(connection, now_ms, timeout_ms);
+            }
+            return TransferStatus::Pending {
+                requested_lease: transfer.requested_lease,
+                cutoff: transfer.cutoff,
+            };
+        }
         let Some(from) = self.active.take() else {
             return TransferStatus::Failed;
         };
@@ -284,6 +303,7 @@ impl<T> ControllerBroker<T> {
             cutoff,
             deadline_ms: now_ms.saturating_add(timeout_ms),
             quiescent: false,
+            destination_rearm_required: false,
         });
         TransferStatus::Pending {
             requested_lease,
@@ -389,6 +409,32 @@ impl<T> ControllerBroker<T> {
         None
     }
 
+    /// Rearm an in-process policy destination after it consumed an ingress reset without changing
+    /// its transport connection. External destinations must reconnect and use `begin_transfer`.
+    pub fn rearm_internal_transfer_destination(
+        &mut self,
+        host: HostId,
+        connection: ConnectionGeneration,
+        now_ms: u64,
+        timeout_ms: u64,
+    ) -> TransferStatus {
+        let Some(transfer) = self.transfer else {
+            return TransferStatus::Failed;
+        };
+        if !transfer.destination_rearm_required
+            || transfer.to != host
+            || transfer.to_connection != connection
+            || !self.connection_matches(host, connection)
+            || timeout_ms == 0
+        {
+            return TransferStatus::Pending {
+                requested_lease: transfer.requested_lease,
+                cutoff: transfer.cutoff,
+            };
+        }
+        self.rearm_transfer_destination(connection, now_ms, timeout_ms)
+    }
+
     /// Retire all delivery after an upstream bounded ingress overflow. The dropped native batch
     /// may contain release edges, so authority cannot survive and delivery stays behind the reset
     /// barrier until native neutral is observed and a lease is granted again.
@@ -405,7 +451,10 @@ impl<T> ControllerBroker<T> {
             if self.exhausted {
                 return None;
             }
-            self.transfer = Some(transfer);
+            self.transfer = Some(Transfer {
+                destination_rearm_required: true,
+                ..transfer
+            });
             if let Some(predecessor) = self.hosts.get_mut(&transfer.from.host) {
                 predecessor.outbox.clear();
                 predecessor.outbox.push_back(BrokerMessage::Revoke {
@@ -512,7 +561,11 @@ impl<T> ControllerBroker<T> {
         let Some(transfer) = self.transfer else {
             return TransferStatus::Failed;
         };
-        if !transfer.quiescent || !self.neutral || self.reset_barrier {
+        if transfer.destination_rearm_required
+            || !transfer.quiescent
+            || !self.neutral
+            || self.reset_barrier
+        {
             return TransferStatus::Pending {
                 requested_lease: transfer.requested_lease,
                 cutoff: transfer.cutoff,
@@ -530,6 +583,27 @@ impl<T> ControllerBroker<T> {
         self.transfer = None;
         self.active = Some(lease);
         TransferStatus::Granted(lease)
+    }
+
+    fn rearm_transfer_destination(
+        &mut self,
+        connection: ConnectionGeneration,
+        now_ms: u64,
+        timeout_ms: u64,
+    ) -> TransferStatus {
+        let Some(mut transfer) = self.transfer else {
+            return TransferStatus::Failed;
+        };
+        let Some(requested_lease) = self.allocate_lease_epoch() else {
+            self.fail_closed();
+            return TransferStatus::Failed;
+        };
+        transfer.to_connection = connection;
+        transfer.requested_lease = requested_lease;
+        transfer.deadline_ms = now_ms.saturating_add(timeout_ms);
+        transfer.destination_rearm_required = false;
+        self.transfer = Some(transfer);
+        self.try_finish_transfer()
     }
 
     fn connection_matches(&self, host: HostId, generation: ConnectionGeneration) -> bool {
@@ -900,7 +974,7 @@ mod tests {
         let b = broker.attach(HostId(2));
         let old = broker.grant(HostId(1), a).unwrap();
         let TransferStatus::Pending {
-            requested_lease,
+            requested_lease: abandoned_lease,
             cutoff,
         } = broker.begin_transfer(HostId(2), b, 10, 100)
         else {
@@ -928,14 +1002,23 @@ mod tests {
                 | IngressDisposition::RejectedResetBarrier { .. }
         ));
         assert!(broker.set_neutral(true).is_none());
-        assert_eq!(
+        assert!(matches!(
             broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
-            TransferStatus::Granted(Lease {
-                host: HostId(2),
-                connection_generation: b,
-                epoch: requested_lease,
-            })
-        );
+            TransferStatus::Pending { .. }
+        ));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), b, 20, 100),
+            TransferStatus::Pending { .. }
+        ));
+        let reconnected_b = broker.attach(HostId(2));
+        let TransferStatus::Granted(granted) =
+            broker.begin_transfer(HostId(2), reconnected_b, 30, 100)
+        else {
+            panic!("fresh destination request must complete the fenced transfer");
+        };
+        assert_eq!(granted.host, HostId(2));
+        assert_eq!(granted.connection_generation, reconnected_b);
+        assert_ne!(granted.epoch, abandoned_lease);
     }
 
     #[test]
@@ -960,7 +1043,14 @@ mod tests {
             broker.acknowledge_verified_termination(HostId(1), a),
             TransferStatus::Pending { .. }
         ));
-        let granted = broker.set_neutral(true).unwrap();
+        assert!(broker.set_neutral(true).is_none());
+        assert!(broker.active_lease().is_none());
+        let reconnected_b = broker.attach(HostId(2));
+        let TransferStatus::Granted(granted) =
+            broker.begin_transfer(HostId(2), reconnected_b, 30, 100)
+        else {
+            panic!("verified predecessor still requires fresh destination rearm");
+        };
         assert_eq!(granted.host, HostId(2));
         assert!(broker.drain(HostId(1), a).is_empty());
         assert!(matches!(

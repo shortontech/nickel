@@ -5980,6 +5980,14 @@ impl NickelSession {
                 self.dispatch_brokered_controller(delivery);
             }
         }
+        if neutral {
+            let _ = self.controller_broker.rearm_internal_transfer_destination(
+                ControllerHostId(0),
+                self.controller_internal_connection,
+                now_ms,
+                DEFAULT_TRANSFER_DEADLINE_MS,
+            );
+        }
         let transfer_grant = self.controller_broker.set_neutral(neutral);
         if transfer_grant.is_some() {
             self.controller_recovery = None;
