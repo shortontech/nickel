@@ -1577,11 +1577,7 @@ impl NickelSession {
                         {
                             tracing::warn!(?error, "failed to reassert X11 keyboard focus");
                         }
-                        self.space.elements().for_each(|window| {
-                            if let Some(toplevel) = window.toplevel() {
-                                toplevel.send_pending_configure();
-                            }
-                        });
+                        self.send_tracked_xdg_configures_for_all_windows();
                         self.notify_protocol_snapshot();
                         match part {
                             FramePart::Close => {
@@ -1829,25 +1825,19 @@ impl NickelSession {
                                 {
                                     tracing::warn!(?error, "failed to reassert X11 keyboard focus");
                                 }
-                                self.space.elements().for_each(|window| {
-                                    if let Some(toplevel) = window.toplevel() {
-                                        toplevel.send_pending_configure();
-                                    }
-                                });
+                                self.send_tracked_xdg_configures_for_all_windows();
                             }
                         }
                     } else {
                         self.space.elements().for_each(|window| {
                             window.set_activated(false);
-                            if let Some(toplevel) = window.toplevel() {
-                                toplevel.send_pending_configure();
-                            }
                         });
                         self.realize_seat_focus_with_serial(
                             None,
                             nickel_core::focus::FocusScope::Ordinary,
                             serial,
                         );
+                        self.send_tracked_xdg_configures_for_all_windows();
                     }
                     self.notify_protocol_snapshot();
                 };

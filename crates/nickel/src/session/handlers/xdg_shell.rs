@@ -1179,11 +1179,7 @@ impl NickelSession {
                 Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
                 nickel_core::focus::FocusScope::Ordinary,
             );
-            self.space.elements().for_each(|window| {
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_pending_configure();
-                }
-            });
+            self.send_tracked_xdg_configures_for_all_windows();
         }
     }
 

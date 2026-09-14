@@ -399,11 +399,7 @@ impl NickelSession {
             if surface.is_maximized() {
                 self.apply_maximized_x11_geometry(&window, &surface, true);
             }
-            self.space.elements().for_each(|candidate| {
-                if let Some(toplevel) = candidate.toplevel() {
-                    toplevel.send_pending_configure();
-                }
-            });
+            self.send_tracked_xdg_configures_for_all_windows();
         }
         self.request_output_redraw();
         self.notify_protocol_snapshot();

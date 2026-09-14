@@ -388,7 +388,7 @@ impl ResizeSurfaceState {
                     *self = Self::Idle;
                     return result;
                 }
-                Some((*edges, *initial_rect))
+                None
             }
             Self::Idle => None,
         }
@@ -580,7 +580,7 @@ mod tests {
             terminal_configures: vec![12_u32.into()],
         };
 
-        assert!(state.commit(Some(11_u32.into())).is_some());
+        assert!(state.commit(Some(11_u32.into())).is_none());
         assert!(matches!(
             state,
             ResizeSurfaceState::WaitingForLastCommit { .. }
@@ -600,7 +600,7 @@ mod tests {
                 terminal_configures: recorded,
             };
 
-            assert!(state.commit(Some(acknowledged.into())).is_some());
+            assert_eq!(state.commit(Some(acknowledged.into())).is_some(), retired);
             assert_eq!(state == ResizeSurfaceState::Idle, retired);
         }
     }

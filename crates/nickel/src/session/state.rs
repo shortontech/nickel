@@ -4925,7 +4925,7 @@ impl NickelSession {
                                         width: width as i32,
                                         height: height as i32,
                                     };
-                                    Self::configure_window(&window, geometry);
+                                    self.configure_window(&window, geometry);
                                     if let Some(surface) = window.x11_surface() {
                                         surface
                                             .configure(Rectangle::new(
@@ -8645,7 +8645,7 @@ impl NickelSession {
             .and_then(|window| window.toplevel().cloned())
         {
             surface.with_pending_state(|state| state.size = Some((width, area.height).into()));
-            surface.send_pending_configure();
+            self.send_tracked_xdg_configure(&surface);
         }
         self.notify_protocol_snapshot();
     }
@@ -8684,7 +8684,7 @@ impl NickelSession {
             self.map_compositor_moved_window(window.clone(), location, true);
             if let Some(surface) = window.toplevel() {
                 surface.with_pending_state(|state| state.size = Some(restore.geometry.size));
-                surface.send_pending_configure();
+                self.send_tracked_xdg_configure(&surface);
             }
         } else if self
             .protocol_windows()
@@ -9506,11 +9506,7 @@ impl NickelSession {
                 Some(crate::session::focus::KeyboardFocusTarget::Wayland(surface)),
                 FocusScope::Launcher,
             );
-            self.space.elements().for_each(|window| {
-                if let Some(toplevel) = window.toplevel() {
-                    toplevel.send_pending_configure();
-                }
-            });
+            self.send_tracked_xdg_configures_for_all_windows();
             self.raise_panels();
         } else {
             self.space.unmap_elem(&window);
@@ -9609,11 +9605,7 @@ impl NickelSession {
             crate::session::focus::KeyboardFocusTarget::for_window(&target),
             FocusScope::Other(role as u64),
         );
-        self.space.elements().for_each(|window| {
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.send_pending_configure();
-            }
-        });
+        self.send_tracked_xdg_configures_for_all_windows();
         true
     }
 
@@ -10563,6 +10555,30 @@ impl NickelSession {
         }
     }
 
+    pub(crate) fn send_tracked_xdg_configure(
+        &mut self,
+        surface: &smithay::wayland::shell::xdg::ToplevelSurface,
+    ) -> Option<smithay::utils::Serial> {
+        let serial = surface.send_pending_configure();
+        if let Some(serial) = serial
+            && let Some(window) = self.xdg_toplevel_window(surface.wl_surface())
+        {
+            self.record_xdg_configure_incorporation(&window, serial);
+        }
+        serial
+    }
+
+    pub(crate) fn send_tracked_xdg_configures_for_all_windows(&mut self) {
+        let surfaces = self
+            .space
+            .elements()
+            .filter_map(|window| window.toplevel().cloned())
+            .collect::<Vec<_>>();
+        for surface in surfaces {
+            self.send_tracked_xdg_configure(&surface);
+        }
+    }
+
     pub(crate) fn record_x11_client_desired_geometry(
         &mut self,
         id: WindowId,
@@ -10734,7 +10750,7 @@ impl NickelSession {
         }
         let target = shell_layout::centered_in(output, (size.w, size.h));
         if size.w != target.width || size.h != target.height {
-            Self::configure_window(window, target);
+            self.configure_window(window, target);
         }
         let location = Self::shell_surface_location(window, target);
         self.map_buffered_window(window.clone(), location, true);
@@ -10813,7 +10829,7 @@ impl NickelSession {
             let Some(geometry) = self.space.output_geometry(output) else {
                 continue;
             };
-            Self::configure_window(
+            self.configure_window(
                 &lock,
                 Geometry {
                     x: geometry.loc.x,
@@ -11128,7 +11144,7 @@ impl NickelSession {
         let height = requested_height.clamp(52, maximum_height);
         let x = x.clamp(output.x, output.x + output.width - width);
         let y = output.y + output.height - shell_layout::PANEL_HEIGHT - height - 4;
-        Self::configure_window(
+        self.configure_window(
             &window,
             Geometry {
                 x,
@@ -11150,11 +11166,7 @@ impl NickelSession {
                 FocusScope::Ordinary,
             );
         }
-        self.space.elements().for_each(|element| {
-            if let Some(toplevel) = element.toplevel() {
-                toplevel.send_pending_configure();
-            }
-        });
+        self.send_tracked_xdg_configures_for_all_windows();
         self.space.raise_element(&window, focus);
         self.raise_panels();
         eprintln!("nickel: {label} shown at {x},{y}");
@@ -11258,7 +11270,7 @@ impl NickelSession {
         if !self.placement_is_authorized(id, placement) {
             return;
         }
-        Self::configure_window(window, target);
+        self.configure_window(window, target);
         let location = Self::shell_surface_location(window, target);
         self.map_buffered_window(window.clone(), location, false);
     }
@@ -11331,7 +11343,7 @@ impl NickelSession {
             (size.w.max(1), size.h.max(1)),
             anchor.preferred,
         );
-        Self::configure_window(&window, target);
+        self.configure_window(&window, target);
         let location = Self::shell_surface_location(&window, target);
         self.hidden_shell_roles.remove(&role);
         self.hidden_shell_role_locations
@@ -11498,11 +11510,7 @@ impl NickelSession {
         {
             tracing::warn!(?error, "failed to reassert X11 keyboard focus");
         }
-        self.space.elements().for_each(|window| {
-            if let Some(toplevel) = window.toplevel() {
-                toplevel.send_pending_configure();
-            }
-        });
+        self.send_tracked_xdg_configures_for_all_windows();
         self.raise_panels();
         self.notify_protocol_snapshot();
         self.sync_internal_window_decorations();
@@ -11992,7 +12000,7 @@ impl NickelSession {
                 width: geometry.size.w,
                 height: geometry.size.h,
             };
-            Self::configure_window(&desktop, geometry);
+            self.configure_window(&desktop, geometry);
             let location = Self::shell_surface_location(&desktop, geometry);
             self.map_buffered_window(desktop, location, false);
         }
@@ -12019,7 +12027,7 @@ impl NickelSession {
                 continue;
             }
             let geometry = shell_layout::panel(output);
-            Self::configure_window(&panel, geometry);
+            self.configure_window(&panel, geometry);
             let location = Self::shell_surface_location(&panel, geometry);
             self.map_buffered_window(panel.clone(), location, false);
             self.space.raise_element(&panel, false);
@@ -12167,7 +12175,7 @@ impl NickelSession {
         self.space
             .map_element(window, (geometry.x, geometry.y), true);
         self.raise_panels();
-        surface.send_pending_configure();
+        self.send_tracked_xdg_configure(surface);
         self.notify_protocol_snapshot();
     }
 
@@ -12247,7 +12255,7 @@ impl NickelSession {
             self.map_buffered_window(window, (restore.x, restore.y), true);
         }
         self.raise_panels();
-        surface.send_pending_configure();
+        self.send_tracked_xdg_configure(surface);
         self.notify_protocol_snapshot();
     }
 
@@ -12294,7 +12302,7 @@ impl NickelSession {
         });
         window.override_z_index(45);
         self.map_buffered_window(window, (output.x, output.y), true);
-        surface.send_pending_configure();
+        self.send_tracked_xdg_configure(surface);
     }
 
     pub fn unfullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
@@ -12336,7 +12344,7 @@ impl NickelSession {
             }
         }
         self.raise_panels();
-        surface.send_pending_configure();
+        self.send_tracked_xdg_configure(surface);
     }
 
     pub fn fullscreen_x11(&mut self, surface: &smithay::xwayland::X11Surface) {
@@ -12512,10 +12520,9 @@ impl NickelSession {
                     geometry,
                 );
             }
-            Self::configure_window(&window, geometry);
+            self.configure_window(&window, geometry);
             self.space
                 .map_element(window, (geometry.x, geometry.y), true);
-            surface.send_pending_configure();
         }
         let maximized_x11 = self
             .space
@@ -12686,7 +12693,7 @@ impl NickelSession {
         });
         self.space
             .map_element(window.clone(), (geometry.x, geometry.y), true);
-        surface.send_pending_configure();
+        self.send_tracked_xdg_configure(&surface);
         self.notify_protocol_snapshot();
         Some((geometry.x, geometry.y).into())
     }
@@ -12725,11 +12732,10 @@ impl NickelSession {
                 {
                     continue;
                 }
-                Self::configure_window(&window, output);
+                self.configure_window(&window, output);
                 window.override_z_index(45);
                 self.space
                     .map_element(window.clone(), (output.x, output.y), true);
-                surface.send_pending_configure();
             } else if let Some(surface) = window.x11_surface() {
                 let id = self.x11_windows.get(&surface.window_id()).copied();
                 let geometry = smithay::utils::Rectangle::new(
@@ -13139,7 +13145,7 @@ impl NickelSession {
             return false;
         }
         let geometry = placement.desired;
-        Self::configure_window(window, geometry);
+        self.configure_window(window, geometry);
         if let Some(surface) = window.x11_surface() {
             let _ = surface.configure(smithay::utils::Rectangle::new(
                 (geometry.x, geometry.y).into(),
@@ -13257,12 +13263,12 @@ impl NickelSession {
         shell_layout::bottom_left_in(work_area, (width, height), 18, 8)
     }
 
-    fn configure_window(window: &Window, geometry: Geometry) {
+    fn configure_window(&mut self, window: &Window, geometry: Geometry) {
         if let Some(toplevel) = window.toplevel() {
             toplevel.with_pending_state(|state| {
                 state.size = Some(Size::from((geometry.width, geometry.height)));
             });
-            toplevel.send_pending_configure();
+            self.send_tracked_xdg_configure(toplevel);
         }
     }
 
