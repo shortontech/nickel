@@ -23,6 +23,25 @@ use crate::{
     winit_shell::{PANEL_HEIGHT, PanelEdge, SurfaceRole},
 };
 
+/// Replace an adapter-local recipient with the compositor-owned internal slot.
+///
+/// `step_slot_changes` is the authority boundary that resolves both the opaque
+/// surface lifetime and its [`SurfaceRole`].  The shared normalized envelope
+/// does not yet carry a role discriminator, so the role remains enforced by
+/// the typed routing branch below rather than being encoded into a numeric
+/// lease.  Source, admission, operation, transform, and text bindings remain
+/// owned by the producer and must pass through unchanged.
+fn bind_internal_ingress_recipient(event: &mut nickel_ui::HostEvent, recipient: InternalSurfaceId) {
+    let nickel_ui::HostEvent::NormalizedIngress(envelope) = event else {
+        return;
+    };
+    let lifetime = recipient.snapshot_token();
+    envelope.recipient = nickel_ui::NormalizedRecipientBinding {
+        lease: lifetime,
+        lifetime,
+    };
+}
+
 /// Geometry of an output supplied by the compositor-native host.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InternalOutput {
