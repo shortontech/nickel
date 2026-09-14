@@ -1,5 +1,6 @@
 #[cfg(unix)]
 pub mod client;
+pub mod controller_broker;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
