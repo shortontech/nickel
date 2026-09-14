@@ -88,6 +88,7 @@ enum SessionControllerSource {
         lease: Option<nickel_session_protocol::controller_broker::LeaseEpoch>,
         role_lease: Option<ControllerRoleLease>,
         last_event: nickel_session_protocol::controller_broker::EventId,
+        pending_overflow: Option<ControllerOverflowReport>,
         phase: SessionControllerPhase,
     },
     Retrying {
@@ -100,6 +101,15 @@ enum SessionControllerPhase {
     Lease,
     Poll,
     Acknowledge,
+    Reset,
+}
+
+#[cfg(any(unix, windows))]
+#[derive(Clone, Copy)]
+struct ControllerOverflowReport {
+    lease_epoch: nickel_session_protocol::controller_broker::LeaseEpoch,
+    stream_generation: nickel_session_protocol::controller_broker::StreamGeneration,
+    through: nickel_session_protocol::controller_broker::EventId,
 }
 
 #[cfg(any(unix, windows))]
@@ -159,6 +169,28 @@ impl SessionControllerSource {
         }
     }
 
+    fn report_execution_overflow(&mut self, binding: ControllerExecutionBinding) {
+        if let Self::Attached {
+            connection_generation,
+            lease,
+            pending_overflow,
+            ..
+        } = self
+            && connection_generation.0 == binding.connection_generation
+            && lease.is_some_and(|lease| lease.0 == binding.lease_epoch)
+        {
+            *pending_overflow = Some(ControllerOverflowReport {
+                lease_epoch: nickel_session_protocol::controller_broker::LeaseEpoch(
+                    binding.lease_epoch,
+                ),
+                stream_generation: nickel_session_protocol::controller_broker::StreamGeneration(
+                    binding.stream_generation,
+                ),
+                through: nickel_session_protocol::controller_broker::EventId(binding.event_id),
+            });
+        }
+    }
+
     fn poll_actions(
         &mut self,
     ) -> Vec<(
@@ -207,6 +239,7 @@ impl SessionControllerSource {
                                 lease: None,
                                 role_lease: None,
                                 last_event: nickel_session_protocol::controller_broker::EventId(0),
+                                pending_overflow: None,
                                 phase: SessionControllerPhase::Lease,
                             },
                             Vec::new(),
@@ -225,6 +258,7 @@ impl SessionControllerSource {
                 mut lease,
                 mut role_lease,
                 mut last_event,
+                mut pending_overflow,
                 phase,
             } => match connection.receive() {
                 Ok(None) => (
@@ -234,6 +268,7 @@ impl SessionControllerSource {
                         lease,
                         role_lease,
                         last_event,
+                        pending_overflow,
                         phase,
                     },
                     Vec::new(),
@@ -279,6 +314,17 @@ impl SessionControllerSource {
                                 execution_oracle,
                             },
                         ) => {
+                            if let Some(report) = pending_overflow.take() {
+                                lease = None;
+                                role_lease = None;
+                                actions.clear();
+                                Some(ControllerHostRequest::ReportExecutionOverflow {
+                                    connection_generation,
+                                    lease_epoch: report.lease_epoch,
+                                    stream_generation: report.stream_generation,
+                                    through: report.through,
+                                })
+                            } else {
                             let revocation = messages.iter().find_map(|message| match message {
                                 BrokerMessage::Revoke {
                                     connection_generation: bound,
@@ -387,6 +433,14 @@ impl SessionControllerSource {
                                     connection_generation,
                                 })
                             }
+                            }
+                        }
+                        (
+                            SessionControllerPhase::Reset,
+                            ControllerHostResponse::ResetAcknowledged { .. },
+                        ) => {
+                            *self = Self::retrying();
+                            return Vec::new();
                         }
                         (SessionControllerPhase::Acknowledge, _) => {
                             *self = Self::retrying();
@@ -400,6 +454,11 @@ impl SessionControllerSource {
                             ControllerHostRequest::AcknowledgeQuiescence { .. }
                         ) {
                             SessionControllerPhase::Acknowledge
+                        } else if matches!(
+                            request,
+                            ControllerHostRequest::ReportExecutionOverflow { .. }
+                        ) {
+                            SessionControllerPhase::Reset
                         } else {
                             SessionControllerPhase::Poll
                         };
@@ -414,6 +473,7 @@ impl SessionControllerSource {
                                     lease,
                                     role_lease,
                                     last_event,
+                                    pending_overflow,
                                     phase: next_phase,
                                 },
                                 actions,
@@ -3915,6 +3975,13 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 }
                 if outcome.changed {
                     self.scheduler.invalidate();
+                }
+                #[cfg(any(unix, windows))]
+                if let Some(execution) = outcome.controller_executions.iter().find(|execution| {
+                    execution.disposition == ControllerExecutionDisposition::ResetOverflow
+                }) {
+                    self.session_controller
+                        .report_execution_overflow(execution.binding);
                 }
                 for action in outcome.global_actions {
                     match self

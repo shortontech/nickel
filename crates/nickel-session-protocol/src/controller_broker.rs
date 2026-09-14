@@ -374,6 +374,12 @@ impl<T> ControllerBroker<T> {
         }
         if self.recovery_destination.is_some() {
             self.install_reset(EventId(self.next_event));
+            if !self.exhausted && self.connection_matches(internal, connection) {
+                self.recovery_destination = Some(RecoveryDestination {
+                    host: internal,
+                    abandoned_connection: connection,
+                });
+            }
             return TransferStatus::Failed;
         }
         if self.active.is_some_and(|lease| lease.host != internal) {
@@ -521,6 +527,39 @@ impl<T> ControllerBroker<T> {
             }
         }
         recoverable
+    }
+
+    /// Accept an authenticated executor's report that its bounded press ledger overflowed.
+    /// The reporting connection is abandoned: recovery requires neutral input and a fresh
+    /// connection/lease request, so a later release on the old stream cannot rearm execution.
+    pub fn reset_executor_overflow(
+        &mut self,
+        host: HostId,
+        connection: ConnectionGeneration,
+        lease_epoch: LeaseEpoch,
+        stream_generation: StreamGeneration,
+        through: EventId,
+    ) -> bool {
+        let Some(active) = self.active else {
+            return false;
+        };
+        if active.host != host
+            || active.connection_generation != connection
+            || active.epoch != lease_epoch
+            || self.stream_generation != stream_generation
+            || through.0 > self.next_event
+        {
+            return false;
+        }
+        self.install_reset(through);
+        if self.exhausted {
+            return false;
+        }
+        self.recovery_destination = Some(RecoveryDestination {
+            host,
+            abandoned_connection: connection,
+        });
+        true
     }
 
     pub fn expire_transfer(&mut self, now_ms: u64) -> TransferStatus {
@@ -1205,6 +1244,73 @@ mod tests {
             TransferStatus::Failed
         );
         assert!(broker.grant(HostId(1), current).is_some());
+    }
+
+    #[test]
+    fn executor_overflow_requires_acknowledged_reset_neutral_and_new_connection() {
+        let mut broker = ControllerBroker::new(4);
+        let old_connection = broker.attach(HostId(1));
+        let lease = broker.grant(HostId(1), old_connection).unwrap();
+        let IngressDisposition::Delivered { event_id, .. } = broker.ingest(1) else {
+            panic!("initial event must be delivered");
+        };
+
+        assert!(broker.reset_executor_overflow(
+            HostId(1),
+            old_connection,
+            lease.epoch,
+            broker.stream_generation(),
+            event_id,
+        ));
+        assert!(broker.active_lease().is_none());
+        assert!(matches!(
+            broker.ingest(2),
+            IngressDisposition::RejectedResetBarrier { .. }
+        ));
+        broker.set_neutral(true);
+        assert!(broker.grant(HostId(1), old_connection).is_none());
+
+        let new_connection = broker.attach(HostId(1));
+        assert!(matches!(
+            broker.begin_transfer(HostId(1), new_connection, 10, 100),
+            TransferStatus::Granted(_)
+        ));
+    }
+
+    #[test]
+    fn security_takeover_replaces_timed_out_external_destination_with_internal_recovery() {
+        let mut broker = ControllerBroker::<()>::new(8);
+        let internal = broker.attach(HostId(0));
+        let predecessor = broker.attach(HostId(1));
+        let abandoned = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), predecessor).unwrap();
+        let TransferStatus::Pending { cutoff, .. } =
+            broker.begin_transfer(HostId(2), abandoned, 0, 10)
+        else {
+            panic!("external transfer must start");
+        };
+        assert_eq!(broker.expire_transfer(10), TransferStatus::Failed);
+
+        assert_eq!(
+            broker.security_takeover(HostId(0), internal, 11, 10),
+            TransferStatus::Failed
+        );
+        let fresh_abandoned = broker.attach(HostId(2));
+        assert_eq!(
+            broker.begin_transfer(HostId(2), fresh_abandoned, 12, 10),
+            TransferStatus::Failed
+        );
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), predecessor, old.epoch, cutoff,),
+            TransferStatus::Failed
+        );
+        assert!(broker.set_neutral(true).is_none());
+        let TransferStatus::Granted(granted) =
+            broker.rearm_internal_transfer_destination(HostId(0), internal, 13, 10)
+        else {
+            panic!("internal policy successor must recover after poison and neutral");
+        };
+        assert_eq!(granted.host, HostId(0));
     }
 
     #[test]

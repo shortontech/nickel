@@ -642,6 +642,12 @@ pub enum ControllerHostRequest {
         lease_epoch: controller_broker::LeaseEpoch,
         cutoff: controller_broker::EventId,
     },
+    ReportExecutionOverflow {
+        connection_generation: controller_broker::ConnectionGeneration,
+        lease_epoch: controller_broker::LeaseEpoch,
+        stream_generation: controller_broker::StreamGeneration,
+        through: controller_broker::EventId,
+    },
     Detach {
         connection_generation: controller_broker::ConnectionGeneration,
     },
@@ -679,6 +685,9 @@ pub enum ControllerHostResponse {
         lease_epoch: controller_broker::LeaseEpoch,
     },
     LeaseFailed,
+    ResetAcknowledged {
+        stream_generation: controller_broker::StreamGeneration,
+    },
     Messages {
         lease_epoch: Option<controller_broker::LeaseEpoch>,
         messages: Vec<controller_broker::BrokerMessage<ControllerEnvelopePayload>>,

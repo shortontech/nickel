@@ -6244,6 +6244,35 @@ impl NickelSession {
                     .store(true, Ordering::Release);
                 controller_transfer_response(status)
             }
+            ControllerHostRequest::ReportExecutionOverflow {
+                connection_generation,
+                lease_epoch,
+                stream_generation,
+                through,
+            } => {
+                if !self.controller_broker.reset_executor_overflow(
+                    host,
+                    connection_generation,
+                    lease_epoch,
+                    stream_generation,
+                    through,
+                ) {
+                    return ServerMessage::ControllerHost(ControllerHostResponse::LeaseFailed);
+                }
+                if self
+                    .controller_external_lease_binding
+                    .is_some_and(|binding| {
+                        binding.host == host && binding.connection == connection_generation
+                    })
+                {
+                    self.controller_external_lease_binding = None;
+                }
+                self.controller_neutral_probe_requested
+                    .store(true, Ordering::Release);
+                ControllerHostResponse::ResetAcknowledged {
+                    stream_generation: self.controller_broker.stream_generation(),
+                }
+            }
             ControllerHostRequest::Detach {
                 connection_generation,
             } => {
