@@ -2687,7 +2687,8 @@ fn xdg_configure_extends_existing_request(
     revisions: nickel_core::geometry_authority::DesiredRevisions,
     placement: Geometry,
 ) -> bool {
-    record.settlement.request.desired == revisions
+    record.settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
+        && record.settlement.request.desired == revisions
         && record.settlement.request.placement == placement
 }
 
@@ -10887,6 +10888,18 @@ impl NickelSession {
         true
     }
 
+    fn clear_xdg_resize_operation(&mut self, id: WindowId) {
+        if let Some(window) = self.registry_native_window(id)
+            && let Some(surface) = window.toplevel()
+        {
+            crate::session::grabs::resize_grab::clear_resize_correlation(surface.wl_surface());
+        }
+        self.cancel_geometry_window_operation(
+            id,
+            nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+        );
+    }
+
     pub(crate) fn record_xdg_desired_geometry(
         &mut self,
         window: &Window,
@@ -10965,26 +10978,20 @@ impl NickelSession {
                         == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
                 }
                 if expired {
-                    if let Some(window) = state.registry_native_window(id)
-                        && let Some(surface) = window.toplevel()
-                    {
-                        crate::session::grabs::resize_grab::clear_resize_correlation(
-                            surface.wl_surface(),
-                        );
-                    }
-                    state.cancel_geometry_window_operation(
-                        id,
-                        nickel_core::window_operation::CancellationReason::AuthorityUnknown,
-                    );
+                    state.clear_xdg_resize_operation(id);
                 }
                 smithay::reexports::calloop::timer::TimeoutAction::Drop
             },
         );
-        if timer.is_err()
+        let timer_failed = timer.is_err();
+        if timer_failed
             && let Some(record) = self.xdg_geometry_settlements.get_mut(&id)
             && record.settlement.request.id == request_id
         {
             record.settlement.fail();
+        }
+        if timer_failed {
+            self.clear_xdg_resize_operation(id);
         }
     }
 
@@ -14397,7 +14404,7 @@ mod protocol_tests {
         };
         let mut authority = GeometryAuthority::new(first, Presentation::Normal);
         let revisions = authority.revisions();
-        let record = XdgConfigureSettlement {
+        let mut record = XdgConfigureSettlement {
             configures: std::collections::VecDeque::new(),
             outcomes: std::collections::VecDeque::new(),
             settlement: Settlement::new(
@@ -14416,6 +14423,16 @@ mod protocol_tests {
         assert!(xdg_configure_extends_existing_request(
             &record, revisions, first
         ));
+        record.settlement.fail();
+        assert!(!xdg_configure_extends_existing_request(
+            &record, revisions, first
+        ));
+        record.settlement.status = nickel_core::geometry_authority::SettlementStatus::Pending;
+        record.settlement.expire(750);
+        assert!(!xdg_configure_extends_existing_request(
+            &record, revisions, first
+        ));
+        record.settlement.status = nickel_core::geometry_authority::SettlementStatus::Pending;
 
         let newer = nickel_core::geometry::LogicalRect { x: 11, ..first };
         authority.authorize_placement(
