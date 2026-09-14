@@ -41,7 +41,7 @@ use windows::{
             TH32CS_SNAPPROCESS,
         },
         System::LibraryLoader::GetModuleHandleW,
-        System::SystemInformation::GetTickCount,
+        System::SystemInformation::GetTickCount64,
         System::Threading::{
             AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
             PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -57,6 +57,7 @@ use windows::{
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock},
         },
         UI::{
+            Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent},
             HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext},
             Input::KeyboardAndMouse::{
                 GetAsyncKeyState, GetCapture, ReleaseCapture, SetCapture, SetFocus,
@@ -71,8 +72,9 @@ use windows::{
             },
             WindowsAndMessaging::{
                 BringWindowToTop, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
-                DefWindowProcW, DestroyIcon, DrawIconEx, EnumWindows, GA_ROOT, GA_ROOTOWNER,
-                GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_SYSTEM_MOVESIZEEND,
+                EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON,
+                GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
                 GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
@@ -86,10 +88,11 @@ use windows::{
                 SWP_ASYNCWINDOWPOS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
                 SWP_NOZORDER, SendNotifyMessageW, SetForegroundWindow, SetLayeredWindowAttributes,
                 SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CLOSE,
-                WM_CONTEXTMENU, WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP,
-                WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD,
-                WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WINDOW_EX_STYLE, WINDOW_STYLE,
+                WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLOSE, WM_CONTEXTMENU,
+                WM_COPYDATA, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+                WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSCOMMAND, WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN,
+                WS_CLIPSIBLINGS, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
                 WS_EX_TOOLWINDOW, WS_POPUP, WindowFromPoint,
             },
         },
@@ -1124,6 +1127,10 @@ fn run_super_key_hook(
     diagnostic_state: &Arc<Mutex<WindowsShortcutOwnerState>>,
 ) {
     SHORTCUT_SENDER.set(sender).ok();
+    let native_move_size_hook = NativeMoveSizeHook::install();
+    if native_move_size_hook.is_none() {
+        tracing::warn!("native move/size ownership observation is unavailable");
+    }
     let run = native_hotkey_requests()[0];
     let registrations = Arc::new(Mutex::new((RegistrationTable::default(), None)));
     let ready_registrations = Arc::clone(&registrations);
@@ -1319,6 +1326,54 @@ static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
     LazyLock::new(|| Mutex::new(WindowDragCoordinator::default()));
+
+struct NativeMoveSizeHook(HWINEVENTHOOK);
+
+impl NativeMoveSizeHook {
+    fn install() -> Option<Self> {
+        let hook = unsafe {
+            SetWinEventHook(
+                EVENT_SYSTEM_MOVESIZESTART,
+                EVENT_SYSTEM_MOVESIZEEND,
+                None,
+                Some(native_move_size_event),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
+        (!hook.is_invalid()).then_some(Self(hook))
+    }
+}
+
+impl Drop for NativeMoveSizeHook {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnhookWinEvent(self.0);
+        }
+    }
+}
+
+unsafe extern "system" fn native_move_size_event(
+    _: HWINEVENTHOOK,
+    event: u32,
+    window: HWND,
+    _: i32,
+    _: i32,
+    _: u32,
+    _: u32,
+) {
+    if window.is_invalid() {
+        return;
+    }
+    let started = event == EVENT_SYSTEM_MOVESIZESTART;
+    if !started && event != EVENT_SYSTEM_MOVESIZEEND {
+        return;
+    }
+    if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
+        coordinator.native_move_size(window.0 as isize, started, unsafe { GetTickCount64() });
+    }
+}
 const PANEL_APPBAR_CALLBACK: u32 = 0x8000 + 17;
 const ABN_FULLSCREENAPP_CODE: usize = 2;
 
@@ -1329,11 +1384,18 @@ struct WindowDrag {
     window: isize,
     start: POINT,
     resize_edge: Option<u32>,
-    initiated_at: u32,
-    last_update: u32,
+    initiated_at: u64,
+    last_update: u64,
     last_apply: NativeApplyState,
     authority: GeometryAuthority,
     settlement: Option<Settlement>,
+    last_observed: LogicalRect,
+}
+
+struct RetainedNativeSettlement {
+    window: isize,
+    authority: GeometryAuthority,
+    settlement: Settlement,
     last_observed: LogicalRect,
 }
 
@@ -1350,6 +1412,7 @@ struct WindowDragCoordinator {
     active: Option<WindowDrag>,
     next_mapping_generation: u64,
     next_native_request: u64,
+    retained_settlement: Option<RetainedNativeSettlement>,
     last_terminal_apply: Option<NativeApplyState>,
 }
 
@@ -1360,7 +1423,7 @@ struct WindowDragAdmission {
     rectangle: RECT,
     resize_edge: Option<u32>,
     initiating_button: u16,
-    time: u32,
+    time: u64,
 }
 
 impl WindowDragCoordinator {
@@ -1447,7 +1510,7 @@ impl WindowDragCoordinator {
         true
     }
 
-    fn update(&mut self, pointer: POINT, time: u32) -> Result<(), ()> {
+    fn update(&mut self, pointer: POINT, time: u64) -> Result<(), ()> {
         let Some(mut active) = self.active.take() else {
             return Err(());
         };
@@ -1503,13 +1566,17 @@ impl WindowDragCoordinator {
         let Some(mut active) = self.active.take() else {
             return;
         };
-        let last_update = active.last_update;
-        if let Err(reason) = observe_window_drag(&mut active, last_update, true) {
-            let _ = self.reducer.cancel(active.operation, reason);
-            self.last_terminal_apply = Some(active.last_apply);
-            return;
-        }
         if self.reducer.release(active.operation, binding).disposition == Disposition::Applied {
+            self.retained_settlement =
+                active
+                    .settlement
+                    .take()
+                    .map(|settlement| RetainedNativeSettlement {
+                        window: active.window,
+                        authority: active.authority.clone(),
+                        settlement,
+                        last_observed: active.last_observed,
+                    });
             self.last_terminal_apply = Some(active.last_apply);
             self.active = None;
         } else {
@@ -1521,6 +1588,75 @@ impl WindowDragCoordinator {
         if let Some(active) = self.active.take() {
             let _ = self.reducer.cancel(active.operation, reason);
             self.last_terminal_apply = Some(active.last_apply);
+        }
+    }
+
+    fn observe_retained_settlement(&mut self, now: u64) {
+        let Some(mut retained) = self.retained_settlement.take() else {
+            return;
+        };
+        let mut rectangle = RECT::default();
+        let window = HWND(retained.window as *mut c_void);
+        if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
+            retained.authority.base_placement.control = ControlMode::Delegated;
+            return;
+        }
+        let observed = logical_rect(rectangle);
+        let fact = native_geometry(observed);
+        if observed == retained.settlement.request.placement {
+            let request = retained.settlement.request.id;
+            retained
+                .settlement
+                .observe(fact, ObservationCausality::Correlated(request));
+            retained
+                .authority
+                .observe(fact, ObservationCausality::Correlated(request));
+            return;
+        }
+        retained
+            .settlement
+            .observe(fact, ObservationCausality::Unknown);
+        retained.settlement.expire(now);
+        if retained.settlement.status == SettlementStatus::Pending {
+            retained.last_observed = observed;
+            self.retained_settlement = Some(retained);
+        } else {
+            retained
+                .authority
+                .observe(fact, ObservationCausality::Unknown);
+            retained.authority.base_placement.control = ControlMode::Delegated;
+        }
+    }
+
+    fn native_move_size(&mut self, window: isize, started: bool, now: u64) {
+        if started {
+            if self
+                .active
+                .as_ref()
+                .is_some_and(|active| active.window == window)
+            {
+                self.cancel(CancellationReason::NativeTakeover);
+            }
+            if let Some(mut retained) = self.retained_settlement.take() {
+                if retained.window != window {
+                    self.retained_settlement = Some(retained);
+                    return;
+                }
+                let fact = native_geometry(retained.last_observed);
+                retained
+                    .settlement
+                    .observe(fact, ObservationCausality::Independent);
+                retained
+                    .authority
+                    .observe(fact, ObservationCausality::Independent);
+                retained.authority.base_placement.control = ControlMode::Delegated;
+            }
+        } else if self
+            .retained_settlement
+            .as_ref()
+            .is_some_and(|retained| retained.window == window)
+        {
+            self.observe_retained_settlement(now);
         }
     }
 }
@@ -1797,14 +1933,15 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         x: event.x,
         y: event.y,
     };
+    let now = unsafe { GetTickCount64() };
     if let Ok(mut coordinator) = WINDOW_DRAG.lock()
-        && let Some(operation) = coordinator.active
+        && let Some(operation) = coordinator.active.clone()
     {
         let release = pointer_release_binding(event.kind);
         let current_release = release == Some(operation.completion);
         if event.kind == NativePointerKind::Moved || current_release {
             if event.kind == NativePointerKind::Moved
-                && event.time.wrapping_sub(operation.initiated_at) >= 250
+                && now.saturating_sub(operation.initiated_at) >= 250
                 && !completion_button_physically_held(operation.completion)
             {
                 // Low-level button-up delivery is not infallible. Once another
@@ -1821,9 +1958,8 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             } else {
                 8
             };
-            if current_release || event.time.wrapping_sub(operation.last_update) >= minimum_interval
-            {
-                if coordinator.update(point, event.time).is_err() {
+            if current_release || now.saturating_sub(operation.last_update) >= minimum_interval {
+                if coordinator.update(point, now).is_err() {
                     return if current_release {
                         HookDisposition::Suppress
                     } else {
@@ -1919,7 +2055,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             rectangle,
             resize_edge,
             initiating_button,
-            time: event.time,
+            time: now,
         })
     });
     if !admitted {
@@ -1938,7 +2074,7 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let observation = coordinator
         .active
         .as_mut()
-        .map(|active| observe_window_drag(active, unsafe { GetTickCount() }, false));
+        .map(|active| observe_window_drag(active, unsafe { GetTickCount64() }, false));
     match observation {
         Some(Err(reason)) => {
             coordinator.cancel(reason);
@@ -1947,6 +2083,7 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
         Some(Ok(false)) => return,
         _ => {}
     }
+    coordinator.observe_retained_settlement(unsafe { GetTickCount64() });
     let Some(active) = coordinator.active.as_ref() else {
         return;
     };
@@ -1965,7 +2102,7 @@ fn apply_window_drag(
     rectangle: LogicalRect,
     request_id: u64,
     mapping_generation: u64,
-    now: u32,
+    now: u64,
 ) -> NativeApplyState {
     let authorized = operation.authority.authorize_placement(
         rectangle,
@@ -1984,7 +2121,7 @@ fn apply_window_drag(
             placement: authorized.desired,
         },
         SettlementLimits {
-            deadline_tick: u64::from(now).saturating_add(250),
+            deadline_tick: now.saturating_add(250),
             max_corrections: 0,
         },
     ));
@@ -2036,7 +2173,7 @@ fn contested_authority(rectangle: RECT) -> GeometryAuthority {
 fn classify_window_drag_observation(
     operation: &mut WindowDrag,
     observed: LogicalRect,
-    now: u32,
+    now: u64,
     final_observation: bool,
 ) -> Result<bool, CancellationReason> {
     let fact = native_geometry(observed);
@@ -2052,7 +2189,7 @@ fn classify_window_drag_observation(
             return Ok(true);
         }
         settlement.observe(fact, ObservationCausality::Unknown);
-        settlement.expire(u64::from(now));
+        settlement.expire(now);
         if final_observation || settlement.status == SettlementStatus::Unconfirmed {
             operation
                 .authority
@@ -2074,7 +2211,7 @@ fn classify_window_drag_observation(
 
 fn observe_window_drag(
     operation: &mut WindowDrag,
-    now: u32,
+    now: u64,
     final_observation: bool,
 ) -> Result<bool, CancellationReason> {
     let mut rectangle = RECT::default();
@@ -4372,11 +4509,12 @@ mod tests {
 
     use super::{
         DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, TrayNotifyIconData,
-        WindowDrag, application_icon, clamp_preview_x, classify_window_drag_observation,
-        contain_rect, contested_authority, executable_icon, is_nickel_host_terminal,
-        is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
-        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
-        restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
+        WindowDrag, WindowDragAdmission, WindowDragCoordinator, application_icon, clamp_preview_x,
+        classify_window_drag_observation, contain_rect, contested_authority, executable_icon,
+        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        parse_windows_command, project_native_preview_diagnostics, project_windows_shortcuts,
+        rectangle_covers, restore_legacy_icon_alpha, should_restore_on_activation,
+        windows_pid_descends_from,
     };
 
     fn contested_drag() -> WindowDrag {
@@ -4456,6 +4594,68 @@ mod tests {
             drag.authority.base_placement.control,
             ControlMode::Delegated
         );
+    }
+
+    #[test]
+    fn release_commits_interaction_and_retains_async_settlement() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        assert!(coordinator.admit(WindowDragAdmission {
+            window: 1,
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 10,
+        }));
+        let active = coordinator.active.as_mut().unwrap();
+        active.settlement = Some(Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(9),
+                mapping_generation: 1,
+                desired: active.authority.revisions(),
+                placement: active.last_observed,
+            },
+            SettlementLimits {
+                deadline_tick: 260,
+                max_corrections: 0,
+            },
+        ));
+        let completion = active.completion;
+        coordinator.release(completion);
+        assert!(coordinator.active.is_none());
+        assert!(coordinator.retained_settlement.is_some());
+    }
+
+    #[test]
+    fn native_move_size_start_supersedes_retained_nickel_settlement() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut drag = contested_drag();
+        let settlement = Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(10),
+                mapping_generation: 1,
+                desired: drag.authority.revisions(),
+                placement: drag.last_observed,
+            },
+            SettlementLimits {
+                deadline_tick: 260,
+                max_corrections: 0,
+            },
+        );
+        coordinator.retained_settlement = Some(super::RetainedNativeSettlement {
+            window: drag.window,
+            authority: std::mem::replace(&mut drag.authority, contested_authority(RECT::default())),
+            settlement,
+            last_observed: drag.last_observed,
+        });
+        coordinator.native_move_size(drag.window, true, 40);
+        assert!(coordinator.retained_settlement.is_none());
     }
 
     #[test]
