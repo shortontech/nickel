@@ -2533,6 +2533,9 @@ impl<A: Application> UiHost<A> {
         };
         if outcome.changed {
             let (_, _, cancellation) = self.rebuild_timed();
+            let cancellation_committed = cancellation.changed
+                || cancellation.disposition == crate::EventDisposition::Handled
+                || !cancellation.messages.is_empty();
             outcome.merge(cancellation);
             if let Some(failure) = self
                 .overlay_failures
@@ -2540,20 +2543,32 @@ impl<A: Application> UiHost<A> {
                 .find(|failure| failure.overlay == id)
                 .cloned()
             {
-                self.state = prior_state;
-                self.tree = prior_tree;
-                self.input_dispatcher = prior_dispatcher;
-                self.pending_long_press = prior_pending_long_press;
-                self.overlay_failures = prior_overlay_failures;
-                self.frame_generation = prior_frame_generation;
-                outcome = HostEventOutcome {
+                let typed_failure = HostEventOutcome {
                     disposition: crate::EventDisposition::Rejected("overlay declaration failed"),
                     semantic_failures: vec![SemanticActionFailure {
-                        target: invocation_target,
+                        target: invocation_target.clone(),
                         error: failure.error,
                     }],
                     ..HostEventOutcome::default()
                 };
+                if cancellation_committed {
+                    // Cancellation has already delivered application messages
+                    // and retired the physical gesture. Preserve that authority,
+                    // discard only the failed overlay request, and resolve a
+                    // coherent base frame from the post-cancellation state.
+                    self.state.dismiss_overlay(crate::DismissReason::Cancel);
+                    let (_, _, base_outcome) = self.rebuild_timed();
+                    outcome.merge(base_outcome);
+                    outcome.merge(typed_failure);
+                } else {
+                    self.state = prior_state;
+                    self.tree = prior_tree;
+                    self.input_dispatcher = prior_dispatcher;
+                    self.pending_long_press = prior_pending_long_press;
+                    self.overlay_failures = prior_overlay_failures;
+                    self.frame_generation = prior_frame_generation;
+                    outcome = typed_failure;
+                }
             }
         }
         outcome.effects = self.application.take_effect_evidence();
@@ -5031,6 +5046,8 @@ mod tests {
 
     struct CancellationViewApplication {
         cancelled: bool,
+        invalidate_overlay_on_cancel: bool,
+        cancellation_effect_pending: bool,
     }
 
     impl Application for CancellationViewApplication {
@@ -5042,7 +5059,32 @@ mod tests {
                 CancellationViewMessage::Drag(crate::DragPhase::Cancelled)
             ) {
                 self.cancelled = true;
+                self.cancellation_effect_pending = true;
             }
+        }
+
+        fn message_evidence(&self, message: &Self::Message) -> MessageEvidence {
+            MessageEvidence {
+                type_name: "cancellation-view",
+                label: matches!(
+                    message,
+                    CancellationViewMessage::Drag(crate::DragPhase::Cancelled)
+                )
+                .then(|| "cancelled".into()),
+            }
+        }
+
+        fn take_effect_evidence(&mut self) -> Vec<EffectEvidence> {
+            self.cancellation_effect_pending
+                .then(|| {
+                    self.cancellation_effect_pending = false;
+                    EffectEvidence {
+                        type_name: "cancellation-view-effect",
+                        label: Some("cancelled".into()),
+                    }
+                })
+                .into_iter()
+                .collect()
         }
 
         fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
@@ -5064,7 +5106,13 @@ mod tests {
             vec![FrameOverlay::surface(
                 crate::TransientSurface::dialog(
                     "modal",
-                    crate::OverlayAnchor::Node(UiId::from("anchor")),
+                    crate::OverlayAnchor::Node(UiId::from(
+                        if self.cancelled && self.invalidate_overlay_on_cancel {
+                            "missing"
+                        } else {
+                            "anchor"
+                        },
+                    )),
                     crate::Size::new(120.0, 80.0),
                     crate::OverlayStyle {
                         background: 0x111111,
@@ -6211,7 +6259,15 @@ mod tests {
 
     #[test]
     fn modal_commit_revalidates_cancellation_driven_view_changes() {
-        let mut host = UiHost::new(CancellationViewApplication { cancelled: false }, 320, 200);
+        let mut host = UiHost::new(
+            CancellationViewApplication {
+                cancelled: false,
+                invalidate_overlay_on_cancel: false,
+                cancellation_effect_pending: false,
+            },
+            320,
+            200,
+        );
         let anchor = host
             .query_unique(&crate::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
@@ -6248,6 +6304,67 @@ mod tests {
             })
             .is_empty()
         );
+    }
+
+    #[test]
+    fn post_cancel_overlay_failure_keeps_gesture_retired_and_evidence() {
+        let mut host = UiHost::new(
+            CancellationViewApplication {
+                cancelled: false,
+                invalidate_overlay_on_cancel: true,
+                cancellation_effect_pending: false,
+            },
+            320,
+            200,
+        );
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Before cancel".into(),
+            })
+            .unwrap();
+        let point = crate::Point {
+            x: anchor.bounds.origin.x + anchor.bounds.size.width / 2.0,
+            y: anchor.bounds.origin.y + anchor.bounds.size.height / 2.0,
+        };
+        host.handle_event(UiEvent::PointerPressed(point));
+
+        let failed = host.open_transient(OverlayId::new("modal"), anchor.id);
+        assert_eq!(
+            failed.disposition,
+            crate::EventDisposition::Rejected("overlay declaration failed")
+        );
+        assert_eq!(failed.semantic_failures.len(), 1);
+        assert!(
+            failed
+                .messages
+                .iter()
+                .any(|message| message.label.as_deref() == Some("cancelled"))
+        );
+        assert!(
+            failed
+                .effects
+                .iter()
+                .any(|effect| effect.type_name == "cancellation-view-effect")
+        );
+        assert!(host.application().cancelled);
+        assert!(host.state.pressed().is_none());
+        assert!(host.state.captured().is_none());
+        assert_eq!(host.inspect().open_overlay, None);
+        assert!(
+            host.query(&crate::SemanticSelector::Role(SemanticRole::Dialog))
+                .is_empty()
+        );
+        assert!(
+            host.query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "After cancel".into(),
+            })
+            .is_ok()
+        );
+
+        let release = host.handle_event(UiEvent::PointerReleased(point));
+        assert!(release.messages.is_empty());
     }
 
     #[test]
