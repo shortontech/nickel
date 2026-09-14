@@ -2943,7 +2943,7 @@ pub struct NickelSession {
     x11_issued_geometry_requests:
         HashMap<WindowId, std::collections::VecDeque<nickel_core::geometry_authority::Settlement>>,
     x11_geometry_outcomes:
-        HashMap<WindowId, std::collections::VecDeque<nickel_core::geometry_authority::Settlement>>,
+        std::collections::VecDeque<(WindowId, nickel_core::geometry_authority::Settlement)>,
     x11_geometry_overall_deadlines: HashMap<WindowId, u64>,
     xdg_geometry_settlements: HashMap<WindowId, XdgConfigureSettlement>,
     pub(crate) x11_next_native_request: u64,
@@ -7968,7 +7968,7 @@ impl NickelSession {
             interactive_resize_baselines: HashMap::new(),
             x11_geometry_settlements: HashMap::new(),
             x11_issued_geometry_requests: HashMap::new(),
-            x11_geometry_outcomes: HashMap::new(),
+            x11_geometry_outcomes: std::collections::VecDeque::new(),
             x11_geometry_overall_deadlines: HashMap::new(),
             xdg_geometry_settlements: HashMap::new(),
             x11_next_native_request: 0,
@@ -10682,7 +10682,7 @@ impl NickelSession {
             evicted
         };
         if let Some(mut evicted) = evicted {
-            evicted.supersede();
+            evicted.expire(evicted.limits.deadline_tick);
             self.retain_x11_geometry_outcome(id, evicted);
         }
         self.x11_geometry_settlements.insert(id, settlement);
@@ -10695,11 +10695,11 @@ impl NickelSession {
         id: WindowId,
         outcome: nickel_core::geometry_authority::Settlement,
     ) {
-        let outcomes = self.x11_geometry_outcomes.entry(id).or_default();
-        if outcomes.len() == 16 {
-            outcomes.pop_front();
+        const MAX_RETAINED_X11_OUTCOMES: usize = 256;
+        if self.x11_geometry_outcomes.len() == MAX_RETAINED_X11_OUTCOMES {
+            self.x11_geometry_outcomes.pop_front();
         }
-        outcomes.push_back(outcome);
+        self.x11_geometry_outcomes.push_back((id, outcome));
     }
 
     fn fail_and_retain_x11_requests(&mut self, id: WindowId) {

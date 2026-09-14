@@ -440,7 +440,8 @@ fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
         .next()
         .unwrap();
     assert!(binding.contains("ledger.len() == 16"));
-    assert!(binding.contains("evicted.supersede()"));
+    assert!(binding.contains("evicted.expire(evicted.limits.deadline_tick)"));
+    assert!(!binding.contains("evicted.supersede()"));
     assert!(binding.contains("retain_x11_geometry_outcome"));
     let teardown = state
         .split("pub fn forget_x11_geometry")
@@ -451,4 +452,15 @@ fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
         .unwrap();
     assert!(teardown.matches("fail_and_retain_x11_requests").count() >= 2);
     assert!(!teardown.contains("x11_issued_geometry_requests.clear()"));
+
+    let retention = state
+        .split("fn retain_x11_geometry_outcome")
+        .nth(1)
+        .unwrap()
+        .split("fn fail_and_retain_x11_requests")
+        .next()
+        .unwrap();
+    assert!(retention.contains("MAX_RETAINED_X11_OUTCOMES: usize = 256"));
+    assert!(retention.contains("self.x11_geometry_outcomes.pop_front()"));
+    assert!(retention.contains("push_back((id, outcome))"));
 }
