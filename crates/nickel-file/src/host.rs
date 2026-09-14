@@ -4,8 +4,8 @@ use nickel_input::{
     AggregateModifier, InputEvent, KeyCode, KeyEdge, PhysicalKey, PointerButton, PointerEvent,
 };
 use nickel_ui::{
-    AdapterOutcome, Application, ControllerFence, HostAdapter, HostServices, Point,
-    ReadingDirection, SemanticNodeSnapshot, UiHost,
+    AdapterOutcome, Application, ControllerFence, EventDisposition, HostAdapter, HostServices,
+    Point, ReadingDirection, SemanticNodeSnapshot, ShortcutOutcome, UiHost,
 };
 use winit::{
     dpi::LogicalSize,
@@ -58,6 +58,32 @@ fn navigation_shortcut(key: KeyCode, alt_down: bool) -> Option<NavigationShortcu
         KeyCode::ArrowUp => Some(NavigationShortcut::Up),
         _ => None,
     }
+}
+
+fn perform_navigation_shortcut(app: &mut FileApp, shortcut: NavigationShortcut) -> ShortcutOutcome {
+    let available = !app.navigation_pending()
+        && match shortcut {
+            NavigationShortcut::Back => app.browser.can_go_back(),
+            NavigationShortcut::Forward => app.browser.can_go_forward(),
+            NavigationShortcut::Up => app.browser.can_go_up(),
+        };
+    if !available {
+        return ShortcutOutcome::rejected("navigation unavailable");
+    }
+    match shortcut {
+        NavigationShortcut::Back => app.go_back(),
+        NavigationShortcut::Forward => app.go_forward(),
+        NavigationShortcut::Up => app.go_up(),
+    }
+    ShortcutOutcome::handled(true)
+}
+
+fn perform_tab_cycle(app: &mut FileApp, reverse: bool) -> ShortcutOutcome {
+    let Some(index) = adjacent_tab_index(app.active_tab, app.tabs.len(), reverse) else {
+        return ShortcutOutcome::rejected("tab cycle unavailable");
+    };
+    app.switch_tab(index);
+    ShortcutOutcome::handled(true)
 }
 
 fn selection_command_modifier(modifiers: &nickel_input::ModifierState) -> bool {
@@ -233,7 +259,7 @@ impl FileApp {
         host.application_mut().resolved_grid_columns =
             host.resolved_grid_columns().unwrap_or(1).max(1);
         let mut changed = false;
-        let mut consume = false;
+        let mut disposition = EventDisposition::Unhandled;
         match event.clone() {
             InputEvent::Key(key) => {
                 let app = host.application_mut();
@@ -247,24 +273,26 @@ impl FileApp {
                     return AdapterOutcome::default();
                 };
                 if let Some(shortcut) = navigation_shortcut(key, alt_down) {
-                    match shortcut {
-                        NavigationShortcut::Back => app.go_back(),
-                        NavigationShortcut::Forward => app.go_forward(),
-                        NavigationShortcut::Up => app.go_up(),
-                    }
+                    let outcome = perform_navigation_shortcut(app, shortcut);
                     return AdapterOutcome {
-                        changed: true,
+                        changed: outcome.changed,
+                        disposition: outcome.disposition,
                         ..AdapterOutcome::default()
                     };
                 }
-                if key == KeyCode::Tab
-                    && app.control_down
-                    && let Some(index) =
-                        adjacent_tab_index(app.active_tab, app.tabs.len(), app.shift_down)
-                {
-                    app.switch_tab(index);
+                if key == KeyCode::Tab && app.control_down {
+                    let outcome = perform_tab_cycle(app, app.shift_down);
                     return AdapterOutcome {
-                        changed: true,
+                        changed: outcome.changed,
+                        disposition: outcome.disposition,
+                        ..AdapterOutcome::default()
+                    };
+                }
+                if key == KeyCode::Backspace {
+                    let outcome = perform_navigation_shortcut(app, NavigationShortcut::Back);
+                    return AdapterOutcome {
+                        changed: outcome.changed,
+                        disposition: outcome.disposition,
                         ..AdapterOutcome::default()
                     };
                 }
@@ -308,7 +336,6 @@ impl FileApp {
                             -1
                         },
                     ),
-                    KeyCode::Backspace => app.go_back(),
                     KeyCode::Escape => {
                         if app.pending_transfer_conflict.is_some() {
                             app.update(FileMessage::TransferCancelConflicts);
@@ -343,7 +370,7 @@ impl FileApp {
                     }
                     _ => {}
                 }
-                consume = matches!(
+                disposition = if matches!(
                     key,
                     KeyCode::ArrowDown
                         | KeyCode::ArrowUp
@@ -357,7 +384,11 @@ impl FileApp {
                         && matches!(
                             key,
                             KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyV
-                        ));
+                        )) {
+                    EventDisposition::Handled
+                } else {
+                    EventDisposition::Unhandled
+                };
                 changed = true;
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
@@ -499,11 +530,7 @@ impl FileApp {
         }
         AdapterOutcome {
             changed,
-            disposition: if consume {
-                nickel_ui::EventDisposition::Handled
-            } else {
-                nickel_ui::EventDisposition::Unhandled
-            },
+            disposition,
             exit: host.application().exit_requested,
         }
     }
@@ -651,11 +678,12 @@ mod tests {
     use super::{
         DROP_HOVER_OPEN_DELAY, NavigationShortcut, adjacent_tab_index,
         cancel_transient_input_on_focus_loss, drop_destination_at, navigation_shortcut,
-        open_drop_hover_target, selection_command_modifier, update_drop_hover,
+        open_drop_hover_target, perform_navigation_shortcut, perform_tab_cycle,
+        selection_command_modifier, update_drop_hover,
     };
     use crate::{FileApp, FileMessage};
     use nickel_input::{KeyCode, Modifier, ModifierState};
-    use nickel_ui::Application;
+    use nickel_ui::{Application, EventDisposition};
 
     #[test]
     fn conventional_alt_navigation_shortcuts_precede_item_direction() {
@@ -683,6 +711,38 @@ mod tests {
         assert_eq!(adjacent_tab_index(0, 3, true), Some(2));
         assert_eq!(adjacent_tab_index(0, 1, false), None);
         assert_eq!(adjacent_tab_index(2, 2, false), None);
+    }
+
+    #[test]
+    fn unavailable_navigation_and_tab_cycle_are_typed_rejections() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = FileApp::new(directory.path().to_path_buf());
+
+        let back = perform_navigation_shortcut(&mut app, NavigationShortcut::Back);
+        assert!(!back.changed);
+        assert_eq!(
+            back.disposition,
+            EventDisposition::Rejected("navigation unavailable")
+        );
+
+        let tab = perform_tab_cycle(&mut app, false);
+        assert!(!tab.changed);
+        assert_eq!(
+            tab.disposition,
+            EventDisposition::Rejected("tab cycle unavailable")
+        );
+    }
+
+    #[test]
+    fn available_navigation_returns_typed_handled_outcome() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = directory.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let mut app = FileApp::new(child);
+
+        let up = perform_navigation_shortcut(&mut app, NavigationShortcut::Up);
+        assert!(up.changed);
+        assert_eq!(up.disposition, EventDisposition::Handled);
     }
 
     #[test]

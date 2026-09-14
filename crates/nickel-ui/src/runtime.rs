@@ -4519,6 +4519,10 @@ mod tests {
         let mut host = UiHost::new(InputApplication::default(), 320, 48);
         let field = host.semantic_nodes()[0].id.clone();
         assert!(host.request_focus(field).changed);
+        assert_eq!(
+            host.inspect().target_mode,
+            crate::WidgetTargetMode::Navigation
+        );
         host.handle_controller_action(ControllerAction::Confirm);
         assert!(host.controller_targets_text_input());
         assert!(host.input_context().text_focused);

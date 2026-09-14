@@ -1683,6 +1683,13 @@ impl<Message: Clone> UiFrame<Message> {
         intent: InteractionIntent,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
         let semantic_invocation = matches!(intent, InteractionIntent::Invoke { .. });
+        let enters_text_editing = matches!(
+            &intent,
+            InteractionIntent::Invoke {
+                target,
+                action: SemanticAction::Invoke(ActionKind::Activate),
+            } if self.is_text_input(target)
+        );
         let modality = match source {
             InputSource::Keyboard => Some(InputModality::Keyboard),
             InputSource::Pointer => Some(InputModality::Pointer),
@@ -1816,6 +1823,13 @@ impl<Message: Clone> UiFrame<Message> {
             || !outcome.messages.is_empty()
             || outcome.clipboard_text.is_some();
         outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
+        if enters_text_editing {
+            outcome.invalidation = outcome.invalidation.merge(
+                state
+                    .navigation_mut()
+                    .set_target_mode(crate::WidgetTargetMode::TextEditing),
+            );
+        }
         outcome.invalidation = outcome
             .invalidation
             .merge(self.revalidate_target_mode(state));
@@ -1829,7 +1843,9 @@ impl<Message: Clone> UiFrame<Message> {
         let mode = state
             .current_target()
             .map_or(crate::WidgetTargetMode::Navigation, |target| {
-                if self.is_text_input(target) {
+                if self.is_text_input(target)
+                    && state.navigation().target_mode() == crate::WidgetTargetMode::TextEditing
+                {
                     crate::WidgetTargetMode::TextEditing
                 } else if state.navigation().target_mode()
                     == crate::WidgetTargetMode::ValueAdjustment
@@ -1924,6 +1940,13 @@ impl<Message: Clone> UiFrame<Message> {
         target: &UiId,
         outcome: &mut EventOutcome<Message>,
     ) -> DefaultActivation {
+        if self.is_text_input(target) {
+            return DefaultActivation::Handled(
+                state
+                    .navigation_mut()
+                    .set_target_mode(crate::WidgetTargetMode::TextEditing),
+            );
+        }
         if let Some(invalidation) = self.activate_text_command(state, target, outcome) {
             return DefaultActivation::Handled(invalidation);
         }
