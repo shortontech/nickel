@@ -1198,6 +1198,7 @@ pub struct UiHost<A: Application> {
     pending_long_press: Option<PendingLongPress>,
     admitted_controller_presses: std::collections::BTreeSet<AdmittedControllerPress>,
     controller_press_authority: Option<ControllerExecutionAuthority>,
+    controller_overflow_fence: Option<ControllerExecutionAuthority>,
     normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
@@ -1221,6 +1222,7 @@ pub struct UiHostViewport<Message> {
     pending_long_press: Option<PendingLongPress>,
     admitted_controller_presses: std::collections::BTreeSet<AdmittedControllerPress>,
     controller_press_authority: Option<ControllerExecutionAuthority>,
+    controller_overflow_fence: Option<ControllerExecutionAuthority>,
     normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
@@ -1776,6 +1778,8 @@ pub enum ControllerExecutionDisposition {
     RejectedStale,
     RejectedUnpairedRelease,
     ResetOverflow,
+    RejectedResetFence,
+    ResetNeutralized,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1958,6 +1962,7 @@ impl<A: Application> UiHost<A> {
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
             controller_press_authority: None,
+            controller_overflow_fence: None,
             normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
@@ -2004,6 +2009,10 @@ impl<A: Application> UiHost<A> {
             controller_press_authority: std::mem::replace(
                 &mut self.controller_press_authority,
                 viewport.controller_press_authority,
+            ),
+            controller_overflow_fence: std::mem::replace(
+                &mut self.controller_overflow_fence,
+                viewport.controller_overflow_fence,
             ),
             normalized_source_orders: std::mem::replace(
                 &mut self.normalized_source_orders,
@@ -2066,6 +2075,7 @@ impl<A: Application> UiHost<A> {
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
             controller_press_authority: None,
+            controller_overflow_fence: None,
             normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
@@ -2671,64 +2681,98 @@ impl<A: Application> UiHost<A> {
                 HostEvent::AdmittedController { action, binding } => {
                     let admitted =
                         controller_authority.is_some_and(|authority| authority.admits(binding));
-                    let mut overflow_reset = false;
-                    let paired = match (binding.edge, action) {
-                        (nickel_input::KeyEdge::Released, Some(action)) => {
-                            let key = AdmittedControllerPress::new(binding, action);
-                            let paired = admitted && self.admitted_controller_presses.remove(&key);
-                            if !paired {
+                    if let Some(blocked) = self.controller_overflow_fence {
+                        let replacement =
+                            controller_authority.filter(|authority| *authority != blocked);
+                        let neutralized = admitted
+                            && replacement.is_some()
+                            && binding.edge == nickel_input::KeyEdge::Released
+                            && !binding.repeat;
+                        if neutralized {
+                            self.controller_overflow_fence = None;
+                            self.controller_press_authority = replacement;
+                            self.admitted_controller_presses.clear();
+                        }
+                        let mut outcome = HostEventOutcome::default();
+                        outcome
+                            .controller_executions
+                            .push(ControllerExecutionEvidence {
+                                binding,
+                                disposition: if neutralized {
+                                    ControllerExecutionDisposition::ResetNeutralized
+                                } else {
+                                    ControllerExecutionDisposition::RejectedResetFence
+                                },
+                                message_count: 0,
+                                effect_count: 0,
+                            });
+                        outcome
+                    } else {
+                        let mut overflow_reset = false;
+                        let paired = match (binding.edge, action) {
+                            (nickel_input::KeyEdge::Released, Some(action)) => {
+                                let key = AdmittedControllerPress::new(binding, action);
+                                let paired =
+                                    admitted && self.admitted_controller_presses.remove(&key);
+                                if !paired {
+                                    self.admitted_controller_presses.retain(|press| {
+                                        press.device_generation != binding.device_generation
+                                            || press.action != action
+                                    });
+                                }
+                                paired
+                            }
+                            (nickel_input::KeyEdge::Released, None) => {
                                 self.admitted_controller_presses.retain(|press| {
                                     press.device_generation != binding.device_generation
-                                        || press.action != action
                                 });
-                            }
-                            paired
-                        }
-                        (nickel_input::KeyEdge::Released, None) => {
-                            self.admitted_controller_presses.retain(|press| {
-                                press.device_generation != binding.device_generation
-                            });
-                            false
-                        }
-                        (nickel_input::KeyEdge::Pressed, Some(action)) if admitted => {
-                            let key = AdmittedControllerPress::new(binding, action);
-                            if !self.admitted_controller_presses.contains(&key)
-                                && self.admitted_controller_presses.len()
-                                    >= MAX_ADMITTED_CONTROLLER_PRESSES
-                            {
-                                self.admitted_controller_presses.clear();
-                                self.controller_press_authority = None;
-                                overflow_reset = true;
                                 false
-                            } else {
-                                self.admitted_controller_presses.insert(key);
-                                true
                             }
-                        }
-                        (nickel_input::KeyEdge::Pressed, _) => admitted,
-                    };
-                    let mut outcome = if paired && binding.edge == nickel_input::KeyEdge::Pressed {
-                        self.dispatch_controller_action(action.expect("paired press has action"))
-                    } else {
-                        HostEventOutcome::default()
-                    };
-                    outcome
-                        .controller_executions
-                        .push(ControllerExecutionEvidence {
-                            binding,
-                            disposition: if overflow_reset {
-                                ControllerExecutionDisposition::ResetOverflow
-                            } else if !admitted {
-                                ControllerExecutionDisposition::RejectedStale
-                            } else if binding.edge == nickel_input::KeyEdge::Released && !paired {
-                                ControllerExecutionDisposition::RejectedUnpairedRelease
+                            (nickel_input::KeyEdge::Pressed, Some(action)) if admitted => {
+                                let key = AdmittedControllerPress::new(binding, action);
+                                if !self.admitted_controller_presses.contains(&key)
+                                    && self.admitted_controller_presses.len()
+                                        >= MAX_ADMITTED_CONTROLLER_PRESSES
+                                {
+                                    self.admitted_controller_presses.clear();
+                                    self.controller_press_authority = None;
+                                    self.controller_overflow_fence = controller_authority;
+                                    overflow_reset = true;
+                                    false
+                                } else {
+                                    self.admitted_controller_presses.insert(key);
+                                    true
+                                }
+                            }
+                            (nickel_input::KeyEdge::Pressed, _) => admitted,
+                        };
+                        let mut outcome =
+                            if paired && binding.edge == nickel_input::KeyEdge::Pressed {
+                                self.dispatch_controller_action(
+                                    action.expect("paired press has action"),
+                                )
                             } else {
-                                ControllerExecutionDisposition::Executed
-                            },
-                            message_count: outcome.messages.len(),
-                            effect_count: 0,
-                        });
-                    outcome
+                                HostEventOutcome::default()
+                            };
+                        outcome
+                            .controller_executions
+                            .push(ControllerExecutionEvidence {
+                                binding,
+                                disposition: if overflow_reset {
+                                    ControllerExecutionDisposition::ResetOverflow
+                                } else if !admitted {
+                                    ControllerExecutionDisposition::RejectedStale
+                                } else if binding.edge == nickel_input::KeyEdge::Released && !paired
+                                {
+                                    ControllerExecutionDisposition::RejectedUnpairedRelease
+                                } else {
+                                    ControllerExecutionDisposition::Executed
+                                },
+                                message_count: outcome.messages.len(),
+                                effect_count: 0,
+                            });
+                        outcome
+                    }
                 }
                 HostEvent::Shortcut(shortcut) => {
                     let shortcut = self.application.shortcut_outcome(shortcut);
@@ -5074,6 +5118,90 @@ mod tests {
         assert_eq!(
             last.unwrap().controller_executions[0].disposition,
             ControllerExecutionDisposition::ResetOverflow
+        );
+
+        let stale_repeat = ControllerExecutionBinding {
+            device_generation: 1,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 300,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+            repeat: true,
+        };
+        let stale = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: stale_repeat,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            stale.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedResetFence
+        );
+
+        let replacement = ControllerExecutionAuthority {
+            routing_epoch: 10,
+            lease_epoch: 8,
+            ..authority
+        };
+        let replacement_press = ControllerExecutionBinding {
+            routing_epoch: 10,
+            lease_epoch: 8,
+            repeat: false,
+            event_id: 301,
+            ..stale_repeat
+        };
+        let before_neutral = host.step(HostBatch {
+            controller_authority: Some(replacement),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: replacement_press,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            before_neutral.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedResetFence
+        );
+
+        let neutral = ControllerExecutionBinding {
+            edge: KeyEdge::Released,
+            event_id: 302,
+            ..replacement_press
+        };
+        let neutralized = host.step(HostBatch {
+            controller_authority: Some(replacement),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: neutral,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            neutralized.controller_executions[0].disposition,
+            ControllerExecutionDisposition::ResetNeutralized
+        );
+
+        let rearmed = host.step(HostBatch {
+            controller_authority: Some(replacement),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: ControllerExecutionBinding {
+                    event_id: 303,
+                    ..replacement_press
+                },
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            rearmed.controller_executions[0].disposition,
+            ControllerExecutionDisposition::Executed
         );
     }
 
