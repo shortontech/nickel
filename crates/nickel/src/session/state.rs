@@ -2560,6 +2560,7 @@ struct CompatibilityControlState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ControllerRoute {
     target: Option<nickel_ui::InternalSurfaceId>,
+    external_surface: Option<WindowId>,
     launcher_intercepted: bool,
 }
 
@@ -2569,6 +2570,21 @@ struct ControllerRoleLease {
     /// InternalSurfaceId is a generation-bearing runtime lifetime, not a reusable role label.
     target: nickel_ui::InternalSurfaceId,
     security_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ExternalControllerLeaseBinding {
+    host: ControllerHostId,
+    connection: ControllerConnectionGeneration,
+    surface: WindowId,
+}
+
+fn external_controller_surface_changed(
+    binding: ExternalControllerLeaseBinding,
+    active: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    focused_surface: Option<WindowId>,
+) -> bool {
+    active == Some((binding.host, binding.connection)) && focused_surface != Some(binding.surface)
 }
 
 #[derive(Debug)]
@@ -2625,6 +2641,7 @@ pub struct NickelSession {
     controller_routing_epoch: u64,
     controller_role_lease: Option<ControllerRoleLease>,
     controller_role_security_epoch: u64,
+    controller_external_lease_binding: Option<ExternalControllerLeaseBinding>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
@@ -5717,6 +5734,15 @@ impl NickelSession {
                 && (!self.locked || lease.role == SurfaceRole::Lock)
         });
 
+        let external_surface = if target.is_none() {
+            self.windows
+                .snapshot()
+                .into_iter()
+                .find(|window| self.remote_keyboard_focus_matches(window.id))
+                .map(|window| window.id)
+        } else {
+            None
+        };
         ControllerRoute {
             target: lease.map(|lease| lease.target),
             launcher_intercepted: self.internal_shell.is_some()
@@ -5761,6 +5787,39 @@ impl NickelSession {
         }
     }
 
+    fn begin_controller_security_takeover(&mut self) {
+        let Some(lease) = self.controller_broker.active_lease() else {
+            return;
+        };
+        if lease.host == ControllerHostId(0) {
+            return;
+        }
+        let now_ms = self.start_time.elapsed().as_millis() as u64;
+        let _ = self.controller_broker.begin_transfer(
+            ControllerHostId(0),
+            self.controller_internal_connection,
+            now_ms,
+            DEFAULT_TRANSFER_DEADLINE_MS,
+        );
+    }
+
+    fn fence_changed_external_controller_surface(&mut self) {
+        if self
+            .controller_external_lease_binding
+            .is_some_and(|binding| {
+                external_controller_surface_changed(
+                    binding,
+                    self.controller_broker
+                        .active_lease()
+                        .map(|lease| (lease.host, lease.connection_generation)),
+                    self.native_controller_route().external_surface,
+                )
+            })
+        {
+            self.begin_controller_security_takeover();
+        }
+    }
+
     fn refresh_controller_route(&mut self) -> (u64, ControllerRoute) {
         if self.controller_role_lease.is_some() && self.native_controller_route().target.is_none() {
             self.revoke_controller_role_lease();
@@ -5789,6 +5848,7 @@ impl NickelSession {
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         self.controller_broker.expire_transfer(now_ms);
         let (routing_epoch, route) = self.refresh_controller_route();
+        self.fence_changed_external_controller_surface();
         let protected_route = route
             .target
             .is_some_and(|target| self.internal_ui.remote_access_protected(target));
@@ -5905,6 +5965,7 @@ impl NickelSession {
     ) -> ServerMessage {
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         self.controller_broker.expire_transfer(now_ms);
+        self.fence_changed_external_controller_surface();
         let host = ControllerHostId(u64::from(peer_pid));
         let response = match request {
             ControllerHostRequest::Attach => ControllerHostResponse::Attached {
@@ -5914,9 +5975,15 @@ impl NickelSession {
             ControllerHostRequest::RequestLease {
                 connection_generation,
             } => {
-                if !self.controller_host_is_current_recipient(peer_pid) {
+                let route = self.native_controller_route();
+                let Some(surface) = route.external_surface.filter(|surface| {
+                    self.remote_window_identities
+                        .get(surface)
+                        .and_then(super::remote_identity::WindowIdentity::current_process_id)
+                        == Some(peer_pid)
+                }) else {
                     return ServerMessage::ControllerHost(ControllerHostResponse::LeaseFailed);
-                }
+                };
                 let status = self.controller_broker.begin_transfer(
                     host,
                     connection_generation,
@@ -5948,6 +6015,13 @@ impl NickelSession {
                     }
                     status => status,
                 };
+                if !matches!(status, ControllerTransferStatus::Failed) {
+                    self.controller_external_lease_binding = Some(ExternalControllerLeaseBinding {
+                        host,
+                        connection: connection_generation,
+                        surface,
+                    });
+                }
                 controller_transfer_response(status)
             }
             ControllerHostRequest::Poll {
@@ -5989,12 +6063,28 @@ impl NickelSession {
             ControllerHostRequest::Detach {
                 connection_generation,
             } => {
+                if self
+                    .controller_external_lease_binding
+                    .is_some_and(|binding| {
+                        binding.host == host && binding.connection == connection_generation
+                    })
+                {
+                    self.controller_external_lease_binding = None;
+                }
                 self.controller_broker.detach(host, connection_generation);
                 ControllerHostResponse::Detached
             }
             ControllerHostRequest::Relinquish {
                 connection_generation,
             } => {
+                if self
+                    .controller_external_lease_binding
+                    .is_some_and(|binding| {
+                        binding.host == host && binding.connection == connection_generation
+                    })
+                {
+                    self.controller_external_lease_binding = None;
+                }
                 self.controller_broker
                     .relinquish(host, connection_generation);
                 ControllerHostResponse::Detached
@@ -7435,6 +7525,7 @@ impl NickelSession {
             controller_routing_epoch: 0,
             controller_role_lease: None,
             controller_role_security_epoch: 0,
+            controller_external_lease_binding: None,
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
@@ -10673,6 +10764,9 @@ impl NickelSession {
     }
 
     pub(crate) fn lock_session(&mut self) {
+        // Revoke external controller execution at the security boundary itself. Waiting for the
+        // next device poll would leave a window where already queued input could cross into lock.
+        self.begin_controller_security_takeover();
         self.invalidate_remote_shell_actions();
         if self.locked {
             return;
@@ -10783,6 +10877,7 @@ impl NickelSession {
     }
 
     pub(crate) fn suspend_input_authority(&mut self) {
+        self.begin_controller_security_takeover();
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Suspend);
         self.cancel_all_touch_authority();
         self.cancel_consumer_control_repeats();
@@ -13597,12 +13692,14 @@ impl ClientData for ClientState {
 #[cfg(test)]
 mod protocol_tests {
     use super::{
-        DisplacedWindow, PREVIEW_BYTE_CAPACITY, PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER,
-        PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES, PendingLaunchObservation,
-        PendingLaunchWindowDisposition, RegisteredShellRole, ShellRegistrationRejection,
-        admitted_preview_ids, advance_preview_content_generation, apply_shell_behavior_value,
-        bounded_preview_ids, clamp_decorated_content_to_work_area, clamp_window_location,
-        command_requires_shell_identity, drag_icon_location, identification_expiry_is_current,
+        ControllerConnectionGeneration, ControllerHostId, DisplacedWindow,
+        ExternalControllerLeaseBinding, PREVIEW_BYTE_CAPACITY,
+        PREVIEW_ENTRIES_PER_VISIBLE_CONSUMER, PREVIEW_ENTRY_CAPACITY, PREVIEW_FRAME_BYTES,
+        PendingLaunchObservation, PendingLaunchWindowDisposition, RegisteredShellRole,
+        ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
+        apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
+        clamp_window_location, command_requires_shell_identity, drag_icon_location,
+        external_controller_surface_changed, identification_expiry_is_current,
         internal_restore_is_current, maximized_content_geometry, output_contains_logical_point,
         output_index_for_shell_surface, output_rescue_revision_is_current,
         pending_launch_window_disposition, placement_restore_is_current,
@@ -13614,6 +13711,27 @@ mod protocol_tests {
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke,
     };
+
+    #[test]
+    fn external_controller_lease_is_bound_to_exact_surface_generation() {
+        let binding = ExternalControllerLeaseBinding {
+            host: ControllerHostId(44),
+            connection: ControllerConnectionGeneration(7),
+            surface: super::WindowId(10),
+        };
+        let active = Some((binding.host, binding.connection));
+        assert!(!external_controller_surface_changed(
+            binding,
+            active,
+            Some(super::WindowId(10))
+        ));
+        assert!(external_controller_surface_changed(
+            binding,
+            active,
+            Some(super::WindowId(11))
+        ));
+        assert!(external_controller_surface_changed(binding, active, None));
+    }
     use crate::session::output_retirement::{
         BIND_SETTLE_GRACE as OUTPUT_GLOBAL_BIND_SETTLE_GRACE,
         DISABLED_GRACE as OUTPUT_GLOBAL_DISABLED_GRACE,
