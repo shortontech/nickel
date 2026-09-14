@@ -1846,7 +1846,8 @@ impl NickelSession {
                     client_present,
                 );
                 if normalized
-                    || self.internal_ui.touch_with_client(
+                    || self.internal_ui.touch_from_source(
+                        &event.device().id(),
                         i32::from(event.slot()) as u64,
                         (location.x, location.y),
                         crate::session::TouchPhase::Started,
@@ -1898,10 +1899,12 @@ impl NickelSession {
                     (location.x, location.y),
                     crate::session::TouchPhase::Moved,
                     false,
-                ) || self.internal_ui.touch(
+                ) || self.internal_ui.touch_from_source(
+                    &event.device().id(),
                     i32::from(event.slot()) as u64,
                     (location.x, location.y),
                     crate::session::TouchPhase::Moved,
+                    false,
                 ) {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();
@@ -1926,10 +1929,12 @@ impl NickelSession {
                     (0.0, 0.0),
                     crate::session::TouchPhase::Ended,
                     false,
-                ) || self.internal_ui.touch(
+                ) || self.internal_ui.touch_from_source(
+                    &event.device().id(),
                     i32::from(event.slot()) as u64,
                     (0.0, 0.0),
                     crate::session::TouchPhase::Ended,
+                    false,
                 ) {
                     self.flush_internal_shell_input();
                     self.request_output_redraw();

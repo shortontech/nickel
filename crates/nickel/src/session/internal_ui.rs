@@ -1541,7 +1541,9 @@ pub struct InternalUiRuntime {
     presentation: BTreeMap<InternalSurfaceId, PresentedSurface>,
     focused: Option<InternalSurfaceId>,
     hovered: Option<InternalSurfaceId>,
-    touches: BTreeMap<u64, (InternalSurfaceId, UiPoint)>,
+    /// Generic hosted touch capture. The empty source is the explicitly aggregate semantic path;
+    /// native ingress supplies its stable device identity so equal slot numbers cannot collide.
+    touches: BTreeMap<(String, u64), (InternalSurfaceId, UiPoint)>,
     // Keep the complete batch for coordinator-owned scenes: normalized input and
     // focus lifecycle facts must survive the same handoff as semantic UI actions.
     routed_events: Vec<(
@@ -2580,7 +2582,7 @@ impl InternalUiRuntime {
     }
 
     pub fn touch(&mut self, contact: u64, point: (f64, f64), phase: TouchPhase) -> bool {
-        self.touch_with_client(contact, point, phase, false)
+        self.touch_from_source("", contact, point, phase, false)
     }
 
     pub fn touch_with_client(
@@ -2590,12 +2592,24 @@ impl InternalUiRuntime {
         phase: TouchPhase,
         client_present: bool,
     ) -> bool {
+        self.touch_from_source("", contact, point, phase, client_present)
+    }
+
+    pub(crate) fn touch_from_source(
+        &mut self,
+        source: &str,
+        contact: u64,
+        point: (f64, f64),
+        phase: TouchPhase,
+        client_present: bool,
+    ) -> bool {
+        let key = (source.to_owned(), contact);
         match phase {
             TouchPhase::Started => {
                 let Some((id, local)) = self.surface_at(point, client_present) else {
                     return false;
                 };
-                self.touches.insert(contact, (id, local));
+                self.touches.insert(key, (id, local));
                 if self.surface_accepts_keyboard_focus(id) && self.focused != Some(id) {
                     if let Some(previous) = self.focused {
                         self.step(
@@ -2618,7 +2632,7 @@ impl InternalUiRuntime {
                 self.dispatch_ui(id, UiEvent::PointerPressed(local));
                 true
             }
-            TouchPhase::Moved => self.touches.get(&contact).copied().is_some_and(|(id, _)| {
+            TouchPhase::Moved => self.touches.get(&key).copied().is_some_and(|(id, _)| {
                 let Some(surface) = self.presentation.get(&id) else {
                     return false;
                 };
@@ -2627,17 +2641,17 @@ impl InternalUiRuntime {
                     x: (point.0 - f64::from(x)) as f32,
                     y: (point.1 - f64::from(y)) as f32,
                 };
-                self.touches.insert(contact, (id, local));
+                self.touches.insert(key, (id, local));
                 self.dispatch_ui(id, UiEvent::PointerMoved(local));
                 true
             }),
-            TouchPhase::Ended => self.touches.remove(&contact).is_some_and(|(id, local)| {
+            TouchPhase::Ended => self.touches.remove(&key).is_some_and(|(id, local)| {
                 self.dispatch_ui(id, UiEvent::PointerReleased(local));
                 true
             }),
             TouchPhase::Cancelled => self
                 .touches
-                .remove(&contact)
+                .remove(&key)
                 .is_some_and(|(id, _)| self.dispatch_ui(id, UiEvent::PointerCancelled)),
         }
     }
@@ -2666,10 +2680,21 @@ impl InternalUiRuntime {
     }
 
     pub fn cancel_touches(&mut self) -> bool {
-        let targets = std::mem::take(&mut self.touches);
+        self.cancel_touches_from_source(None)
+    }
+
+    pub(crate) fn cancel_touches_from_source(&mut self, source: Option<&str>) -> bool {
+        let keys = self
+            .touches
+            .keys()
+            .filter(|(owner, _)| source.is_none_or(|source| owner == source))
+            .cloned()
+            .collect::<Vec<_>>();
         let mut handled = false;
-        for (_, (id, _)) in targets {
-            handled |= self.dispatch_ui(id, UiEvent::PointerCancelled);
+        for key in keys {
+            if let Some((id, _)) = self.touches.remove(&key) {
+                handled |= self.dispatch_ui(id, UiEvent::PointerCancelled);
+            }
         }
         handled
     }

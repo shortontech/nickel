@@ -104,6 +104,31 @@ mod tests {
     }
 
     #[test]
+    fn generic_native_touch_keeps_equal_slots_separate_and_device_loss_fences_tails() {
+        use crate::session::TouchPhase::*;
+        let mut runtime = InternalUiRuntime::default();
+        desktop(&mut runtime);
+
+        assert!(runtime.touch_from_source("touch-a", 4, (-780.0, -40.0), Started, false));
+        assert!(runtime.touch_from_source("touch-b", 4, (-760.0, -20.0), Started, false));
+        runtime.drain_routed_events();
+
+        runtime.remove_desktop_pointer_device("touch-a");
+        assert!(!runtime.touch_from_source("touch-a", 4, (0.0, 0.0), Moved, false));
+        assert!(runtime.touch_from_source("touch-b", 4, (-750.0, -10.0), Moved, false));
+        assert!(runtime.cancel_touches());
+        assert!(!runtime.touch_from_source("touch-b", 4, (0.0, 0.0), Ended, false));
+
+        let cancelled = runtime
+            .drain_routed_events()
+            .into_iter()
+            .flat_map(|(_, batch, _)| batch.events)
+            .filter(|event| matches!(event, HostEvent::Ui(nickel_ui::UiEvent::PointerCancelled)))
+            .count();
+        assert_eq!(cancelled, 2);
+    }
+
+    #[test]
     fn normalized_keyboard_touch_never_focuses_and_retirement_swallows_old_contact_tail() {
         use crate::session::TouchPhase::*;
         let mut runtime = InternalUiRuntime::default();
@@ -771,6 +796,7 @@ impl InternalUiRuntime {
     /// disappear while the seat's pointer is dragging without owning that drag.
     pub(crate) fn remove_desktop_pointer_device(&mut self, source: &str) {
         self.cancel_normalized_touches(Some(source));
+        self.cancel_touches_from_source(Some(source));
         let state = &mut self.desktop_input;
         let Some(device) = state.devices.remove(source) else {
             return;

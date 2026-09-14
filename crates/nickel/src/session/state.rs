@@ -10091,6 +10091,7 @@ impl NickelSession {
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Lock);
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
+        self.cancel_all_touch_authority();
         self.locked = true;
         self.remote_control.lock();
         self.sync_remote_control_indicators();
@@ -10132,10 +10133,6 @@ impl NickelSession {
             },
         );
         pointer.frame(self);
-        // Native target state is authoritative. A completed touch frame can retain a target even
-        // when compositor-side slot accounting is already empty, so cancellation is unconditional.
-        self.active_touch_slots.clear();
-        self.seat.get_touch().unwrap().cancel(self);
         let preferred_lock_output = self.preferred_interaction_output_name();
         let internal_lock = self.internal_shell.as_ref().and_then(|shell| {
             let locks = || {
@@ -10194,10 +10191,21 @@ impl NickelSession {
 
     pub(crate) fn suspend_input_authority(&mut self) {
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Suspend);
+        self.cancel_all_touch_authority();
+        self.cancel_consumer_control_repeats();
+    }
+
+    fn cancel_all_touch_authority(&mut self) {
+        // Cancel host-owned domains before native delivery can be redirected to protected UI.
+        let normalized = self.internal_ui.cancel_normalized_touches(None);
+        let internal = self.internal_ui.cancel_touches();
+        if normalized || internal {
+            self.flush_internal_shell_input();
+        }
+        // Native target state is authoritative. A completed frame can retain targets even when
+        // compositor-side slot bookkeeping is already empty, so cancellation is unconditional.
         self.active_touch_slots.clear();
         self.seat.get_touch().unwrap().cancel(self);
-        self.internal_ui.cancel_touches();
-        self.cancel_consumer_control_repeats();
     }
 
     fn unlock_session(&mut self) {
@@ -14071,6 +14079,56 @@ mod protocol_tests {
         );
         assert!(session.window_operations.operation(operation).is_none());
         assert!(session.window_operations.begin(request).0.is_some());
+    }
+
+    #[test]
+    fn secure_lifecycle_cancels_normalized_and_internal_touch_domains_before_new_routing() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let desktop = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
+            .unwrap()
+            .id;
+        let runtime = session.internal_shell_surfaces[&desktop];
+        let geometry = session.internal_ui.placement(runtime).unwrap().geometry;
+        let point = (f64::from(geometry.0 + 10), f64::from(geometry.1 + 10));
+
+        assert!(session.internal_ui.normalized_touch_input(
+            "physical-a",
+            7,
+            point,
+            crate::session::TouchPhase::Started,
+            false,
+        ));
+        assert!(session.internal_ui.touch_from_source(
+            "physical-b",
+            7,
+            point,
+            crate::session::TouchPhase::Started,
+            false,
+        ));
+        session.cancel_all_touch_authority();
+
+        assert!(!session.internal_ui.normalized_touch_input(
+            "physical-a",
+            7,
+            point,
+            crate::session::TouchPhase::Moved,
+            false,
+        ));
+        assert!(!session.internal_ui.touch_from_source(
+            "physical-b",
+            7,
+            point,
+            crate::session::TouchPhase::Ended,
+            false,
+        ));
+        session.cancel_all_touch_authority();
     }
 
     #[test]
