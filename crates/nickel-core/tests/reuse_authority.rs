@@ -274,7 +274,7 @@ fn independent_x11_configure_revokes_an_active_operation_before_native_apply() {
 }
 
 #[test]
-fn unknown_x11_notify_terminates_interaction_before_reconciliation() {
+fn unknown_x11_notify_defers_issued_request_failure_to_bounded_reconciliation() {
     let root = workspace_root();
     let x11 =
         fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
@@ -285,9 +285,44 @@ fn unknown_x11_notify_terminates_interaction_before_reconciliation() {
         .split("fn property_notify")
         .next()
         .unwrap();
-    let cancel = notify.find("CancellationReason::AuthorityUnknown").unwrap();
-    let cleanup = notify.find("pointer.unset_grab").unwrap();
+    let pending = notify.find("x11_has_pending_issued_request").unwrap();
+    let cancel = notify.find("cancel_geometry_window_operation").unwrap();
     let observe = notify.find("observe_x11_geometry").unwrap();
-    assert!(cancel < cleanup && cleanup < observe);
+    assert!(pending < cancel && cancel < observe);
     assert!(notify.contains("x11_configure_notify_causality()"));
+
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let binding = state
+        .split("fn bind_x11_geometry_request")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn record_xdg_desired_geometry")
+        .next()
+        .unwrap();
+    assert!(binding.contains("SettlementStatus::Unconfirmed"));
+    assert!(binding.contains("cancel_geometry_window_operation"));
+}
+
+#[test]
+fn relayout_and_hidden_rescue_require_live_geometry_authority() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let relayout = state
+        .split("pub(crate) fn relayout_maximized_windows")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn apply_maximized_x11_geometry")
+        .next()
+        .unwrap();
+    assert!(relayout.contains("apply_authorized_complete_window_geometry"));
+    assert!(!relayout.contains("self.configure_window(&window, geometry)"));
+    let removal = state
+        .split("for (id, (window, location)) in &mut self.minimized_windows")
+        .nth(1)
+        .unwrap()
+        .split("self.displaced_output_windows")
+        .next()
+        .unwrap();
+    assert!(removal.matches("try_authorize_placement").count() >= 2);
+    assert!(!removal.contains("authority.set_placement"));
 }

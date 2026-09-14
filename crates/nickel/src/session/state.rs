@@ -8273,8 +8273,7 @@ impl NickelSession {
                 size,
                 fallback_geometry,
             );
-            *location = rescue_location;
-            let rescue_revision = {
+            let Some(rescue_revision) = ({
                 let desired = Geometry {
                     x: rescue_location.x,
                     y: rescue_location.y,
@@ -8287,17 +8286,14 @@ impl NickelSession {
                     max_width: None,
                     max_height: None,
                 };
-                let authority = self.geometry_authorities.entry(*id).or_insert_with(|| {
-                    nickel_core::geometry_authority::GeometryAuthority::new(
-                        desired,
-                        nickel_core::geometry_authority::Presentation::Normal,
-                    )
-                });
-                if authority.base_placement.value != desired {
-                    authority.set_placement(desired, constraints);
-                }
-                authority.revisions().placement
+                self.geometry_authorities
+                    .get_mut(id)
+                    .and_then(|authority| authority.try_authorize_placement(desired, constraints))
+                    .map(|placement| placement.revision)
+            }) else {
+                continue;
             };
+            *location = rescue_location;
             displaced.push(DisplacedWindow {
                 id: *id,
                 relative_location,
@@ -8329,8 +8325,7 @@ impl NickelSession {
                 size,
                 fallback_geometry,
             );
-            *location = rescue_location;
-            let rescue_revision = {
+            let Some(rescue_revision) = ({
                 let desired = Geometry {
                     x: rescue_location.x,
                     y: rescue_location.y,
@@ -8343,17 +8338,14 @@ impl NickelSession {
                     max_width: None,
                     max_height: None,
                 };
-                let authority = self.geometry_authorities.entry(*id).or_insert_with(|| {
-                    nickel_core::geometry_authority::GeometryAuthority::new(
-                        desired,
-                        nickel_core::geometry_authority::Presentation::Normal,
-                    )
-                });
-                if authority.base_placement.value != desired {
-                    authority.set_placement(desired, constraints);
-                }
-                authority.revisions().placement
+                self.geometry_authorities
+                    .get_mut(id)
+                    .and_then(|authority| authority.try_authorize_placement(desired, constraints))
+                    .map(|placement| placement.revision)
+            }) else {
+                continue;
             };
+            *location = rescue_location;
             displaced.push(DisplacedWindow {
                 id: *id,
                 relative_location,
@@ -10510,10 +10502,19 @@ impl NickelSession {
         let timer = self.event_loop_handle.insert_source(
             smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
             move |_, _, state| {
+                let mut expired = false;
                 if let Some(settlement) = state.x11_geometry_settlements.get_mut(&id)
                     && settlement.request.id == request_id
                 {
                     settlement.expire(settlement.limits.deadline_tick);
+                    expired = settlement.status
+                        == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
+                }
+                if expired {
+                    state.cancel_geometry_window_operation(
+                        id,
+                        nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+                    );
                 }
                 smithay::reexports::calloop::timer::TimeoutAction::Drop
             },
@@ -10525,6 +10526,34 @@ impl NickelSession {
             settlement.fail();
         }
         Some(request_id)
+    }
+
+    pub(crate) fn x11_has_pending_issued_request(&self, id: WindowId) -> bool {
+        self.x11_geometry_settlements
+            .get(&id)
+            .is_some_and(|settlement| {
+                settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
+            })
+    }
+
+    pub(crate) fn cancel_geometry_window_operation(
+        &mut self,
+        id: WindowId,
+        reason: nickel_core::window_operation::CancellationReason,
+    ) -> bool {
+        let subject = nickel_core::window_operation::WindowId::new(id.0);
+        let Some(operation) = self.window_operations.operation_for_window(subject) else {
+            return false;
+        };
+        let _ = self.window_operations.cancel(operation, reason);
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.unset_grab(
+                self,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                smithay::backend::input::InputTime::now(),
+            );
+        }
+        true
     }
 
     pub(crate) fn record_xdg_desired_geometry(
@@ -12674,16 +12703,17 @@ impl NickelSession {
                 .surface_windows
                 .get(&surface.wl_surface().id())
                 .copied();
-            if let Some(id) = id {
+            let placement = id.and_then(|id| {
                 self.record_presentation_geometry(
                     id,
                     nickel_core::geometry_authority::Presentation::Maximized,
                     geometry,
-                );
+                )
+                .map(|placement| (id, placement))
+            });
+            if let Some((id, placement)) = placement {
+                self.apply_authorized_complete_window_geometry(window, id, placement, true);
             }
-            self.configure_window(&window, geometry);
-            self.space
-                .map_element(window, (geometry.x, geometry.y), true);
         }
         let maximized_x11 = self
             .space
