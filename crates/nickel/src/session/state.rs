@@ -5906,7 +5906,10 @@ impl NickelSession {
             }
             ControllerHostRequest::Poll {
                 connection_generation,
-            } => {
+            } if self
+                .controller_broker
+                .is_attached(host, connection_generation) =>
+            {
                 let lease_epoch = self
                     .controller_broker
                     .active_lease()
@@ -5919,6 +5922,7 @@ impl NickelSession {
                     messages: self.controller_broker.drain(host, connection_generation),
                 }
             }
+            ControllerHostRequest::Poll { .. } => ControllerHostResponse::LeaseFailed,
             ControllerHostRequest::AcknowledgeQuiescence {
                 connection_generation,
                 lease_epoch,

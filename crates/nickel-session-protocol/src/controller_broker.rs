@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, VecDeque};
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CONTROLLER_QUEUE_LIMIT: usize = 256;
+pub const DEFAULT_CONTROLLER_HOST_LIMIT: usize = 64;
 pub const DEFAULT_TRANSFER_DEADLINE_MS: u64 = 750;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -108,6 +109,8 @@ pub struct ControllerBroker<T> {
     next_lease: u64,
     stream_generation: StreamGeneration,
     queue_limit: usize,
+    host_limit: usize,
+    exhausted: bool,
     neutral: bool,
     reset_barrier: bool,
     active: Option<Lease>,
@@ -117,10 +120,15 @@ pub struct ControllerBroker<T> {
 
 impl<T> ControllerBroker<T> {
     pub fn new(queue_limit: usize) -> Self {
+        Self::with_limits(queue_limit, DEFAULT_CONTROLLER_HOST_LIMIT)
+    }
+
+    pub fn with_limits(queue_limit: usize, host_limit: usize) -> Self {
         assert!(
             queue_limit >= 1,
             "controller queue must retain a lifecycle barrier"
         );
+        assert!(host_limit >= 1, "controller host registry must be bounded");
         Self {
             hosts: BTreeMap::new(),
             next_connection: 0,
@@ -128,6 +136,8 @@ impl<T> ControllerBroker<T> {
             next_lease: 0,
             stream_generation: StreamGeneration(1),
             queue_limit,
+            host_limit,
+            exhausted: false,
             neutral: true,
             reset_barrier: false,
             active: None,
@@ -137,7 +147,25 @@ impl<T> ControllerBroker<T> {
     }
 
     pub fn attach(&mut self, host: HostId) -> ConnectionGeneration {
-        self.next_connection = self.next_connection.saturating_add(1);
+        if self.exhausted {
+            return ConnectionGeneration(0);
+        }
+        let Some(next_connection) = self.next_connection.checked_add(1) else {
+            self.fail_closed();
+            return ConnectionGeneration(0);
+        };
+        if !self.hosts.contains_key(&host) && self.hosts.len() >= self.host_limit {
+            let Some(evicted) = self
+                .hosts
+                .keys()
+                .copied()
+                .find(|candidate| !self.host_is_authority_protected(*candidate))
+            else {
+                return ConnectionGeneration(0);
+            };
+            self.hosts.remove(&evicted);
+        }
+        self.next_connection = next_connection;
         let generation = ConnectionGeneration(self.next_connection);
         let replaced = self.hosts.insert(
             host,
@@ -175,7 +203,8 @@ impl<T> ControllerBroker<T> {
     }
 
     pub fn grant(&mut self, host: HostId, connection: ConnectionGeneration) -> Option<Lease> {
-        if self.active.is_some()
+        if self.exhausted
+            || self.active.is_some()
             || self.transfer.is_some()
             || self.poisoned_predecessor.is_some()
             || self.reset_barrier
@@ -183,8 +212,14 @@ impl<T> ControllerBroker<T> {
         {
             return None;
         }
-        self.connection_matches(host, connection)
-            .then(|| self.install_lease(host, connection))
+        if !self.connection_matches(host, connection) {
+            return None;
+        }
+        let lease = self.install_lease(host, connection);
+        if lease.is_none() {
+            self.fail_closed();
+        }
+        lease
     }
 
     pub fn begin_transfer(
@@ -194,6 +229,9 @@ impl<T> ControllerBroker<T> {
         now_ms: u64,
         timeout_ms: u64,
     ) -> TransferStatus {
+        if self.exhausted {
+            return TransferStatus::Failed;
+        }
         let Some(from) = self.active.take() else {
             return TransferStatus::Failed;
         };
@@ -202,7 +240,11 @@ impl<T> ControllerBroker<T> {
             return TransferStatus::Failed;
         }
         let cutoff = EventId(self.next_event);
-        let requested_lease = self.allocate_lease_epoch();
+        let Some(requested_lease) = self.allocate_lease_epoch() else {
+            self.active = Some(from);
+            self.fail_closed();
+            return TransferStatus::Failed;
+        };
         self.push_lifecycle(
             from.host,
             BrokerMessage::Revoke {
@@ -313,7 +355,18 @@ impl<T> ControllerBroker<T> {
     }
 
     pub fn ingest(&mut self, payload: T) -> IngressDisposition {
-        self.next_event = self.next_event.saturating_add(1);
+        if self.exhausted {
+            return IngressDisposition::RejectedResetBarrier {
+                event_id: EventId(self.next_event),
+            };
+        }
+        let Some(next_event) = self.next_event.checked_add(1) else {
+            self.fail_closed();
+            return IngressDisposition::RejectedResetBarrier {
+                event_id: EventId(self.next_event),
+            };
+        };
+        self.next_event = next_event;
         let event_id = EventId(self.next_event);
         if self.transfer.is_some() {
             return IngressDisposition::RejectedTransfer { event_id };
@@ -359,6 +412,10 @@ impl<T> ControllerBroker<T> {
         self.active
     }
 
+    pub fn is_attached(&self, host: HostId, connection: ConnectionGeneration) -> bool {
+        self.connection_matches(host, connection)
+    }
+
     fn try_finish_transfer(&mut self) -> TransferStatus {
         let Some(transfer) = self.transfer else {
             return TransferStatus::Failed;
@@ -389,19 +446,19 @@ impl<T> ControllerBroker<T> {
             .is_some_and(|state| state.connection == generation)
     }
 
-    fn allocate_lease_epoch(&mut self) -> LeaseEpoch {
-        self.next_lease = self.next_lease.saturating_add(1);
-        LeaseEpoch(self.next_lease)
+    fn allocate_lease_epoch(&mut self) -> Option<LeaseEpoch> {
+        self.next_lease = self.next_lease.checked_add(1)?;
+        Some(LeaseEpoch(self.next_lease))
     }
 
-    fn install_lease(&mut self, host: HostId, connection: ConnectionGeneration) -> Lease {
+    fn install_lease(&mut self, host: HostId, connection: ConnectionGeneration) -> Option<Lease> {
         let lease = Lease {
             host,
             connection_generation: connection,
-            epoch: self.allocate_lease_epoch(),
+            epoch: self.allocate_lease_epoch()?,
         };
         self.active = Some(lease);
-        lease
+        Some(lease)
     }
 
     fn push_lifecycle(&mut self, host: HostId, message: BrokerMessage<T>) {
@@ -418,7 +475,12 @@ impl<T> ControllerBroker<T> {
         self.transfer = None;
         self.neutral = false;
         self.reset_barrier = true;
-        self.stream_generation.0 = self.stream_generation.0.saturating_add(1);
+        let Some(stream_generation) = self.stream_generation.0.checked_add(1) else {
+            self.stream_generation = StreamGeneration(u64::MAX);
+            self.fail_closed();
+            return;
+        };
+        self.stream_generation = StreamGeneration(stream_generation);
         let generation = self.stream_generation;
         for host in self.hosts.values_mut() {
             host.outbox.clear();
@@ -444,6 +506,33 @@ impl<T> ControllerBroker<T> {
         self.poisoned_predecessor = None;
         if self.neutral {
             self.reset_barrier = false;
+        }
+    }
+
+    fn host_is_authority_protected(&self, host: HostId) -> bool {
+        self.active.is_some_and(|lease| lease.host == host)
+            || self
+                .transfer
+                .is_some_and(|transfer| transfer.from.host == host || transfer.to == host)
+            || self
+                .poisoned_predecessor
+                .is_some_and(|poison| poison.lease.host == host)
+    }
+
+    fn fail_closed(&mut self) {
+        self.exhausted = true;
+        self.active = None;
+        self.transfer = None;
+        self.neutral = false;
+        self.reset_barrier = true;
+        let generation = self.stream_generation;
+        let through = EventId(self.next_event);
+        for host in self.hosts.values_mut() {
+            host.outbox.clear();
+            host.outbox.push_back(BrokerMessage::StreamReset {
+                stream_generation: generation,
+                through,
+            });
         }
     }
 }
@@ -617,6 +706,79 @@ mod tests {
             TransferStatus::Failed
         );
         assert!(broker.grant(HostId(1), current).is_some());
+    }
+
+    #[test]
+    fn host_registry_evicts_only_idle_non_authority_entries() {
+        let mut broker = ControllerBroker::<()>::with_limits(4, 2);
+        let protected = broker.attach(HostId(1));
+        let idle = broker.attach(HostId(2));
+        broker.grant(HostId(1), protected).unwrap();
+
+        let replacement = broker.attach(HostId(3));
+        assert_ne!(replacement, ConnectionGeneration(0));
+        assert_eq!(broker.hosts.len(), 2);
+        assert!(!broker.connection_matches(HostId(2), idle));
+        assert!(broker.connection_matches(HostId(1), protected));
+    }
+
+    #[test]
+    fn full_authority_protected_registry_rejects_new_attachment() {
+        let mut broker = ControllerBroker::<()>::with_limits(4, 2);
+        let active = broker.attach(HostId(1));
+        let target = broker.attach(HostId(2));
+        broker.grant(HostId(1), active).unwrap();
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), target, 0, 10),
+            TransferStatus::Pending { .. }
+        ));
+
+        assert_eq!(broker.attach(HostId(3)), ConnectionGeneration(0));
+        assert_eq!(broker.hosts.len(), 2);
+    }
+
+    #[test]
+    fn identity_exhaustion_fails_closed_without_reusing_maximum() {
+        let mut connection_broker = ControllerBroker::<()>::new(2);
+        connection_broker.next_connection = u64::MAX;
+        assert_eq!(connection_broker.attach(HostId(1)), ConnectionGeneration(0));
+        assert!(connection_broker.exhausted);
+
+        let mut event_broker = ControllerBroker::new(2);
+        let connection = event_broker.attach(HostId(1));
+        event_broker.grant(HostId(1), connection).unwrap();
+        event_broker.next_event = u64::MAX;
+        assert!(matches!(
+            event_broker.ingest(()),
+            IngressDisposition::RejectedResetBarrier {
+                event_id: EventId(u64::MAX)
+            }
+        ));
+        assert_eq!(event_broker.active_lease(), None);
+
+        let mut lease_broker = ControllerBroker::<()>::new(2);
+        let connection = lease_broker.attach(HostId(1));
+        lease_broker.next_lease = u64::MAX;
+        assert!(lease_broker.grant(HostId(1), connection).is_none());
+        assert!(lease_broker.exhausted);
+
+        let mut stream_broker = ControllerBroker::new(1);
+        let connection = stream_broker.attach(HostId(1));
+        stream_broker.grant(HostId(1), connection).unwrap();
+        stream_broker.stream_generation = StreamGeneration(u64::MAX);
+        assert!(matches!(
+            stream_broker.ingest(1),
+            IngressDisposition::Delivered { .. }
+        ));
+        assert!(matches!(
+            stream_broker.ingest(2),
+            IngressDisposition::OverflowReset { .. }
+        ));
+        assert!(stream_broker.exhausted);
+        assert!(matches!(
+            stream_broker.drain(HostId(1), connection).as_slice(),
+            [BrokerMessage::StreamReset { .. }]
+        ));
     }
 
     #[test]

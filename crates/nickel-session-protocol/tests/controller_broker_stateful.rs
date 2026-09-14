@@ -53,11 +53,9 @@ fn bounded_generated_transfer_timeout_and_overflow_sequences_fence_delivery() {
                     broker.set_neutral(true);
                     assert!(broker.grant(HostId(1), a).is_none());
                     assert_eq!(
-                        broker.acknowledge_quiescence(
+                        broker.acknowledge_verified_termination(
                             lease.host,
-                            lease.connection_generation,
-                            lease.epoch,
-                            cutoff,
+                            lease.connection_generation
                         ),
                         TransferStatus::Failed
                     );
