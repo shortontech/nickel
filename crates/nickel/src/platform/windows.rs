@@ -1507,67 +1507,8 @@ enum SettlementRetentionOutcome {
 enum NativeApplyState {
     NotSubmitted,
     AcceptedSettlementUnknown,
-    DeferredBusy,
     Rejected,
 }
-
-#[derive(Clone, Copy)]
-struct NativeWindowWrite {
-    lifetime: NativeWindowLifetime,
-    request: NativeRequest,
-}
-
-#[derive(Clone, Copy)]
-struct NativeWindowWriteCompletion {
-    lifetime: NativeWindowLifetime,
-    request: NativeRequest,
-    applied: bool,
-}
-
-struct NativeWindowWriter {
-    requests: mpsc::SyncSender<NativeWindowWrite>,
-    completions: Mutex<Receiver<NativeWindowWriteCompletion>>,
-}
-
-static NATIVE_WINDOW_WRITER: LazyLock<NativeWindowWriter> = LazyLock::new(|| {
-    let (request_tx, request_rx) = mpsc::sync_channel::<NativeWindowWrite>(16);
-    let (completion_tx, completion_rx) = mpsc::channel();
-    thread::Builder::new()
-        .name("nickel-window-writer".into())
-        .spawn(move || {
-            while let Ok(write) = request_rx.recv() {
-                let rectangle = write.request.placement;
-                let window = HWND(write.lifetime.fingerprint.window as *mut c_void);
-                let applied = unsafe {
-                    SetWindowPos(
-                        window,
-                        None,
-                        rectangle.x,
-                        rectangle.y,
-                        rectangle.width,
-                        rectangle.height,
-                        SWP_NOZORDER | SWP_NOACTIVATE,
-                    )
-                    .is_ok()
-                };
-                if completion_tx
-                    .send(NativeWindowWriteCompletion {
-                        lifetime: write.lifetime,
-                        request: write.request,
-                        applied,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-        })
-        .expect("native window writer thread must start");
-    NativeWindowWriter {
-        requests: request_tx,
-        completions: Mutex::new(completion_rx),
-    }
-});
 
 #[derive(Clone, Copy)]
 enum ActiveSettlementExit {
@@ -1604,48 +1545,6 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
-    fn drain_native_write_completions(&mut self) {
-        let Ok(completions) = NATIVE_WINDOW_WRITER.completions.lock() else {
-            return;
-        };
-        while let Ok(completion) = completions.try_recv() {
-            if let Some(active) = self
-                .active
-                .as_mut()
-                .filter(|active| active.lifetime == completion.lifetime)
-            {
-                let is_latest = active
-                    .issued_settlements
-                    .back()
-                    .is_some_and(|settlement| settlement.request.id == completion.request.id);
-                if let Some(settlement) = active
-                    .issued_settlements
-                    .iter_mut()
-                    .find(|settlement| settlement.request.id == completion.request.id)
-                {
-                    apply_native_write_completion(
-                        &mut active.authority,
-                        &mut active.last_observed,
-                        settlement,
-                        completion,
-                        is_latest,
-                    );
-                    continue;
-                }
-            }
-            let key = (completion.lifetime, completion.request.id);
-            if let Some(retained) = self.retained_settlements.get_mut(&key) {
-                apply_native_write_completion(
-                    &mut retained.authority,
-                    &mut retained.last_observed,
-                    &mut retained.settlement,
-                    completion,
-                    true,
-                );
-            }
-        }
-    }
-
     fn terminalize_native_takeover(
         &mut self,
         mut active: WindowDrag,
@@ -1948,7 +1847,6 @@ impl WindowDragCoordinator {
     }
 
     fn update(&mut self, pointer: POINT, time: u64) -> Result<(), ()> {
-        self.drain_native_write_completions();
         let Some(mut active) = self.active.take() else {
             return Err(());
         };
@@ -2674,8 +2572,13 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     HookDisposition::Suppress
 }
 
-const fn permits_contested_workflow(native_ownership_observation: bool) -> bool {
-    native_ownership_observation
+const fn permits_contested_workflow(_native_ownership_observation: bool) -> bool {
+    // Win32 exposes no bounded SetWindowPos completion carrying request
+    // identity. ASYNCWINDOWPOS is bounded but tokenless; synchronous
+    // SetWindowPos can block forever in a hung foreign UI thread. Neither is
+    // the synchronously enforceable capability required for foreign geometry
+    // authority, so this adapter must fail closed.
+    false
 }
 
 fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
@@ -2683,7 +2586,6 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
         return;
     };
     let now = unsafe { GetTickCount64() };
-    coordinator.drain_native_write_completions();
     if coordinator.expire_unknown_suspension(now) {
         return;
     }
@@ -2718,64 +2620,13 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
 }
 
 fn apply_window_drag(
-    operation: &mut WindowDrag,
-    rectangle: LogicalRect,
-    request_id: u64,
-    mapping_generation: u64,
-    now: u64,
+    _operation: &mut WindowDrag,
+    _rectangle: LogicalRect,
+    _request_id: u64,
+    _mapping_generation: u64,
+    _now: u64,
 ) -> (NativeApplyState, Option<Settlement>) {
-    let authorized = operation.authority.authorize_placement(
-        rectangle,
-        GeometryConstraints {
-            min_width: 120,
-            min_height: 80,
-            max_width: None,
-            max_height: None,
-        },
-    );
-    let settlement = Settlement::new(
-        NativeRequest {
-            id: NativeRequestId(request_id),
-            mapping_generation,
-            desired: operation.authority.revisions(),
-            placement: authorized.desired,
-        },
-        SettlementLimits {
-            deadline_tick: now.saturating_add(250),
-            max_corrections: 0,
-        },
-    );
-    match NATIVE_WINDOW_WRITER.requests.try_send(NativeWindowWrite {
-        lifetime: operation.lifetime,
-        request: settlement.request,
-    }) {
-        Ok(()) => {
-            let displaced = enqueue_issued_settlement(operation, settlement);
-            (NativeApplyState::AcceptedSettlementUnknown, displaced)
-        }
-        Err(mpsc::TrySendError::Full(_)) => (NativeApplyState::DeferredBusy, None),
-        Err(mpsc::TrySendError::Disconnected(_)) => (NativeApplyState::Rejected, None),
-    }
-}
-
-fn apply_native_write_completion(
-    authority: &mut GeometryAuthority,
-    last_observed: &mut LogicalRect,
-    settlement: &mut Settlement,
-    completion: NativeWindowWriteCompletion,
-    authoritative: bool,
-) {
-    if !completion.applied || settlement.request != completion.request {
-        settlement.fail();
-        return;
-    }
-    let request = completion.request.id;
-    let fact = native_geometry(completion.request.placement);
-    settlement.observe(fact, ObservationCausality::Correlated(request));
-    if authoritative {
-        authority.observe(fact, ObservationCausality::Correlated(request));
-        *last_observed = completion.request.placement;
-    }
+    (NativeApplyState::Rejected, None)
 }
 
 fn enqueue_issued_settlement(
@@ -2837,9 +2688,9 @@ fn classify_window_drag_observation(
     if observed != operation.last_observed {
         operation
             .authority
-            .observe(fact, ObservationCausality::Unknown);
-        operation.unknown_since.get_or_insert(now);
-        return Ok(false);
+            .observe(fact, ObservationCausality::Independent);
+        operation.authority.base_placement.control = ControlMode::Delegated;
+        return Err(CancellationReason::NativeTakeover);
     }
     Ok(true)
 }
@@ -5163,9 +5014,8 @@ mod tests {
         ActiveSettlementExit, DwmPreviewState, NativeApplyState, NativePreviewDiagnostics,
         NativeWindowFingerprint, NativeWindowLifetime, RetainedNativeSettlement,
         SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
-        WindowDragAdmission, WindowDragCoordinator, application_icon,
-        apply_native_write_completion, apply_window_drag, clamp_preview_x,
-        classify_window_drag_observation, contain_rect, contested_authority,
+        WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
+        clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
         contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
@@ -5239,7 +5089,7 @@ mod tests {
     }
 
     #[test]
-    fn changed_tokenless_geometry_enters_unknown_before_another_write() {
+    fn independent_native_geometry_revokes_before_another_write() {
         let mut drag = contested_drag();
         let observed = LogicalRect {
             x: 40,
@@ -5247,85 +5097,13 @@ mod tests {
         };
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 10, false),
-            Ok(false)
+            Err(CancellationReason::NativeTakeover)
         );
-        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
-        assert_eq!(drag.unknown_since, Some(10));
-    }
-
-    #[test]
-    fn synchronous_request_evidence_keeps_ordinary_drag_live_past_unknown_bound() {
-        let mut drag = contested_drag();
-        for (tick, request) in (16..=320).step_by(16).zip(1_u64..) {
-            let observed = LogicalRect {
-                x: drag.last_observed.x + 1,
-                ..drag.last_observed
-            };
-            let mut settlement = Settlement::new(
-                NativeRequest {
-                    id: NativeRequestId(request),
-                    mapping_generation: 1,
-                    desired: drag.authority.revisions(),
-                    placement: observed,
-                },
-                SettlementLimits {
-                    deadline_tick: tick + 250,
-                    max_corrections: 0,
-                },
-            );
-            let request = settlement.request;
-            apply_native_write_completion(
-                &mut drag.authority,
-                &mut drag.last_observed,
-                &mut settlement,
-                super::NativeWindowWriteCompletion {
-                    lifetime: drag.lifetime,
-                    request,
-                    applied: true,
-                },
-                true,
-            );
-            assert!(matches!(
-                settlement.status,
-                SettlementStatus::Applied | SettlementStatus::AppliedWithAdjustment
-            ));
-            assert_eq!(drag.unknown_since, None);
-        }
-        assert_eq!(drag.last_observed.x, 30);
-    }
-
-    #[test]
-    fn failed_or_interleaved_writer_completion_never_claims_correlation() {
-        let drag = contested_drag();
-        let mut authority = drag.authority.clone();
-        let mut observed = drag.last_observed;
-        let mut settlement = Settlement::new(
-            NativeRequest {
-                id: NativeRequestId(81),
-                mapping_generation: 1,
-                desired: drag.authority.revisions(),
-                placement: LogicalRect { x: 80, ..observed },
-            },
-            SettlementLimits {
-                deadline_tick: 250,
-                max_corrections: 0,
-            },
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::External);
+        assert_eq!(
+            drag.authority.base_placement.control,
+            ControlMode::Delegated
         );
-        let mut interleaved = settlement.request;
-        interleaved.id = NativeRequestId(82);
-        apply_native_write_completion(
-            &mut authority,
-            &mut observed,
-            &mut settlement,
-            super::NativeWindowWriteCompletion {
-                lifetime: drag.lifetime,
-                request: interleaved,
-                applied: true,
-            },
-            true,
-        );
-        assert_eq!(settlement.status, SettlementStatus::Failed);
-        assert_eq!(observed, drag.last_observed);
     }
 
     #[test]
@@ -5557,7 +5335,32 @@ mod tests {
     #[test]
     fn contested_workflow_fails_closed_without_native_ownership_hook() {
         assert!(!permits_contested_workflow(false));
-        assert!(permits_contested_workflow(true));
+        assert!(!permits_contested_workflow(true));
+    }
+
+    #[test]
+    fn unavailable_foreign_geometry_never_admits_or_mutates_reused_hwnd() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        let reused = fingerprint(7, 99);
+
+        if permits_contested_workflow(true) {
+            let _ = coordinator.admit(WindowDragAdmission {
+                fingerprint: reused,
+                start: POINT::default(),
+                rectangle,
+                resize_edge: None,
+                initiating_button: 1,
+                time: 10,
+            });
+        }
+        assert!(coordinator.active.is_none());
+        assert!(!coordinator.current_lifetimes.contains_key(&reused.window));
     }
 
     #[test]
@@ -5619,13 +5422,16 @@ mod tests {
     }
 
     #[test]
-    fn rejected_later_async_apply_preserves_previous_pending_request() {
+    fn unavailable_constrained_apply_preserves_authority_and_pending_request() {
         let mut drag = drag_with_pending_settlement(43);
         let rectangle = drag.last_observed;
+        let revisions = drag.authority.revisions();
         let (state, displaced) = apply_window_drag(&mut drag, rectangle, 44, 1, 20);
 
         assert_eq!(state, NativeApplyState::Rejected);
         assert!(displaced.is_none());
+        assert_eq!(drag.authority.revisions(), revisions);
+        assert_eq!(drag.last_observed, rectangle);
         assert_eq!(
             drag.issued_settlements
                 .front()
