@@ -1370,6 +1370,13 @@ struct PendingLongPress {
     host_connection_generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TouchIntentArbitration {
+    Preserve,
+    CancelThenDispatch,
+    RejectBusy,
+}
+
 const TOUCH_LONG_PRESS_DELAY: Duration = Duration::from_millis(500);
 const TOUCH_LONG_PRESS_SLOP: f32 = 8.0;
 
@@ -2682,6 +2689,66 @@ impl<A: Application> UiHost<A> {
         }
     }
 
+    fn touch_owner_target(&self) -> Option<&UiId> {
+        self.pending_long_press
+            .as_ref()
+            .and_then(|pending| pending.target.as_ref())
+            .or_else(|| self.state.captured())
+    }
+
+    fn arbitrate_activation_target(&self, target: Option<&UiId>) -> TouchIntentArbitration {
+        let Some(owner) = self.touch_owner_target() else {
+            return TouchIntentArbitration::Preserve;
+        };
+        match target {
+            Some(target) if target == owner => TouchIntentArbitration::RejectBusy,
+            Some(_) => TouchIntentArbitration::CancelThenDispatch,
+            None => TouchIntentArbitration::Preserve,
+        }
+    }
+
+    fn touch_arbitration_for_event(&self, event: &HostEvent) -> TouchIntentArbitration {
+        let resolved_activation = |target: &UiId| {
+            self.tree
+                .resolve_effective_target(target, ActionKind::Activate)
+                .ok()
+                .map(|route| route.target)
+        };
+        match event {
+            HostEvent::Semantic { target, action }
+            | HostEvent::Accessibility { target, action }
+            | HostEvent::ControllerSemantic { target, action }
+                if *action == SemanticAction::Invoke(ActionKind::Activate) =>
+            {
+                resolved_activation(target)
+                    .as_ref()
+                    .map_or(TouchIntentArbitration::Preserve, |target| {
+                        self.arbitrate_activation_target(Some(target))
+                    })
+            }
+            HostEvent::Controller(ControllerAction::Confirm)
+            | HostEvent::Ui(UiEvent::ControllerActivate | UiEvent::KeyboardNavigateActivate) => {
+                let target = self
+                    .state
+                    .navigation()
+                    .controller_selected()
+                    .or_else(|| self.state.focused());
+                target
+                    .and_then(resolved_activation)
+                    .as_ref()
+                    .map_or(TouchIntentArbitration::Preserve, |target| {
+                        self.arbitrate_activation_target(Some(target))
+                    })
+            }
+            HostEvent::Ui(UiEvent::AccessibilityFocus(target))
+                if self.tree.accepts_accessibility_focus(target) =>
+            {
+                self.arbitrate_activation_target(Some(target))
+            }
+            _ => TouchIntentArbitration::Preserve,
+        }
+    }
+
     fn finalize_pending_long_press_attachment(&mut self) {
         let Some(pending) = self.pending_long_press.as_mut() else {
             return;
@@ -2804,24 +2871,18 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
-            let semantic_conflicts_with_touch = match &event {
-                HostEvent::Semantic { target, action }
-                | HostEvent::Accessibility { target, action }
-                | HostEvent::ControllerSemantic { target, action }
-                    if *action == SemanticAction::Invoke(ActionKind::Activate) =>
+            let touch_arbitration = match &event {
+                HostEvent::AdmittedController { action, binding }
+                    if *action == Some(ControllerAction::Confirm)
+                        && binding.edge == nickel_input::KeyEdge::Pressed
+                        && controller_authority
+                            .is_some_and(|authority| authority.admits(*binding)) =>
                 {
-                    let touch_target = self
-                        .pending_long_press
-                        .as_ref()
-                        .and_then(|pending| pending.target.as_ref())
-                        .or_else(|| self.state.captured());
-                    touch_target.is_some_and(|owner| owner != target)
-                        && self
-                            .tree
-                            .resolve_effective_target(target, ActionKind::Activate)
-                            .is_ok()
+                    self.touch_arbitration_for_event(&HostEvent::Controller(
+                        ControllerAction::Confirm,
+                    ))
                 }
-                _ => false,
+                _ => self.touch_arbitration_for_event(&event),
             };
             let normalized_input = match &event {
                 HostEvent::Normalized { input, .. } => Some(input),
@@ -2841,161 +2902,161 @@ impl<A: Application> UiHost<A> {
                     _ => {}
                 }
             }
-            if matches!(&event, HostEvent::Controller(ControllerAction::Confirm))
-                || semantic_conflicts_with_touch
-            {
+            if touch_arbitration == TouchIntentArbitration::CancelThenDispatch {
                 combined.merge(self.arbitrate_touch_ownership());
             }
-            let mut outcome = match event {
-                HostEvent::Ui(event) => self.dispatch_ui_event(event),
-                HostEvent::Controller(action) => self.dispatch_controller_action(action),
-                HostEvent::AdmittedController { action, binding } => {
-                    let admitted =
-                        controller_authority.is_some_and(|authority| authority.admits(binding));
-                    if admitted
-                        && binding.edge == nickel_input::KeyEdge::Pressed
-                        && action == Some(ControllerAction::Confirm)
-                    {
-                        combined.merge(self.arbitrate_touch_ownership());
-                    }
-                    if let Some(blocked) = self.controller_overflow_fence
-                        && admitted
-                        && controller_authority.is_some_and(|authority| authority != blocked)
-                    {
-                        // A distinct authority can only arrive after the broker acknowledged the
-                        // reset, observed native neutral, and issued a replacement lease. Clear
-                        // the local press fence before dispatch so recovery does not consume the
-                        // first new gesture as though it were the missing old-stream release.
-                        self.controller_overflow_fence = None;
-                        self.controller_press_authority = controller_authority;
-                        self.admitted_controller_presses.clear();
-                    }
-                    if self.controller_overflow_fence.is_some() {
-                        let mut outcome = HostEventOutcome::default();
-                        outcome
-                            .controller_executions
-                            .push(ControllerExecutionEvidence {
-                                binding,
-                                disposition: ControllerExecutionDisposition::RejectedResetFence,
-                                message_count: 0,
-                                effect_count: 0,
-                            });
-                        outcome
-                    } else {
-                        let mut overflow_reset = false;
-                        let paired = match (binding.edge, action) {
-                            (nickel_input::KeyEdge::Released, Some(action)) => {
-                                let key = AdmittedControllerPress::new(binding, action);
-                                let paired =
-                                    admitted && self.admitted_controller_presses.remove(&key);
-                                if !paired {
+            let mut outcome = if touch_arbitration == TouchIntentArbitration::RejectBusy {
+                HostEventOutcome {
+                    disposition: crate::EventDisposition::Rejected("input busy"),
+                    ..HostEventOutcome::default()
+                }
+            } else {
+                match event {
+                    HostEvent::Ui(event) => self.dispatch_ui_event(event),
+                    HostEvent::Controller(action) => self.dispatch_controller_action(action),
+                    HostEvent::AdmittedController { action, binding } => {
+                        let admitted =
+                            controller_authority.is_some_and(|authority| authority.admits(binding));
+                        if let Some(blocked) = self.controller_overflow_fence
+                            && admitted
+                            && controller_authority.is_some_and(|authority| authority != blocked)
+                        {
+                            // A distinct authority can only arrive after the broker acknowledged the
+                            // reset, observed native neutral, and issued a replacement lease. Clear
+                            // the local press fence before dispatch so recovery does not consume the
+                            // first new gesture as though it were the missing old-stream release.
+                            self.controller_overflow_fence = None;
+                            self.controller_press_authority = controller_authority;
+                            self.admitted_controller_presses.clear();
+                        }
+                        if self.controller_overflow_fence.is_some() {
+                            let mut outcome = HostEventOutcome::default();
+                            outcome
+                                .controller_executions
+                                .push(ControllerExecutionEvidence {
+                                    binding,
+                                    disposition: ControllerExecutionDisposition::RejectedResetFence,
+                                    message_count: 0,
+                                    effect_count: 0,
+                                });
+                            outcome
+                        } else {
+                            let mut overflow_reset = false;
+                            let paired = match (binding.edge, action) {
+                                (nickel_input::KeyEdge::Released, Some(action)) => {
+                                    let key = AdmittedControllerPress::new(binding, action);
+                                    let paired =
+                                        admitted && self.admitted_controller_presses.remove(&key);
+                                    if !paired {
+                                        self.admitted_controller_presses.retain(|press| {
+                                            press.device_generation != binding.device_generation
+                                                || press.action != action
+                                        });
+                                    }
+                                    paired
+                                }
+                                (nickel_input::KeyEdge::Released, None) => {
                                     self.admitted_controller_presses.retain(|press| {
                                         press.device_generation != binding.device_generation
-                                            || press.action != action
                                     });
-                                }
-                                paired
-                            }
-                            (nickel_input::KeyEdge::Released, None) => {
-                                self.admitted_controller_presses.retain(|press| {
-                                    press.device_generation != binding.device_generation
-                                });
-                                false
-                            }
-                            (nickel_input::KeyEdge::Pressed, Some(action)) if admitted => {
-                                let key = AdmittedControllerPress::new(binding, action);
-                                if !self.admitted_controller_presses.contains(&key)
-                                    && self.admitted_controller_presses.len()
-                                        >= MAX_ADMITTED_CONTROLLER_PRESSES
-                                {
-                                    self.admitted_controller_presses.clear();
-                                    self.controller_press_authority = None;
-                                    self.controller_overflow_fence = controller_authority;
-                                    overflow_reset = true;
                                     false
-                                } else {
-                                    self.admitted_controller_presses.insert(key);
-                                    true
                                 }
-                            }
-                            (nickel_input::KeyEdge::Pressed, _) => admitted,
-                        };
-                        let mut outcome =
-                            if paired && binding.edge == nickel_input::KeyEdge::Pressed {
-                                self.dispatch_controller_action(
-                                    action.expect("paired press has action"),
-                                )
-                            } else {
-                                HostEventOutcome::default()
+                                (nickel_input::KeyEdge::Pressed, Some(action)) if admitted => {
+                                    let key = AdmittedControllerPress::new(binding, action);
+                                    if !self.admitted_controller_presses.contains(&key)
+                                        && self.admitted_controller_presses.len()
+                                            >= MAX_ADMITTED_CONTROLLER_PRESSES
+                                    {
+                                        self.admitted_controller_presses.clear();
+                                        self.controller_press_authority = None;
+                                        self.controller_overflow_fence = controller_authority;
+                                        overflow_reset = true;
+                                        false
+                                    } else {
+                                        self.admitted_controller_presses.insert(key);
+                                        true
+                                    }
+                                }
+                                (nickel_input::KeyEdge::Pressed, _) => admitted,
                             };
-                        outcome
-                            .controller_executions
-                            .push(ControllerExecutionEvidence {
-                                binding,
-                                disposition: if overflow_reset {
-                                    ControllerExecutionDisposition::ResetOverflow
-                                } else if !admitted {
-                                    ControllerExecutionDisposition::RejectedStale
-                                } else if binding.edge == nickel_input::KeyEdge::Released && !paired
-                                {
-                                    ControllerExecutionDisposition::RejectedUnpairedRelease
+                            let mut outcome =
+                                if paired && binding.edge == nickel_input::KeyEdge::Pressed {
+                                    self.dispatch_controller_action(
+                                        action.expect("paired press has action"),
+                                    )
                                 } else {
-                                    ControllerExecutionDisposition::Executed
-                                },
-                                message_count: outcome.messages.len(),
-                                effect_count: 0,
-                            });
-                        outcome
+                                    HostEventOutcome::default()
+                                };
+                            outcome
+                                .controller_executions
+                                .push(ControllerExecutionEvidence {
+                                    binding,
+                                    disposition: if overflow_reset {
+                                        ControllerExecutionDisposition::ResetOverflow
+                                    } else if !admitted {
+                                        ControllerExecutionDisposition::RejectedStale
+                                    } else if binding.edge == nickel_input::KeyEdge::Released
+                                        && !paired
+                                    {
+                                        ControllerExecutionDisposition::RejectedUnpairedRelease
+                                    } else {
+                                        ControllerExecutionDisposition::Executed
+                                    },
+                                    message_count: outcome.messages.len(),
+                                    effect_count: 0,
+                                });
+                            outcome
+                        }
                     }
-                }
-                HostEvent::Shortcut(shortcut) => {
-                    let shortcut = self.application.shortcut_outcome(shortcut);
-                    HostEventOutcome {
-                        changed: shortcut.changed,
-                        disposition: shortcut.disposition,
-                        invalidation: if shortcut.changed {
-                            Invalidation::Layout
+                    HostEvent::Shortcut(shortcut) => {
+                        let shortcut = self.application.shortcut_outcome(shortcut);
+                        HostEventOutcome {
+                            changed: shortcut.changed,
+                            disposition: shortcut.disposition,
+                            invalidation: if shortcut.changed {
+                                Invalidation::Layout
+                            } else {
+                                Invalidation::None
+                            },
+                            ..HostEventOutcome::default()
+                        }
+                    }
+                    HostEvent::Semantic { target, action } => {
+                        self.dispatch_semantic_action(target, action, InputSource::Programmatic)
+                    }
+                    HostEvent::Accessibility { target, action } => {
+                        self.dispatch_semantic_action(target, action, InputSource::Accessibility)
+                    }
+                    HostEvent::ControllerSemantic { target, action } => {
+                        self.dispatch_semantic_action(target, action, InputSource::Controller)
+                    }
+                    HostEvent::Normalized {
+                        input,
+                        clipboard_text,
+                    } => self.dispatch_input(&input, clipboard_text.as_deref()),
+                    HostEvent::NormalizedIngress(envelope) => {
+                        if self.admits_normalized_ingress(&envelope, &normalized_authorities) {
+                            self.update_admitted_long_press(&envelope, now);
+                            self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
                         } else {
-                            Invalidation::None
-                        },
-                        ..HostEventOutcome::default()
+                            HostEventOutcome::default()
+                        }
                     }
-                }
-                HostEvent::Semantic { target, action } => {
-                    self.dispatch_semantic_action(target, action, InputSource::Programmatic)
-                }
-                HostEvent::Accessibility { target, action } => {
-                    self.dispatch_semantic_action(target, action, InputSource::Accessibility)
-                }
-                HostEvent::ControllerSemantic { target, action } => {
-                    self.dispatch_semantic_action(target, action, InputSource::Controller)
-                }
-                HostEvent::Normalized {
-                    input,
-                    clipboard_text,
-                } => self.dispatch_input(&input, clipboard_text.as_deref()),
-                HostEvent::NormalizedIngress(envelope) => {
-                    if self.admits_normalized_ingress(&envelope, &normalized_authorities) {
-                        self.update_admitted_long_press(&envelope, now);
-                        self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
-                    } else {
-                        HostEventOutcome::default()
-                    }
-                }
-                HostEvent::Poll => {
-                    let changed = self.application.poll();
-                    self.next_application_deadline = self
-                        .application
-                        .poll_interval()
-                        .map(|interval| now + interval);
-                    HostEventOutcome {
-                        changed,
-                        invalidation: if changed {
-                            Invalidation::Layout
-                        } else {
-                            Invalidation::None
-                        },
-                        ..HostEventOutcome::default()
+                    HostEvent::Poll => {
+                        let changed = self.application.poll();
+                        self.next_application_deadline = self
+                            .application
+                            .poll_interval()
+                            .map(|interval| now + interval);
+                        HostEventOutcome {
+                            changed,
+                            invalidation: if changed {
+                                Invalidation::Layout
+                            } else {
+                                Invalidation::None
+                            },
+                            ..HostEventOutcome::default()
+                        }
                     }
                 }
             };
@@ -6403,7 +6464,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_confirm_arbitrates_touch_before_deadline_and_end() {
+    fn same_owner_controller_confirm_is_busy_and_touch_end_activates_once() {
         let origin = Instant::now();
         let mut host = UiHost::new(ControllerApplication, 160, 48);
         host.step(HostBatch {
@@ -6427,16 +6488,14 @@ mod tests {
             events: vec![HostEvent::Controller(ControllerAction::Confirm)],
             ..HostBatch::default()
         });
-        assert_eq!(confirm.messages.len(), 1);
-        assert!(host.pending_long_press.is_none());
-        assert!(!host.input_dispatcher.touch_active());
+        assert!(confirm.messages.is_empty());
+        assert_eq!(
+            confirm.disposition,
+            crate::EventDisposition::Rejected("input busy")
+        );
+        assert!(host.pending_long_press.is_some());
+        assert!(host.input_dispatcher.touch_active());
 
-        let deadline = host.step(HostBatch {
-            now: Some(origin + super::TOUCH_LONG_PRESS_DELAY),
-            events: vec![HostEvent::Poll],
-            ..HostBatch::default()
-        });
-        assert!(deadline.messages.is_empty());
         let ended = host.step(HostBatch {
             events: vec![synthetic_normalized(
                 InputEvent::Touch(TouchEvent::Ended {
@@ -6449,7 +6508,7 @@ mod tests {
             )],
             ..HostBatch::default()
         });
-        assert!(ended.messages.is_empty());
+        assert_eq!(ended.messages.len(), 1);
     }
 
     #[test]
@@ -6498,6 +6557,90 @@ mod tests {
             ..HostBatch::default()
         });
         assert!(host.input_dispatcher.touch_active());
+    }
+
+    #[test]
+    fn raw_ui_different_target_cancels_touch_before_transition() {
+        let mut host = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let nodes = host.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        host.state
+            .navigation_mut()
+            .set_controller_selected(Some(second.id.clone()));
+
+        let activated = host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::ControllerActivate)],
+            ..HostBatch::default()
+        });
+        assert_eq!(activated.messages.len(), 1);
+        assert!(!host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_none());
+
+        let ended = host.handle_input(
+            &InputEvent::Touch(TouchEvent::Ended {
+                device: DeviceId(4),
+                order: EventOrder(2),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        assert!(ended.messages.is_empty());
+
+        let mut accessibility = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let nodes = accessibility.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second_id = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap()
+            .id
+            .clone();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        accessibility.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(5),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        accessibility.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::AccessibilityFocus(
+                second_id.clone(),
+            ))],
+            ..HostBatch::default()
+        });
+        assert!(!accessibility.input_dispatcher.touch_active());
+        assert!(accessibility.pending_long_press.is_none());
+        assert_eq!(accessibility.state.focused(), Some(&second_id));
     }
 
     #[test]
