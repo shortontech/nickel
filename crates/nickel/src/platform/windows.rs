@@ -1482,6 +1482,10 @@ fn unknown_suspension_within_bound(unknown_since: Option<u64>, now: u64) -> bool
     unknown_since.is_none_or(|since| now.saturating_sub(since) < MAX_UNKNOWN_SUSPENSION_MS)
 }
 
+fn should_observe_tokenless_geometry(active: &WindowDrag) -> bool {
+    active.issued_settlements.is_empty() || active.unknown_since.is_some()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalSettlementOutcome {
     key: RetainedSettlementKey,
@@ -1861,7 +1865,15 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
-        let observation = observe_window_drag(&mut active, time, false);
+        let observation = if should_observe_tokenless_geometry(&active) {
+            observe_window_drag(&mut active, time, false)
+        } else {
+            // Issuance is evidence that Nickel still owns this write turn, but
+            // it cannot authenticate a later tokenless rectangle. Keep the
+            // gesture live without manufacturing observation causality;
+            // explicit move/size WinEvents remain the takeover oracle.
+            Ok(true)
+        };
         match observation {
             Err(reason) => {
                 let _ = self.reducer.cancel(active.operation, reason);
@@ -2568,6 +2580,7 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let observation = coordinator
         .active
         .as_mut()
+        .filter(|active| should_observe_tokenless_geometry(active))
         .map(|active| observe_window_drag(active, now, false));
     match observation {
         Some(Err(reason)) => {
@@ -2684,21 +2697,6 @@ fn classify_window_drag_observation(
 ) -> Result<bool, CancellationReason> {
     let fact = native_geometry(observed);
     if !operation.issued_settlements.is_empty() {
-        let compatible_with_own_write = observed == operation.last_observed
-            || operation
-                .issued_settlements
-                .iter()
-                .any(|settlement| settlement.request.placement == observed);
-        if compatible_with_own_write {
-            // Geometry equality cannot prove Win32 request causality, so do
-            // not settle or transfer authority. It can, however, exclude a
-            // competing geometry value and permit the gesture to continue.
-            operation.last_observed = observed;
-            for settlement in &mut operation.issued_settlements {
-                settlement.expire(now);
-            }
-            return Ok(true);
-        }
         for settlement in &mut operation.issued_settlements {
             settlement.observe(fact, ObservationCausality::Unknown);
             settlement.expire(now);
@@ -5047,7 +5045,8 @@ mod tests {
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
         project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
+        should_observe_tokenless_geometry, should_restore_on_activation,
+        unknown_suspension_within_bound, windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -5183,51 +5182,41 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(true)
+            Ok(false)
         );
-        assert_ne!(drag.authority.base_placement.owner, FieldOwner::Unknown);
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
         assert!(!drag.issued_settlements.is_empty());
+        assert_eq!(drag.unknown_since, Some(249));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Ok(true)
+            Ok(false)
         );
     }
 
     #[test]
-    fn pending_baseline_observation_does_not_suspend_own_write() {
+    fn pending_baseline_observation_is_unknown_without_native_evidence() {
         let mut drag = drag_with_pending_settlement(60);
         let observed = drag.last_observed;
 
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 10, false),
-            Ok(true)
+            Ok(false)
         );
-        assert_eq!(drag.unknown_since, None);
+        assert_eq!(drag.unknown_since, Some(10));
         assert_eq!(drag.issued_settlements.len(), 1);
     }
 
     #[test]
-    fn reconcile_ticks_do_not_turn_own_pending_requests_into_unknown() {
-        let mut coordinator = WindowDragCoordinator::default();
+    fn production_reconcile_skips_unauthenticated_geometry_during_issued_write() {
         let mut drag = drag_with_pending_settlement(70);
-        for (tick, request) in [(50, 71), (100, 72), (200, 73), (300, 74)] {
-            let observed = drag.last_observed;
-            assert_eq!(
-                classify_window_drag_observation(&mut drag, observed, tick, false),
-                Ok(true),
-                "tick {tick}"
-            );
-            let mut next = drag.issued_settlements[0];
-            next.request.id = NativeRequestId(request);
-            next.limits.deadline_tick = tick + 250;
-            if let Some(displaced) = enqueue_issued_settlement(&mut drag, next) {
-                coordinator.record_displaced_active_settlement(drag.lifetime, displaced);
-            }
-        }
+        assert!(!should_observe_tokenless_geometry(&drag));
 
-        assert_eq!(drag.unknown_since, None);
-        assert_eq!(drag.issued_settlements.len(), 5);
-        assert!(drag.issued_settlements.len() <= super::MAX_ACTIVE_WINDOW_SETTLEMENTS);
+        drag.unknown_since = Some(50);
+        assert!(should_observe_tokenless_geometry(&drag));
+
+        drag.issued_settlements.clear();
+        drag.unknown_since = None;
+        assert!(should_observe_tokenless_geometry(&drag));
     }
 
     #[test]
