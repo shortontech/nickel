@@ -45,7 +45,7 @@ pub(crate) fn internal_normalized_ingress(
     };
     let authority = nickel_ui::NormalizedIngressAuthority {
         source: source.clone(),
-        recipient: recipient.clone(),
+        recipient,
         transfer_cutoff: None,
         host_connection_generation: recipient.lifetime,
         operation_epoch: None,

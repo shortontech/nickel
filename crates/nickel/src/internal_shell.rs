@@ -1218,7 +1218,7 @@ mod tests {
 
         assert!(internal_ingress_matches_route(
             &event,
-            &[authority.clone()],
+            std::slice::from_ref(&authority),
             42
         ));
         assert!(!internal_ingress_matches_route(&event, &[authority], 43));
