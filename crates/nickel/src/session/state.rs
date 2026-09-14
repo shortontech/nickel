@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc,
-        atomic::{AtomicU8, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -2590,6 +2590,15 @@ fn external_controller_surface_changed(
     active == Some((binding.host, binding.connection)) && focused_surface != Some(binding.surface)
 }
 
+fn orderly_external_controller_successor(
+    active: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    relinquishing: (ControllerHostId, ControllerConnectionGeneration),
+    internal: ControllerConnectionGeneration,
+) -> Option<(ControllerHostId, ControllerConnectionGeneration)> {
+    (relinquishing.0 != ControllerHostId(0) && active == Some(relinquishing))
+        .then_some((ControllerHostId(0), internal))
+}
+
 #[derive(Debug)]
 pub(crate) enum InternalCaptureState {
     Idle,
@@ -2673,6 +2682,7 @@ pub struct NickelSession {
     controller_role_security_epoch: u64,
     controller_external_lease_binding: Option<ExternalControllerLeaseBinding>,
     controller_ingress_recovery: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    controller_neutral_probe_requested: Arc<AtomicBool>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
@@ -5935,6 +5945,18 @@ impl NickelSession {
         );
     }
 
+    pub(crate) fn handle_controller_ingress_exhaustion(&mut self) {
+        self.controller_ingress_recovery = None;
+        self.controller_broker.exhaust();
+        tracing::error!(
+            "native controller ingress generation exhausted; input remains fail closed"
+        );
+    }
+
+    pub(crate) fn controller_neutral_probe(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.controller_neutral_probe_requested)
+    }
+
     fn dispatch_brokered_controller(
         &mut self,
         delivery: nickel_session_protocol::controller_broker::Delivery<ControllerEnvelopePayload>,
@@ -6149,6 +6171,13 @@ impl NickelSession {
             ControllerHostRequest::Relinquish {
                 connection_generation,
             } => {
+                let orderly_successor = orderly_external_controller_successor(
+                    self.controller_broker
+                        .active_lease()
+                        .map(|lease| (lease.host, lease.connection_generation)),
+                    (host, connection_generation),
+                    self.controller_internal_connection,
+                );
                 if self
                     .controller_external_lease_binding
                     .is_some_and(|binding| {
@@ -6157,8 +6186,14 @@ impl NickelSession {
                 {
                     self.controller_external_lease_binding = None;
                 }
-                self.controller_broker
+                let _ = self
+                    .controller_broker
                     .relinquish(host, connection_generation);
+                if let Some(successor) = orderly_successor {
+                    self.controller_ingress_recovery = Some(successor);
+                    self.controller_neutral_probe_requested
+                        .store(true, Ordering::Release);
+                }
                 ControllerHostResponse::Detached
             }
         };
@@ -7603,6 +7638,7 @@ impl NickelSession {
             controller_role_security_epoch: 0,
             controller_external_lease_binding: None,
             controller_ingress_recovery: None,
+            controller_neutral_probe_requested: Arc::new(AtomicBool::new(false)),
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
@@ -14032,6 +14068,28 @@ mod protocol_tests {
             Some(super::WindowId(11))
         ));
         assert!(external_controller_surface_changed(binding, active, None));
+    }
+
+    #[test]
+    fn orderly_external_relinquish_selects_only_the_internal_successor() {
+        let external = (ControllerHostId(44), ControllerConnectionGeneration(7));
+        let internal = ControllerConnectionGeneration(2);
+        assert_eq!(
+            super::orderly_external_controller_successor(Some(external), external, internal),
+            Some((ControllerHostId(0), internal))
+        );
+        assert_eq!(
+            super::orderly_external_controller_successor(None, external, internal),
+            None
+        );
+        assert_eq!(
+            super::orderly_external_controller_successor(
+                Some((ControllerHostId(0), internal)),
+                (ControllerHostId(0), internal),
+                internal,
+            ),
+            None
+        );
     }
     use crate::session::output_retirement::{
         BIND_SETTLE_GRACE as OUTPUT_GLOBAL_BIND_SETTLE_GRACE,

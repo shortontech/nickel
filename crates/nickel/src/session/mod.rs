@@ -113,6 +113,10 @@ fn admit_native_controller_generation(
     (overflowed, batch_generation >= *accepted_generation)
 }
 
+fn native_controller_generation_exhausted(generation: u64) -> bool {
+    generation == u64::MAX
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--available-backends")) {
         if cfg!(feature = "backend-winit") {
@@ -142,6 +146,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let display: Display<NickelSession> = Display::new()?;
     let mut state = NickelSession::new(&mut event_loop, display, arguments.test_control);
+    let controller_neutral_probe_requested = state.controller_neutral_probe();
     state.internal_ui.set_renderer_mode(arguments.ui_renderer);
     tracing::info!(
         renderer = ?arguments.ui_renderer,
@@ -241,6 +246,11 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .insert_source(controller_events, move |event, _, state| {
             if let smithay::reexports::calloop::channel::Event::Msg(batch) = event {
                 let current_generation = event_loop_controller_generation.load(Ordering::Acquire);
+                if native_controller_generation_exhausted(current_generation) {
+                    accepted_controller_generation = u64::MAX;
+                    state.handle_controller_ingress_exhaustion();
+                    return;
+                }
                 let (overflowed, admitted) = admit_native_controller_generation(
                     batch.ingress_generation,
                     current_generation,
@@ -264,7 +274,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 let events = controller.wait_global_envelopes(Duration::from_secs(1));
                 let neutral = !controller.held_input();
+                let neutral_probe_requested =
+                    controller_neutral_probe_requested.swap(false, Ordering::AcqRel);
                 if !force_observation
+                    && !neutral_probe_requested
                     && !should_publish_native_controller_batch(&events, neutral, &mut last_neutral)
                 {
                     continue;
@@ -459,7 +472,8 @@ mod tests {
     use super::{
         NativeControllerBatch, NativeControllerPublish, TEST_CONTROL_ENVIRONMENT,
         USER_SESSION_ENVIRONMENT, admit_native_controller_generation,
-        publish_native_controller_batch, secure_storage_required, secure_storage_startup_timed_out,
+        native_controller_generation_exhausted, publish_native_controller_batch,
+        secure_storage_required, secure_storage_startup_timed_out,
         should_publish_native_controller_batch, test_control_allowed,
         wait_for_secure_storage_start,
     };
@@ -514,6 +528,26 @@ mod tests {
             admit_native_controller_generation(2, 2, &mut accepted),
             (false, true)
         );
+    }
+
+    #[test]
+    fn exhausted_ingress_generation_is_terminal_even_for_equal_generation_batch() {
+        assert!(native_controller_generation_exhausted(u64::MAX));
+        let (sender, _receiver) = smithay::reexports::calloop::channel::sync_channel(0);
+        let generation = AtomicU64::new(u64::MAX);
+        assert_eq!(
+            publish_native_controller_batch(
+                &sender,
+                &generation,
+                NativeControllerBatch {
+                    events: Vec::new(),
+                    neutral: true,
+                    ingress_generation: u64::MAX,
+                },
+            ),
+            NativeControllerPublish::Overflow
+        );
+        assert_eq!(generation.load(Ordering::Acquire), u64::MAX);
     }
 
     #[test]
