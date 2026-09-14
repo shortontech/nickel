@@ -68,9 +68,8 @@ fn x11_client_request_causality() -> nickel_core::geometry_authority::Observatio
     nickel_core::geometry_authority::ObservationCausality::Independent
 }
 
+#[cfg(test)]
 fn x11_configure_notify_causality() -> nickel_core::geometry_authority::ObservationCausality {
-    // X11 configure notifications contain no Nickel request token. Geometry
-    // equality and arrival order are deliberately not accepted as evidence.
     nickel_core::geometry_authority::ObservationCausality::Unknown
 }
 
@@ -576,29 +575,27 @@ impl XwmHandler for NickelSession {
         _above: Option<X11Window>,
     ) {
         let registry_id = self.x11_window_id(&window);
-        if let Some(id) = registry_id
-            && !self.x11_has_pending_issued_request(id)
-        {
-            self.cancel_geometry_window_operation(
-                id,
-                nickel_core::window_operation::CancellationReason::AuthorityUnknown,
-            );
-        }
+        let observed = shell_layout::Geometry {
+            x: geometry.loc.x,
+            y: geometry.loc.y,
+            width: geometry.size.w,
+            height: geometry.size.h,
+        };
         if let Some(mapped) = self.x11_window(&window) {
             self.space.map_element(mapped, geometry.loc, false);
             self.request_output_redraw();
         }
         if let Some(id) = registry_id {
-            self.observe_x11_geometry(
-                id,
-                shell_layout::Geometry {
-                    x: geometry.loc.x,
-                    y: geometry.loc.y,
-                    width: geometry.size.w,
-                    height: geometry.size.h,
-                },
-                x11_configure_notify_causality(),
-            );
+            let causality = self.x11_configure_observation_causality(id, observed);
+            if causality == nickel_core::geometry_authority::ObservationCausality::Unknown
+                && !self.x11_has_pending_issued_request(id)
+            {
+                self.cancel_geometry_window_operation(
+                    id,
+                    nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+                );
+            }
+            self.observe_x11_geometry(id, observed, causality);
         }
     }
 

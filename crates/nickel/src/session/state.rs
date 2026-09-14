@@ -2940,6 +2940,7 @@ pub struct NickelSession {
         HashMap<WindowId, nickel_core::geometry_authority::CompensationBaseline>,
     pub(crate) x11_geometry_settlements:
         HashMap<WindowId, nickel_core::geometry_authority::Settlement>,
+    x11_geometry_overall_deadlines: HashMap<WindowId, u64>,
     xdg_geometry_settlements: HashMap<WindowId, XdgConfigureSettlement>,
     pub(crate) x11_next_native_request: u64,
     presentation_restore_revisions: HashMap<
@@ -7900,6 +7901,7 @@ impl NickelSession {
             internal_move_baselines: HashMap::new(),
             interactive_resize_baselines: HashMap::new(),
             x11_geometry_settlements: HashMap::new(),
+            x11_geometry_overall_deadlines: HashMap::new(),
             xdg_geometry_settlements: HashMap::new(),
             x11_next_native_request: 0,
             presentation_restore_revisions: HashMap::new(),
@@ -10573,24 +10575,31 @@ impl NickelSession {
         let desired_revisions = self.geometry_authorities.get(&id).and_then(|authority| {
             revisions_for_authorized_x11_request(authority, desired, placement_revision)
         })?;
+        let now = self
+            .start_time
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
         if let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
             && settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
             && settlement.request.mapping_generation == id.0
         {
             settlement.request.desired = desired_revisions;
             settlement.request.placement = desired;
-            return Some(settlement.request.id);
+            let request_id = settlement.request.id;
+            let overall = self.x11_geometry_overall_deadlines[&id];
+            settlement.limits.deadline_tick = now.saturating_add(750).min(overall);
+            let delay = settlement.limits.deadline_tick.saturating_sub(now);
+            self.schedule_x11_settlement_deadline(id, request_id, delay);
+            return Some(request_id);
         }
         self.x11_next_native_request = self
             .x11_next_native_request
             .checked_add(1)
             .expect("X11 native request identity exhausted");
         let request_id = NativeRequestId(self.x11_next_native_request);
-        let now = self
-            .start_time
-            .elapsed()
-            .as_millis()
-            .min(u128::from(u64::MAX)) as u64;
+        self.x11_geometry_overall_deadlines
+            .insert(id, now.saturating_add(10_000));
         self.x11_geometry_settlements.insert(
             id,
             Settlement::new(
@@ -10606,14 +10615,31 @@ impl NickelSession {
                 },
             ),
         );
+        self.schedule_x11_settlement_deadline(id, request_id, 750);
+        Some(request_id)
+    }
+
+    fn schedule_x11_settlement_deadline(
+        &mut self,
+        id: WindowId,
+        request_id: nickel_core::geometry_authority::NativeRequestId,
+        delay_ms: u64,
+    ) {
         let timer = self.event_loop_handle.insert_source(
-            smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
+            smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(
+                delay_ms,
+            )),
             move |_, _, state| {
                 let mut expired = false;
                 if let Some(settlement) = state.x11_geometry_settlements.get_mut(&id)
                     && settlement.request.id == request_id
                 {
-                    settlement.expire(settlement.limits.deadline_tick);
+                    let now = state
+                        .start_time
+                        .elapsed()
+                        .as_millis()
+                        .min(u128::from(u64::MAX)) as u64;
+                    settlement.expire(now);
                     expired = settlement.status
                         == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
                 }
@@ -10632,7 +10658,6 @@ impl NickelSession {
         {
             settlement.fail();
         }
-        Some(request_id)
     }
 
     pub(crate) fn x11_has_pending_issued_request(&self, id: WindowId) -> bool {
@@ -10641,6 +10666,28 @@ impl NickelSession {
             .is_some_and(|settlement| {
                 settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
             })
+    }
+
+    pub(crate) fn x11_configure_observation_causality(
+        &self,
+        id: WindowId,
+        observed: Geometry,
+    ) -> nickel_core::geometry_authority::ObservationCausality {
+        self.x11_geometry_settlements
+            .get(&id)
+            .filter(|settlement| {
+                settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
+                    && settlement.request.mapping_generation == id.0
+                    && settlement.request.placement == observed
+            })
+            .map_or(
+                nickel_core::geometry_authority::ObservationCausality::Unknown,
+                |settlement| {
+                    nickel_core::geometry_authority::ObservationCausality::Correlated(
+                        settlement.request.id,
+                    )
+                },
+            )
     }
 
     pub(crate) fn cancel_geometry_window_operation(
@@ -12748,6 +12795,7 @@ impl NickelSession {
         self.x11_fullscreen_restore.remove(&surface.window_id());
         if let Some(id) = self.x11_windows.get(&surface.window_id()).copied() {
             self.x11_geometry_settlements.remove(&id);
+            self.x11_geometry_overall_deadlines.remove(&id);
             self.presentation_restore_revisions
                 .retain(|(window, _), _| *window != id);
         }
@@ -12759,6 +12807,7 @@ impl NickelSession {
         self.x11_fullscreen_restore.clear();
         self.x11_fullscreen_restore.shrink_to_fit();
         self.x11_geometry_settlements.clear();
+        self.x11_geometry_overall_deadlines.clear();
         self.x11_geometry_settlements.shrink_to_fit();
     }
 
