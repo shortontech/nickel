@@ -1676,6 +1676,7 @@ impl<Message: Clone> UiFrame<Message> {
         source: InputSource,
         intent: InteractionIntent,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        let semantic_invocation = matches!(intent, InteractionIntent::Invoke { .. });
         let modality = match source {
             InputSource::Keyboard => Some(InputModality::Keyboard),
             InputSource::Pointer => Some(InputModality::Pointer),
@@ -1805,7 +1806,13 @@ impl<Message: Clone> UiFrame<Message> {
                 .invalidation
                 .merge(self.dismiss_blurred_dropdowns(state));
         }
+        let semantic_effect = outcome.invalidation != Invalidation::None
+            || !outcome.messages.is_empty()
+            || outcome.clipboard_text.is_some();
         outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
+        if semantic_invocation || semantic_effect {
+            outcome.disposition = crate::EventDisposition::Handled;
+        }
         Ok(outcome)
     }
 
@@ -2489,6 +2496,14 @@ impl<Message: Clone> UiFrame<Message> {
 
     fn reduce_event(&self, state: &mut UiStateStore, event: UiEvent) -> EventOutcome<Message> {
         let mut outcome = EventOutcome::default();
+        let intrinsically_handled = matches!(
+            event,
+            UiEvent::FocusGained
+                | UiEvent::FocusLost
+                | UiEvent::Suspended
+                | UiEvent::DeviceRemoved
+                | UiEvent::PointerCancelled
+        );
         let keyboard_tree_navigation = matches!(
             event,
             UiEvent::KeyboardNavigateUp
@@ -3081,6 +3096,7 @@ impl<Message: Clone> UiFrame<Message> {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
                 }
@@ -3089,6 +3105,7 @@ impl<Message: Clone> UiFrame<Message> {
                 {
                     return EventOutcome {
                         invalidation,
+                        disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
                 }
@@ -3114,6 +3131,7 @@ impl<Message: Clone> UiFrame<Message> {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
                 }
@@ -3122,6 +3140,7 @@ impl<Message: Clone> UiFrame<Message> {
                 {
                     return EventOutcome {
                         invalidation,
+                        disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
                 }
@@ -3598,6 +3617,9 @@ impl<Message: Clone> UiFrame<Message> {
         };
         if keyboard_tree_navigation {
             outcome.invalidation = outcome.invalidation.merge(state.set_focus(None));
+        }
+        if intrinsically_handled {
+            outcome.disposition = crate::EventDisposition::Handled;
         }
         outcome
     }

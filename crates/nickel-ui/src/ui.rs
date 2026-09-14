@@ -313,12 +313,22 @@ pub struct EventOutcome<Message> {
 
 /// Whether a semantic transition consumed the admitted input. Consumption is
 /// deliberately independent of visual or application-state changes.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum EventDisposition {
     Handled,
     #[default]
     Unhandled,
     Rejected(&'static str),
+}
+
+impl EventDisposition {
+    pub fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Rejected(reason), _) | (_, Self::Rejected(reason)) => Self::Rejected(reason),
+            (Self::Handled, _) | (_, Self::Handled) => Self::Handled,
+            (Self::Unhandled, Self::Unhandled) => Self::Unhandled,
+        }
+    }
 }
 
 impl<Message> Default for EventOutcome<Message> {

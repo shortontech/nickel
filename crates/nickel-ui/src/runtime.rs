@@ -1028,6 +1028,7 @@ pub struct HostChangeToken {
 #[derive(Clone, Debug, PartialEq)]
 pub struct HostEventOutcome {
     pub changed: bool,
+    pub disposition: crate::EventDisposition,
     pub invalidation: Invalidation,
     pub messages: Vec<MessageEvidence>,
     pub effects: Vec<EffectEvidence>,
@@ -1070,6 +1071,7 @@ impl Default for HostEventOutcome {
     fn default() -> Self {
         Self {
             changed: false,
+            disposition: crate::EventDisposition::Unhandled,
             invalidation: Invalidation::None,
             messages: Vec::new(),
             effects: Vec::new(),
@@ -1091,6 +1093,7 @@ impl Default for HostEventOutcome {
 impl HostEventOutcome {
     fn merge(&mut self, mut other: Self) {
         self.changed |= other.changed;
+        self.disposition = self.disposition.merge(other.disposition);
         self.invalidation = self.invalidation.merge(other.invalidation);
         self.messages.append(&mut other.messages);
         self.effects.append(&mut other.effects);
@@ -2030,6 +2033,7 @@ impl<A: Application> UiHost<A> {
             .transition(&mut self.state, source, InteractionIntent::Event(event))
             .expect("ordinary UI events cannot fail semantic resolution");
         let invalidation = outcome.invalidation;
+        let disposition = outcome.disposition;
         let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
         let messages = outcome
             .messages
@@ -2045,6 +2049,7 @@ impl<A: Application> UiHost<A> {
             .or(outcome.clipboard_text);
         HostEventOutcome {
             changed,
+            disposition,
             invalidation,
             messages,
             clipboard_text,
@@ -2071,6 +2076,7 @@ impl<A: Application> UiHost<A> {
         ) {
             Ok(outcome) => {
                 let invalidation = outcome.invalidation;
+                let disposition = outcome.disposition;
                 let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
                 let messages = outcome
                     .messages
@@ -2082,6 +2088,7 @@ impl<A: Application> UiHost<A> {
                 }
                 HostEventOutcome {
                     changed,
+                    disposition,
                     invalidation,
                     messages,
                     clipboard_text: self
@@ -2095,6 +2102,11 @@ impl<A: Application> UiHost<A> {
                 }
             }
             Err(error) => HostEventOutcome {
+                disposition: crate::EventDisposition::Rejected(match error {
+                    SemanticActionError::MissingTarget => "missing target",
+                    SemanticActionError::AmbiguousTarget => "ambiguous target",
+                    SemanticActionError::ActionUnavailable => "action unavailable",
+                }),
                 semantic_failures: vec![SemanticActionFailure { target, error }],
                 ..HostEventOutcome::default()
             },
@@ -3719,6 +3731,24 @@ mod tests {
         assert!(host.controller_targets_text_input());
         assert!(host.input_context().text_focused);
         assert!(!host.inspect().controller_editing);
+    }
+
+    #[test]
+    fn handled_no_op_and_rejected_action_have_explicit_dispositions() {
+        let mut host = UiHost::new(ControllerApplication, 320, 48);
+        host.handle_event(UiEvent::FocusGained);
+        let no_op = host.handle_event(UiEvent::FocusGained);
+        assert!(!no_op.changed);
+        assert_eq!(no_op.disposition, crate::EventDisposition::Handled);
+
+        let button = host.semantic_nodes()[0].id.clone();
+        let rejected =
+            host.perform_semantic_action(button, SemanticAction::Invoke(ActionKind::Increment));
+        assert_eq!(
+            rejected.disposition,
+            crate::EventDisposition::Rejected("action unavailable")
+        );
+        assert_eq!(rejected.semantic_failures.len(), 1);
     }
 
     #[test]
