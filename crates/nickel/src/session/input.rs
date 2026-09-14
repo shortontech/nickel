@@ -2418,8 +2418,16 @@ mod tests {
         assert_eq!(slots.get("touch-a", contact), None);
 
         assert!(!slots.device_added("touch-a"));
+        assert_eq!(
+            slots.get("touch-a", contact),
+            None,
+            "the replacement generation cannot inherit the removed contact"
+        );
         let replacement = slots.begin("touch-a", contact);
-        assert_ne!(replacement, old);
+        // Whole-domain cancellation ended the old lifetime, so recycling its numeric Smithay
+        // slot is safe. The generation-bearing contact key, not numeric non-reuse, is the fence.
+        assert_eq!(slots.get("touch-a", contact), Some(replacement));
+        assert_eq!(replacement, old);
         slots.cancel_all();
         assert_eq!(slots.get("touch-a", contact), None);
         assert_eq!(slots.end("touch-a", contact), None);
