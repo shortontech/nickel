@@ -18,7 +18,11 @@ pub mod windows;
 #[cfg(feature = "winit")]
 pub mod winit;
 
-/// Identifies an input device within a backend instance.
+/// Identifies one connected lifetime of an input device within a backend instance.
+///
+/// Adapters that can observe reconnects must allocate a fresh value when a native
+/// identifier is reused. This makes the value the device generation carried by
+/// normalized events, rather than a permanent hardware identifier.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct DeviceId(pub u64);
 
@@ -441,6 +445,20 @@ pub enum PointerEvent {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TouchId(pub u64);
+
+/// Identifies a touch contact without conflating equal contact numbers reported
+/// by distinct connected device lifetimes.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TouchContactId {
+    pub device: DeviceId,
+    pub contact: TouchId,
+}
+
+impl TouchContactId {
+    pub const fn new(device: DeviceId, contact: TouchId) -> Self {
+        Self { device, contact }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum TouchEvent {

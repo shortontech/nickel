@@ -656,7 +656,7 @@ impl<Message> UiHostViewport<Message> {
 
 #[derive(Clone, Copy, Debug)]
 struct PendingLongPress {
-    contact: nickel_input::TouchId,
+    contact: nickel_input::TouchContactId,
     origin: crate::Point,
     deadline: Instant,
 }
@@ -1784,12 +1784,13 @@ impl<A: Application> UiHost<A> {
             if let HostEvent::Normalized { input, .. } = &event {
                 match input {
                     nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started {
+                        device,
                         contact,
                         position,
                         ..
-                    }) => {
+                    }) if !self.input_dispatcher.pointer_interaction_active() => {
                         self.pending_long_press = Some(PendingLongPress {
-                            contact: *contact,
+                            contact: nickel_input::TouchContactId::new(*device, *contact),
                             origin: crate::Point {
                                 x: position.x as f32,
                                 y: position.y as f32,
@@ -1798,12 +1799,13 @@ impl<A: Application> UiHost<A> {
                         });
                     }
                     nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Moved {
+                        device,
                         contact,
                         position,
                         ..
-                    }) if self
-                        .pending_long_press
-                        .is_some_and(|pending| pending.contact == *contact) =>
+                    }) if self.pending_long_press.is_some_and(|pending| {
+                        pending.contact == nickel_input::TouchContactId::new(*device, *contact)
+                    }) =>
                     {
                         let pending = self.pending_long_press.expect("matched pending touch");
                         let dx = position.x as f32 - pending.origin.x;
@@ -1815,9 +1817,23 @@ impl<A: Application> UiHost<A> {
                     nickel_input::InputEvent::Touch(
                         nickel_input::TouchEvent::Ended { contact, .. }
                         | nickel_input::TouchEvent::Cancelled { contact, .. },
-                    ) if self
-                        .pending_long_press
-                        .is_some_and(|pending| pending.contact == *contact) =>
+                    ) if self.pending_long_press.is_some_and(|pending| {
+                        let device = match input {
+                            nickel_input::InputEvent::Touch(
+                                nickel_input::TouchEvent::Ended { device, .. }
+                                | nickel_input::TouchEvent::Cancelled { device, .. },
+                            ) => *device,
+                            _ => unreachable!("matched touch end or cancellation"),
+                        };
+                        pending.contact == nickel_input::TouchContactId::new(device, *contact)
+                    }) =>
+                    {
+                        self.pending_long_press = None;
+                    }
+                    nickel_input::InputEvent::DeviceRemoved { device, .. }
+                        if self
+                            .pending_long_press
+                            .is_some_and(|pending| pending.contact.device == *device) =>
                     {
                         self.pending_long_press = None;
                     }
@@ -3758,6 +3774,131 @@ mod tests {
         assert_eq!(touch_outcome.messages, pointer_outcome.messages);
         assert_eq!(touch_outcome.invalidation, pointer_outcome.invalidation);
         assert_eq!(touch.inspect(), pointer.inspect());
+    }
+
+    fn primary_button(device: u64, order: u64, edge: KeyEdge, point: Point) -> InputEvent {
+        InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(device),
+            order: EventOrder(order),
+            button: PointerButton::Primary,
+            edge,
+            position: Some(point),
+        })
+    }
+
+    #[test]
+    fn normalized_host_ignores_release_from_a_device_that_does_not_own_capture() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        let point = Point { x: 40.0, y: 20.0 };
+
+        assert!(
+            host.handle_input(&primary_button(1, 1, KeyEdge::Pressed, point), None)
+                .messages
+                .is_empty()
+        );
+        let capture = host
+            .inspect()
+            .pointer_capture
+            .expect("the production hit test established capture");
+
+        assert!(
+            host.handle_input(&primary_button(2, 2, KeyEdge::Released, point), None)
+                .messages
+                .is_empty()
+        );
+        assert_eq!(host.inspect().pointer_capture.as_ref(), Some(&capture));
+
+        assert_eq!(
+            host.handle_input(&primary_button(1, 3, KeyEdge::Released, point), None)
+                .messages
+                .len(),
+            1
+        );
+        assert!(host.inspect().pointer_capture.is_none());
+    }
+
+    #[test]
+    fn normalized_host_keeps_capture_when_an_unrelated_device_is_removed() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        let point = Point { x: 40.0, y: 20.0 };
+
+        host.handle_input(&primary_button(1, 1, KeyEdge::Pressed, point), None);
+        let capture = host
+            .inspect()
+            .pointer_capture
+            .expect("the production hit test established capture");
+        assert!(
+            host.handle_input(
+                &InputEvent::DeviceRemoved {
+                    device: DeviceId(2),
+                    order: EventOrder(2),
+                },
+                None,
+            )
+            .messages
+            .is_empty()
+        );
+        assert_eq!(host.inspect().pointer_capture.as_ref(), Some(&capture));
+
+        assert_eq!(
+            host.handle_input(&primary_button(1, 3, KeyEdge::Released, point), None)
+                .messages
+                .len(),
+            1
+        );
+        assert!(host.inspect().pointer_capture.is_none());
+    }
+
+    #[test]
+    fn normalized_host_distinguishes_equal_contact_numbers_on_distinct_devices() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        let position = Point { x: 40.0, y: 20.0 };
+        let contact = TouchId(7);
+
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(1),
+                order: EventOrder(1),
+                contact,
+                position,
+            }),
+            None,
+        );
+        let capture = host
+            .inspect()
+            .pointer_capture
+            .expect("the production hit test established capture");
+
+        assert!(
+            host.handle_input(
+                &InputEvent::Touch(TouchEvent::Ended {
+                    device: DeviceId(2),
+                    order: EventOrder(2),
+                    contact,
+                    position,
+                }),
+                None,
+            )
+            .messages
+            .is_empty()
+        );
+        assert_eq!(host.inspect().pointer_capture.as_ref(), Some(&capture));
+
+        assert_eq!(
+            host.handle_input(
+                &InputEvent::Touch(TouchEvent::Ended {
+                    device: DeviceId(1),
+                    order: EventOrder(3),
+                    contact,
+                    position,
+                }),
+                None,
+            )
+            .messages
+            .len(),
+            1
+        );
+        assert!(host.inspect().pointer_capture.is_none());
     }
 
     #[test]

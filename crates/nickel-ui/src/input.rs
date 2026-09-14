@@ -2,7 +2,7 @@
 
 use nickel_input::{
     AggregateModifier, DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, LogicalKey, NamedKey,
-    PhysicalKey, PointerButton, PointerEvent, TextEvent, TouchEvent, TouchId,
+    PhysicalKey, PointerButton, PointerEvent, TextEvent, TouchContactId, TouchEvent,
 };
 use std::collections::VecDeque;
 
@@ -32,8 +32,14 @@ pub enum InputCommand {
 #[derive(Clone, Debug, Default)]
 pub struct FocusedInputDispatcher {
     pointer: Point,
-    active_touch: Option<TouchId>,
+    active_pointer: Option<PointerCompletionBinding>,
     consumed_text: VecDeque<ConsumedTextTransaction>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PointerCompletionBinding {
+    Pointer(DeviceId),
+    Touch(TouchContactId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,7 +50,14 @@ struct ConsumedTextTransaction {
 
 impl FocusedInputDispatcher {
     pub(crate) fn touch_active(&self) -> bool {
-        self.active_touch.is_some()
+        matches!(
+            self.active_pointer,
+            Some(PointerCompletionBinding::Touch(_))
+        )
+    }
+
+    pub(crate) fn pointer_interaction_active(&self) -> bool {
+        self.active_pointer.is_some()
     }
 
     pub fn dispatch(&mut self, event: &InputEvent) -> Vec<InputCommand> {
@@ -99,9 +112,14 @@ impl FocusedInputDispatcher {
                 vec![InputCommand::Ui(UiEvent::PointerMoved(self.pointer))]
             }
             InputEvent::Touch(TouchEvent::Started {
-                contact, position, ..
-            }) if self.active_touch.is_none() => {
-                self.active_touch = Some(*contact);
+                device,
+                contact,
+                position,
+                ..
+            }) if self.active_pointer.is_none() => {
+                self.active_pointer = Some(PointerCompletionBinding::Touch(TouchContactId::new(
+                    *device, *contact,
+                )));
                 self.pointer = Point {
                     x: position.x as f32,
                     y: position.y as f32,
@@ -112,8 +130,15 @@ impl FocusedInputDispatcher {
                 ]
             }
             InputEvent::Touch(TouchEvent::Moved {
-                contact, position, ..
-            }) if self.active_touch == Some(*contact) => {
+                device,
+                contact,
+                position,
+                ..
+            }) if self.active_pointer
+                == Some(PointerCompletionBinding::Touch(TouchContactId::new(
+                    *device, *contact,
+                ))) =>
+            {
                 self.pointer = Point {
                     x: position.x as f32,
                     y: position.y as f32,
@@ -121,37 +146,63 @@ impl FocusedInputDispatcher {
                 vec![InputCommand::Ui(UiEvent::PointerMoved(self.pointer))]
             }
             InputEvent::Touch(TouchEvent::Ended {
-                contact, position, ..
-            }) if self.active_touch == Some(*contact) => {
-                self.active_touch = None;
+                device,
+                contact,
+                position,
+                ..
+            }) if self.active_pointer
+                == Some(PointerCompletionBinding::Touch(TouchContactId::new(
+                    *device, *contact,
+                ))) =>
+            {
+                self.active_pointer = None;
                 self.pointer = Point {
                     x: position.x as f32,
                     y: position.y as f32,
                 };
                 vec![InputCommand::Ui(UiEvent::PointerReleased(self.pointer))]
             }
-            InputEvent::Touch(TouchEvent::Cancelled { contact, .. })
-                if self.active_touch == Some(*contact) =>
+            InputEvent::Touch(TouchEvent::Cancelled {
+                device, contact, ..
+            }) if self.active_pointer
+                == Some(PointerCompletionBinding::Touch(TouchContactId::new(
+                    *device, *contact,
+                ))) =>
             {
-                self.active_touch = None;
+                self.active_pointer = None;
                 vec![InputCommand::Ui(UiEvent::PointerCancelled)]
             }
             InputEvent::Pointer(PointerEvent::Button {
+                device,
                 button: PointerButton::Primary,
-                edge,
+                edge: KeyEdge::Pressed,
                 position,
                 ..
-            }) => {
+            }) if self.active_pointer.is_none() => {
                 if let Some(position) = position {
                     self.pointer = Point {
                         x: position.x as f32,
                         y: position.y as f32,
                     };
                 }
-                vec![InputCommand::Ui(match edge {
-                    KeyEdge::Pressed => UiEvent::PointerPressed(self.pointer),
-                    KeyEdge::Released => UiEvent::PointerReleased(self.pointer),
-                })]
+                self.active_pointer = Some(PointerCompletionBinding::Pointer(*device));
+                vec![InputCommand::Ui(UiEvent::PointerPressed(self.pointer))]
+            }
+            InputEvent::Pointer(PointerEvent::Button {
+                device,
+                button: PointerButton::Primary,
+                edge: KeyEdge::Released,
+                position,
+                ..
+            }) if self.active_pointer == Some(PointerCompletionBinding::Pointer(*device)) => {
+                if let Some(position) = position {
+                    self.pointer = Point {
+                        x: position.x as f32,
+                        y: position.y as f32,
+                    };
+                }
+                self.active_pointer = None;
+                vec![InputCommand::Ui(UiEvent::PointerReleased(self.pointer))]
             }
             InputEvent::Pointer(PointerEvent::Button {
                 button: PointerButton::Secondary,
@@ -200,16 +251,26 @@ impl FocusedInputDispatcher {
                 vec![InputCommand::Ui(UiEvent::FocusGained)]
             }
             InputEvent::FocusLost { .. } => {
-                self.active_touch = None;
+                self.active_pointer = None;
                 self.consumed_text.clear();
                 vec![InputCommand::Ui(UiEvent::FocusLost)]
             }
             InputEvent::DeviceRemoved { device, .. } => {
-                // UiEvent::DeviceRemoved cancels this viewport's interactions.
-                self.active_touch = None;
                 self.consumed_text
                     .retain(|transaction| transaction.device != *device);
-                vec![InputCommand::Ui(UiEvent::DeviceRemoved)]
+                let owns_pointer = matches!(
+                    self.active_pointer,
+                    Some(PointerCompletionBinding::Pointer(owner)) if owner == *device
+                ) || matches!(
+                    self.active_pointer,
+                    Some(PointerCompletionBinding::Touch(owner)) if owner.device == *device
+                );
+                if owns_pointer {
+                    self.active_pointer = None;
+                    vec![InputCommand::Ui(UiEvent::DeviceRemoved)]
+                } else {
+                    Vec::new()
+                }
             }
             InputEvent::Key(event) if event.edge == KeyEdge::Pressed => {
                 let shift = event.modifiers.aggregate(AggregateModifier::Shift);
@@ -513,7 +574,8 @@ fn suppresses_repeat(command: &InputCommand) -> bool {
 #[cfg(test)]
 mod tests {
     use nickel_input::{
-        DeviceId, EventOrder, KeyEvent, KeyLocation, Modifier, ModifierState, NativeCode, NativeKey,
+        DeviceId, EventOrder, KeyEvent, KeyLocation, Modifier, ModifierState, NativeCode,
+        NativeKey, TouchId,
     };
 
     use super::*;
