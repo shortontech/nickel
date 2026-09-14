@@ -2683,7 +2683,8 @@ impl<A: Application> UiHost<A> {
     fn arbitrate_touch_ownership(&mut self) -> HostEventOutcome {
         let pending = self.pending_long_press.take().is_some();
         let active = self.input_dispatcher.cancel_touch_ownership();
-        if pending || active {
+        let tree_owned = self.state.pressed().is_some() || self.state.captured().is_some();
+        if pending || active || tree_owned {
             self.dispatch_ui_event(UiEvent::PointerCancelled)
         } else {
             HostEventOutcome::default()
@@ -2772,15 +2773,14 @@ impl<A: Application> UiHost<A> {
         if after.is_some_and(|target| target != owner) {
             TouchIntentArbitration::CancelThenDispatch
         } else if after == Some(owner)
-            && (outcome.disposition != crate::EventDisposition::Unhandled
-                || !outcome.messages.is_empty())
-            && matches!(
-                event,
-                UiEvent::KeyboardNavigateActivate
-                    | UiEvent::ControllerAdjust(_)
-                    | UiEvent::ControllerActivate
-                    | UiEvent::AccessibilityActivate(_)
-            )
+            && (!outcome.messages.is_empty()
+                || matches!(
+                    event,
+                    UiEvent::KeyboardNavigateActivate
+                        | UiEvent::ControllerAdjust(_)
+                        | UiEvent::ControllerActivate
+                        | UiEvent::AccessibilityActivate(_)
+                ))
         {
             TouchIntentArbitration::RejectBusy
         } else {
@@ -2910,28 +2910,21 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
-            let busy_controller_binding = match &event {
-                HostEvent::AdmittedController { action, binding }
-                    if *action == Some(ControllerAction::Confirm)
-                        && binding.edge == nickel_input::KeyEdge::Pressed
-                        && controller_authority
-                            .is_some_and(|authority| authority.admits(*binding)) =>
+            let admitted_controller_press = match &event {
+                HostEvent::AdmittedController {
+                    action: Some(action),
+                    binding,
+                } if binding.edge == nickel_input::KeyEdge::Pressed
+                    && controller_authority.is_some_and(|authority| authority.admits(*binding)) =>
                 {
-                    Some(*binding)
+                    controller_ui_event(*action).map(|event| (*binding, event))
                 }
                 _ => None,
             };
-            let touch_arbitration = match &event {
-                HostEvent::AdmittedController { action, binding }
-                    if *action == Some(ControllerAction::Confirm)
-                        && binding.edge == nickel_input::KeyEdge::Pressed
-                        && controller_authority
-                            .is_some_and(|authority| authority.admits(*binding)) =>
-                {
-                    self.touch_arbitration_for_ui_event(&UiEvent::ControllerActivate)
-                }
-                _ => self.touch_arbitration_for_event(&event),
-            };
+            let touch_arbitration = admitted_controller_press.as_ref().map_or_else(
+                || self.touch_arbitration_for_event(&event),
+                |(_, event)| self.touch_arbitration_for_ui_event(event),
+            );
             let normalized_input = match &event {
                 HostEvent::Normalized { input, .. } => Some(input),
                 HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
@@ -2958,7 +2951,7 @@ impl<A: Application> UiHost<A> {
                     disposition: crate::EventDisposition::Rejected("input busy"),
                     ..HostEventOutcome::default()
                 };
-                if let Some(binding) = busy_controller_binding {
+                if let Some((binding, _)) = admitted_controller_press {
                     outcome
                         .controller_executions
                         .push(ControllerExecutionEvidence {
@@ -4674,7 +4667,7 @@ mod tests {
         ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
         ControllerExecutionBinding, ControllerExecutionDisposition, ControllerExecutionEvidence,
         InputModality, Invalidation, NavigationEntry, NavigationScope, OverlayId, SemanticAction,
-        SemanticActionError, SemanticRole, SemanticValueInput, TextField, UiEvent, UiId,
+        SemanticActionError, SemanticRole, SemanticValueInput, Slider, TextField, UiEvent, UiId,
         UiStateStore,
     };
 
@@ -4785,6 +4778,22 @@ mod tests {
         fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
             Container::new()
                 .children([Button::new("A", "A").id("a"), Button::new("B", "B").id("b")])
+        }
+    }
+
+    struct AdjustmentApplication {
+        value: f32,
+    }
+
+    impl Application for AdjustmentApplication {
+        type Message = f32;
+
+        fn update(&mut self, value: Self::Message) {
+            self.value = value;
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Slider::on_change(|value| value, self.value).id("value")
         }
     }
 
@@ -6652,6 +6661,85 @@ mod tests {
     }
 
     #[test]
+    fn admitted_same_owner_adjustment_is_busy_without_press_ledger_entry() {
+        let mut host = UiHost::new(AdjustmentApplication { value: 0.5 }, 160, 48);
+        let slider = host.semantic_nodes()[0].clone();
+        let point = Point {
+            x: f64::from(slider.bounds.origin.x + slider.bounds.size.width / 2.0),
+            y: f64::from(slider.bounds.origin.y + slider.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+                position: Some(point),
+            }),
+            None,
+        );
+        host.state
+            .navigation_mut()
+            .set_controller_selected(Some(slider.id));
+        host.state
+            .navigation_mut()
+            .set_target_mode(crate::WidgetTargetMode::ValueAdjustment);
+        let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 41,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+        };
+
+        let busy = host.step(HostBatch {
+            window_focused: Some(true),
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Right),
+                binding,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(host.application().value, 0.5);
+        assert_eq!(busy.messages.len(), 0);
+        assert_eq!(busy.effects.len(), 0);
+        assert_eq!(
+            busy.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedBusy
+        );
+
+        let released = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Right),
+                binding: ControllerExecutionBinding {
+                    edge: KeyEdge::Released,
+                    ..binding
+                },
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            released.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedUnpairedRelease
+        );
+    }
+
+    #[test]
     fn unrelated_or_invalid_events_preserve_active_touch_ownership() {
         let mut host = UiHost::new(ControllerApplication, 160, 48);
         host.step(HostBatch {
@@ -6781,6 +6869,59 @@ mod tests {
         assert!(!accessibility.input_dispatcher.touch_active());
         assert!(accessibility.pending_long_press.is_none());
         assert_eq!(accessibility.state.focused(), Some(&second_id));
+    }
+
+    #[test]
+    fn different_target_cancels_mouse_capture_before_its_release_tail() {
+        let mut host = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let nodes = host.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+                position: Some(point),
+            }),
+            None,
+        );
+        assert_eq!(host.state.captured(), Some(&first.id));
+        host.state
+            .navigation_mut()
+            .set_controller_selected(Some(second.id.clone()));
+
+        let activated = host.step(HostBatch {
+            events: vec![HostEvent::Ui(UiEvent::ControllerActivate)],
+            ..HostBatch::default()
+        });
+        assert_eq!(activated.messages.len(), 1);
+        assert!(host.state.pressed().is_none());
+        assert!(host.state.captured().is_none());
+
+        let released = host.handle_input(
+            &InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(4),
+                order: EventOrder(2),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Released,
+                position: Some(point),
+            }),
+            None,
+        );
+        assert!(released.messages.is_empty());
+        assert_eq!(host.application().invoked, ["B"]);
     }
 
     #[test]
