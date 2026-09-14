@@ -286,11 +286,11 @@ impl UiApplication for LauncherApplication {
         std::mem::take(&mut self.dirty) || icons_changed
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        match shortcut {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        nickel_ui::ShortcutOutcome::from_changed(match shortcut {
             Shortcut::Submit if self.launcher.mode() == LauncherMode::Search => {
                 if self.launcher.result_count() == 0 {
-                    return false;
+                    return nickel_ui::ShortcutOutcome::from_changed(false);
                 }
                 self.effects.push(LauncherAction::ActivateResult(
                     self.launcher.selected_index(),
@@ -306,7 +306,7 @@ impl UiApplication for LauncherApplication {
                 true
             }
             _ => false,
-        }
+        })
     }
 }
 

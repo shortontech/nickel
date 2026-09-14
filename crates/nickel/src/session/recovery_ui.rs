@@ -36,13 +36,13 @@ impl Application for RecoveryApplication {
         self.pending = Some(message);
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
         self.pending = match shortcut {
             Shortcut::Submit => Some(RecoveryAction::Retry),
             Shortcut::Escape => Some(RecoveryAction::Exit),
             _ => None,
         };
-        self.pending.is_some()
+        nickel_ui::ShortcutOutcome::from_changed(self.pending.is_some())
     }
 
     fn view(&self, _context: ViewContext) -> impl nickel_ui::View<Self::Message> {

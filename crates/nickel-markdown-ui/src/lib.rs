@@ -9,7 +9,7 @@ use nickel_markdown::{MarkdownPalette, markdown_view};
 #[cfg(feature = "application")]
 use nickel_ui::{
     Align, AnyView, Application, Button, ComponentBuilderExt, Container, Insets, Justify, Length,
-    Row, Shortcut, Spacer, Text, UiId, VerticalScroll, View, ui,
+    Row, Shortcut, ShortcutOutcome, Spacer, Text, UiId, VerticalScroll, View, ui,
 };
 #[cfg(feature = "application")]
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -857,8 +857,8 @@ impl Application for ViewerApplication {
         Some(std::time::Duration::from_millis(16))
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        match shortcut {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+        ShortcutOutcome::from_changed(match shortcut {
             Shortcut::Escape
                 if self.runtime_error.is_some()
                     || matches!(self.model.status(), ViewerStatus::Error(_)) =>
@@ -887,7 +887,7 @@ impl Application for ViewerApplication {
                 true
             }
             _ => false,
-        }
+        })
     }
 
     fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Self::Message> {
@@ -1799,12 +1799,16 @@ mod tests {
         };
         let mut application = ViewerApplication::loaded(document);
         application.model.set_scroll_position(42.0);
-        assert!(application.shortcut(Shortcut::DocumentEnd));
+        assert!(application.shortcut_outcome(Shortcut::DocumentEnd).changed);
         assert_eq!(application.model.scroll_position(), f32::MAX);
-        assert!(application.shortcut(Shortcut::DocumentStart));
+        assert!(
+            application
+                .shortcut_outcome(Shortcut::DocumentStart)
+                .changed
+        );
         assert_eq!(application.model.scroll_position(), 0.0);
         application.runtime_error = Some("Recoverable".into());
-        assert!(application.shortcut(Shortcut::Escape));
+        assert!(application.shortcut_outcome(Shortcut::Escape).changed);
         assert!(application.runtime_error.is_none());
         assert_eq!(
             application.model.current().unwrap().document.source,

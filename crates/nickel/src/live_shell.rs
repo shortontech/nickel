@@ -120,13 +120,13 @@ impl UiApplication for RunApplication {
         }
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
         match shortcut {
             Shortcut::Submit => self.update(RunAction::Submit),
             Shortcut::Escape => self.update(RunAction::Dismiss),
-            _ => return false,
+            _ => return nickel_ui::ShortcutOutcome::from_changed(false),
         }
-        true
+        nickel_ui::ShortcutOutcome::handled(true)
     }
 
     fn poll(&mut self) -> bool {
@@ -359,13 +359,13 @@ impl nickel_ui::Application for LockApplication {
         }
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
         if shortcut != Shortcut::Submit {
-            return false;
+            return nickel_ui::ShortcutOutcome::from_changed(false);
         }
         self.effects
             .push(LockEffect::Authenticate(std::mem::take(&mut self.password)));
-        true
+        nickel_ui::ShortcutOutcome::handled(true)
     }
 
     fn view(&self, context: ViewContext) -> impl nickel_ui::View<Self::Message> {
@@ -6566,9 +6566,9 @@ mod run_application_tests {
         let mut app = application();
         app.update(RunAction::SetCommand("  cargo test  ".into()));
 
-        assert!(app.shortcut(Shortcut::Submit));
+        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
         assert_eq!(app.take_effects(), [RunEffect::Submit("cargo test".into())]);
-        assert!(app.shortcut(Shortcut::Escape));
+        assert!(app.shortcut_outcome(Shortcut::Escape).changed);
         assert_eq!(app.take_effects(), [RunEffect::Dismiss]);
     }
 
@@ -6576,7 +6576,7 @@ mod run_application_tests {
     fn empty_command_does_not_cross_the_launch_boundary() {
         let mut app = application();
         app.update(RunAction::SetCommand("   ".into()));
-        assert!(app.shortcut(Shortcut::Submit));
+        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
         assert!(app.take_effects().is_empty());
     }
 

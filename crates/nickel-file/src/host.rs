@@ -499,7 +499,11 @@ impl FileApp {
         }
         AdapterOutcome {
             changed,
-            consume,
+            disposition: if consume {
+                nickel_ui::EventDisposition::Handled
+            } else {
+                nickel_ui::EventDisposition::Unhandled
+            },
             exit: host.application().exit_requested,
         }
     }

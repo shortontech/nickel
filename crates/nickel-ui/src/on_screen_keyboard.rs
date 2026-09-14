@@ -8,7 +8,7 @@ use nickel_core::theme::ThemePalette;
 
 use crate::{
     Align, Application, Button, ButtonPresentation, Column, Container, Insets, Justify, Row,
-    SemanticTheme, SemanticTokenSet, Shortcut, Spacer, Text, ViewContext,
+    SemanticTheme, SemanticTokenSet, Shortcut, ShortcutOutcome, Spacer, Text, ViewContext,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -139,12 +139,12 @@ impl Application for KeyboardApp {
         }
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
         if shortcut == Shortcut::Escape {
             self.update(KeyboardMessage::Hide);
-            true
+            ShortcutOutcome::handled(true)
         } else {
-            false
+            ShortcutOutcome::from_changed(false)
         }
     }
 

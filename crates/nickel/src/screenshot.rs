@@ -329,13 +329,17 @@ impl Application for ScreenshotApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
-        if shortcut == nickel_ui::Shortcut::Escape && (self.image.is_some() || self.error_visible) {
-            self.push_effect(ScreenshotEffect::Cancel);
-            true
-        } else {
-            false
-        }
+    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
+        nickel_ui::ShortcutOutcome::from_changed(
+            if shortcut == nickel_ui::Shortcut::Escape
+                && (self.image.is_some() || self.error_visible)
+            {
+                self.push_effect(ScreenshotEffect::Cancel);
+                true
+            } else {
+                false
+            },
+        )
     }
 }
 

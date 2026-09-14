@@ -943,7 +943,7 @@ mod tests {
         });
         app.state.status = ConnectionStatus::Ready;
         app.state.draft = "first\nsecond".into();
-        assert!(app.shortcut(Shortcut::Submit));
+        assert!(app.shortcut_outcome(Shortcut::Submit).changed);
         // Submission is staged until the backend acknowledges TurnStarted, so a failed
         // transport cannot destroy the user's draft or attachments.
         assert_eq!(app.state.draft, "first\nsecond");
@@ -1590,7 +1590,7 @@ mod tests {
             app.state.diagnostics.back().map(String::as_str),
             Some("writer lease raced")
         );
-        assert!(app.shortcut(Shortcut::Escape));
+        assert!(app.shortcut_outcome(Shortcut::Escape).changed);
         assert!(!app.resume_picker_open);
     }
 

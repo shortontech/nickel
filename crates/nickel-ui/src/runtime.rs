@@ -942,15 +942,9 @@ pub trait Application: Sized {
         None
     }
 
-    /// Handle application-level keyboard semantics before ordinary component activation.
-    fn shortcut(&mut self, _shortcut: Shortcut) -> bool {
-        false
-    }
-
-    /// Explicit shortcut consumption. Override this when a handled shortcut
-    /// can be a no-op or when rejection must stop widget fallback.
-    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
-        ShortcutOutcome::from_changed(self.shortcut(shortcut))
+    /// Explicit application-level keyboard semantics before ordinary component activation.
+    fn shortcut_outcome(&mut self, _shortcut: Shortcut) -> ShortcutOutcome {
+        ShortcutOutcome::from_changed(false)
     }
 
     /// Offers normalized RGBA clipboard pixels to the focused application.
@@ -3513,7 +3507,8 @@ mod tests {
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
         ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
-        PresentScheduler, Shortcut, UiHost, ViewContext, local_controller_poll_lease,
+        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        local_controller_poll_lease,
         queue_continuous_input, wait_duration,
     };
 
@@ -3721,12 +3716,12 @@ mod tests {
             TextField::on_change(&self.text, Message::Changed)
         }
 
-        fn shortcut(&mut self, shortcut: Shortcut) -> bool {
+        fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
             if shortcut != Shortcut::Submit {
-                return false;
+                return ShortcutOutcome::from_changed(false);
             }
             self.submits += 1;
-            true
+            ShortcutOutcome::handled(true)
         }
     }
 

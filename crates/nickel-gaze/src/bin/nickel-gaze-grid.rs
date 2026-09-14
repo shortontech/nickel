@@ -7,7 +7,7 @@ use nickel_gaze::{
 };
 use nickel_ui::{
     Align, AnyView, Application, Button, Column, ComponentBuilderExt, Container, Grid, Image,
-    Justify, Row, SemanticRole, Shortcut, Spacer, Text, TextAlign, ViewContext,
+    Justify, Row, SemanticRole, Shortcut, ShortcutOutcome, Spacer, Text, TextAlign, ViewContext,
 };
 use std::{
     error::Error,
@@ -284,14 +284,14 @@ impl Application for GazeGridApplication {
         Some(std::time::Duration::from_millis(16))
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        match shortcut {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+        ShortcutOutcome::from_changed(match shortcut {
             Shortcut::Reload => {
                 self.recenter();
                 true
             }
             _ => false,
-        }
+        })
     }
 
     fn title(&self) -> &str {

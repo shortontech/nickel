@@ -6,6 +6,7 @@ use nickel_codex::{
 };
 use nickel_markdown::{MarkdownDocument, MarkdownPalette, markdown_content_view};
 use nickel_ui::SemanticRole;
+use nickel_ui::ShortcutOutcome;
 use nickel_ui::prelude::*;
 
 use crate::model::item_label;
@@ -1097,8 +1098,8 @@ impl Application for ChatApplication {
         Some(self.controller_poll_interval)
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        match shortcut {
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+        ShortcutOutcome::from_changed(match shortcut {
             Shortcut::Submit if self.state.can_send() => {
                 self.update(ChatMessage::Send);
                 true
@@ -1113,7 +1114,7 @@ impl Application for ChatApplication {
                 true
             }
             _ => false,
-        }
+        })
     }
 
     fn view(&self, _context: nickel_ui::ViewContext) -> impl View<Self::Message> {

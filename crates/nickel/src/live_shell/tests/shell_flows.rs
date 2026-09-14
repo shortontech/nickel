@@ -969,10 +969,11 @@
             &mut application,
             super::LockMessage::Password("secret".into()),
         );
-        assert!(nickel_ui::Application::shortcut(
+        assert!(nickel_ui::Application::shortcut_outcome(
             &mut application,
             nickel_ui::Shortcut::Submit
-        ));
+        )
+        .changed);
         assert!(application.password.is_empty());
         let super::LockEffect::Authenticate(password) = application.effects.pop().unwrap();
         assert_eq!(&**password, "secret");

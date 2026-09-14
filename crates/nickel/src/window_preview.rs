@@ -247,12 +247,12 @@ impl Application for WindowMenuApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
         if shortcut != nickel_ui::Shortcut::Escape {
-            return false;
+            return nickel_ui::ShortcutOutcome::from_changed(false);
         }
         self.effects.push(MenuAction::Dismiss);
-        true
+        nickel_ui::ShortcutOutcome::handled(true)
     }
 }
 
@@ -432,12 +432,12 @@ impl Application for ApplicationMenuApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
         if shortcut != nickel_ui::Shortcut::Escape {
-            return false;
+            return nickel_ui::ShortcutOutcome::from_changed(false);
         }
         self.effects.push(ApplicationMenuAction::Dismiss);
-        true
+        nickel_ui::ShortcutOutcome::handled(true)
     }
 }
 
@@ -604,13 +604,13 @@ impl Application for WindowPreviewApp {
         std::mem::take(&mut self.dirty)
     }
 
-    fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
-        if shortcut == nickel_ui::Shortcut::Escape {
+    fn shortcut_outcome(&mut self, shortcut: nickel_ui::Shortcut) -> nickel_ui::ShortcutOutcome {
+        nickel_ui::ShortcutOutcome::from_changed(if shortcut == nickel_ui::Shortcut::Escape {
             self.effects.push(PreviewAction::Dismiss);
             true
         } else {
             false
-        }
+        })
     }
 }
 
@@ -1330,7 +1330,11 @@ mod tests {
             host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::Activate));
             assert_eq!(host.application_mut().take_effects(), vec![action]);
         }
-        assert!(host.application_mut().shortcut(nickel_ui::Shortcut::Escape));
+        assert!(
+            host.application_mut()
+                .shortcut_outcome(nickel_ui::Shortcut::Escape)
+                .changed
+        );
         assert_eq!(
             host.application_mut().take_effects(),
             vec![MenuAction::Dismiss]

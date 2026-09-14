@@ -129,16 +129,18 @@ impl Application for NotificationApp {
         std::mem::take(&mut self.effect_evidence)
     }
 
-    fn shortcut(&mut self, shortcut: Shortcut) -> bool {
-        if shortcut == Shortcut::Escape && self.history_mode {
-            self.effects.push(NotificationEffect::CloseHistory);
-            true
-        } else if shortcut == Shortcut::Escape && self.notification.is_some() {
-            self.request_dismiss();
-            true
-        } else {
-            false
-        }
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> nickel_ui::ShortcutOutcome {
+        nickel_ui::ShortcutOutcome::from_changed(
+            if shortcut == Shortcut::Escape && self.history_mode {
+                self.effects.push(NotificationEffect::CloseHistory);
+                true
+            } else if shortcut == Shortcut::Escape && self.notification.is_some() {
+                self.request_dismiss();
+                true
+            } else {
+                false
+            },
+        )
     }
 
     fn poll(&mut self) -> bool {

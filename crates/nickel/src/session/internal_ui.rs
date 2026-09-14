@@ -3228,12 +3228,15 @@ mod tests {
     impl Application for SubmitCounter {
         type Message = ();
         fn update(&mut self, (): ()) {}
-        fn shortcut(&mut self, shortcut: nickel_ui::Shortcut) -> bool {
+        fn shortcut_outcome(
+            &mut self,
+            shortcut: nickel_ui::Shortcut,
+        ) -> nickel_ui::ShortcutOutcome {
             if shortcut != nickel_ui::Shortcut::Submit {
-                return false;
+                return nickel_ui::ShortcutOutcome::from_changed(false);
             }
             self.0 += 1;
-            true
+            nickel_ui::ShortcutOutcome::handled(true)
         }
         fn view(&self, _: ViewContext) -> impl View<Self::Message> {
             Text::new("submit")
