@@ -147,7 +147,7 @@ impl WindowPointerOperation {
     }
 
     #[cfg(test)]
-    fn id(&self) -> OperationId {
+    pub(crate) fn id(&self) -> OperationId {
         self.id
     }
 }

@@ -10950,6 +10950,24 @@ impl NickelSession {
         );
     }
 
+    fn supersede_xdg_resize_for_presentation(&mut self, id: WindowId, surface: &ToplevelSurface) {
+        // Presentation changes own the complete placement. Revoke an active
+        // pointer operation before publishing that placement so its grab can
+        // neither issue a later motion update nor retain a left/top commit
+        // anchor across the presentation configure.
+        self.cancel_geometry_window_operation(
+            id,
+            nickel_core::window_operation::CancellationReason::Superseded,
+        );
+        self.interactive_resize_baselines.remove(&id);
+        surface.with_pending_state(|state| {
+            state.states.unset(
+                smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Resizing,
+            );
+        });
+        crate::session::grabs::resize_grab::clear_resize_correlation(surface.wl_surface());
+    }
+
     pub(crate) fn record_xdg_desired_geometry(
         &mut self,
         window: &Window,
@@ -12794,6 +12812,9 @@ impl NickelSession {
             .surface_windows
             .get(&surface.wl_surface().id())
             .copied();
+        if let Some(id) = window_id {
+            self.supersede_xdg_resize_for_presentation(id, surface);
+        }
         self.maximized_restore
             .entry(surface.wl_surface().id())
             .or_insert(Geometry {

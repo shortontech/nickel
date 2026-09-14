@@ -643,4 +643,82 @@ mod tests {
             assert_eq!(*state, ResizeSurfaceState::Idle);
         }
     }
+
+    #[test]
+    fn maximize_supersedes_active_resize_before_ack_commit_or_later_motion() {
+        use nickel_core::{
+            geometry::LogicalRect,
+            geometry_authority::ControlMode,
+            window_operation::{
+                BeginRequest, CancellationReason, CompletionBinding, CompletionGesture,
+                GeometrySeed, MappingGeneration, NativeLifetimeId, OperationKind, PressEpoch,
+                SeatId, Source, SourceGeneration, SourceId, TerminalOutcome, WindowId,
+                WindowMapping, WindowOperationReducer,
+            },
+        };
+
+        let source = Source {
+            id: SourceId::new(1),
+            generation: SourceGeneration::new(1),
+        };
+        let subject = WindowMapping {
+            window: WindowId::new(7),
+            native_lifetime: NativeLifetimeId::new(8),
+            generation: MappingGeneration::new(9),
+        };
+        let mut reducer = WindowOperationReducer::default();
+        let operation = WindowPointerOperation::begin_with_geometry(
+            &mut reducer,
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject,
+                kind: OperationKind::Resize(operation_resize_edges(ResizeEdge::TOP_LEFT).unwrap()),
+                control: ControlMode::Cooperative,
+                origin: CompletionBinding {
+                    source,
+                    gesture: CompletionGesture::Button(0x110),
+                    press_epoch: PressEpoch::new(1),
+                },
+                optional_update_sources: Vec::new(),
+            },
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: 10,
+                    y: 20,
+                    width: 300,
+                    height: 200,
+                },
+                constraints: GeometryConstraints {
+                    min_width: 1,
+                    min_height: 1,
+                    max_width: None,
+                    max_height: None,
+                },
+            },
+        )
+        .expect("active resize admitted");
+        let id = operation.id();
+        let mut correlation = ResizeSurfaceState::WaitingForLastCommit {
+            edges: ResizeEdge::TOP_LEFT,
+            initial_rect: initial_rect(),
+            terminal_configures: vec![12_u32.into()],
+        };
+
+        let transition = reducer.cancel(id, CancellationReason::Superseded);
+        assert_eq!(
+            transition.disposition,
+            nickel_core::window_operation::Disposition::Applied
+        );
+        correlation.clear();
+
+        assert_eq!(
+            reducer.terminal_outcome(id),
+            Some(TerminalOutcome::Cancelled(CancellationReason::Superseded))
+        );
+        assert!(correlation.commit(Some(12_u32.into())).is_none());
+        assert!(
+            operation.propose(&mut reducer, 40, 30).is_none(),
+            "late pointer motion cannot publish geometry after maximize supersedes the resize"
+        );
+    }
 }
