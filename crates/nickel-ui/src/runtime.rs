@@ -506,10 +506,33 @@ impl PresentScheduler {
     }
 }
 
+#[derive(Clone, Debug)]
+struct AdmittedNormalizedInput {
+    envelope: NormalizedInputEnvelope,
+    authority: NormalizedIngressAuthority,
+}
+
 fn queue_continuous_input(
-    pending: &mut Vec<nickel_input::InputEvent>,
-    event: nickel_input::InputEvent,
+    pending: &mut Vec<AdmittedNormalizedInput>,
+    mut sample: AdmittedNormalizedInput,
 ) {
+    const MAX_PENDING_CONTINUOUS_INPUT: usize = 256;
+    if pending.len() >= MAX_PENDING_CONTINUOUS_INPUT {
+        let order = sample.envelope.admission.order;
+        let source = sample.envelope.source.clone();
+        let recipient = sample.envelope.recipient;
+        let mut reset = sample.clone();
+        reset.envelope.input = nickel_input::InputEvent::FocusLost {
+            order: nickel_input::EventOrder(order),
+        };
+        reset.envelope.clipboard_text = None;
+        reset.envelope.source = source;
+        reset.envelope.recipient = recipient;
+        pending.clear();
+        pending.push(reset);
+        return;
+    }
+    let event = sample.envelope.input;
     let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
         device,
         order,
@@ -517,16 +540,19 @@ fn queue_continuous_input(
         delta,
     }) = event
     else {
-        pending.push(event);
+        sample.envelope.input = event;
+        pending.push(sample);
         return;
     };
-    if let Some(nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
-        device: queued_device,
-        order: queued_order,
-        position: queued_position,
-        delta: queued_delta,
-    })) = pending.last_mut()
+    if let Some(queued) = pending.last_mut()
+        && let nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+            device: queued_device,
+            order: queued_order,
+            position: queued_position,
+            delta: queued_delta,
+        }) = &mut queued.envelope.input
         && *queued_device == device
+        && queued.authority == sample.authority
     {
         *queued_order = order;
         *queued_position = position;
@@ -538,16 +564,16 @@ fn queue_continuous_input(
             (None, next) => next,
             (previous, None) => previous,
         };
+        queued.envelope.admission = sample.envelope.admission;
         return;
     }
-    pending.push(nickel_input::InputEvent::Pointer(
-        nickel_input::PointerEvent::Motion {
-            device,
-            order,
-            position,
-            delta,
-        },
-    ));
+    sample.envelope.input = nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Motion {
+        device,
+        order,
+        position,
+        delta,
+    });
+    pending.push(sample);
 }
 
 #[cfg(target_os = "linux")]
@@ -3075,13 +3101,89 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     transform_generation: u64,
     stopped: bool,
     error: Option<Box<dyn Error>>,
-    pending_continuous_input: Vec<nickel_input::InputEvent>,
+    pending_continuous_input: Vec<AdmittedNormalizedInput>,
     normalized_admission_order: u64,
     normalized_ingress_epoch: Instant,
     native_host_generation: u64,
+    standalone_recipient: NormalizedRecipientBinding,
 }
 
 impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
+    fn admit_continuous_input(
+        &mut self,
+        input: nickel_input::InputEvent,
+    ) -> AdmittedNormalizedInput {
+        self.normalized_admission_order = self.normalized_admission_order.wrapping_add(1).max(1);
+        let device_generation = input.device().map_or(0, |device| device.0);
+        #[cfg(any(unix, windows))]
+        let recipient = self
+            .session_controller
+            .recipient_binding()
+            .or_else(|| {
+                self.session_controller
+                    .is_absent()
+                    .then_some(self.standalone_recipient)
+            })
+            .unwrap_or(NormalizedRecipientBinding {
+                lease: 0,
+                lifetime: 0,
+            });
+        #[cfg(not(any(unix, windows)))]
+        let recipient = self.standalone_recipient;
+        #[cfg(any(unix, windows))]
+        let role = if self.session_controller.is_absent() {
+            "standalone-window"
+        } else {
+            "session-attached-window"
+        };
+        #[cfg(not(any(unix, windows)))]
+        let role = "standalone-window";
+        let source = NormalizedSourceBinding {
+            seat: 0,
+            backend_stream: "winit".into(),
+            stream_generation: self.native_host_generation,
+            device_generation,
+            identity_capability: "backend_generation".into(),
+            reconnect_generation: device_generation,
+        };
+        let authority = NormalizedIngressAuthority {
+            source: source.clone(),
+            recipient,
+            transfer_cutoff: None,
+            host_connection_generation: recipient.lifetime,
+            operation_epoch: None,
+            transform_generation: Some(self.transform_generation),
+            text_transaction: None,
+            composition_recipient_epoch: Some(recipient.lifetime),
+            role: role.into(),
+            coordinate_meaning: "window-logical".into(),
+        };
+        let envelope = NormalizedInputEnvelope {
+            input,
+            clipboard_text: None,
+            source,
+            admission: NormalizedAdmissionBinding {
+                order: self.normalized_admission_order,
+                monotonic_micros: self.normalized_ingress_epoch.elapsed().as_micros() as u64,
+            },
+            recipient,
+            operation: None,
+            transform_generation: Some(self.transform_generation),
+            text_transaction: None,
+            transfer_cutoff: None,
+            broker_event_id: None,
+            host_connection_generation: recipient.lifetime,
+            operation_epoch: None,
+            role: role.into(),
+            coordinate_meaning: "window-logical".into(),
+            composition_recipient_epoch: Some(recipient.lifetime),
+        };
+        AdmittedNormalizedInput {
+            envelope,
+            authority,
+        }
+    }
+
     fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
         let native_host_generation = NEXT_NATIVE_HOST_GENERATION
@@ -3125,6 +3227,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             normalized_admission_order: 0,
             normalized_ingress_epoch: now,
             native_host_generation,
+            standalone_recipient: NormalizedRecipientBinding {
+                lease: 0,
+                lifetime: native_host_generation,
+            },
         }
     }
 
@@ -3182,23 +3288,23 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 None => return,
             };
             if !consume {
+                if matches!(input, nickel_input::InputEvent::FocusGained { .. }) {
+                    let generation = NEXT_NATIVE_HOST_GENERATION
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        .max(1);
+                    self.standalone_recipient = NormalizedRecipientBinding {
+                        lease: generation,
+                        lifetime: generation,
+                    };
+                }
                 self.normalized_admission_order =
                     self.normalized_admission_order.wrapping_add(1).max(1);
                 let device_generation = input.device().map_or(0, |device| device.0);
                 #[cfg(any(unix, windows))]
                 let recipient = self.session_controller.recipient_binding().or_else(|| {
-                    self.session_controller.is_absent().then(|| {
-                        self.host.as_ref().map_or(
-                            NormalizedRecipientBinding {
-                                lease: 0,
-                                lifetime: 0,
-                            },
-                            |host| NormalizedRecipientBinding {
-                                lease: u64::from(host.inspect().window_focused),
-                                lifetime: host.inspect().frame_generation,
-                            },
-                        )
-                    })
+                    self.session_controller
+                        .is_absent()
+                        .then_some(self.standalone_recipient)
                 });
                 #[cfg(any(unix, windows))]
                 let recipient_role = if self.session_controller.is_absent() {
@@ -3207,14 +3313,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     "session-attached-window"
                 };
                 #[cfg(not(any(unix, windows)))]
-                let recipient = self.host.as_ref().map(|host| NormalizedRecipientBinding {
-                    lease: if host.inspect().window_focused {
-                        self.native_host_generation
-                    } else {
-                        0
-                    },
-                    lifetime: self.native_host_generation,
-                });
+                let recipient = Some(self.standalone_recipient);
                 #[cfg(not(any(unix, windows)))]
                 let recipient_role = "standalone-window";
                 let source = NormalizedSourceBinding {
@@ -3264,6 +3363,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     coordinate_meaning: "window-logical".into(),
                     composition_recipient_epoch: authority.composition_recipient_epoch,
                 }));
+                if matches!(events.last(), Some(HostEvent::NormalizedIngress(envelope)) if matches!(envelope.input, nickel_input::InputEvent::FocusLost { .. }))
+                {
+                    self.standalone_recipient.lease = 0;
+                }
             }
         }
         if adapter_exit {
@@ -3313,8 +3416,49 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         if self.pending_continuous_input.is_empty() {
             return;
         }
-        let inputs = std::mem::take(&mut self.pending_continuous_input);
-        self.dispatch_normalized_input(event_loop, window, inputs, None);
+        let samples = std::mem::take(&mut self.pending_continuous_input);
+        let mut events = Vec::new();
+        let mut authorities = Vec::new();
+        let mut changed = false;
+        let mut exit = false;
+        for sample in samples {
+            match self.adapter.normalized_input(
+                self.host.as_mut().unwrap(),
+                &sample.envelope.input,
+                HostServices { window },
+            ) {
+                Ok(outcome) if outcome.disposition != crate::EventDisposition::Unhandled => {
+                    changed |= outcome.changed;
+                    exit |= outcome.exit;
+                }
+                Ok(outcome) => {
+                    changed |= outcome.changed;
+                    exit |= outcome.exit;
+                    events.push(HostEvent::NormalizedIngress(sample.envelope));
+                    authorities.push(sample.authority);
+                }
+                Err(error) => {
+                    self.fail(event_loop, error);
+                    return;
+                }
+            }
+        }
+        if exit {
+            event_loop.exit();
+        }
+        if events.is_empty() && !changed {
+            return;
+        }
+        if let Some(host) = &mut self.host {
+            let outcome = host.step(HostBatch {
+                events,
+                normalized_authorities: authorities,
+                application_changed: changed,
+                ..Default::default()
+            });
+            self.apply_input_outcome(window, outcome);
+            self.start_pending_file_drag(window);
+        }
     }
 
     fn fail(&mut self, event_loop: &ActiveEventLoop, error: impl Into<Box<dyn Error>>) {
@@ -3749,7 +3893,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
                         | nickel_input::PointerEvent::Motion { .. }
                 )
             ) {
-                queue_continuous_input(&mut self.pending_continuous_input, normalized);
+                let sample = self.admit_continuous_input(normalized);
+                queue_continuous_input(&mut self.pending_continuous_input, sample);
                 self.scheduler.invalidate();
                 continue;
             }
@@ -3813,12 +3958,13 @@ mod tests {
     #[cfg(unix)]
     use super::SessionControllerSource;
     use super::{
-        Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
-        ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
-        GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
-        NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
-        NormalizedSourceBinding, PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
-        local_controller_poll_lease, queue_continuous_input, wait_duration,
+        AdmittedNormalizedInput, Application, Completion, CompletionFailure, CompletionFailureKind,
+        ControllerDiscoveryMode, ControllerPollSchedule, ControllerRole, ControllerRoleLease,
+        EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
+        HostFailureStage, MessageEvidence, NormalizedAdmissionBinding, NormalizedInputEnvelope,
+        NormalizedRecipientBinding, NormalizedSourceBinding, PresentScheduler, Shortcut,
+        ShortcutOutcome, UiHost, ViewContext, local_controller_poll_lease, queue_continuous_input,
+        wait_duration,
     };
 
     #[test]
@@ -4168,6 +4314,16 @@ mod tests {
 
     #[test]
     fn continuous_pointer_motion_keeps_latest_position_and_total_delta() {
+        let admitted = |input| {
+            let HostEvent::NormalizedIngress(envelope) = synthetic_normalized(input, None) else {
+                unreachable!()
+            };
+            let authority = envelope.execution_authority();
+            AdmittedNormalizedInput {
+                envelope,
+                authority,
+            }
+        };
         let mut pending = Vec::new();
         for (order, position, delta) in [
             (1, Point { x: 10.0, y: 20.0 }, Vector { x: 1.0, y: 2.0 }),
@@ -4175,18 +4331,18 @@ mod tests {
         ] {
             queue_continuous_input(
                 &mut pending,
-                InputEvent::Pointer(PointerEvent::Motion {
+                admitted(InputEvent::Pointer(PointerEvent::Motion {
                     device: DeviceId(7),
                     order: EventOrder(order),
                     position,
                     delta: Some(delta),
-                }),
+                })),
             );
         }
 
         assert_eq!(pending.len(), 1);
         assert_eq!(
-            pending[0],
+            pending[0].envelope.input,
             InputEvent::Pointer(PointerEvent::Motion {
                 device: DeviceId(7),
                 order: EventOrder(2),
@@ -4194,6 +4350,80 @@ mod tests {
                 delta: Some(Vector { x: 5.0, y: 8.0 }),
             })
         );
+    }
+
+    #[test]
+    fn continuous_input_overflow_inserts_reset_barrier_and_stays_bounded() {
+        let admitted = |input| {
+            let HostEvent::NormalizedIngress(envelope) = synthetic_normalized(input, None) else {
+                unreachable!()
+            };
+            let authority = envelope.execution_authority();
+            AdmittedNormalizedInput {
+                envelope,
+                authority,
+            }
+        };
+        let mut pending = Vec::new();
+        for order in 1..=300 {
+            queue_continuous_input(
+                &mut pending,
+                admitted(InputEvent::Pointer(PointerEvent::Motion {
+                    device: DeviceId(order % 2),
+                    order: EventOrder(order),
+                    position: Point {
+                        x: order as f64,
+                        y: 0.0,
+                    },
+                    delta: None,
+                })),
+            );
+        }
+        assert!(pending.len() <= 256);
+        assert!(
+            pending
+                .iter()
+                .any(|event| matches!(event.envelope.input, InputEvent::FocusLost { .. }))
+        );
+    }
+
+    #[test]
+    fn continuous_input_does_not_coalesce_across_recipient_rotation() {
+        let admitted = |input, generation| {
+            let HostEvent::NormalizedIngress(mut envelope) = synthetic_normalized(input, None)
+            else {
+                unreachable!()
+            };
+            envelope.recipient = NormalizedRecipientBinding {
+                lease: generation,
+                lifetime: generation,
+            };
+            envelope.host_connection_generation = generation;
+            envelope.composition_recipient_epoch = Some(generation);
+            let authority = envelope.execution_authority();
+            AdmittedNormalizedInput {
+                envelope,
+                authority,
+            }
+        };
+        let motion = |order| {
+            InputEvent::Pointer(PointerEvent::Motion {
+                device: DeviceId(7),
+                order: EventOrder(order),
+                position: Point {
+                    x: order as f64,
+                    y: 0.0,
+                },
+                delta: None,
+            })
+        };
+        let mut pending = Vec::new();
+        queue_continuous_input(&mut pending, admitted(motion(1), 10));
+        queue_continuous_input(&mut pending, admitted(motion(2), 11));
+
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].envelope.recipient.lifetime, 10);
+        assert_eq!(pending[1].envelope.recipient.lifetime, 11);
     }
 
     #[test]
