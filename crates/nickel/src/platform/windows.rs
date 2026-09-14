@@ -1417,7 +1417,7 @@ struct WindowDragCoordinator {
     active: Option<WindowDrag>,
     next_mapping_generation: u64,
     next_native_request: u64,
-    retained_settlement: Option<RetainedNativeSettlement>,
+    retained_settlements: HashMap<(isize, NativeRequestId), RetainedNativeSettlement>,
     last_terminal_apply: Option<NativeApplyState>,
 }
 
@@ -1433,7 +1433,12 @@ struct WindowDragAdmission {
 
 impl WindowDragCoordinator {
     fn admit(&mut self, admission: WindowDragAdmission) -> bool {
-        if self.active.is_some() || self.retained_settlement.is_some() {
+        if self.active.is_some()
+            || self
+                .retained_settlements
+                .values()
+                .any(|retained| retained.window == admission.window)
+        {
             return false;
         }
         if let Some(last_apply) = self.last_terminal_apply {
@@ -1572,16 +1577,18 @@ impl WindowDragCoordinator {
             return;
         };
         if self.reducer.release(active.operation, binding).disposition == Disposition::Applied {
-            self.retained_settlement =
-                active
-                    .settlement
-                    .take()
-                    .map(|settlement| RetainedNativeSettlement {
+            if let Some(settlement) = active.settlement.take() {
+                let key = (active.window, settlement.request.id);
+                self.retained_settlements.insert(
+                    key,
+                    RetainedNativeSettlement {
                         window: active.window,
                         authority: active.authority.clone(),
                         settlement,
                         last_observed: active.last_observed,
-                    });
+                    },
+                );
+            }
             self.last_terminal_apply = Some(active.last_apply);
             self.active = None;
         } else {
@@ -1597,29 +1604,36 @@ impl WindowDragCoordinator {
     }
 
     fn observe_retained_settlement(&mut self, now: u64) {
-        let Some(mut retained) = self.retained_settlement.take() else {
-            return;
-        };
-        let mut rectangle = RECT::default();
-        let window = HWND(retained.window as *mut c_void);
-        if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
-            retained.authority.base_placement.control = ControlMode::Delegated;
-            return;
-        }
-        let observed = logical_rect(rectangle);
-        let fact = native_geometry(observed);
-        retained
-            .settlement
-            .observe(fact, ObservationCausality::Unknown);
-        retained.settlement.expire(now);
-        if retained.settlement.status == SettlementStatus::Pending {
-            retained.last_observed = observed;
-            self.retained_settlement = Some(retained);
-        } else {
+        let keys = self
+            .retained_settlements
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for key in keys {
+            let Some(mut retained) = self.retained_settlements.remove(&key) else {
+                continue;
+            };
+            let mut rectangle = RECT::default();
+            let window = HWND(retained.window as *mut c_void);
+            if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
+                retained.authority.base_placement.control = ControlMode::Delegated;
+                continue;
+            }
+            let observed = logical_rect(rectangle);
+            let fact = native_geometry(observed);
             retained
-                .authority
+                .settlement
                 .observe(fact, ObservationCausality::Unknown);
-            retained.authority.base_placement.control = ControlMode::Delegated;
+            retained.settlement.expire(now);
+            if retained.settlement.status == SettlementStatus::Pending {
+                retained.last_observed = observed;
+                self.retained_settlements.insert(key, retained);
+            } else {
+                retained
+                    .authority
+                    .observe(fact, ObservationCausality::Unknown);
+                retained.authority.base_placement.control = ControlMode::Delegated;
+            }
         }
     }
 
@@ -1632,11 +1646,15 @@ impl WindowDragCoordinator {
             {
                 self.cancel(CancellationReason::NativeTakeover);
             }
-            if let Some(mut retained) = self.retained_settlement.take() {
-                if retained.window != window {
-                    self.retained_settlement = Some(retained);
-                    return;
-                }
+            let keys = self
+                .retained_settlements
+                .iter()
+                .filter_map(|(key, retained)| (retained.window == window).then_some(*key))
+                .collect::<Vec<_>>();
+            for key in keys {
+                let Some(mut retained) = self.retained_settlements.remove(&key) else {
+                    continue;
+                };
                 let fact = native_geometry(retained.last_observed);
                 retained
                     .settlement
@@ -1647,9 +1665,9 @@ impl WindowDragCoordinator {
                 retained.authority.base_placement.control = ControlMode::Delegated;
             }
         } else if self
-            .retained_settlement
-            .as_ref()
-            .is_some_and(|retained| retained.window == window)
+            .retained_settlements
+            .values()
+            .any(|retained| retained.window == window)
         {
             self.observe_retained_settlement(now);
         }
@@ -4657,7 +4675,60 @@ mod tests {
         let completion = active.completion;
         coordinator.release(completion);
         assert!(coordinator.active.is_none());
-        assert!(coordinator.retained_settlement.is_some());
+        assert_eq!(coordinator.retained_settlements.len(), 1);
+    }
+
+    #[test]
+    fn retained_settlement_does_not_hold_seat_against_unrelated_window() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        assert!(coordinator.admit(WindowDragAdmission {
+            window: 1,
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 10,
+        }));
+        let active = coordinator.active.as_mut().unwrap();
+        active.settlement = Some(Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(9),
+                mapping_generation: 1,
+                desired: active.authority.revisions(),
+                placement: active.last_observed,
+            },
+            SettlementLimits {
+                deadline_tick: 260,
+                max_corrections: 0,
+            },
+        ));
+        let completion = active.completion;
+        coordinator.release(completion);
+
+        assert!(!coordinator.admit(WindowDragAdmission {
+            window: 1,
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 15,
+        }));
+        assert!(coordinator.admit(WindowDragAdmission {
+            window: 2,
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 20,
+        }));
+        assert_eq!(coordinator.active.as_ref().map(|drag| drag.window), Some(2));
+        assert_eq!(coordinator.retained_settlements.len(), 1);
     }
 
     #[test]
@@ -4676,14 +4747,20 @@ mod tests {
                 max_corrections: 0,
             },
         );
-        coordinator.retained_settlement = Some(super::RetainedNativeSettlement {
-            window: drag.window,
-            authority: std::mem::replace(&mut drag.authority, contested_authority(RECT::default())),
-            settlement,
-            last_observed: drag.last_observed,
-        });
+        coordinator.retained_settlements.insert(
+            (drag.window, settlement.request.id),
+            super::RetainedNativeSettlement {
+                window: drag.window,
+                authority: std::mem::replace(
+                    &mut drag.authority,
+                    contested_authority(RECT::default()),
+                ),
+                settlement,
+                last_observed: drag.last_observed,
+            },
+        );
         coordinator.native_move_size(drag.window, true, 40);
-        assert!(coordinator.retained_settlement.is_none());
+        assert!(coordinator.retained_settlements.is_empty());
     }
 
     #[test]
