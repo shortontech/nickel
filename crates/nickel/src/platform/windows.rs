@@ -1441,6 +1441,7 @@ struct WindowDrag {
     last_apply: NativeApplyState,
     authority: GeometryAuthority,
     issued_settlements: VecDeque<Settlement>,
+    unknown_since: Option<u64>,
     last_observed: LogicalRect,
 }
 
@@ -1471,9 +1472,14 @@ const MAX_RETAINED_WINDOW_SETTLEMENTS: usize = 64;
 const MAX_TERMINAL_SETTLEMENT_OUTCOMES: usize = 64;
 const MAX_ACTIVE_WINDOW_SETTLEMENTS: usize = 16;
 const MAX_CONTESTED_DRAG_DURATION_MS: u64 = 300_000;
+const MAX_UNKNOWN_SUSPENSION_MS: u64 = 250;
 
 const fn contested_drag_within_bound(initiated_at: u64, now: u64) -> bool {
     now.saturating_sub(initiated_at) < MAX_CONTESTED_DRAG_DURATION_MS
+}
+
+fn unknown_suspension_within_bound(unknown_since: Option<u64>, now: u64) -> bool {
+    unknown_since.is_none_or(|since| now.saturating_sub(since) < MAX_UNKNOWN_SUSPENSION_MS)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1774,6 +1780,7 @@ impl WindowDragCoordinator {
             last_apply: NativeApplyState::NotSubmitted,
             authority: contested_authority(admission.rectangle),
             issued_settlements: VecDeque::new(),
+            unknown_since: None,
             last_observed: logical_rect(admission.rectangle),
         });
         true
@@ -1790,6 +1797,13 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Unconfirmed);
             return Err(());
         }
+        if !unknown_suspension_within_bound(active.unknown_since, time) {
+            let _ = self
+                .reducer
+                .cancel(active.operation, CancellationReason::AuthorityUnknown);
+            self.finish_active(active, ActiveSettlementExit::Unconfirmed);
+            return Err(());
+        }
         if !self.lifetime_is_current(active.lifetime)
             || native_window_fingerprint(active.window) != Some(active.lifetime.fingerprint)
         {
@@ -1799,7 +1813,13 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
-        match observe_window_drag(&mut active, time, false) {
+        let observation = if active.issued_settlements.is_empty() || active.unknown_since.is_some()
+        {
+            observe_window_drag(&mut active, time, false)
+        } else {
+            Ok(true)
+        };
+        match observation {
             Err(reason) => {
                 let _ = self.reducer.cancel(active.operation, reason);
                 self.finish_active(active, ActiveSettlementExit::Unconfirmed);
@@ -2568,9 +2588,11 @@ fn classify_window_drag_observation(
             settlement.observe(fact, ObservationCausality::Unknown);
             settlement.expire(now);
         }
-        // Win32 provides no request token in geometry observations. Pending or expired Unknown
-        // observations are accounted separately and do not stall an otherwise bounded drag.
-        return Ok(true);
+        // Win32 provides no request token in geometry observations. Once such an observation is
+        // actually received, stop writing until authority is explicitly restored or the bounded
+        // suspension terminates. Equality and arrival order are not treated as correlation.
+        operation.unknown_since.get_or_insert(now);
+        return Ok(false);
     }
     if observed != operation.last_observed {
         operation
@@ -4890,7 +4912,7 @@ mod tests {
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
         project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_restore_on_activation, windows_pid_descends_from,
+        should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -4927,6 +4949,7 @@ mod tests {
             last_apply: NativeApplyState::NotSubmitted,
             authority: contested_authority(rectangle),
             issued_settlements: VecDeque::new(),
+            unknown_since: None,
             last_observed: LogicalRect {
                 x: 10,
                 y: 20,
@@ -4973,7 +4996,7 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_native_request_expires_without_stalling_contested_updates() {
+    fn unmatched_native_request_suspends_and_expires_as_unconfirmed() {
         let mut drag = contested_drag();
         let observed = drag.last_observed;
         drag.issued_settlements.push_back(Settlement::new(
@@ -4990,11 +5013,11 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(true)
+            Ok(false)
         );
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Ok(true)
+            Ok(false)
         );
         assert_eq!(
             drag.issued_settlements
@@ -5002,6 +5025,7 @@ mod tests {
                 .map(|settlement| settlement.status),
             Some(SettlementStatus::Unconfirmed)
         );
+        assert_eq!(drag.unknown_since, Some(249));
     }
 
     #[test]
@@ -5022,45 +5046,26 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(true)
+            Ok(false)
         );
         assert!(!drag.issued_settlements.is_empty());
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Ok(true)
+            Ok(false)
         );
     }
 
     #[test]
-    fn pending_unknown_observations_allow_multiple_bounded_drag_updates() {
-        let mut coordinator = WindowDragCoordinator::default();
+    fn pending_unknown_observation_suspends_before_another_write() {
         let mut drag = drag_with_pending_settlement(60);
-        drag.issued_settlements[0].limits.deadline_tick = 250;
         let observed = drag.last_observed;
 
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 10, false),
-            Ok(true)
+            Ok(false)
         );
-        let mut second = drag.issued_settlements[0];
-        second.request.id = NativeRequestId(61);
-        second.limits.deadline_tick = 270;
-        assert!(enqueue_issued_settlement(&mut drag, second).is_none());
-        assert_eq!(
-            classify_window_drag_observation(&mut drag, observed, 250, false),
-            Ok(true)
-        );
-        coordinator.record_terminal_active_settlements(&mut drag);
-
+        assert_eq!(drag.unknown_since, Some(10));
         assert_eq!(drag.issued_settlements.len(), 1);
-        assert_eq!(
-            coordinator.terminal_settlement_outcomes.back(),
-            Some(&TerminalSettlementOutcome {
-                key: (drag.lifetime, NativeRequestId(60)),
-                status: SettlementStatus::Unconfirmed,
-            })
-        );
-        assert!(drag.issued_settlements.len() <= super::MAX_ACTIVE_WINDOW_SETTLEMENTS);
     }
 
     #[test]
@@ -5072,6 +5077,15 @@ mod tests {
         assert!(!contested_drag_within_bound(
             10,
             10 + super::MAX_CONTESTED_DRAG_DURATION_MS
+        ));
+        assert!(unknown_suspension_within_bound(None, u64::MAX));
+        assert!(unknown_suspension_within_bound(
+            Some(20),
+            20 + super::MAX_UNKNOWN_SUSPENSION_MS - 1
+        ));
+        assert!(!unknown_suspension_within_bound(
+            Some(20),
+            20 + super::MAX_UNKNOWN_SUSPENSION_MS
         ));
     }
 
