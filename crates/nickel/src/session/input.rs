@@ -77,37 +77,6 @@ fn desktop_modifiers(
     )
 }
 
-pub(super) fn internal_keyboard_event(sym: Keysym, state: KeyState) -> Option<nickel_ui::UiEvent> {
-    if state != KeyState::Pressed {
-        return None;
-    }
-    Some(match sym.raw() {
-        keysyms::KEY_Tab => nickel_ui::UiEvent::FocusNext,
-        keysyms::KEY_ISO_Left_Tab => nickel_ui::UiEvent::FocusPrevious,
-        keysyms::KEY_Up => nickel_ui::UiEvent::KeyboardNavigateUp,
-        keysyms::KEY_Down => nickel_ui::UiEvent::KeyboardNavigateDown,
-        keysyms::KEY_Left => nickel_ui::UiEvent::KeyboardNavigateLeft,
-        keysyms::KEY_Right => nickel_ui::UiEvent::KeyboardNavigateRight,
-        keysyms::KEY_Return | keysyms::KEY_KP_Enter | keysyms::KEY_space => {
-            nickel_ui::UiEvent::KeyboardActivate
-        }
-        keysyms::KEY_Escape => nickel_ui::UiEvent::KeyboardNavigateBack,
-        keysyms::KEY_BackSpace => nickel_ui::UiEvent::TextBackspace,
-        keysyms::KEY_Delete => nickel_ui::UiEvent::TextDelete,
-        keysyms::KEY_Home => nickel_ui::UiEvent::KeyboardNavigateStart,
-        keysyms::KEY_End => nickel_ui::UiEvent::KeyboardNavigateEnd,
-        keysyms::KEY_Page_Up => nickel_ui::UiEvent::KeyboardNavigatePageUp,
-        keysyms::KEY_Page_Down => nickel_ui::UiEvent::KeyboardNavigatePageDown,
-        _ => {
-            let character = sym.key_char()?;
-            if character.is_control() {
-                return None;
-            }
-            nickel_ui::UiEvent::TextInput(character.to_string())
-        }
-    })
-}
-
 /// Normalize physical identity independently of the active XKB layout. Unknown
 /// keys keep their native identity; characters retain XKB's modified symbol.
 fn desktop_key_event(
@@ -203,6 +172,31 @@ fn desktop_key_event(
         repeat,
         modifiers,
     }
+}
+
+fn desktop_key_events(
+    native: (u32, Keysym, KeyState),
+    modifiers: nickel_input::ModifierState,
+    device: nickel_input::DeviceId,
+    order: nickel_input::EventOrder,
+    repeat: bool,
+) -> Vec<nickel_input::InputEvent> {
+    let (_, sym, state) = native;
+    let mut events = vec![nickel_input::InputEvent::Key(desktop_key_event(
+        native, modifiers, device, order, repeat,
+    ))];
+    if state == KeyState::Pressed
+        && let Some(character) = sym.key_char().filter(|character| !character.is_control())
+    {
+        events.push(nickel_input::InputEvent::Text(
+            nickel_input::TextEvent::Commit {
+                device,
+                order,
+                text: character.to_string(),
+            },
+        ));
+    }
+    events
 }
 
 /// Virtual modifiers describe one normalized chord; they never update the seat's
@@ -786,7 +780,7 @@ impl NickelSession {
                                         event.key_code().raw(),
                                         state == KeyState::Pressed,
                                         |device, order, repeat| {
-                                            desktop_key_event(
+                                            desktop_key_events(
                                                 (event.key_code().raw(), sym, state),
                                                 desktop_modifiers(modifiers),
                                                 device,
@@ -795,20 +789,7 @@ impl NickelSession {
                                             )
                                         },
                                     );
-                                    if !desktop_handled {
-                                        if state == KeyState::Pressed
-                                            && matches!(
-                                                sym.raw(),
-                                                keysyms::KEY_Return | keysyms::KEY_KP_Enter
-                                            )
-                                        {
-                                            session.internal_ui.submit_or_activate();
-                                        } else if let Some(event) =
-                                            internal_keyboard_event(sym, state)
-                                        {
-                                            session.internal_ui.keyboard(event);
-                                        }
-                                    }
+                                    debug_assert!(desktop_handled);
                                     session.flush_internal_shell_input();
                                     session.request_output_redraw();
                                     return FilterResult::Intercept(None);
@@ -933,20 +914,9 @@ impl NickelSession {
                                 }
                                 let desktop_handled = session.internal_ui.desktop_keyboard_input(
                                     &event.device().id(), event.key_code().raw(), state == KeyState::Pressed,
-                                    |device, order, repeat| desktop_key_event((event.key_code().raw(), sym, state), desktop_modifiers(modifiers), device, order, repeat),
+                                    |device, order, repeat| desktop_key_events((event.key_code().raw(), sym, state), desktop_modifiers(modifiers), device, order, repeat),
                                 );
-                                if !desktop_handled {
-                                    if state == KeyState::Pressed
-                                        && matches!(
-                                            sym.raw(),
-                                            keysyms::KEY_Return | keysyms::KEY_KP_Enter
-                                        )
-                                    {
-                                        session.internal_ui.submit_or_activate();
-                                    } else if let Some(event) = internal_keyboard_event(sym, state) {
-                                        session.internal_ui.keyboard(event);
-                                    }
-                                }
+                                debug_assert!(desktop_handled);
                                 session.flush_internal_shell_input();
                                 session.request_output_redraw();
                                 return FilterResult::Intercept(None);
@@ -2328,6 +2298,25 @@ mod tests {
             LogicalKey::Named(nickel_input::NamedKey::Enter)
         );
         assert!(enter.repeat);
+
+        let text = super::desktop_key_events(
+            (38, Keysym::new(keysyms::KEY_q), super::KeyState::Pressed),
+            Default::default(),
+            DeviceId(7),
+            EventOrder(13),
+            false,
+        );
+        assert!(matches!(
+            &text[..],
+            [
+                nickel_input::InputEvent::Key(_),
+                nickel_input::InputEvent::Text(nickel_input::TextEvent::Commit {
+                    device: DeviceId(7),
+                    order: EventOrder(13),
+                    text,
+                })
+            ] if text == "q"
+        ));
     }
 
     use smithay::utils::{Point, Rectangle};

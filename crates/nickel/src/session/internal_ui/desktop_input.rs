@@ -226,7 +226,7 @@ mod tests {
                 pressed,
                 |device, order, repeat| {
                     assert_eq!(repeat, expected_repeat);
-                    nickel_input::KeyEvent {
+                    vec![InputEvent::Key(nickel_input::KeyEvent {
                         device,
                         order,
                         repeat,
@@ -239,7 +239,7 @@ mod tests {
                             KeyEdge::Released
                         },
                         modifiers: Default::default(),
-                    }
+                    })]
                 }
             ));
         }
@@ -256,6 +256,40 @@ mod tests {
             ))
         );
         assert!(!runtime.desktop_keyboard_interaction_active());
+    }
+
+    #[test]
+    fn focused_non_desktop_surface_receives_the_same_normalized_keyboard_path() {
+        let mut runtime = InternalUiRuntime::default();
+        let panel = runtime.insert_scene(
+            Vec::new(),
+            InternalSurfacePlacement {
+                role: InternalSurfaceRole::Panel,
+                geometry: (0, 0, 800, 48),
+                output: None,
+            },
+            1.0,
+        );
+        runtime.focus_surface(panel);
+        runtime.drain_routed_events();
+
+        assert!(
+            runtime.desktop_keyboard_input("keyboard", 38, true, |device, order, _| {
+                vec![InputEvent::Text(nickel_input::TextEvent::Commit {
+                    device,
+                    order,
+                    text: "q".into(),
+                })]
+            })
+        );
+        let routed = runtime.drain_routed_events();
+        assert!(matches!(
+            &routed[0].1.events[..],
+            [HostEvent::Normalized {
+                input: InputEvent::Text(nickel_input::TextEvent::Commit { text, .. }),
+                ..
+            }] if text == "q"
+        ));
     }
 
     #[test]
@@ -656,14 +690,12 @@ impl InternalUiRuntime {
         source: &str,
         raw: u32,
         pressed: bool,
-        normalize: impl FnOnce(DeviceId, EventOrder, bool) -> nickel_input::KeyEvent,
+        normalize: impl FnOnce(DeviceId, EventOrder, bool) -> Vec<InputEvent>,
     ) -> bool {
         let Some(id) = self.focused.filter(|id| {
-            self.presentation.get(id).is_some_and(|surface| {
-                surface.visible
-                    && surface.external_scene.is_some()
-                    && surface.placement.role == InternalSurfaceRole::Desktop
-            })
+            self.presentation
+                .get(id)
+                .is_some_and(|surface| surface.visible)
         }) else {
             return false;
         };
@@ -679,14 +711,17 @@ impl InternalUiRuntime {
             state.pressed_keys.remove(&(device, raw));
             false
         };
-        let key = normalize(device, EventOrder(state.order), repeat);
+        let events = normalize(device, EventOrder(state.order), repeat)
+            .into_iter()
+            .map(|input| HostEvent::Normalized {
+                input,
+                clipboard_text: None,
+            })
+            .collect();
         self.step(
             id,
             HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: InputEvent::Key(key),
-                    clipboard_text: None,
-                }],
+                events,
                 ..Default::default()
             },
         );

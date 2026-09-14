@@ -62,7 +62,14 @@ impl SessionControllerSource {
         }
     }
 
-    fn poll_actions(&mut self) -> Vec<(ControllerAction, ControllerFamily)> {
+    fn poll_actions(
+        &mut self,
+    ) -> Vec<(
+        ControllerAction,
+        ControllerFamily,
+        ControllerExecutionBinding,
+        ControllerExecutionAuthority,
+    )> {
         use nickel_session_protocol::{
             ControllerHostRequest, ControllerHostResponse, InputState,
             controller_broker::BrokerMessage,
@@ -190,9 +197,26 @@ impl SessionControllerSource {
                                         let Some(action) = delivery.payload.action else {
                                             continue;
                                         };
+                                        let binding = ControllerExecutionBinding {
+                                            routing_epoch: delivery.payload.routing_epoch,
+                                            event_id: delivery.event_id.0,
+                                            lease_epoch: delivery.lease_epoch.0,
+                                            connection_generation: delivery.connection_generation.0,
+                                            stream_generation: delivery.stream_generation.0,
+                                            cutoff: None,
+                                            repeat: delivery.payload.repeat,
+                                        };
                                         actions.push((
                                             controller_action_from_message(action),
                                             controller_family_from_message(delivery.payload.family),
+                                            binding,
+                                            ControllerExecutionAuthority {
+                                                routing_epoch: delivery.payload.routing_epoch,
+                                                lease_epoch: current_lease.0,
+                                                connection_generation: connection_generation.0,
+                                                stream_generation: delivery.stream_generation.0,
+                                                cutoff: None,
+                                            },
                                         ));
                                     }
                                 }
@@ -2886,13 +2910,19 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 .as_ref()
                 .is_some_and(|host| host.inspect().window_focused);
             let (actions, controller_connected) = if let Some(controller) = &mut self.controller {
-                let actions = controller
+                let actions: Vec<_> = controller
                     .poll_with_fence(now, focused, || {
                         self.adapter
                             .controller_fence(HostServices { window: &window })
                     })
                     .into_iter()
-                    .map(|action| (action, controller.active_family().unwrap_or_default()))
+                    .map(|action| {
+                        (
+                            action,
+                            controller.active_family().unwrap_or_default(),
+                            None::<(ControllerExecutionBinding, ControllerExecutionAuthority)>,
+                        )
+                    })
                     .collect();
                 (actions, controller.connected())
             } else {
@@ -2903,21 +2933,38 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         SessionControllerSource::Connecting { .. }
                             | SessionControllerSource::Attached { .. }
                     );
-                    (self.session_controller.poll_actions(), connected)
+                    (
+                        self.session_controller
+                            .poll_actions()
+                            .into_iter()
+                            .map(|(action, family, binding, authority)| {
+                                (action, family, Some((binding, authority)))
+                            })
+                            .collect(),
+                        connected,
+                    )
                 }
                 #[cfg(not(any(unix, windows)))]
                 {
                     (Vec::new(), false)
                 }
             };
-            for (action, family) in actions {
+            for (action, family, admission) in actions {
                 let Some(host) = self.host.as_mut() else {
                     break;
                 };
                 if host.set_controller_family(family) {
                     self.scheduler.invalidate();
                 }
-                let outcome = host.handle_controller_action(action);
+                let outcome = if let Some((binding, authority)) = admission {
+                    host.step(HostBatch {
+                        controller_authority: Some(authority),
+                        events: vec![HostEvent::AdmittedController { action, binding }],
+                        ..HostBatch::default()
+                    })
+                } else {
+                    host.handle_controller_action(action)
+                };
                 if action == ControllerAction::Confirm
                     && outcome.text_input_active
                     && host.controller_targets_text_input()
