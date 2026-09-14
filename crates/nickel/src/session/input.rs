@@ -33,6 +33,7 @@ use crate::session::{
     grabs::{
         MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
         move_grab::WindowPointerOperation, move_internal_grab::operation_window,
+        resize_grab::operation_resize_edges,
     },
     state::NickelSession,
     window_frame::{self, FramePart},
@@ -249,40 +250,38 @@ impl NickelSession {
         })
     }
 
-    /// `Ok(None)` is the deliberately unmigrated XWayland path. `Err(())`
-    /// means an XDG move lost shared admission and must not install a grab.
-    fn begin_compositor_window_move(
+    /// Every supported compositor-owned client operation must acquire shared
+    /// admission before its native grab is installed.
+    fn begin_compositor_window_operation(
         &mut self,
         window: &smithay::desktop::Window,
         button: u32,
         serial: smithay::utils::Serial,
-    ) -> Result<Option<WindowPointerOperation>, ()> {
-        if window.toplevel().is_none() {
-            return Ok(None);
-        }
-        let surface = window
-            .wl_surface()
-            .map(std::borrow::Cow::into_owned)
-            .ok_or(())?;
-        let registry_id = self.surface_windows.get(&surface.id()).copied().ok_or(())?;
-        let origin = Self::compositor_pointer_binding(button, serial).ok_or(())?;
+        kind: OperationKind,
+        control: ControlMode,
+    ) -> Option<WindowPointerOperation> {
+        let surface = window.wl_surface().map(std::borrow::Cow::into_owned)?;
+        let registry_id = self.surface_windows.get(&surface.id()).copied()?;
+        let origin = Self::compositor_pointer_binding(button, serial)?;
+        let native_lifetime = window.x11_surface().map_or_else(
+            || u64::from(surface.id().protocol_id()),
+            |x11| u64::from(x11.window_id()),
+        );
         WindowPointerOperation::begin(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
                 subject: WindowMapping {
                     window: OperationWindowId::new(registry_id.0),
-                    native_lifetime: NativeLifetimeId::new(u64::from(surface.id().protocol_id())),
+                    native_lifetime: NativeLifetimeId::new(native_lifetime),
                     generation: MappingGeneration::new(registry_id.0),
                 },
-                kind: OperationKind::Move,
-                control: ControlMode::Enforced,
+                kind,
+                control,
                 origin,
                 optional_update_sources: Vec::new(),
             },
         )
-        .map(Some)
-        .ok_or(())
     }
 
     fn begin_internal_surface_move(
@@ -1477,11 +1476,15 @@ impl NickelSession {
                                         button,
                                         location,
                                     };
-                                    let operation = match self
-                                        .begin_compositor_window_move(&window, button, serial)
-                                    {
-                                        Ok(operation) => operation,
-                                        Err(()) => {
+                                    let operation = match self.begin_compositor_window_operation(
+                                        &window,
+                                        button,
+                                        serial,
+                                        OperationKind::Move,
+                                        ControlMode::Enforced,
+                                    ) {
+                                        Some(operation) => operation,
+                                        None => {
                                             tracing::info!(
                                                 "server-titlebar move rejected by shared operation admission"
                                             );
@@ -1541,13 +1544,29 @@ impl NickelSession {
                                     button,
                                     location,
                                 };
+                                let Some(operation_edges) = operation_resize_edges(edges) else {
+                                    return None;
+                                };
+                                let Some(operation) = self.begin_compositor_window_operation(
+                                    &window,
+                                    button,
+                                    serial,
+                                    OperationKind::Resize(operation_edges),
+                                    ControlMode::Cooperative,
+                                ) else {
+                                    tracing::info!(
+                                        "server-frame resize rejected by shared operation admission"
+                                    );
+                                    return None;
+                                };
                                 pointer.set_grab(
                                     self,
-                                    ResizeSurfaceGrab::start(
+                                    ResizeSurfaceGrab::start_with_operation(
                                         start_data,
                                         window,
                                         edges,
                                         initial_rect,
+                                        operation,
                                     ),
                                     serial,
                                     Focus::Clear,
@@ -1701,8 +1720,14 @@ impl NickelSession {
                         button,
                         location,
                     };
-                    match self.begin_compositor_window_move(&window, button, serial) {
-                        Ok(operation) => pointer.set_grab(
+                    match self.begin_compositor_window_operation(
+                        &window,
+                        button,
+                        serial,
+                        OperationKind::Move,
+                        ControlMode::Enforced,
+                    ) {
+                        Some(operation) => pointer.set_grab(
                             self,
                             MoveSurfaceGrab {
                                 start_data,
@@ -1715,7 +1740,7 @@ impl NickelSession {
                             serial,
                             Focus::Clear,
                         ),
-                        Err(()) => tracing::info!(
+                        None => tracing::info!(
                             "Super+pointer move rejected by shared operation admission"
                         ),
                     }
@@ -1748,12 +1773,32 @@ impl NickelSession {
                         button,
                         location,
                     };
-                    pointer.set_grab(
-                        self,
-                        ResizeSurfaceGrab::start(start_data, window, edges, initial_rect),
+                    let Some(operation_edges) = operation_resize_edges(edges) else {
+                        return None;
+                    };
+                    match self.begin_compositor_window_operation(
+                        &window,
+                        button,
                         serial,
-                        Focus::Clear,
-                    );
+                        OperationKind::Resize(operation_edges),
+                        ControlMode::Cooperative,
+                    ) {
+                        Some(operation) => pointer.set_grab(
+                            self,
+                            ResizeSurfaceGrab::start_with_operation(
+                                start_data,
+                                window,
+                                edges,
+                                initial_rect,
+                                operation,
+                            ),
+                            serial,
+                            Focus::Clear,
+                        ),
+                        None => tracing::info!(
+                            "Super+pointer resize rejected by shared operation admission"
+                        ),
+                    }
                 }
 
                 if !suppress_pointer_event {

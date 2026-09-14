@@ -2763,6 +2763,13 @@ pub struct NickelSession {
     geometry_authorities: HashMap<WindowId, nickel_core::geometry_authority::GeometryAuthority>,
     pub(crate) x11_geometry_settlements:
         HashMap<WindowId, nickel_core::geometry_authority::Settlement>,
+    pub(crate) xdg_geometry_settlements: HashMap<
+        WindowId,
+        (
+            smithay::utils::Serial,
+            nickel_core::geometry_authority::Settlement,
+        ),
+    >,
     pub(crate) x11_next_native_request: u64,
     presentation_restore_revisions: HashMap<
         (WindowId, nickel_core::geometry_authority::Presentation),
@@ -7387,6 +7394,7 @@ impl NickelSession {
             displaced_output_windows: HashMap::new(),
             geometry_authorities: HashMap::new(),
             x11_geometry_settlements: HashMap::new(),
+            xdg_geometry_settlements: HashMap::new(),
             x11_next_native_request: 0,
             presentation_restore_revisions: HashMap::new(),
             preview_highlight: None,
@@ -9394,6 +9402,7 @@ impl NickelSession {
             self.windows.remove(window_id);
             self.remote_window_identities.remove(&window_id);
             self.geometry_authorities.remove(&window_id);
+            self.xdg_geometry_settlements.remove(&window_id);
             self.presentation_restore_revisions
                 .retain(|(id, _), _| *id != window_id);
             self.schedule_remote_resource_retirement();
@@ -9823,6 +9832,113 @@ impl NickelSession {
             settlement.fail();
         }
         request_id
+    }
+
+    pub(crate) fn record_xdg_desired_geometry(
+        &mut self,
+        window: &Window,
+        desired: Geometry,
+        configure: smithay::utils::Serial,
+    ) {
+        use nickel_core::geometry_authority::{
+            NativeRequest, NativeRequestId, Settlement, SettlementLimits,
+        };
+        let Some(id) = self.window_geometry_authority_id(window) else {
+            return;
+        };
+        self.record_desired_geometry(id, desired);
+        self.x11_next_native_request = self
+            .x11_next_native_request
+            .checked_add(1)
+            .expect("native geometry request identity exhausted");
+        let request_id = NativeRequestId(self.x11_next_native_request);
+        let desired_revisions = self.geometry_authorities[&id].revisions();
+        let now = self
+            .start_time
+            .elapsed()
+            .as_millis()
+            .min(u128::from(u64::MAX)) as u64;
+        self.xdg_geometry_settlements.insert(
+            id,
+            (
+                configure,
+                Settlement::new(
+                    NativeRequest {
+                        id: request_id,
+                        mapping_generation: id.0,
+                        desired: desired_revisions,
+                        placement: desired,
+                    },
+                    SettlementLimits {
+                        deadline_tick: now.saturating_add(750),
+                        max_corrections: 1,
+                    },
+                ),
+            ),
+        );
+        let timer = self.event_loop_handle.insert_source(
+            smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
+            move |_, _, state| {
+                if let Some((_, settlement)) = state.xdg_geometry_settlements.get_mut(&id)
+                    && settlement.request.id == request_id
+                {
+                    settlement.expire(settlement.limits.deadline_tick);
+                }
+                smithay::reexports::calloop::timer::TimeoutAction::Drop
+            },
+        );
+        if timer.is_err()
+            && let Some((_, settlement)) = self.xdg_geometry_settlements.get_mut(&id)
+            && settlement.request.id == request_id
+        {
+            settlement.fail();
+        }
+    }
+
+    pub(crate) fn observe_xdg_geometry_commit(
+        &mut self,
+        window: &Window,
+        acked: Option<smithay::utils::Serial>,
+    ) {
+        use nickel_core::geometry_authority::{
+            CoordinateUnits, GeometryMeaning, ObservationCausality, TaggedGeometry,
+        };
+        let Some(id) = self.window_geometry_authority_id(window) else {
+            return;
+        };
+        let topology_version = self
+            .geometry_authorities
+            .get(&id)
+            .map_or(1, |authority| authority.topology_version);
+        let Some((expected, settlement)) = self.xdg_geometry_settlements.get(&id) else {
+            return;
+        };
+        if !acked.is_some_and(|acked| acked.is_no_older_than(expected)) {
+            return;
+        }
+        let request_id = settlement.request.id;
+        let geometry = window.geometry();
+        let location = self.space.element_location(window).unwrap_or_default();
+        let fact = TaggedGeometry {
+            rect: Geometry {
+                x: location.x,
+                y: location.y,
+                width: geometry.size.w.max(1),
+                height: geometry.size.h.max(1),
+            },
+            meaning: GeometryMeaning::WaylandWindowGeometry,
+            units: CoordinateUnits::CanonicalLogical,
+            topology_version,
+        };
+        let causality = ObservationCausality::Correlated(request_id);
+        if let Some(authority) = self.geometry_authorities.get_mut(&id) {
+            authority.observe(fact, causality);
+        }
+        if let Some((_, settlement)) = self.xdg_geometry_settlements.get_mut(&id)
+            && settlement.request.id == request_id
+        {
+            settlement.observe(fact, causality);
+        }
     }
 
     pub(crate) fn record_x11_client_desired_geometry(

@@ -395,7 +395,7 @@ impl XdgShellHandler for NickelSession {
                 initial_window_location,
                 last_window_location: initial_window_location,
                 restored_from_maximized: false,
-                operation: Some(operation),
+                operation,
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -479,7 +479,7 @@ impl XdgShellHandler for NickelSession {
                 window,
                 native_edges,
                 Rectangle::new(initial_window_location, initial_window_size),
-                Some(operation),
+                operation,
             );
 
             pointer.set_grab(self, grab, serial, Focus::Clear);

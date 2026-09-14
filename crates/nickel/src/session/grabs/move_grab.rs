@@ -18,9 +18,7 @@ pub struct MoveSurfaceGrab {
     pub initial_window_location: Point<i32, Logical>,
     pub last_window_location: Point<i32, Logical>,
     pub restored_from_maximized: bool,
-    /// Present for client-requested XDG/XWayland operations. Compositor-
-    /// initiated frame and modifier moves are migrated separately.
-    pub operation: Option<WindowPointerOperation>,
+    pub operation: WindowPointerOperation,
 }
 
 /// Native-pointer adapter for the shared operation lifecycle.
@@ -126,11 +124,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
-        if self
-            .operation
-            .as_ref()
-            .is_some_and(|operation| !operation.admits_motion(&mut data.window_operations))
-        {
+        if !self.operation.admits_motion(&mut data.window_operations) {
             return;
         }
 
@@ -161,12 +155,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
 
         let initiating_button_released =
             !handle.current_pressed().contains(&self.start_data.button);
-        if initiating_button_released
-            && self
-                .operation
-                .as_ref()
-                .is_none_or(|operation| operation.complete(&mut data.window_operations))
-        {
+        if initiating_button_released && self.operation.complete(&mut data.window_operations) {
             // The initiating button released and the shared reducer committed.
             if self.window.x11_surface().is_some()
                 && let Some(location) = data.space.element_location(&self.window)
@@ -189,17 +178,17 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
     fn unset(&mut self, data: &mut NickelSession) {
         // Covers target loss, grab replacement, and seat/resource teardown.
         // Normal completion has already removed the operation.
-        if let Some(operation) = &self.operation {
-            operation.cancel(&mut data.window_operations);
-            if operation.requests_conditional_compensation(&data.window_operations)
-                && data.space.element_location(&self.window) == Some(self.last_window_location)
-            {
-                data.map_compositor_moved_window(
-                    self.window.clone(),
-                    self.initial_window_location,
-                    true,
-                );
-            }
+        self.operation.cancel(&mut data.window_operations);
+        if self
+            .operation
+            .requests_conditional_compensation(&data.window_operations)
+            && data.space.element_location(&self.window) == Some(self.last_window_location)
+        {
+            data.map_compositor_moved_window(
+                self.window.clone(),
+                self.initial_window_location,
+                true,
+            );
         }
     }
 }

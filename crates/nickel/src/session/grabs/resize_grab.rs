@@ -67,26 +67,17 @@ pub struct ResizeSurfaceGrab {
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
-    operation: Option<WindowPointerOperation>,
+    operation: WindowPointerOperation,
     terminal: bool,
 }
 
 impl ResizeSurfaceGrab {
-    pub fn start(
-        start_data: PointerGrabStartData<NickelSession>,
-        window: Window,
-        edges: ResizeEdge,
-        initial_window_rect: Rectangle<i32, Logical>,
-    ) -> Self {
-        Self::start_with_operation(start_data, window, edges, initial_window_rect, None)
-    }
-
     pub fn start_with_operation(
         start_data: PointerGrabStartData<NickelSession>,
         window: Window,
         edges: ResizeEdge,
         initial_window_rect: Rectangle<i32, Logical>,
-        operation: Option<WindowPointerOperation>,
+        operation: WindowPointerOperation,
     ) -> Self {
         let initial_rect = initial_window_rect;
 
@@ -136,12 +127,10 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         if self.terminal {
             return;
         }
-        if let Some(operation) = &self.operation {
-            operation.cancel(&mut data.window_operations);
-        }
-        let compensate = self.operation.as_ref().is_none_or(|operation| {
-            operation.requests_conditional_compensation(&data.window_operations)
-        });
+        self.operation.cancel(&mut data.window_operations);
+        let compensate = self
+            .operation
+            .requests_conditional_compensation(&data.window_operations);
         if !compensate {
             return;
         }
@@ -186,11 +175,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
-        if self
-            .operation
-            .as_ref()
-            .is_some_and(|operation| !operation.admits_motion(&mut data.window_operations))
-        {
+        if !self.operation.admits_motion(&mut data.window_operations) {
             return;
         }
 
@@ -282,10 +267,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
 
         // The button is a button code as defined in the
         if !handle.current_pressed().contains(&self.start_data.button)
-            && self
-                .operation
-                .as_ref()
-                .is_none_or(|operation| operation.complete(&mut data.window_operations))
+            && self.operation.complete(&mut data.window_operations)
         {
             // The initiating button released; free the seat before settlement.
             if self.window.x11_surface().is_some() {
@@ -315,6 +297,25 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                     state.size = Some(self.last_window_size);
                 });
                 let final_configure = xdg.send_pending_configure();
+                if let Some(final_configure) = final_configure {
+                    let mut location = self.initial_rect.loc;
+                    if self.edges.contains(ResizeEdge::LEFT) {
+                        location.x += self.initial_rect.size.w - self.last_window_size.w;
+                    }
+                    if self.edges.contains(ResizeEdge::TOP) {
+                        location.y += self.initial_rect.size.h - self.last_window_size.h;
+                    }
+                    data.record_xdg_desired_geometry(
+                        &self.window,
+                        crate::session::shell_layout::Geometry {
+                            x: location.x,
+                            y: location.y,
+                            width: self.last_window_size.w.max(1),
+                            height: self.last_window_size.h.max(1),
+                        },
+                        final_configure,
+                    );
+                }
                 ResizeSurfaceState::with(xdg.wl_surface(), |state| {
                     *state = ResizeSurfaceState::WaitingForLastCommit {
                         edges: self.edges,
@@ -390,7 +391,10 @@ impl ResizeSurfaceState {
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<()> {
+pub fn handle_commit(
+    space: &mut Space<Window>,
+    surface: &WlSurface,
+) -> Option<(Window, Option<smithay::utils::Serial>)> {
     let window = space
         .elements()
         .find(|window| {
@@ -442,10 +446,10 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
 
     if new_loc.x.is_some() || new_loc.y.is_some() {
         // If TOP or LEFT side of the window got resized, we have to move it
-        space.map_element(window, window_loc, false);
+        space.map_element(window.clone(), window_loc, false);
     }
 
-    Some(())
+    Some((window, last_acked))
 }
 
 #[cfg(test)]

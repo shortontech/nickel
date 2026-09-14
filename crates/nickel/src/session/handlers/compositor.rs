@@ -115,7 +115,9 @@ impl CompositorHandler for NickelSession {
         // windows such as Chromium's portal chooser and Electron confirmation dialogs.
         let toplevel = self.xdg_toplevel_window(surface);
         xdg_shell::handle_commit(&mut self.popups, toplevel, surface);
-        resize_grab::handle_commit(&mut self.space, surface);
+        if let Some((window, acked)) = resize_grab::handle_commit(&mut self.space, surface) {
+            self.observe_xdg_geometry_commit(&window, acked);
+        }
         if let Some(sender) = &self.buffer_commit_tx {
             let _ = sender.send(SurfaceBufferCommit {
                 surface: surface.clone(),
