@@ -1482,6 +1482,10 @@ fn unknown_suspension_within_bound(unknown_since: Option<u64>, now: u64) -> bool
     unknown_since.is_none_or(|since| now.saturating_sub(since) < MAX_UNKNOWN_SUSPENSION_MS)
 }
 
+fn active_needs_geometry_reconcile(active: &WindowDrag) -> bool {
+    active.issued_settlements.is_empty() || active.unknown_since.is_some()
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalSettlementOutcome {
     key: RetainedSettlementKey,
@@ -1533,6 +1537,25 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn suspend_for_independent_native_geometry(
+        &mut self,
+        mut active: WindowDrag,
+        observed: LogicalRect,
+        now: u64,
+    ) {
+        let fact = native_geometry(observed);
+        active
+            .authority
+            .observe(fact, ObservationCausality::Independent);
+        for settlement in &mut active.issued_settlements {
+            settlement.observe(fact, ObservationCausality::Independent);
+        }
+        active.last_observed = observed;
+        active.unknown_since.get_or_insert(now);
+        self.record_terminal_active_settlements(&mut active);
+        self.active = Some(active);
+    }
+
     fn expire_unknown_suspension(&mut self, now: u64) -> bool {
         let expired = self
             .active
@@ -1830,8 +1853,7 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
-        let observation = if active.issued_settlements.is_empty() || active.unknown_since.is_some()
-        {
+        let observation = if active_needs_geometry_reconcile(&active) {
             observe_window_drag(&mut active, time, false)
         } else {
             Ok(true)
@@ -1849,6 +1871,10 @@ impl WindowDragCoordinator {
             Ok(true) => {}
         }
         self.record_terminal_active_settlements(&mut active);
+        if active.unknown_since.is_some() {
+            self.active = Some(active);
+            return Ok(());
+        }
         let transition = self.reducer.update_geometry(
             active.operation,
             active.completion.source,
@@ -1972,7 +1998,17 @@ impl WindowDragCoordinator {
                 .as_ref()
                 .is_some_and(|active| active.window == window)
             {
-                self.cancel(CancellationReason::NativeTakeover);
+                let active = self.active.take().expect("matching active drag exists");
+                let mut rectangle = RECT::default();
+                if unsafe { GetWindowRect(HWND(window as *mut c_void), &mut rectangle) }.is_err() {
+                    let _ = self
+                        .reducer
+                        .cancel(active.operation, CancellationReason::AuthorityUnknown);
+                    self.finish_active(active, ActiveSettlementExit::Unconfirmed);
+                } else {
+                    let observed = logical_rect(rectangle);
+                    self.suspend_for_independent_native_geometry(active, observed, now);
+                }
             }
             let keys = self
                 .retained_settlements
@@ -2489,6 +2525,7 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let observation = coordinator
         .active
         .as_mut()
+        .filter(|active| active_needs_geometry_reconcile(active))
         .map(|active| observe_window_drag(active, now, false));
     match observation {
         Some(Err(reason)) => {
@@ -4930,10 +4967,10 @@ mod tests {
         ActiveSettlementExit, DwmPreviewState, NativeApplyState, NativePreviewDiagnostics,
         NativeWindowFingerprint, NativeWindowLifetime, RetainedNativeSettlement,
         SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
-        WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
-        clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
-        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        WindowDragAdmission, WindowDragCoordinator, active_needs_geometry_reconcile,
+        application_icon, apply_window_drag, clamp_preview_x, classify_window_drag_observation,
+        contain_rect, contested_authority, contested_drag_within_bound, enqueue_issued_settlement,
+        executable_icon, is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
         project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
         should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
@@ -5091,6 +5128,49 @@ mod tests {
         );
         assert_eq!(drag.unknown_since, Some(10));
         assert_eq!(drag.issued_settlements.len(), 1);
+    }
+
+    #[test]
+    fn reconcile_ticks_do_not_turn_own_pending_requests_into_unknown() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut drag = drag_with_pending_settlement(70);
+        for (tick, request) in [(50, 71), (100, 72), (200, 73), (300, 74)] {
+            assert!(!active_needs_geometry_reconcile(&drag), "tick {tick}");
+            let mut next = drag.issued_settlements[0];
+            next.request.id = NativeRequestId(request);
+            next.limits.deadline_tick = tick + 250;
+            if let Some(displaced) = enqueue_issued_settlement(&mut drag, next) {
+                coordinator.record_displaced_active_settlement(drag.lifetime, displaced);
+            }
+        }
+
+        assert_eq!(drag.unknown_since, None);
+        assert_eq!(drag.issued_settlements.len(), 5);
+        assert!(drag.issued_settlements.len() <= super::MAX_ACTIVE_WINDOW_SETTLEMENTS);
+    }
+
+    #[test]
+    fn explicit_competing_geometry_still_enters_unknown_suspension() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let drag = drag_with_pending_settlement(75);
+        let lifetime = drag.lifetime;
+        let competing = LogicalRect {
+            x: drag.last_observed.x + 40,
+            ..drag.last_observed
+        };
+
+        coordinator.suspend_for_independent_native_geometry(drag, competing, 80);
+        let drag = coordinator.active.as_ref().unwrap();
+        assert_eq!(drag.unknown_since, Some(80));
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::External);
+        assert!(active_needs_geometry_reconcile(&drag));
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key: (lifetime, NativeRequestId(75)),
+                status: SettlementStatus::Superseded,
+            })
+        );
     }
 
     #[test]
