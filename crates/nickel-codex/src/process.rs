@@ -1,7 +1,7 @@
-use std::{
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{path::Path, process::Command};
+
+#[cfg(windows)]
+use std::path::PathBuf;
 
 #[cfg(windows)]
 const MAX_COMMAND_SHIM_BYTES: u64 = 64 * 1024;
@@ -25,9 +25,13 @@ pub(crate) fn command(executable: &Path) -> Command {
         return command;
     }
 
-    let mut command = Command::new(executable);
+    let command = Command::new(executable);
     #[cfg(windows)]
-    suppress_window(&mut command);
+    let command = {
+        let mut command = command;
+        suppress_window(&mut command);
+        command
+    };
     command
 }
 
