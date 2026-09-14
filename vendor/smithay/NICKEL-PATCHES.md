@@ -10,6 +10,22 @@ GBM C feature probes, README and license. Examples, benchmarks, sibling workspac
 packages and Git metadata are omitted; corresponding manifest entries are removed.
 The root Cargo git patch preserves the original pinned dependency declaration.
 
+## Local patch: complete touch-sequence cancellation
+
+`TouchHandle::cancel` cancels and clears every still-active focused slot even when
+the preceding touch batch has already received `frame`. Contacts unchanged since
+the last frame are terminated along with changed contacts, target frame markers
+still deduplicate the client-wide cancel notification, and later motion/up events
+for cancelled slots are ignored. This corrects the valid backend sequence
+`down -> frame -> cancel`; upstream revision `e3d461a` returns early in that case
+because it has no pending frame marker.
+
+The focused unit test drives the public `TouchHandle` production boundary with
+multiple changed and unchanged slots, observes target callbacks rather than grab
+internals, and verifies cancelled slots cannot receive later motion/up delivery.
+Remove this patch when an upstream Smithay release provides equivalent whole-
+sequence cancellation semantics.
+
 ## Local patch: opt-in nonblocking frame finalization
 
 `GlesFrame::try_finish` shares normal finalization bookkeeping but returns

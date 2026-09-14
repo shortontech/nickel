@@ -671,16 +671,16 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
     }
 
     fn cancel(&mut self, data: &mut D, seat: &Seat<D>) {
-        let Some(marker) = self.pending_frame.take() else {
-            tracing::warn!("cancel called without prior events");
-            return;
-        };
+        // Cancellation terminates the whole active touch sequence, not merely
+        // contacts changed since the last frame. In particular, a backend is
+        // allowed to send down -> frame -> cancel, at which point there is no
+        // pending frame marker but every focused slot still needs cancellation.
+        let marker = self
+            .pending_frame
+            .take()
+            .unwrap_or_else(|| FrameMarker(frame_marker::next()));
 
         for state in self.focus.values_mut() {
-            if state.current.map(|c| c == state.pending).unwrap_or(false) {
-                continue;
-            }
-
             state.current = Some(marker);
 
             if let Some((focus, _)) = state.focus.take() {
@@ -688,8 +688,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
                     focus.cancel(seat, data, marker);
                 }
             }
+
+            // An already-released contact is not cancelled, but retaining its
+            // pending frame target would keep stale sequence state alive.
+            state.frame_pending = None;
         }
 
+        self.focus.clear();
         frame_marker::remove(marker.0);
     }
 
@@ -764,5 +769,198 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         };
 
         self.pending_frame.unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use crate::{
+        backend::input::{InputTime, KeyState, TouchSlot},
+        input::{
+            keyboard::{KeyboardTarget, KeysymHandle, ModifiersState},
+            pointer::{
+                AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent,
+                GesturePinchBeginEvent, GesturePinchEndEvent, GesturePinchUpdateEvent,
+                GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+                MotionEvent as PointerMotionEvent, PointerTarget, RelativeMotionEvent,
+            },
+            SeatState,
+        },
+        utils::{IsAlive, Serial},
+    };
+
+    use super::*;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Recorded {
+        Down(TouchSlot),
+        Motion(TouchSlot),
+        Up(TouchSlot),
+        Frame,
+        Cancel,
+    }
+
+    #[derive(Debug, Default)]
+    struct TargetState {
+        events: Mutex<Vec<Recorded>>,
+        last_frame: Mutex<Option<FrameMarker>>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct Target(Arc<TargetState>);
+
+    impl PartialEq for Target {
+        fn eq(&self, other: &Self) -> bool {
+            Arc::ptr_eq(&self.0, &other.0)
+        }
+    }
+
+    impl IsAlive for Target {
+        fn alive(&self) -> bool {
+            true
+        }
+    }
+
+    struct State {
+        seat_state: SeatState<Self>,
+    }
+
+    impl SeatHandler for State {
+        type KeyboardFocus = Target;
+        type PointerFocus = Target;
+        type TouchFocus = Target;
+
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seat_state
+        }
+    }
+
+    impl TouchTarget<State> for Target {
+        fn down(&self, _: &Seat<State>, _: &mut State, event: &DownEvent) {
+            self.0.events.lock().unwrap().push(Recorded::Down(event.slot));
+        }
+
+        fn up(&self, _: &Seat<State>, _: &mut State, event: &UpEvent) {
+            self.0.events.lock().unwrap().push(Recorded::Up(event.slot));
+        }
+
+        fn motion(&self, _: &Seat<State>, _: &mut State, event: &MotionEvent) {
+            self.0.events.lock().unwrap().push(Recorded::Motion(event.slot));
+        }
+
+        fn frame(&self, _: &Seat<State>, _: &mut State, marker: FrameMarker) {
+            self.0.events.lock().unwrap().push(Recorded::Frame);
+            *self.0.last_frame.lock().unwrap() = Some(marker);
+        }
+
+        fn cancel(&self, _: &Seat<State>, _: &mut State, marker: FrameMarker) {
+            self.0.events.lock().unwrap().push(Recorded::Cancel);
+            *self.0.last_frame.lock().unwrap() = Some(marker);
+        }
+
+        fn shape(&self, _: &Seat<State>, _: &mut State, _: &ShapeEvent) {}
+        fn orientation(&self, _: &Seat<State>, _: &mut State, _: &OrientationEvent) {}
+
+        fn last_frame(&self, _: &Seat<State>, _: &mut State) -> Option<FrameMarker> {
+            *self.0.last_frame.lock().unwrap()
+        }
+    }
+
+    impl KeyboardTarget<State> for Target {
+        fn enter(&self, _: &Seat<State>, _: &mut State, _: Vec<KeysymHandle<'_>>, _: Serial) {}
+        fn leave(&self, _: &Seat<State>, _: &mut State, _: Serial) {}
+        fn key(
+            &self,
+            _: &Seat<State>,
+            _: &mut State,
+            _: KeysymHandle<'_>,
+            _: KeyState,
+            _: Serial,
+            _: InputTime,
+        ) {
+        }
+        fn modifiers(&self, _: &Seat<State>, _: &mut State, _: ModifiersState, _: Serial) {}
+    }
+
+    impl PointerTarget<State> for Target {
+        fn enter(&self, _: &Seat<State>, _: &mut State, _: &PointerMotionEvent) {}
+        fn motion(&self, _: &Seat<State>, _: &mut State, _: &PointerMotionEvent) {}
+        fn relative_motion(&self, _: &Seat<State>, _: &mut State, _: &RelativeMotionEvent) {}
+        fn button(&self, _: &Seat<State>, _: &mut State, _: &ButtonEvent) {}
+        fn axis(&self, _: &Seat<State>, _: &mut State, _: AxisFrame) {}
+        fn frame(&self, _: &Seat<State>, _: &mut State) {}
+        fn gesture_swipe_begin(&self, _: &Seat<State>, _: &mut State, _: &GestureSwipeBeginEvent) {}
+        fn gesture_swipe_update(&self, _: &Seat<State>, _: &mut State, _: &GestureSwipeUpdateEvent) {}
+        fn gesture_swipe_end(&self, _: &Seat<State>, _: &mut State, _: &GestureSwipeEndEvent) {}
+        fn gesture_pinch_begin(&self, _: &Seat<State>, _: &mut State, _: &GesturePinchBeginEvent) {}
+        fn gesture_pinch_update(&self, _: &Seat<State>, _: &mut State, _: &GesturePinchUpdateEvent) {}
+        fn gesture_pinch_end(&self, _: &Seat<State>, _: &mut State, _: &GesturePinchEndEvent) {}
+        fn gesture_hold_begin(&self, _: &Seat<State>, _: &mut State, _: &GestureHoldBeginEvent) {}
+        fn gesture_hold_end(&self, _: &Seat<State>, _: &mut State, _: &GestureHoldEndEvent) {}
+        fn leave(&self, _: &Seat<State>, _: &mut State, _: Serial, _: InputTime) {}
+    }
+
+    fn down(slot: u32, serial: u32) -> DownEvent {
+        DownEvent {
+            slot: Some(slot).into(),
+            location: (10.0, 20.0).into(),
+            serial: serial.into(),
+            time: InputTime::from_millis(serial),
+        }
+    }
+
+    fn motion(slot: u32) -> MotionEvent {
+        MotionEvent {
+            slot: Some(slot).into(),
+            location: (30.0, 40.0).into(),
+            time: InputTime::from_millis(10),
+        }
+    }
+
+    fn up(slot: u32, serial: u32) -> UpEvent {
+        UpEvent {
+            slot: Some(slot).into(),
+            serial: serial.into(),
+            time: InputTime::from_millis(serial),
+        }
+    }
+
+    #[test]
+    fn completed_frame_cancel_terminates_changed_and_unchanged_contacts() {
+        let mut seat_state = SeatState::<State>::new();
+        let mut seat = seat_state.new_seat("test");
+        let touch = seat.add_touch();
+        let mut state = State { seat_state };
+        let shared = Target(Arc::default());
+
+        touch.down(&mut state, Some((shared.clone(), (0.0, 0.0).into())), &down(0, 1));
+        touch.down(&mut state, Some((shared.clone(), (0.0, 0.0).into())), &down(1, 2));
+        touch.down(&mut state, Some((shared.clone(), (0.0, 0.0).into())), &down(2, 3));
+        touch.frame(&mut state);
+        touch.motion(&mut state, None, &motion(0));
+
+        touch.cancel(&mut state);
+
+        assert_eq!(
+            shared.0.events.lock().unwrap().as_slice(),
+            [
+                Recorded::Down(Some(0).into()),
+                Recorded::Down(Some(1).into()),
+                Recorded::Down(Some(2).into()),
+                Recorded::Frame,
+                Recorded::Motion(Some(0).into()),
+                Recorded::Cancel,
+            ]
+        );
+
+        touch.motion(&mut state, None, &motion(0));
+        touch.motion(&mut state, None, &motion(2));
+        touch.up(&mut state, &up(1, 4));
+        assert_eq!(shared.0.events.lock().unwrap().last(), Some(&Recorded::Cancel));
+
+        touch.down(&mut state, Some((shared.clone(), (0.0, 0.0).into())), &down(0, 5));
+        assert_eq!(shared.0.events.lock().unwrap().last(), Some(&Recorded::Down(Some(0).into())));
     }
 }
