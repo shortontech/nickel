@@ -10950,16 +10950,21 @@ impl NickelSession {
         );
     }
 
-    fn supersede_xdg_resize_for_presentation(&mut self, id: WindowId, surface: &ToplevelSurface) {
+    fn supersede_interactive_resize_for_presentation(&mut self, id: WindowId) {
         // Presentation changes own the complete placement. Revoke an active
         // pointer operation before publishing that placement so its grab can
-        // neither issue a later motion update nor retain a left/top commit
-        // anchor across the presentation configure.
+        // neither issue a later motion update nor compensate over the new
+        // presentation geometry.
         self.cancel_geometry_window_operation(
             id,
             nickel_core::window_operation::CancellationReason::Superseded,
         );
         self.interactive_resize_baselines.remove(&id);
+    }
+
+    fn supersede_xdg_resize_for_presentation(&mut self, id: WindowId, surface: &ToplevelSurface) {
+        self.supersede_interactive_resize_for_presentation(id);
+        // XDG also retains a protocol state and left/top commit anchor.
         surface.with_pending_state(|state| {
             state.states.unset(
                 smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Resizing,
@@ -12556,6 +12561,9 @@ impl NickelSession {
             && let Some(surface) = window.x11_surface()
         {
             let maximize = !surface.is_maximized();
+            if maximize {
+                self.supersede_interactive_resize_for_presentation(id);
+            }
             let _ = surface.set_maximized(maximize);
             if maximize {
                 self.apply_maximized_x11_geometry(&window, surface, true);
@@ -15781,6 +15789,99 @@ mod protocol_tests {
             ))
         );
         assert!(operation.complete(&mut session.window_operations));
+    }
+
+    #[test]
+    fn x11_maximize_fence_cancels_active_resize_baseline_and_late_motion() {
+        use nickel_core::{
+            geometry::LogicalRect,
+            geometry_authority::{
+                ControlMode, GeometryAuthority, GeometryConstraints, Presentation,
+            },
+            window_operation::{
+                BeginRequest, CancellationReason, CompletionBinding, CompletionGesture,
+                GeometrySeed, MappingGeneration, NativeLifetimeId, OperationKind, PressEpoch,
+                SeatId, Source, SourceGeneration, SourceId, TerminalOutcome, WindowMapping,
+            },
+        };
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let id = crate::session::window_registry::WindowId(9_903);
+        let geometry = Geometry {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        let authority = GeometryAuthority::new(geometry, Presentation::Normal);
+        session
+            .interactive_resize_baselines
+            .insert(id, authority.baseline());
+        session.geometry_authorities.insert(id, authority);
+
+        let source = Source {
+            id: SourceId::new(1),
+            generation: SourceGeneration::new(1),
+        };
+        let operation =
+            crate::session::grabs::move_grab::WindowPointerOperation::begin_with_geometry(
+                &mut session.window_operations,
+                BeginRequest {
+                    seat: SeatId::new(1),
+                    subject: WindowMapping {
+                        window: nickel_core::window_operation::WindowId::new(id.0),
+                        native_lifetime: NativeLifetimeId::new(1),
+                        generation: MappingGeneration::new(id.0),
+                    },
+                    kind: OperationKind::Resize(
+                        nickel_core::window_operation::ResizeEdges::new(
+                            Some(nickel_core::window_operation::HorizontalEdge::Left),
+                            None,
+                        )
+                        .unwrap(),
+                    ),
+                    control: ControlMode::Cooperative,
+                    origin: CompletionBinding {
+                        source,
+                        gesture: CompletionGesture::Button(0x110),
+                        press_epoch: PressEpoch::new(1),
+                    },
+                    optional_update_sources: Vec::new(),
+                },
+                GeometrySeed {
+                    anchor: LogicalRect {
+                        x: geometry.x,
+                        y: geometry.y,
+                        width: geometry.width,
+                        height: geometry.height,
+                    },
+                    constraints: GeometryConstraints {
+                        min_width: 1,
+                        min_height: 1,
+                        max_width: None,
+                        max_height: None,
+                    },
+                },
+            )
+            .expect("active X11 resize admitted");
+        let operation_id = operation.id();
+
+        // This is the shared fence called by the X11 maximize branch before
+        // set_maximized/configure publishes the presentation geometry.
+        session.supersede_interactive_resize_for_presentation(id);
+
+        assert!(!session.interactive_resize_baselines.contains_key(&id));
+        assert_eq!(
+            session.window_operations.terminal_outcome(operation_id),
+            Some(TerminalOutcome::Cancelled(CancellationReason::Superseded))
+        );
+        assert!(
+            operation
+                .propose(&mut session.window_operations, 40, 0)
+                .is_none(),
+            "late X11 resize motion cannot overwrite maximized geometry"
+        );
     }
 
     #[test]
