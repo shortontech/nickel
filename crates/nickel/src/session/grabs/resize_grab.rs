@@ -175,29 +175,41 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
 
     fn unset(&mut self, data: &mut NickelSession) {
         if self.terminal {
+            data.finish_interactive_resize(&self.window);
+            if let Some(xdg) = self.window.toplevel() {
+                xdg.with_pending_state(|state| {
+                    state.states.unset(xdg_toplevel::State::Resizing);
+                });
+                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                    state.clear();
+                });
+            }
             return;
         }
         self.operation.cancel(&mut data.window_operations);
         let compensate = self
             .operation
             .requests_conditional_compensation(&data.window_operations);
-        if !compensate {
-            return;
-        }
-        let constraints = operation_geometry_constraints(&self.window);
-        if let Some(token) = data.compensate_interactive_resize(&self.window, constraints) {
-            let final_configure = data
-                .apply_authorized_interactive_resize(&self.window, token, false)
-                .flatten();
-            if let Some(xdg) = self.window.toplevel() {
-                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                    *state = ResizeSurfaceState::WaitingForLastCommit {
-                        edges: self.edges,
-                        initial_rect: self.initial_rect,
-                        final_configure,
-                    };
-                });
+        let mut cleared_by_compensation = false;
+        if compensate {
+            let constraints = operation_geometry_constraints(&self.window);
+            if let Some(token) = data.compensate_interactive_resize(&self.window, constraints) {
+                cleared_by_compensation = data
+                    .apply_authorized_interactive_resize(&self.window, token, false)
+                    .is_some();
             }
+        }
+        data.finish_interactive_resize(&self.window);
+        if let Some(xdg) = self.window.toplevel() {
+            xdg.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Resizing);
+            });
+            if !cleared_by_compensation {
+                xdg.send_pending_configure();
+            }
+            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                state.clear();
+            });
         }
     }
 
@@ -326,6 +338,10 @@ enum ResizeSurfaceState {
 }
 
 impl ResizeSurfaceState {
+    fn clear(&mut self) {
+        *self = Self::Idle;
+    }
+
     fn with<F, T>(surface: &WlSurface, cb: F) -> T
     where
         F: FnOnce(&mut Self) -> T,
@@ -551,6 +567,25 @@ mod tests {
 
             assert!(state.commit(Some(acknowledged.into())).is_some());
             assert_eq!(state, ResizeSurfaceState::Idle);
+        }
+    }
+
+    #[test]
+    fn unset_cleanup_clears_active_and_waiting_resize_state() {
+        let mut states = [
+            ResizeSurfaceState::Resizing {
+                edges: ResizeEdge::RIGHT,
+                initial_rect: initial_rect(),
+            },
+            ResizeSurfaceState::WaitingForLastCommit {
+                edges: ResizeEdge::TOP,
+                initial_rect: initial_rect(),
+                final_configure: Some(12_u32.into()),
+            },
+        ];
+        for state in &mut states {
+            state.clear();
+            assert_eq!(*state, ResizeSurfaceState::Idle);
         }
     }
 }

@@ -2592,6 +2592,17 @@ pub(crate) struct InteractiveResizeToken {
     placement: nickel_core::geometry_authority::AuthorizedPlacement,
 }
 
+fn revisions_for_authorized_x11_request(
+    authority: &nickel_core::geometry_authority::GeometryAuthority,
+    desired: Geometry,
+    placement_revision: nickel_core::geometry_authority::GeometryRevision,
+) -> Option<nickel_core::geometry_authority::DesiredRevisions> {
+    (authority.base_placement.revision == placement_revision
+        && authority.base_placement.value == desired
+        && authority.constrained_proposal == desired)
+        .then(|| authority.revisions())
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -8503,18 +8514,10 @@ impl NickelSession {
             height: target.size.h,
         };
         let last_owned_revision = self.record_desired_geometry(id, target_geometry);
-        if let Some(surface) = window.x11_surface() {
-            let request = self.record_x11_desired_geometry(id, target_geometry);
-            if surface.configure(target).is_err()
-                && let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
-                && settlement.request.id == request
-            {
-                settlement.fail();
-            }
-            self.map_buffered_window(window, target.loc, true);
-        } else {
-            self.apply_compositor_moved_window_effect(window, target.loc, true);
+        if window.x11_surface().is_some() {
+            let _ = self.bind_x11_geometry_request(id, target_geometry, last_owned_revision);
         }
+        self.apply_compositor_moved_window_effect(window, target.loc, true);
         self.shortcut_snap_restore.insert(
             id,
             RevisionedPlacementRestore {
@@ -10164,6 +10167,7 @@ impl NickelSession {
     ) -> nickel_core::geometry_authority::NativeRequestId {
         let placement_revision = self.record_desired_geometry(id, desired);
         self.bind_x11_geometry_request(id, desired, placement_revision)
+            .expect("newly authorized X11 geometry must bind its own revision")
     }
 
     fn bind_x11_geometry_request(
@@ -10171,22 +10175,19 @@ impl NickelSession {
         id: WindowId,
         desired: Geometry,
         placement_revision: nickel_core::geometry_authority::GeometryRevision,
-    ) -> nickel_core::geometry_authority::NativeRequestId {
+    ) -> Option<nickel_core::geometry_authority::NativeRequestId> {
         use nickel_core::geometry_authority::{
             NativeRequest, NativeRequestId, Settlement, SettlementLimits,
         };
 
+        let desired_revisions = self.geometry_authorities.get(&id).and_then(|authority| {
+            revisions_for_authorized_x11_request(authority, desired, placement_revision)
+        })?;
         self.x11_next_native_request = self
             .x11_next_native_request
             .checked_add(1)
             .expect("X11 native request identity exhausted");
         let request_id = NativeRequestId(self.x11_next_native_request);
-        let desired_revisions = self
-            .geometry_authorities
-            .get(&id)
-            .map(|authority| authority.revisions())
-            .expect("recording desired geometry installs its authority");
-        debug_assert_eq!(desired_revisions.placement, placement_revision);
         let now = self
             .start_time
             .elapsed()
@@ -10224,7 +10225,7 @@ impl NickelSession {
         {
             settlement.fail();
         }
-        request_id
+        Some(request_id)
     }
 
     pub(crate) fn record_xdg_desired_geometry(
@@ -10419,7 +10420,7 @@ impl NickelSession {
             }
             authority.base_placement.revision
         };
-        Some(self.bind_x11_geometry_request(id, desired, revision))
+        self.bind_x11_geometry_request(id, desired, revision)
     }
 
     pub(crate) fn observe_x11_geometry(
@@ -20193,6 +20194,51 @@ mod protocol_tests {
             },
         );
         assert!(!placement_restore_is_current(&authority, restore));
+    }
+
+    #[test]
+    fn x11_request_binds_existing_snap_revision_without_reauthorizing() {
+        use nickel_core::geometry_authority::{
+            GeometryAuthority, GeometryConstraints, Presentation,
+        };
+
+        let desired = Geometry {
+            x: 0,
+            y: 0,
+            width: 960,
+            height: 1080,
+        };
+        let mut authority = GeometryAuthority::new(desired, Presentation::Normal);
+        let authorized = authority.authorize_placement(
+            desired,
+            GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        );
+        let before = authority.revisions();
+
+        assert_eq!(
+            super::revisions_for_authorized_x11_request(&authority, desired, authorized.revision,),
+            Some(before)
+        );
+        assert_eq!(authority.revisions(), before);
+
+        authority.authorize_placement(
+            desired,
+            GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        );
+        assert_eq!(
+            super::revisions_for_authorized_x11_request(&authority, desired, authorized.revision,),
+            None
+        );
     }
 
     #[test]
