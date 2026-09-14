@@ -2474,6 +2474,21 @@ fn shell_role_accepts_ordinary_focus(role: ShellRole) -> bool {
     )
 }
 
+fn shell_role_from_surface_role(role: crate::winit_shell::SurfaceRole) -> Option<ShellRole> {
+    use crate::winit_shell::SurfaceRole;
+    match role {
+        SurfaceRole::Launcher => Some(ShellRole::Launcher),
+        SurfaceRole::Screenshot => Some(ShellRole::Screenshot),
+        SurfaceRole::OnScreenKeyboard => Some(ShellRole::OnScreenKeyboard),
+        SurfaceRole::Lock => Some(ShellRole::Lock),
+        SurfaceRole::ControlCenter => Some(ShellRole::ControlCenter),
+        SurfaceRole::CodexProjectMenu => Some(ShellRole::ProjectMenu),
+        SurfaceRole::WindowPreview => Some(ShellRole::Preview),
+        SurfaceRole::WindowContextMenu => Some(ShellRole::ContextMenu),
+        _ => None,
+    }
+}
+
 fn recv_control_frame(
     socket: &UnixDatagram,
     frame: &mut [u8],
@@ -2537,6 +2552,14 @@ struct ControllerRoute {
     launcher_intercepted: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControllerRoleLease {
+    role: crate::winit_shell::SurfaceRole,
+    /// InternalSurfaceId is a generation-bearing runtime lifetime, not a reusable role label.
+    target: nickel_ui::InternalSurfaceId,
+    security_epoch: u64,
+}
+
 #[derive(Debug)]
 pub(crate) enum InternalCaptureState {
     Idle,
@@ -2564,6 +2587,8 @@ pub struct NickelSession {
         HashMap<nickel_ui::InternalSurfaceId, nickel_ui::InternalSurfaceId>,
     controller_route: Option<ControllerRoute>,
     controller_routing_epoch: u64,
+    controller_role_lease: Option<ControllerRoleLease>,
+    controller_role_security_epoch: u64,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
@@ -5654,40 +5679,61 @@ impl NickelSession {
     fn native_controller_route(&self) -> ControllerRoute {
         use crate::winit_shell::SurfaceRole;
 
-        let screenshot_visible = self.internal_shell.as_ref().is_some_and(|shell| {
-            shell
-                .surface(SurfaceRole::Screenshot, None)
-                .is_some_and(|surface| shell.visible(surface.id))
-        });
-        let role_target = [
-            SurfaceRole::Screenshot,
-            SurfaceRole::OnScreenKeyboard,
-            SurfaceRole::Launcher,
-        ]
-        .into_iter()
-        .find_map(|role| {
-            self.internal_shell.as_ref().and_then(|shell| {
-                shell
-                    .surface(role, None)
-                    .filter(|surface| shell.visible(surface.id))
-                    .and_then(|surface| self.internal_shell_surfaces.get(&surface.id).copied())
-            })
-        });
-        let target = role_target.or_else(|| {
-            let focused = self.internal_ui.focused()?;
-            self.internal_shell_surfaces
-                .values()
-                .any(|runtime| *runtime == focused)
-                .then_some(focused)
+        let lease = self.controller_role_lease.filter(|lease| {
+            lease.security_epoch == self.controller_role_security_epoch
+                && self.internal_ui.focused() == Some(lease.target)
+                && self.internal_ui.is_visible(lease.target)
+                && (!self.locked || lease.role == SurfaceRole::Lock)
         });
 
         ControllerRoute {
+            target: lease.map(|lease| lease.target),
+            launcher_intercepted: self.internal_shell.is_some()
+                && !lease.is_some_and(|lease| lease.role == SurfaceRole::Screenshot),
+        }
+    }
+
+    fn controller_role_for_runtime(
+        &self,
+        runtime: nickel_ui::InternalSurfaceId,
+    ) -> Option<crate::winit_shell::SurfaceRole> {
+        let shell_id = self
+            .internal_shell_surfaces
+            .iter()
+            .find_map(|(shell, candidate)| (*candidate == runtime).then_some(*shell))?;
+        self.internal_shell
+            .as_ref()?
+            .surfaces()
+            .iter()
+            .find(|surface| surface.id == shell_id)
+            .map(|surface| surface.role)
+    }
+
+    fn grant_controller_role_lease(&mut self, target: nickel_ui::InternalSurfaceId) {
+        let Some(role) = self.controller_role_for_runtime(target) else {
+            self.revoke_controller_role_lease();
+            return;
+        };
+        self.controller_role_security_epoch =
+            self.controller_role_security_epoch.wrapping_add(1).max(1);
+        self.controller_role_lease = Some(ControllerRoleLease {
+            role,
             target,
-            launcher_intercepted: self.internal_shell.is_some() && !screenshot_visible,
+            security_epoch: self.controller_role_security_epoch,
+        });
+    }
+
+    fn revoke_controller_role_lease(&mut self) {
+        if self.controller_role_lease.take().is_some() {
+            self.controller_role_security_epoch =
+                self.controller_role_security_epoch.wrapping_add(1).max(1);
         }
     }
 
     fn refresh_controller_route(&mut self) -> (u64, ControllerRoute) {
+        if self.controller_role_lease.is_some() && self.native_controller_route().target.is_none() {
+            self.revoke_controller_role_lease();
+        }
         let route = self.native_controller_route();
         if self.controller_route != Some(route) {
             self.controller_route = Some(route);
@@ -6413,6 +6459,12 @@ impl NickelSession {
             }
         }
         self.invalidate_remote_shell_surface(id);
+        if self
+            .controller_role_lease
+            .is_some_and(|lease| lease.target == id)
+        {
+            self.revoke_controller_role_lease();
+        }
         let removed = self.internal_ui.remove(id);
         if removed {
             self.schedule_internal_ui_frame();
@@ -7289,6 +7341,8 @@ impl NickelSession {
             internal_shell_surfaces: HashMap::new(),
             controller_route: None,
             controller_routing_epoch: 0,
+            controller_role_lease: None,
+            controller_role_security_epoch: 0,
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,
@@ -8510,6 +8564,14 @@ impl NickelSession {
             |shell| shell.launcher_visible(),
         );
         let changed = was_visible != visible;
+        if changed && !visible {
+            self.revoke_controller_role_lease();
+            if let Some(request) = self.launcher_focus.requested().cloned() {
+                let _ = self
+                    .launcher_focus
+                    .supersede(&request, self.start_time.elapsed());
+            }
+        }
         if changed && visible {
             self.launcher_show_requested_at = Some(std::time::Instant::now());
             self.launcher_output_name = output;
@@ -8591,9 +8653,20 @@ impl NickelSession {
             && let Some(request) = self.launcher_focus.requested().cloned()
             && focused.id() == request.surface
         {
-            let _ = self
-                .launcher_focus
-                .acknowledge_at(&request, self.start_time.elapsed());
+            let eligible = self.launcher_focus_request_is_eligible(&request);
+            let reason = if !self.launcher_visibility.is_visible() {
+                FocusRejectionReason::ScopeWithdrawn
+            } else if self.locked {
+                FocusRejectionReason::AuthorityLost
+            } else {
+                FocusRejectionReason::TargetRetired
+            };
+            let _ = self.launcher_focus.acknowledge_if(
+                &request,
+                self.start_time.elapsed(),
+                eligible,
+                reason,
+            );
             return;
         }
         if focused.is_some()
@@ -8620,6 +8693,26 @@ impl NickelSession {
             }
             self.notify_launcher_visibility(false);
         }
+    }
+
+    fn launcher_focus_request_is_eligible(
+        &self,
+        request: &nickel_core::focus::FocusRequest<ObjectId>,
+    ) -> bool {
+        let Some(record) = self.launcher_focus.record(request) else {
+            return false;
+        };
+        record.scope == FocusScope::Launcher
+            && record.security_epoch == FocusSecurityEpoch(0)
+            && record.target_lifetime == FocusTargetLifetime::EmbeddedInTarget
+            && self.launcher_visibility.is_visible()
+            && !self.locked
+            && self.launcher_window.as_ref().is_some_and(|window| {
+                self.space.elements().any(|mapped| mapped == window)
+                    && window
+                        .wl_surface()
+                        .is_some_and(|surface| surface.id() == request.surface)
+            })
     }
 
     fn schedule_launcher_focus_deadline(&mut self, request_id: FocusRequestId, deadline: Duration) {
@@ -9154,6 +9247,11 @@ impl NickelSession {
     }
 
     fn apply_launcher_visibility(&mut self, visible: bool) {
+        if !visible && let Some(request) = self.launcher_focus.requested().cloned() {
+            let _ = self
+                .launcher_focus
+                .supersede(&request, self.start_time.elapsed());
+        }
         let Some(window) = self.launcher_window.clone() else {
             return;
         };
@@ -9338,6 +9436,15 @@ impl NickelSession {
     }
 
     fn retire_replaced_shell_window(&mut self, window: Window) {
+        if let (Some(surface), Some(request)) = (
+            window.wl_surface(),
+            self.launcher_focus.requested().cloned(),
+        ) && surface.id() == request.surface
+        {
+            let _ = self
+                .launcher_focus
+                .supersede(&request, self.start_time.elapsed());
+        }
         self.space.unmap_elem(&window);
         if let Some(toplevel) = window.toplevel() {
             toplevel.send_close();
@@ -10287,6 +10394,12 @@ impl NickelSession {
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
         self.cancel_all_touch_authority();
+        self.revoke_controller_role_lease();
+        if let Some(request) = self.launcher_focus.requested().cloned() {
+            let _ = self
+                .launcher_focus
+                .supersede(&request, self.start_time.elapsed());
+        }
         self.locked = true;
         self.remote_control.lock();
         self.sync_remote_control_indicators();
@@ -10628,12 +10741,18 @@ impl NickelSession {
         ) {
             return;
         }
-        let registry = self.windows.snapshot();
         if visible {
             self.hidden_shell_roles.remove(&role);
         } else {
             self.hidden_shell_roles.insert(role);
+            if self
+                .controller_role_lease
+                .is_some_and(|lease| shell_role_from_surface_role(lease.role) == Some(role))
+            {
+                self.revoke_controller_role_lease();
+            }
         }
+        let registry = self.windows.snapshot();
         let window = self.shell_windows().find_map(|window| {
             let id = window
                 .wl_surface()
@@ -10949,6 +11068,7 @@ impl NickelSession {
         if !self.internal_ui.focus_surface(surface) {
             return false;
         }
+        self.grant_controller_role_lease(surface);
         self.record_remote_internal_focus_event(surface);
         self.reconcile_keyboard_internal_recipient();
         self.wake_internal_shell();
@@ -10958,6 +11078,7 @@ impl NickelSession {
 
     /// Blur a compositor-hosted owner before assigning a native seat target.
     pub(crate) fn surrender_internal_focus(&mut self) {
+        self.revoke_controller_role_lease();
         if self.internal_ui.clear_focus().is_some() {
             self.record_remote_focus_cleared();
             self.reconcile_keyboard_internal_recipient();
@@ -17640,6 +17761,33 @@ mod protocol_tests {
 
         assert!(session.toggle_internal_launcher());
         assert_eq!(session.internal_ui.focused(), Some(application));
+    }
+
+    #[test]
+    fn visible_shell_role_without_controller_lease_is_not_a_controller_recipient() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        assert!(session.toggle_internal_launcher());
+        let launcher = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Launcher)
+            .and_then(|surface| session.internal_shell_surfaces.get(&surface.id))
+            .copied()
+            .unwrap();
+
+        session.revoke_controller_role_lease();
+        assert!(session.internal_ui.is_visible(launcher));
+        assert_eq!(session.native_controller_route().target, None);
+
+        assert!(session.focus_internal_surface(launcher));
+        assert_eq!(session.native_controller_route().target, Some(launcher));
+
+        session.internal_ui.set_visible(launcher, false);
+        assert_eq!(session.native_controller_route().target, None);
     }
 
     #[test]

@@ -156,6 +156,23 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
         true
     }
 
+    /// Realize only after the owning authority has revalidated target lifetime,
+    /// scope, security epoch, and current eligibility against live facts.
+    pub fn acknowledge_if(
+        &mut self,
+        request: &FocusRequest<Surface>,
+        now: Duration,
+        eligible: bool,
+        rejection: FocusRejectionReason,
+    ) -> bool {
+        if eligible {
+            self.acknowledge_at(request, now)
+        } else {
+            let _ = self.reject(request, rejection, now);
+            false
+        }
+    }
+
     pub fn reject(
         &mut self,
         request: &FocusRequest<Surface>,
@@ -169,6 +186,20 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
             return false;
         }
         self.finish_current(FocusRequestPhase::Rejected(reason));
+        true
+    }
+
+    /// Retire an exact pending request because its owning intent, lifetime, or
+    /// authority was withdrawn. Delayed work for older transactions cannot
+    /// supersede the current request.
+    pub fn supersede(&mut self, request: &FocusRequest<Surface>, now: Duration) -> bool {
+        self.advance_to(now);
+        if !self.current.as_ref().is_some_and(|current| {
+            current.request == *request && current.phase == FocusRequestPhase::Pending
+        }) {
+            return false;
+        }
+        self.finish_current(FocusRequestPhase::Superseded);
         true
     }
 
@@ -348,5 +379,36 @@ mod tests {
         assert!(!focus.advance_request_to(old.transaction, Duration::from_millis(200)));
         assert_eq!(focus.phase(&old), Some(FocusRequestPhase::Superseded));
         assert_eq!(focus.phase(&current), Some(FocusRequestPhase::Pending));
+    }
+
+    #[test]
+    fn withdrawing_exact_intent_supersedes_only_that_pending_request() {
+        let mut focus = FocusTransactions::default();
+        let withdrawn = request_at(&mut focus, "a", 0);
+        assert!(focus.supersede(&withdrawn, Duration::from_millis(10)));
+        assert_eq!(focus.phase(&withdrawn), Some(FocusRequestPhase::Superseded));
+
+        let current = request_at(&mut focus, "b", 20);
+        assert!(!focus.supersede(&withdrawn, Duration::from_millis(30)));
+        assert_eq!(focus.phase(&current), Some(FocusRequestPhase::Pending));
+    }
+
+    #[test]
+    fn late_realization_after_scope_withdrawal_is_rejected_not_acknowledged() {
+        let mut focus = FocusTransactions::default();
+        let request = request_at(&mut focus, "launcher", 0);
+        assert!(!focus.acknowledge_if(
+            &request,
+            Duration::from_millis(10),
+            false,
+            FocusRejectionReason::ScopeWithdrawn,
+        ));
+        assert_eq!(
+            focus.phase(&request),
+            Some(FocusRequestPhase::Rejected(
+                FocusRejectionReason::ScopeWithdrawn
+            ))
+        );
+        assert!(focus.acknowledged().is_none());
     }
 }
