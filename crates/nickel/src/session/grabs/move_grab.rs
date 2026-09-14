@@ -165,6 +165,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_core::geometry_authority::ControlMode;
     use nickel_core::window_operation::{
         CompletionGesture, MappingGeneration, NativeLifetimeId, OperationKind, OperationPhase,
         SeatId, Source, SourceGeneration, SourceId, WindowId, WindowMapping,
@@ -179,6 +180,7 @@ mod tests {
                 generation: MappingGeneration::new(30),
             },
             kind: OperationKind::Move,
+            control: ControlMode::Enforced,
             origin: CompletionBinding {
                 source: Source {
                     id: SourceId::new(1),

@@ -366,6 +366,7 @@ impl XdgShellHandler for NickelSession {
                         generation: MappingGeneration::new(registry_id.0),
                     },
                     kind: OperationKind::Move,
+                    control: nickel_core::geometry_authority::ControlMode::Enforced,
                     origin: CompletionBinding {
                         source: Source {
                             id: SourceId::new(1),

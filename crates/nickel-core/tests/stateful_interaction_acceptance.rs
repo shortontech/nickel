@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use nickel_core::geometry_authority::ControlMode;
 use nickel_core::{
     acceptance::{BoundedTrace, SyntheticClock},
     focus::{
@@ -59,6 +60,7 @@ fn begin(
         seat: SeatId::new(1),
         subject: mapping(generation),
         kind: OperationKind::Move,
+        control: ControlMode::Enforced,
         origin: binding(1),
         optional_update_sources: vec![source(9)],
     });
@@ -77,6 +79,7 @@ fn assert_occupied(
         seat: SeatId::new(1),
         subject: mapping(99),
         kind: OperationKind::Move,
+        control: ControlMode::Enforced,
         origin: binding(7),
         optional_update_sources: vec![],
     });
