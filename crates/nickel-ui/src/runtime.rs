@@ -2515,12 +2515,27 @@ impl<A: Application> UiHost<A> {
         })
     }
 
-    pub fn open_transient(&mut self, id: OverlayId, invocation_target: UiId) -> bool {
-        let changed = self.state.open_overlay(id, invocation_target) != Invalidation::None;
-        if changed {
-            self.rebuild();
+    pub fn open_transient(&mut self, id: OverlayId, invocation_target: UiId) -> HostEventOutcome {
+        let invalidation = self.state.open_overlay(id, invocation_target);
+        let changed = invalidation != Invalidation::None;
+        let mut outcome = HostEventOutcome {
+            changed,
+            invalidation,
+            ..HostEventOutcome::default()
+        };
+        if outcome.changed {
+            let (_, _, cancellation) = self.rebuild_timed();
+            outcome.merge(cancellation);
         }
-        changed
+        outcome.effects = self.application.take_effect_evidence();
+        outcome.pointer_icon = self.pointer_icon;
+        outcome.text_input_active = self.input_context().text_focused;
+        outcome.accessibility_generation = self.frame_generation;
+        outcome.change_token = HostChangeToken {
+            frame_generation: self.frame_generation,
+            semantic_generation: self.frame_generation,
+        };
+        outcome
     }
 
     /// Requests focus through the frame reducer without changing the user's
@@ -3204,7 +3219,8 @@ impl<A: Application> UiHost<A> {
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
-            let (paint_list_us, layout_us) = self.rebuild_timed();
+            let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+            combined.merge(rebuild_outcome);
             combined.telemetry.paint_list_us = paint_list_us;
             combined.telemetry.layout_us = layout_us;
             combined.telemetry.rebuilt = true;
@@ -3231,7 +3247,8 @@ impl<A: Application> UiHost<A> {
                 for message in focus.messages {
                     self.application.update(message);
                 }
-                let (paint_list_us, layout_us) = self.rebuild_timed();
+                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+                combined.merge(rebuild_outcome);
                 combined.telemetry.paint_list_us = combined
                     .telemetry
                     .paint_list_us
@@ -3254,7 +3271,8 @@ impl<A: Application> UiHost<A> {
             let rebuild = long_press.changed;
             combined.merge(long_press);
             if rebuild {
-                let (paint_list_us, layout_us) = self.rebuild_timed();
+                let (paint_list_us, layout_us, rebuild_outcome) = self.rebuild_timed();
+                combined.merge(rebuild_outcome);
                 combined.telemetry.paint_list_us = combined
                     .telemetry
                     .paint_list_us
@@ -3609,16 +3627,29 @@ impl<A: Application> UiHost<A> {
         let _ = self.rebuild_timed();
     }
 
-    fn rebuild_timed(&mut self) -> (u64, u64) {
+    fn rebuild_timed(&mut self) -> (u64, u64, HostEventOutcome) {
         let pending_long_press_was_bound = self
             .pending_long_press
             .as_ref()
             .is_some_and(|pending| pending.frame_generation.is_some());
-        let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
-        let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
+        let mut context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let paint_started = Instant::now();
-        let view = self.application.view(context.clone());
-        let overlays = self.application.frame_overlays(context);
+        let mut overlays = self.application.frame_overlays(context.clone());
+        let cancellation = if blocking_overlay_is_open(&overlays, self.state.open_overlay_id())
+            && self.pointer_interaction_active()
+            && self.state.open_overlay_id().is_none_or(|overlay| {
+                self.touch_owner_target()
+                    .is_none_or(|owner| !self.tree.is_descendant_or_self(overlay.as_ui_id(), owner))
+            }) {
+            let cancellation = self.arbitrate_touch_ownership();
+            context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+            overlays = self.application.frame_overlays(context.clone());
+            cancellation
+        } else {
+            HostEventOutcome::default()
+        };
+        let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
+        let view = self.application.view(context);
         let paint_list_us = elapsed_us(paint_started);
         let layout_started = Instant::now();
         self.tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut self.state));
@@ -3637,7 +3668,7 @@ impl<A: Application> UiHost<A> {
         } else {
             self.finalize_pending_long_press_attachment();
         }
-        (paint_list_us, elapsed_us(layout_started))
+        (paint_list_us, elapsed_us(layout_started), cancellation)
     }
 
     pub fn shutdown(&mut self) {
@@ -3647,6 +3678,22 @@ impl<A: Application> UiHost<A> {
 
 fn elapsed_us(started: Instant) -> u64 {
     started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
+
+fn blocking_overlay_is_open<Message>(
+    overlays: &[FrameOverlay<Message>],
+    open: Option<&OverlayId>,
+) -> bool {
+    let Some(open) = open else {
+        return false;
+    };
+    overlays.iter().any(|overlay| match overlay {
+        FrameOverlay::Menu(menu) => &menu.id == open && menu.kind != crate::TransientKind::Tooltip,
+        FrameOverlay::Surface(surface) | FrameOverlay::ContentSurface { surface, .. } => {
+            &surface.id == open && surface.kind != crate::TransientKind::Tooltip
+        }
+        FrameOverlay::SelectionMarquee { .. } => false,
+    })
 }
 
 fn apply_frame_overlays<Message: Clone>(
@@ -4867,6 +4914,46 @@ mod tests {
         }
     }
 
+    struct ModalGestureApplication {
+        declare_dialog: bool,
+        invoked: usize,
+    }
+
+    impl Application for ModalGestureApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {
+            self.invoked += 1;
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Button::new((), "Anchor").id("anchor")
+        }
+
+        fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+            self.declare_dialog
+                .then(|| {
+                    FrameOverlay::surface(
+                        crate::TransientSurface::dialog(
+                            "modal",
+                            crate::OverlayAnchor::Node(UiId::from("anchor")),
+                            crate::Size::new(120.0, 80.0),
+                            crate::OverlayStyle {
+                                background: 0x111111,
+                                foreground: 0xffffff,
+                                border: 0x888888,
+                                selected: 0x333333,
+                                radius: 8,
+                            },
+                        ),
+                        Button::new((), "Confirm"),
+                    )
+                })
+                .into_iter()
+                .collect()
+        }
+    }
+
     #[derive(Default)]
     struct FocusRequestApplication {
         requested: Option<UiId>,
@@ -5875,7 +5962,10 @@ mod tests {
         }
         let mut host = UiHost::new(DialogApplication { confirmations: 0 }, 320, 200);
         host.request_focus(UiId::from("root/anchor"));
-        assert!(host.open_transient(OverlayId::new("dialog"), UiId::from("root/anchor")));
+        assert!(
+            host.open_transient(OverlayId::new("dialog"), UiId::from("root/anchor"))
+                .changed
+        );
         assert!(
             host.semantic_nodes()
                 .iter()
@@ -5900,6 +5990,101 @@ mod tests {
             host.inspect().keyboard_focus,
             Some(UiId::from("root/anchor"))
         );
+    }
+
+    #[test]
+    fn programmatic_modal_cancels_pointer_before_becoming_eligible() {
+        let mut host = UiHost::new(
+            ModalGestureApplication {
+                declare_dialog: true,
+                invoked: 0,
+            },
+            320,
+            200,
+        );
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Anchor".into(),
+            })
+            .unwrap();
+        let point = crate::Point {
+            x: anchor.bounds.origin.x + anchor.bounds.size.width / 2.0,
+            y: anchor.bounds.origin.y + anchor.bounds.size.height / 2.0,
+        };
+        host.handle_event(UiEvent::PointerPressed(point));
+        assert_eq!(host.state.captured(), Some(&anchor.id));
+
+        let opened = host.open_transient(OverlayId::new("modal"), anchor.id);
+        assert!(opened.changed);
+        assert_eq!(opened.disposition, crate::EventDisposition::Handled);
+        assert_ne!(opened.invalidation, Invalidation::None);
+        assert!(host.state.pressed().is_none());
+        assert!(host.state.captured().is_none());
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("modal")));
+
+        let release = host.handle_event(UiEvent::PointerReleased(point));
+        assert!(release.messages.is_empty());
+        assert_eq!(host.application().invoked, 0);
+    }
+
+    #[test]
+    fn blocking_frame_overlay_topology_cancels_active_touch() {
+        let mut host = UiHost::new(
+            ModalGestureApplication {
+                declare_dialog: false,
+                invoked: 0,
+            },
+            320,
+            200,
+        );
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Anchor".into(),
+            })
+            .unwrap();
+        let point = Point {
+            x: f64::from(anchor.bounds.origin.x + anchor.bounds.size.width / 2.0),
+            y: f64::from(anchor.bounds.origin.y + anchor.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        assert!(host.input_dispatcher.touch_active());
+        host.state
+            .open_overlay(OverlayId::new("modal"), anchor.id.clone());
+        host.application_mut().declare_dialog = true;
+
+        let rebuilt = host.step(HostBatch {
+            application_changed: true,
+            ..HostBatch::default()
+        });
+        assert!(rebuilt.changed);
+        assert_eq!(rebuilt.disposition, crate::EventDisposition::Handled);
+        assert_ne!(rebuilt.invalidation, Invalidation::None);
+        assert!(!host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_none());
+        assert!(host.state.captured().is_none());
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("modal")));
+
+        let release = host.handle_input(
+            &InputEvent::Touch(TouchEvent::Ended {
+                device: DeviceId(4),
+                order: EventOrder(2),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        assert!(release.messages.is_empty());
+        assert_eq!(host.application().invoked, 0);
     }
 
     #[test]
@@ -6006,7 +6191,10 @@ mod tests {
             .expect("tooltip anchor");
         let anchor_id = anchor.id.clone();
         assert!(host.request_focus(anchor_id.clone()).changed);
-        assert!(host.open_transient(OverlayId::new("help-tooltip"), anchor.id));
+        assert!(
+            host.open_transient(OverlayId::new("help-tooltip"), anchor.id)
+                .changed
+        );
         assert!(
             host.query_unique(&crate::SemanticSelector::RoleAndName {
                 role: SemanticRole::Tooltip,
@@ -8018,7 +8206,10 @@ mod tests {
         ];
         for stage in stages {
             let mut host = UiHost::new(FaultApplication, 320, 200);
-            assert!(host.open_transient(OverlayId::new("fault-dialog"), UiId::from("root/anchor")));
+            assert!(
+                host.open_transient(OverlayId::new("fault-dialog"), UiId::from("root/anchor"))
+                    .changed
+            );
             let before = host.inspect();
             let failure = HostFailure {
                 surface: "fault-test".into(),

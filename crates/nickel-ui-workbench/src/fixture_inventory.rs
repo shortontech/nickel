@@ -842,14 +842,17 @@ mod tests {
             ),
         ] {
             let mut host = UiHost::new(InventoryApp::new(Family::Primitives), 920, 700);
-            assert!(host.open_transient(
-                OverlayId::new(overlay_id),
-                UiId::from(if role == SemanticRole::Popover {
-                    "root/primary"
-                } else {
-                    "root/secondary"
-                }),
-            ));
+            assert!(
+                host.open_transient(
+                    OverlayId::new(overlay_id),
+                    UiId::from(if role == SemanticRole::Popover {
+                        "root/primary"
+                    } else {
+                        "root/secondary"
+                    }),
+                )
+                .changed
+            );
             assert!(
                 host.query_unique(&SemanticSelector::RoleAndName {
                     role,
