@@ -1320,7 +1320,6 @@ const ABN_FULLSCREENAPP_CODE: usize = 2;
 struct WindowDrag {
     operation: OperationId,
     completion: CompletionBinding,
-    control: ControlMode,
     window: isize,
     start: POINT,
     rectangle: RECT,
@@ -1409,7 +1408,6 @@ impl WindowDragCoordinator {
         self.active = Some(WindowDrag {
             operation,
             completion,
-            control: ControlMode::ExternallyContested,
             window: admission.window,
             start: admission.start,
             rectangle: admission.rectangle,
@@ -1491,15 +1489,6 @@ fn completion_button_physically_held(binding: CompletionBinding) -> bool {
     let virtual_key = if button == 1 { 0x01 } else { 0x02 };
     // SAFETY: this is a read-only physical button-state query on the hook thread.
     unsafe { GetAsyncKeyState(virtual_key) < 0 }
-}
-
-fn observed_native_takeover(operation: WindowDrag) -> bool {
-    // Nickel never captures the pointer for this foreign-window operation. A
-    // capture owned by the subject therefore proves native control has taken
-    // over; ExternallyContested operations must yield rather than claim exclusion.
-    debug_assert_eq!(operation.control, ControlMode::ExternallyContested);
-    let capture = unsafe { GetCapture() };
-    !capture.0.is_null() && capture.0 as isize == operation.window
 }
 
 fn operation_kind(resize_edge: Option<u32>) -> Option<OperationKind> {
@@ -1752,10 +1741,6 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         let release = pointer_release_binding(event.kind);
         let current_release = release == Some(operation.completion);
         if event.kind == NativePointerKind::Moved || current_release {
-            if observed_native_takeover(operation) {
-                coordinator.cancel(CancellationReason::NativeTakeover);
-                return HookDisposition::Forward;
-            }
             if event.kind == NativePointerKind::Moved
                 && event.time.wrapping_sub(operation.initiated_at) >= 250
                 && !completion_button_physically_held(operation.completion)
