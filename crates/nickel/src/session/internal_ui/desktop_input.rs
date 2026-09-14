@@ -90,7 +90,7 @@ mod tests {
                     assert_eq!(source.seat, 1);
                     assert_eq!(source.device_generation, device.0);
                     assert!(admission.order > 0);
-                    assert_eq!(recipient.lease, id.snapshot_token());
+                    assert_ne!(recipient.lease, 0);
                     assert_eq!(recipient.lifetime, id.snapshot_token());
                     assert_eq!(batch.normalized_authorities.len(), 1);
                     Some(*device)

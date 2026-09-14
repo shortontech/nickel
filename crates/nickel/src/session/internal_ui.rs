@@ -1554,6 +1554,7 @@ pub struct InternalUiRuntime {
     /// Session-owned mapping from renderer-local identities to the coordinator
     /// recipient lifetime that will execute routed input.
     routed_recipients: BTreeMap<InternalSurfaceId, nickel_ui::NormalizedRecipientBinding>,
+    next_recipient_lease: u64,
     desktop_input: desktop_input::DesktopInputState,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
@@ -1574,6 +1575,7 @@ impl Default for InternalUiRuntime {
             touches: BTreeMap::new(),
             routed_events: Vec::new(),
             routed_recipients: BTreeMap::new(),
+            next_recipient_lease: 0,
             desktop_input: Default::default(),
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
@@ -1584,6 +1586,19 @@ impl Default for InternalUiRuntime {
 }
 
 impl InternalUiRuntime {
+    fn allocate_recipient_lease(&mut self) -> u64 {
+        loop {
+            self.next_recipient_lease = self.next_recipient_lease.wrapping_add(1).max(1);
+            if self
+                .routed_recipients
+                .values()
+                .all(|binding| binding.lease != self.next_recipient_lease)
+            {
+                return self.next_recipient_lease;
+            }
+        }
+    }
+
     pub fn insert_boxed(
         &mut self,
         surface: Box<dyn nickel_ui::InternalUiSurface>,
@@ -1927,25 +1942,31 @@ impl InternalUiRuntime {
         recipient: InternalSurfaceId,
     ) {
         let lifetime = recipient.snapshot_token();
+        let lease = if let Some(binding) = self.routed_recipients.get(&runtime) {
+            binding.lease
+        } else {
+            self.allocate_recipient_lease()
+        };
         self.routed_recipients.insert(
             runtime,
-            nickel_ui::NormalizedRecipientBinding {
-                lease: lifetime,
-                lifetime,
-            },
+            nickel_ui::NormalizedRecipientBinding { lease, lifetime },
         );
     }
 
     pub(crate) fn normalized_recipient(
-        &self,
+        &mut self,
         runtime: InternalSurfaceId,
     ) -> nickel_ui::NormalizedRecipientBinding {
-        self.routed_recipients.get(&runtime).copied().unwrap_or(
-            nickel_ui::NormalizedRecipientBinding {
-                lease: runtime.snapshot_token(),
-                lifetime: runtime.snapshot_token(),
-            },
-        )
+        if let Some(binding) = self.routed_recipients.get(&runtime).copied() {
+            return binding;
+        }
+        let lease = self.allocate_recipient_lease();
+        let binding = nickel_ui::NormalizedRecipientBinding {
+            lease,
+            lifetime: runtime.snapshot_token(),
+        };
+        self.routed_recipients.insert(runtime, binding);
+        binding
     }
 
     pub(crate) fn take_surface_retirement(&mut self) -> bool {
