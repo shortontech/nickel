@@ -1470,6 +1470,11 @@ type RetainedSettlementKey = (NativeWindowLifetime, NativeRequestId);
 const MAX_RETAINED_WINDOW_SETTLEMENTS: usize = 64;
 const MAX_TERMINAL_SETTLEMENT_OUTCOMES: usize = 64;
 const MAX_ACTIVE_WINDOW_SETTLEMENTS: usize = 16;
+const MAX_CONTESTED_DRAG_DURATION_MS: u64 = 300_000;
+
+const fn contested_drag_within_bound(initiated_at: u64, now: u64) -> bool {
+    now.saturating_sub(initiated_at) < MAX_CONTESTED_DRAG_DURATION_MS
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalSettlementOutcome {
@@ -1522,6 +1527,21 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn record_terminal_active_settlements(&mut self, active: &mut WindowDrag) {
+        let mut pending = VecDeque::with_capacity(active.issued_settlements.len());
+        while let Some(settlement) = active.issued_settlements.pop_front() {
+            if settlement.status == SettlementStatus::Pending {
+                pending.push_back(settlement);
+            } else {
+                self.record_terminal_settlement(
+                    (active.lifetime, settlement.request.id),
+                    settlement.status,
+                );
+            }
+        }
+        active.issued_settlements = pending;
+    }
+
     fn record_displaced_active_settlement(
         &mut self,
         lifetime: NativeWindowLifetime,
@@ -1763,6 +1783,13 @@ impl WindowDragCoordinator {
         let Some(mut active) = self.active.take() else {
             return Err(());
         };
+        if !contested_drag_within_bound(active.initiated_at, time) {
+            let _ = self
+                .reducer
+                .cancel(active.operation, CancellationReason::AuthorityUnknown);
+            self.finish_active(active, ActiveSettlementExit::Unconfirmed);
+            return Err(());
+        }
         if !self.lifetime_is_current(active.lifetime)
             || native_window_fingerprint(active.window) != Some(active.lifetime.fingerprint)
         {
@@ -1784,6 +1811,7 @@ impl WindowDragCoordinator {
             }
             Ok(true) => {}
         }
+        self.record_terminal_active_settlements(&mut active);
         let transition = self.reducer.update_geometry(
             active.operation,
             active.completion.source,
@@ -2532,7 +2560,7 @@ fn classify_window_drag_observation(
     operation: &mut WindowDrag,
     observed: LogicalRect,
     now: u64,
-    final_observation: bool,
+    _final_observation: bool,
 ) -> Result<bool, CancellationReason> {
     let fact = native_geometry(observed);
     if !operation.issued_settlements.is_empty() {
@@ -2540,19 +2568,9 @@ fn classify_window_drag_observation(
             settlement.observe(fact, ObservationCausality::Unknown);
             settlement.expire(now);
         }
-        if final_observation
-            || operation
-                .issued_settlements
-                .iter()
-                .any(|settlement| settlement.status == SettlementStatus::Unconfirmed)
-        {
-            operation
-                .authority
-                .observe(fact, ObservationCausality::Unknown);
-            operation.authority.base_placement.control = ControlMode::Delegated;
-            return Err(CancellationReason::AuthorityUnknown);
-        }
-        return Ok(false);
+        // Win32 provides no request token in geometry observations. Pending or expired Unknown
+        // observations are accounted separately and do not stall an otherwise bounded drag.
+        return Ok(true);
     }
     if observed != operation.last_observed {
         operation
@@ -4868,11 +4886,11 @@ mod tests {
         SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
         WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
         clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
-        enqueue_issued_settlement, executable_icon, is_nickel_host_terminal,
-        is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
-        permits_contested_workflow, project_native_preview_diagnostics, project_windows_shortcuts,
-        rectangle_covers, restore_legacy_icon_alpha, should_restore_on_activation,
-        windows_pid_descends_from,
+        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
+        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
+        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
+        should_restore_on_activation, windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -4955,7 +4973,7 @@ mod tests {
     }
 
     #[test]
-    fn unmatched_native_request_expires_to_unknown_authority() {
+    fn unmatched_native_request_expires_without_stalling_contested_updates() {
         let mut drag = contested_drag();
         let observed = drag.last_observed;
         drag.issued_settlements.push_back(Settlement::new(
@@ -4972,16 +4990,17 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(false)
+            Ok(true)
         );
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Err(CancellationReason::AuthorityUnknown)
+            Ok(true)
         );
-        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
         assert_eq!(
-            drag.authority.base_placement.control,
-            ControlMode::Delegated
+            drag.issued_settlements
+                .front()
+                .map(|settlement| settlement.status),
+            Some(SettlementStatus::Unconfirmed)
         );
     }
 
@@ -5003,13 +5022,57 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(false)
+            Ok(true)
         );
         assert!(!drag.issued_settlements.is_empty());
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Err(CancellationReason::AuthorityUnknown)
+            Ok(true)
         );
+    }
+
+    #[test]
+    fn pending_unknown_observations_allow_multiple_bounded_drag_updates() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut drag = drag_with_pending_settlement(60);
+        drag.issued_settlements[0].limits.deadline_tick = 250;
+        let observed = drag.last_observed;
+
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 10, false),
+            Ok(true)
+        );
+        let mut second = drag.issued_settlements[0];
+        second.request.id = NativeRequestId(61);
+        second.limits.deadline_tick = 270;
+        assert!(enqueue_issued_settlement(&mut drag, second).is_none());
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 250, false),
+            Ok(true)
+        );
+        coordinator.record_terminal_active_settlements(&mut drag);
+
+        assert_eq!(drag.issued_settlements.len(), 1);
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key: (drag.lifetime, NativeRequestId(60)),
+                status: SettlementStatus::Unconfirmed,
+            })
+        );
+        assert!(drag.issued_settlements.len() <= super::MAX_ACTIVE_WINDOW_SETTLEMENTS);
+    }
+
+    #[test]
+    fn contested_drag_has_an_explicit_overall_interaction_bound() {
+        assert!(contested_drag_within_bound(
+            10,
+            10 + super::MAX_CONTESTED_DRAG_DURATION_MS - 1
+        ));
+        assert!(!contested_drag_within_bound(
+            10,
+            10 + super::MAX_CONTESTED_DRAG_DURATION_MS
+        ));
     }
 
     #[test]
