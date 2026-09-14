@@ -1682,6 +1682,11 @@ impl<Message: Clone> UiFrame<Message> {
         source: InputSource,
         intent: InteractionIntent,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        if let InteractionIntent::Invoke { target, .. } = &intent
+            && !self.target_is_in_active_overlay(target)
+        {
+            return Err(SemanticActionError::MissingTarget);
+        }
         let semantic_invocation = matches!(intent, InteractionIntent::Invoke { .. });
         let enters_text_editing = matches!(
             &intent,
@@ -1969,6 +1974,29 @@ impl<Message: Clone> UiFrame<Message> {
         DefaultActivation::Continue
     }
 
+    fn finish_default_activation(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+        invalidation: Invalidation,
+    ) -> Invalidation {
+        let dismisses_overlay_command =
+            self.text_commands
+                .iter()
+                .any(|command| &command.id == target)
+                && self
+                    .active_overlay_dismiss
+                    .is_none_or(|policy| policy.action)
+                && self.active_overlay.as_ref().is_some_and(|(overlay, _)| {
+                    self.is_descendant_or_self(overlay.as_ui_id(), target)
+                });
+        if dismisses_overlay_command {
+            invalidation.merge(state.dismiss_overlay(crate::DismissReason::Action))
+        } else {
+            invalidation
+        }
+    }
+
     fn operate_navigation_scroll(
         &self,
         state: &mut UiStateStore,
@@ -1999,6 +2027,9 @@ impl<Message: Clone> UiFrame<Message> {
         id: &UiId,
         action: SemanticAction,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
+        if !self.target_is_in_active_overlay(id) {
+            return Err(SemanticActionError::MissingTarget);
+        }
         let node = self
             .resolved
             .find(id)
@@ -2060,6 +2091,9 @@ impl<Message: Clone> UiFrame<Message> {
         id: &UiId,
         action: ActionKind,
     ) -> Result<EffectiveHitRoute, SemanticActionError> {
+        if !self.target_is_in_active_overlay(id) {
+            return Err(SemanticActionError::MissingTarget);
+        }
         let node = self
             .resolved
             .find(id)
@@ -2089,6 +2123,12 @@ impl<Message: Clone> UiFrame<Message> {
             bounds,
             point,
         })
+    }
+
+    fn target_is_in_active_overlay(&self, target: &UiId) -> bool {
+        self.active_overlay
+            .as_ref()
+            .is_none_or(|(overlay, _)| self.is_descendant_or_self(overlay.as_ui_id(), target))
     }
 
     pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
@@ -2889,7 +2929,8 @@ impl<Message: Clone> UiFrame<Message> {
                 }
                 let overlay_action = activates
                     && released.is_some_and(|item| {
-                        self.message_for_id(item).is_some()
+                        (default_activation == DefaultActivation::Continue
+                            && self.message_for_id(item).is_some())
                             || self.text_commands.iter().any(|command| &command.id == item)
                     })
                     && self.active_overlay.as_ref().is_some_and(|(id, _)| {
@@ -3165,8 +3206,7 @@ impl<Message: Clone> UiFrame<Message> {
                         self.begin_default_activation(state, &target, &mut outcome)
                 {
                     return EventOutcome {
-                        invalidation: invalidation
-                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        invalidation: self.finish_default_activation(state, &target, invalidation),
                         disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
@@ -3195,9 +3235,11 @@ impl<Message: Clone> UiFrame<Message> {
                         self.begin_default_activation(state, target, &mut outcome)
                 {
                     return EventOutcome {
-                        invalidation: pointer_cancellation
-                            .merge(invalidation)
-                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        invalidation: pointer_cancellation.merge(self.finish_default_activation(
+                            state,
+                            target,
+                            invalidation,
+                        )),
                         disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
@@ -3383,8 +3425,7 @@ impl<Message: Clone> UiFrame<Message> {
                     self.begin_default_activation(state, &id, &mut outcome)
                 {
                     return EventOutcome {
-                        invalidation: invalidation
-                            .merge(state.dismiss_overlay(crate::DismissReason::Action)),
+                        invalidation: self.finish_default_activation(state, &id, invalidation),
                         ..outcome
                     };
                 }

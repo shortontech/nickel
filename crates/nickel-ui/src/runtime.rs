@@ -6173,6 +6173,103 @@ mod tests {
     }
 
     #[test]
+    fn modal_scope_rejects_retained_background_targets_and_keeps_editor_activation_open() {
+        #[derive(Clone)]
+        enum ModalMessage {
+            Background,
+            Edit(String),
+        }
+
+        #[derive(Default)]
+        struct ModalApplication {
+            background_activations: usize,
+            text: String,
+        }
+
+        impl Application for ModalApplication {
+            type Message = ModalMessage;
+
+            fn update(&mut self, message: Self::Message) {
+                match message {
+                    ModalMessage::Background => self.background_activations += 1,
+                    ModalMessage::Edit(text) => self.text = text,
+                }
+            }
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new(ModalMessage::Background, "Background").id("anchor")
+            }
+
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![FrameOverlay::surface(
+                    crate::TransientSurface::dialog(
+                        "dialog",
+                        crate::OverlayAnchor::InvocationTarget(UiId::from("anchor")),
+                        crate::Size::new(180.0, 96.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                    ),
+                    TextField::on_change(&self.text, ModalMessage::Edit).id("editor"),
+                )]
+            }
+        }
+
+        let mut host = UiHost::new(ModalApplication::default(), 320, 200);
+        let background = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Background".into(),
+            })
+            .expect("background target before modal opens")
+            .id;
+        host.request_focus(background.clone());
+        let opened = host.handle_event(UiEvent::KeyboardActivate);
+        assert!(opened.changed);
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("dialog")));
+
+        let semantic = host.perform_semantic_action(
+            background.clone(),
+            SemanticAction::Invoke(ActionKind::Activate),
+        );
+        assert_eq!(
+            semantic.semantic_failures[0].error,
+            SemanticActionError::MissingTarget
+        );
+        assert_eq!(host.application().background_activations, 0);
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("dialog")));
+
+        let accessible = host
+            .perform_accessibility_action(background, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(
+            accessible.semantic_failures[0].error,
+            SemanticActionError::MissingTarget
+        );
+        assert_eq!(host.application().background_activations, 0);
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("dialog")));
+
+        let editor = host
+            .query_unique(&crate::SemanticSelector::Role(SemanticRole::TextField))
+            .expect("dialog editor")
+            .id;
+        host.request_focus(editor.clone());
+        let editing = host.handle_event(UiEvent::KeyboardActivate);
+        assert!(editing.changed);
+        assert_eq!(editing.disposition, crate::EventDisposition::Handled);
+        assert!(editing.text_input_active);
+        assert_eq!(host.inspect().keyboard_focus, Some(editor));
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(OverlayId::new("dialog")),
+            "entering an editor inside a dialog must not dismiss that dialog"
+        );
+    }
+
+    #[test]
     fn programmatic_modal_cancels_pointer_before_becoming_eligible() {
         let mut host = UiHost::new(
             ModalGestureApplication {
@@ -6495,6 +6592,26 @@ mod tests {
         host.handle_event(UiEvent::ControllerBack);
         assert!(host.inspect().open_overlay.is_none());
         assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+
+        let keyboard_opened = host.handle_event(UiEvent::KeyboardActivate);
+        assert!(keyboard_opened.changed);
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(OverlayId::new("details-popover")),
+            "default keyboard activation must retain the overlay it opens"
+        );
+        host.handle_event(UiEvent::ControllerBack);
+        assert!(host.inspect().open_overlay.is_none());
+
+        let controller_opened = host.handle_controller_action(ControllerAction::Confirm);
+        assert!(controller_opened.changed);
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(OverlayId::new("details-popover")),
+            "default controller activation must retain the overlay it opens"
+        );
+        host.handle_event(UiEvent::ControllerBack);
+        assert!(host.inspect().open_overlay.is_none());
 
         struct TooltipApplication;
         impl Application for TooltipApplication {
