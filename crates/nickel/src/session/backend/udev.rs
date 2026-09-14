@@ -2369,7 +2369,7 @@ impl NickelSession {
             .cloned()
             .collect();
         for window in stranded {
-            self.space.map_element(window, fallback.loc, false);
+            self.map_compositor_moved_window(window, fallback.loc, false);
         }
     }
 

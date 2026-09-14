@@ -120,6 +120,18 @@ pub fn operation_resize_edges(edges: ResizeEdge) -> Option<ResizeEdges> {
     ResizeEdges::new(horizontal, vertical).ok()
 }
 
+pub(crate) fn xdg_commit_causality(
+    request: nickel_core::geometry_authority::NativeRequestId,
+    incorporated: nickel_core::geometry_authority::DesiredRevisions,
+    current: nickel_core::geometry_authority::DesiredRevisions,
+) -> nickel_core::geometry_authority::ObservationCausality {
+    if incorporated == current {
+        nickel_core::geometry_authority::ObservationCausality::Correlated(request)
+    } else {
+        nickel_core::geometry_authority::ObservationCausality::Independent
+    }
+}
+
 impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
     forward_pointer_grab_events!();
 
@@ -475,6 +487,46 @@ mod tests {
             assert!(operation_resize_edges(edges).is_some());
         }
         assert!(operation_resize_edges(ResizeEdge::empty()).is_none());
+    }
+
+    #[test]
+    fn newer_desired_revision_prevents_ack_from_claiming_older_configure() {
+        use nickel_core::geometry_authority::{
+            GeometryAuthority, GeometryConstraints, NativeRequestId, ObservationCausality,
+            Presentation,
+        };
+        let mut authority = GeometryAuthority::new(
+            crate::session::shell_layout::Geometry {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            Presentation::Normal,
+        );
+        let incorporated = authority.revisions();
+        assert_eq!(
+            xdg_commit_causality(NativeRequestId(7), incorporated, authority.revisions()),
+            ObservationCausality::Correlated(NativeRequestId(7))
+        );
+        authority.set_placement(
+            crate::session::shell_layout::Geometry {
+                x: 1,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+            GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        );
+        assert_eq!(
+            xdg_commit_causality(NativeRequestId(7), incorporated, authority.revisions()),
+            ObservationCausality::Independent
+        );
     }
 
     #[test]

@@ -280,6 +280,18 @@ impl NickelSession {
         );
         if geometry.size.w <= 1 || geometry.size.h <= 1 {
             geometry.size = Size::from((DEFAULT_X11_WIDTH, DEFAULT_X11_HEIGHT));
+            if managed {
+                let id = self.x11_windows[&surface.window_id()];
+                self.record_x11_desired_geometry(
+                    id,
+                    shell_layout::Geometry {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
+                        width: geometry.size.w,
+                        height: geometry.size.h,
+                    },
+                );
+            }
             let _ = surface.configure(geometry);
         }
         if managed {
@@ -305,6 +317,16 @@ impl NickelSession {
             );
             if clamped != geometry {
                 geometry = clamped;
+                let id = self.x11_windows[&surface.window_id()];
+                self.record_x11_desired_geometry(
+                    id,
+                    shell_layout::Geometry {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
+                        width: geometry.size.w,
+                        height: geometry.size.h,
+                    },
+                );
                 let _ = surface.configure(geometry);
             }
         }
@@ -324,6 +346,15 @@ impl NickelSession {
                             (placed.x, placed.y).into(),
                             (placed.width, placed.height).into(),
                         );
+                        session.record_x11_desired_geometry(
+                            id,
+                            shell_layout::Geometry {
+                                x: replacement.loc.x,
+                                y: replacement.loc.y,
+                                width: replacement.size.w,
+                                height: replacement.size.h,
+                            },
+                        );
                         surface.configure(replacement).ok()?;
                         surface.set_mapped(true).ok()?;
                         geometry = replacement;
@@ -342,6 +373,16 @@ impl NickelSession {
         }
         if managed {
             let id = self.x11_windows[&surface.window_id()];
+            self.record_x11_client_desired_geometry(
+                id,
+                shell_layout::Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w.max(1),
+                    height: geometry.size.h.max(1),
+                },
+                x11_client_request_causality(),
+            );
             if !self.locked {
                 self.space.elements().for_each(|candidate| {
                     candidate.set_activated(candidate == &window);

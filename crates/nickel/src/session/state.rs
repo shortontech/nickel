@@ -8421,7 +8421,18 @@ impl NickelSession {
             height: target.size.h,
         };
         let last_owned_revision = self.record_desired_geometry(id, target_geometry);
-        self.apply_compositor_moved_window_effect(window, target.loc, true);
+        if let Some(surface) = window.x11_surface() {
+            let request = self.record_x11_desired_geometry(id, target_geometry);
+            if surface.configure(target).is_err()
+                && let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
+                && settlement.request.id == request
+            {
+                settlement.fail();
+            }
+            self.map_buffered_window(window, target.loc, true);
+        } else {
+            self.apply_compositor_moved_window_effect(window, target.loc, true);
+        }
         self.shortcut_snap_restore.insert(
             id,
             RevisionedPlacementRestore {
@@ -10086,9 +10097,7 @@ impl NickelSession {
         window: &Window,
         acked: Option<smithay::utils::Serial>,
     ) {
-        use nickel_core::geometry_authority::{
-            CoordinateUnits, GeometryMeaning, ObservationCausality, TaggedGeometry,
-        };
+        use nickel_core::geometry_authority::{CoordinateUnits, GeometryMeaning, TaggedGeometry};
         let Some(id) = self.window_geometry_authority_id(window) else {
             return;
         };
@@ -10103,6 +10112,11 @@ impl NickelSession {
             return;
         }
         let request_id = settlement.request.id;
+        let incorporated_revisions = settlement.request.desired;
+        let current_revisions = self
+            .geometry_authorities
+            .get(&id)
+            .map(|authority| authority.revisions());
         let geometry = window.geometry();
         let location = self.space.element_location(window).unwrap_or_default();
         let fact = TaggedGeometry {
@@ -10116,7 +10130,17 @@ impl NickelSession {
             units: CoordinateUnits::CanonicalLogical,
             topology_version,
         };
-        let causality = ObservationCausality::Correlated(request_id);
+        let Some(current_revisions) = current_revisions else {
+            return;
+        };
+        let causality = crate::session::grabs::resize_grab::xdg_commit_causality(
+            request_id,
+            incorporated_revisions,
+            current_revisions,
+        );
+        // A newer configure may acknowledge the older serial while
+        // incorporating different desired fields. The helper reports that as
+        // independent instead of attributing it to the superseded request.
         if let Some(authority) = self.geometry_authorities.get_mut(&id) {
             authority.observe(fact, causality);
         }
