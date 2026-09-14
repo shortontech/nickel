@@ -7147,6 +7147,19 @@ mod tests {
             .id;
         let events = vec![
             synthetic_normalized(focus_event(), None),
+            // Complete the focus click before replaying independent controller and
+            // accessibility intents; an unmatched press correctly owns this editor
+            // and makes a same-target semantic value change busy.
+            synthetic_normalized(
+                InputEvent::Pointer(PointerEvent::Button {
+                    device: DeviceId(2),
+                    order: EventOrder(2),
+                    button: PointerButton::Primary,
+                    edge: KeyEdge::Released,
+                    position: Some(Point { x: 4.0, y: 4.0 }),
+                }),
+                None,
+            ),
             synthetic_normalized(
                 InputEvent::Text(TextEvent::Preedit {
                     device: DeviceId(1),
