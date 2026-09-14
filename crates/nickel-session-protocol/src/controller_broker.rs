@@ -96,6 +96,12 @@ struct PoisonedPredecessor {
     cutoff: EventId,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RecoveryDestination {
+    host: HostId,
+    abandoned_connection: ConnectionGeneration,
+}
+
 #[derive(Debug)]
 struct Host<T> {
     connection: ConnectionGeneration,
@@ -117,6 +123,7 @@ pub struct ControllerBroker<T> {
     active: Option<Lease>,
     transfer: Option<Transfer>,
     poisoned_predecessor: Option<PoisonedPredecessor>,
+    recovery_destination: Option<RecoveryDestination>,
 }
 
 impl<T> ControllerBroker<T> {
@@ -144,6 +151,7 @@ impl<T> ControllerBroker<T> {
             active: None,
             transfer: None,
             poisoned_predecessor: None,
+            recovery_destination: None,
         }
     }
 
@@ -220,6 +228,13 @@ impl<T> ControllerBroker<T> {
             self.hosts.remove(&host);
             return status;
         }
+        if self.poisoned_predecessor.is_some_and(|poison| {
+            poison.lease.host == host && poison.lease.connection_generation == connection
+        }) {
+            let status = self.acknowledge_verified_termination(host, connection);
+            self.hosts.remove(&host);
+            return status;
+        }
         self.hosts.remove(&host);
         if self
             .active
@@ -235,6 +250,7 @@ impl<T> ControllerBroker<T> {
             || self.active.is_some()
             || self.transfer.is_some()
             || self.poisoned_predecessor.is_some()
+            || self.recovery_destination.is_some()
             || self.reset_barrier
             || !self.neutral
         {
@@ -259,6 +275,25 @@ impl<T> ControllerBroker<T> {
     ) -> TransferStatus {
         if self.exhausted {
             return TransferStatus::Failed;
+        }
+        if let Some(recovery) = self.recovery_destination {
+            if recovery.host != to
+                || recovery.abandoned_connection == connection
+                || !self.connection_matches(to, connection)
+                || self.poisoned_predecessor.is_some()
+                || self.reset_barrier
+                || !self.neutral
+            {
+                return TransferStatus::Failed;
+            }
+            self.recovery_destination = None;
+            return self
+                .install_lease(to, connection)
+                .map(TransferStatus::Granted)
+                .unwrap_or_else(|| {
+                    self.fail_closed();
+                    TransferStatus::Failed
+                });
         }
         if let Some(transfer) = self.transfer {
             if transfer.destination_rearm_required
@@ -335,6 +370,10 @@ impl<T> ControllerBroker<T> {
                 });
             }
             self.install_reset(transfer.cutoff);
+            return TransferStatus::Failed;
+        }
+        if self.recovery_destination.is_some() {
+            self.install_reset(EventId(self.next_event));
             return TransferStatus::Failed;
         }
         if self.active.is_some_and(|lease| lease.host != internal) {
@@ -419,7 +458,22 @@ impl<T> ControllerBroker<T> {
         timeout_ms: u64,
     ) -> TransferStatus {
         let Some(transfer) = self.transfer else {
-            return TransferStatus::Failed;
+            let Some(recovery) = self.recovery_destination else {
+                return TransferStatus::Failed;
+            };
+            if recovery.host != host
+                || !self.connection_matches(host, connection)
+                || self.poisoned_predecessor.is_some()
+                || self.reset_barrier
+                || !self.neutral
+            {
+                return TransferStatus::Failed;
+            }
+            self.recovery_destination = None;
+            return self
+                .install_lease(host, connection)
+                .map(TransferStatus::Granted)
+                .unwrap_or(TransferStatus::Failed);
         };
         if !transfer.destination_rearm_required
             || transfer.to != host
@@ -443,10 +497,12 @@ impl<T> ControllerBroker<T> {
             return None;
         }
         let interrupted_transfer = self.transfer;
+        let recovery_destination = self.recovery_destination;
         let recoverable = (self.transfer.is_none() && self.poisoned_predecessor.is_none())
             .then_some(self.active)
             .flatten();
         self.install_reset(EventId(self.next_event));
+        self.recovery_destination = recovery_destination;
         if let Some(transfer) = interrupted_transfer {
             if self.exhausted {
                 return None;
@@ -480,6 +536,10 @@ impl<T> ControllerBroker<T> {
         self.poisoned_predecessor = Some(PoisonedPredecessor {
             lease: transfer.from,
             cutoff: transfer.cutoff,
+        });
+        self.recovery_destination = Some(RecoveryDestination {
+            host: transfer.to,
+            abandoned_connection: transfer.to_connection,
         });
         self.transfer = None;
         self.active = None;
@@ -639,6 +699,7 @@ impl<T> ControllerBroker<T> {
     fn install_reset(&mut self, through: EventId) {
         self.active = None;
         self.transfer = None;
+        self.recovery_destination = None;
         self.neutral = false;
         self.reset_barrier = true;
         let Some(stream_generation) = self.stream_generation.0.checked_add(1) else {
@@ -683,12 +744,16 @@ impl<T> ControllerBroker<T> {
             || self
                 .poisoned_predecessor
                 .is_some_and(|poison| poison.lease.host == host)
+            || self
+                .recovery_destination
+                .is_some_and(|recovery| recovery.host == host)
     }
 
     fn fail_closed(&mut self) {
         self.exhausted = true;
         self.active = None;
         self.transfer = None;
+        self.recovery_destination = None;
         self.neutral = false;
         self.reset_barrier = true;
         let generation = self.stream_generation;
@@ -785,7 +850,72 @@ mod tests {
             broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
             TransferStatus::Failed
         );
-        assert!(broker.grant(HostId(2), b).is_some());
+        assert!(broker.grant(HostId(2), b).is_none());
+        let fresh_b = broker.attach(HostId(2));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), fresh_b, 20, 5),
+            TransferStatus::Granted(Lease {
+                host: HostId(2),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn timed_out_transfer_recovers_after_verified_termination_and_fresh_destination() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let a = broker.attach(HostId(1));
+        let stale_b = broker.attach(HostId(2));
+        broker.grant(HostId(1), a).unwrap();
+        broker.begin_transfer(HostId(2), stale_b, 10, 5);
+        assert_eq!(broker.expire_transfer(15), TransferStatus::Failed);
+        broker.set_neutral(true);
+        assert_eq!(
+            broker.acknowledge_verified_termination(HostId(1), a),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(2), stale_b).is_none());
+
+        let fresh_b = broker.attach(HostId(2));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), fresh_b, 20, 5),
+            TransferStatus::Granted(Lease {
+                host: HostId(2),
+                connection_generation,
+                ..
+            }) if connection_generation == fresh_b
+        ));
+    }
+
+    #[test]
+    fn reset_preserved_transfer_timeout_still_requires_late_ack_and_fresh_destination() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let a = broker.attach(HostId(1));
+        let stale_b = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), a).unwrap();
+        let TransferStatus::Pending { cutoff, .. } =
+            broker.begin_transfer(HostId(2), stale_b, 10, 5)
+        else {
+            panic!("transfer must be pending");
+        };
+        broker.reset_ingress();
+        assert_eq!(broker.expire_transfer(15), TransferStatus::Failed);
+        broker.set_neutral(true);
+        assert!(broker.grant(HostId(2), stale_b).is_none());
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(2), stale_b).is_none());
+
+        let fresh_b = broker.attach(HostId(2));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), fresh_b, 20, 5),
+            TransferStatus::Granted(Lease {
+                host: HostId(2),
+                ..
+            })
+        ));
     }
 
     #[test]

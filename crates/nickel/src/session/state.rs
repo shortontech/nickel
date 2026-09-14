@@ -6231,12 +6231,17 @@ impl NickelSession {
                 connection_generation,
                 lease_epoch,
                 cutoff,
-            } => controller_transfer_response(self.controller_broker.acknowledge_quiescence(
-                host,
-                connection_generation,
-                lease_epoch,
-                cutoff,
-            )),
+            } => {
+                let status = self.controller_broker.acknowledge_quiescence(
+                    host,
+                    connection_generation,
+                    lease_epoch,
+                    cutoff,
+                );
+                self.controller_neutral_probe_requested
+                    .store(true, Ordering::Release);
+                controller_transfer_response(status)
+            }
             ControllerHostRequest::Detach {
                 connection_generation,
             } => {
@@ -6272,6 +6277,8 @@ impl NickelSession {
                 let _ = self
                     .controller_broker
                     .relinquish(host, connection_generation);
+                self.controller_neutral_probe_requested
+                    .store(true, Ordering::Release);
                 let pending_owner = self
                     .controller_recovery
                     .and_then(|intent| intent.eligible_owner);

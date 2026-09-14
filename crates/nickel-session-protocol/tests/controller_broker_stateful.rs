@@ -15,7 +15,7 @@ fn bounded_generated_transfer_timeout_and_overflow_sequences_fence_delivery() {
     for mut seed in SEEDS {
         let mut broker = ControllerBroker::new(3);
         let a = broker.attach(HostId(1));
-        let b = broker.attach(HostId(2));
+        let mut b = broker.attach(HostId(2));
         let mut lease = broker.grant(HostId(1), a).unwrap();
 
         for step in 0..STEPS {
@@ -59,7 +59,13 @@ fn bounded_generated_transfer_timeout_and_overflow_sequences_fence_delivery() {
                         ),
                         TransferStatus::Failed
                     );
-                    lease = broker.grant(HostId(1), a).unwrap();
+                    b = broker.attach(HostId(2));
+                    let TransferStatus::Granted(recovered) =
+                        broker.begin_transfer(HostId(2), b, step as u64 * 10 + 6, 5)
+                    else {
+                        panic!("cleared timeout recovery must accept a fresh destination")
+                    };
+                    lease = recovered;
                 }
             } else {
                 for payload in 0..3 {
