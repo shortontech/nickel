@@ -12,7 +12,7 @@ use std::{
 static INTERNAL_INGRESS_ORDER: AtomicU64 = AtomicU64::new(1);
 static INTERNAL_INGRESS_EPOCH: OnceLock<Instant> = OnceLock::new();
 
-fn internal_normalized_ingress(
+pub(crate) fn internal_normalized_ingress(
     input: nickel_input::InputEvent,
     clipboard_text: Option<String>,
     owner: &'static str,

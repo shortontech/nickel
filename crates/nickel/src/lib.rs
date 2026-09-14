@@ -515,11 +515,11 @@ impl<A: Application> EmbeddedUiSurface<A> {
         self.host.accessibility_nodes()
     }
 
-    #[cfg(test)]
     fn inspection(&self) -> nickel_ui::HostInspection {
         self.host.inspect()
     }
 
+    #[cfg(test)]
     fn normalized_input(
         &mut self,
         input: InputEvent,
@@ -530,6 +530,13 @@ impl<A: Application> EmbeddedUiSurface<A> {
                 input,
                 clipboard_text,
             }],
+            ..HostBatch::default()
+        })
+    }
+
+    fn normalized_ingress(&mut self, event: HostEvent) -> HostEventOutcome {
+        self.step(HostBatch {
+            events: vec![event],
             ..HostBatch::default()
         })
     }
@@ -1569,10 +1576,15 @@ fn handle_codex_event(
                     ..HostEventOutcome::default()
                 }
             } else {
-                codex
-                    .host_mut(surface)
-                    .expect("Codex host exists")
-                    .normalized_input(event.clone(), shell.clipboard_text())
+                let host = codex.host_mut(surface).expect("Codex host exists");
+                let ingress = crate::live_shell::internal_normalized_ingress(
+                    event.clone(),
+                    shell.clipboard_text(),
+                    "codex",
+                    host.inspection(),
+                    None,
+                );
+                host.normalized_ingress(ingress)
             }
         }
         ShellEvent::FocusChanged { focused, .. } => codex

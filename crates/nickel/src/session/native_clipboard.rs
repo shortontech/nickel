@@ -236,19 +236,39 @@ impl super::state::NickelSession {
             .set_clipboard_limit(self.native_clipboard.text_limit.unwrap_or(0));
         let mut released = event.clone();
         released.edge = nickel_input::KeyEdge::Released;
+        let recipient = id.snapshot_token();
+        let elapsed = self.start_time.elapsed().as_micros() as u64;
+        let ingress = |event: nickel_input::KeyEvent, clipboard_text| {
+            let order = event.order.0;
+            let device = event.device.0;
+            nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+                input: nickel_input::InputEvent::Key(event),
+                clipboard_text,
+                source: nickel_ui::NormalizedSourceBinding {
+                    seat: 1,
+                    backend_stream: "session-native-clipboard".into(),
+                    stream_generation: 1,
+                    device_generation: device,
+                    identity_capability: "session-device-generation".into(),
+                    reconnect_generation: device,
+                },
+                admission: nickel_ui::NormalizedAdmissionBinding {
+                    order,
+                    monotonic_micros: elapsed,
+                },
+                recipient: nickel_ui::NormalizedRecipientBinding {
+                    lease: recipient,
+                    lifetime: recipient,
+                },
+                operation: None,
+                transform_generation: None,
+                text_transaction: Some(order),
+            })
+        };
         self.internal_ui.step(
             id,
             nickel_ui::HostBatch {
-                events: vec![
-                    nickel_ui::HostEvent::Normalized {
-                        input: nickel_input::InputEvent::Key(event),
-                        clipboard_text: clipboard,
-                    },
-                    nickel_ui::HostEvent::Normalized {
-                        input: nickel_input::InputEvent::Key(released),
-                        clipboard_text: None,
-                    },
-                ],
+                events: vec![ingress(event, clipboard), ingress(released, None)],
                 ..Default::default()
             },
         );
