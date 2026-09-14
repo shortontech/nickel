@@ -739,7 +739,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             };
             return Ok(AdapterOutcome {
                 changed,
-                consume: true,
+                disposition: nickel_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -749,7 +749,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
             let changed = host.application_mut().close_tab(id);
             return Ok(AdapterOutcome {
                 changed,
-                consume: true,
+                disposition: nickel_ui::EventDisposition::Handled,
                 exit: host.application().exit_requested,
             });
         }
@@ -771,7 +771,7 @@ impl HostAdapter<TerminalApp> for TerminalAdapter {
         let changed = host.application_mut().apply_input(command);
         Ok(AdapterOutcome {
             changed,
-            consume: true,
+            disposition: nickel_ui::EventDisposition::Handled,
             exit: false,
         })
     }

@@ -1230,7 +1230,7 @@ impl ShortcutOutcome {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AdapterOutcome {
     pub changed: bool,
-    pub consume: bool,
+    pub disposition: crate::EventDisposition,
     pub exit: bool,
 }
 
@@ -1238,7 +1238,7 @@ impl AdapterOutcome {
     pub const fn changed() -> Self {
         Self {
             changed: true,
-            consume: false,
+            disposition: crate::EventDisposition::Unhandled,
             exit: false,
         }
     }
@@ -1246,7 +1246,7 @@ impl AdapterOutcome {
     pub const fn consumed(changed: bool) -> Self {
         Self {
             changed,
-            consume: true,
+            disposition: crate::EventDisposition::Handled,
             exit: false,
         }
     }
@@ -1254,7 +1254,7 @@ impl AdapterOutcome {
     pub const fn exit() -> Self {
         Self {
             changed: false,
-            consume: true,
+            disposition: crate::EventDisposition::Handled,
             exit: true,
         }
     }
@@ -1434,6 +1434,7 @@ pub struct HostInspection {
     pub navigation_depth: usize,
     pub available_semantic_actions: Vec<ActionKind>,
     pub controller_editing: bool,
+    pub target_mode: crate::WidgetTargetMode,
     pub open_overlay: Option<OverlayId>,
     pub modality: InputModality,
     pub diagnostics: Vec<LayoutDiagnostic>,
@@ -2180,6 +2181,7 @@ impl<A: Application> UiHost<A> {
             navigation_depth: self.tree.navigation_depth(&self.state),
             available_semantic_actions: self.tree.available_semantic_actions(&self.state),
             controller_editing: self.state.navigation().controller_editing(),
+            target_mode: self.state.navigation().target_mode(),
             open_overlay: self.state.open_overlay_id().cloned(),
             modality: self.state.input_modality(),
             diagnostics: self.tree.diagnostics().to_vec(),
@@ -2690,8 +2692,8 @@ impl<A: Application> UiHost<A> {
             combined.changed = true;
             combined.invalidation = Invalidation::Layout;
         }
-        if adapted.consume {
-            combined.disposition = crate::EventDisposition::Handled;
+        combined.disposition = combined.disposition.merge(adapted.disposition);
+        if adapted.disposition != crate::EventDisposition::Unhandled {
             return combined;
         }
         self.state.set_clipboard_offer(clipboard_text);
@@ -2943,7 +2945,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             });
             let consume = match adapted {
                 Some(Ok(outcome)) => {
-                    let consume = outcome.consume;
+                    let consume = outcome.disposition != crate::EventDisposition::Unhandled;
                     adapter_changed |= outcome.changed;
                     adapter_exit |= outcome.exit;
                     consume
@@ -3333,7 +3335,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
         });
         let consume = match adapted {
             Some(Ok(outcome)) => {
-                let consume = outcome.consume;
+                let consume = outcome.disposition != crate::EventDisposition::Unhandled;
                 self.apply_adapter_outcome(event_loop, outcome);
                 consume
             }
@@ -4435,6 +4437,10 @@ mod tests {
         assert!(host.controller_targets_text_input());
         assert!(host.input_context().text_focused);
         assert!(!host.inspect().controller_editing);
+        assert_eq!(
+            host.inspect().target_mode,
+            crate::WidgetTargetMode::TextEditing
+        );
     }
 
     #[test]
@@ -4538,6 +4544,10 @@ mod tests {
         assert!(host.request_focus(button).changed);
         assert!(!host.input_context().text_focused);
         assert!(!host.controller_targets_text_input());
+        assert_eq!(
+            host.inspect().target_mode,
+            crate::WidgetTargetMode::Navigation
+        );
     }
 
     #[test]

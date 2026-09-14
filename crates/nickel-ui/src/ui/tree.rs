@@ -1816,10 +1816,34 @@ impl<Message: Clone> UiFrame<Message> {
             || !outcome.messages.is_empty()
             || outcome.clipboard_text.is_some();
         outcome.invalidation = outcome.invalidation.merge(modality_invalidation);
+        outcome.invalidation = outcome
+            .invalidation
+            .merge(self.revalidate_target_mode(state));
         if semantic_invocation || semantic_effect {
             outcome.disposition = crate::EventDisposition::Handled;
         }
         Ok(outcome)
+    }
+
+    fn revalidate_target_mode(&self, state: &mut UiStateStore) -> Invalidation {
+        let mode = state
+            .current_target()
+            .map_or(crate::WidgetTargetMode::Navigation, |target| {
+                if self.is_text_input(target) {
+                    crate::WidgetTargetMode::TextEditing
+                } else if state.navigation().target_mode()
+                    == crate::WidgetTargetMode::ValueAdjustment
+                    && self.resolved.find(target).is_some_and(|node| {
+                        (node.controller_value.is_some() && node.adjustment_step > 0.0)
+                            || self.scrolls.iter().any(|scroll| scroll.id == node.id)
+                    })
+                {
+                    crate::WidgetTargetMode::ValueAdjustment
+                } else {
+                    crate::WidgetTargetMode::Navigation
+                }
+            });
+        state.navigation_mut().set_target_mode(mode)
     }
 
     fn dismiss_blurred_dropdowns(&self, state: &mut UiStateStore) -> Invalidation {

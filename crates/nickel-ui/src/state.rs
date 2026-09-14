@@ -188,6 +188,9 @@ impl NavigationState {
         self.controller_retained_focus.remove(scope);
     }
     pub(crate) fn set_controller_selected(&mut self, id: Option<UiId>) -> Invalidation {
+        let target_changed = id
+            .as_ref()
+            .is_some_and(|id| self.current_target.as_ref() != Some(id));
         let changed = self.controller_projection_active != id.is_some()
             || id
                 .as_ref()
@@ -195,6 +198,9 @@ impl NavigationState {
         self.controller_projection_active = id.is_some();
         if let Some(id) = id {
             self.current_target = Some(id);
+        }
+        if target_changed {
+            self.target_mode = WidgetTargetMode::Navigation;
         }
         if changed {
             Invalidation::Paint
@@ -214,6 +220,15 @@ impl NavigationState {
         } else {
             WidgetTargetMode::Navigation
         };
+        if self.target_mode == mode {
+            Invalidation::None
+        } else {
+            self.target_mode = mode;
+            Invalidation::Paint
+        }
+    }
+
+    pub(crate) fn set_target_mode(&mut self, mode: WidgetTargetMode) -> Invalidation {
         if self.target_mode == mode {
             Invalidation::None
         } else {
@@ -485,6 +500,7 @@ impl UiStateStore {
         self.text.caret_visible = true;
         if self.navigation.current_target != id {
             self.focus_generation = self.focus_generation.wrapping_add(1);
+            self.navigation.target_mode = WidgetTargetMode::Navigation;
         }
         if id.is_none() {
             self.navigation.controller_projection_active = false;
