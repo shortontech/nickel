@@ -80,7 +80,7 @@ impl SessionControllerSource {
     fn poll_actions(
         &mut self,
     ) -> Vec<(
-        ControllerAction,
+        Option<ControllerAction>,
         ControllerFamily,
         ControllerExecutionBinding,
         ControllerExecutionAuthority,
@@ -231,13 +231,16 @@ impl SessionControllerSource {
                                             continue;
                                         }
                                         last_event = delivery.event_id;
-                                        if delivery.payload.edge != InputState::Pressed {
-                                            continue;
-                                        }
-                                        let Some(action) = delivery.payload.action else {
-                                            continue;
-                                        };
                                         let binding = ControllerExecutionBinding {
+                                            device_generation: delivery.payload.device_generation,
+                                            edge: match delivery.payload.edge {
+                                                InputState::Pressed => {
+                                                    nickel_input::KeyEdge::Pressed
+                                                }
+                                                InputState::Released => {
+                                                    nickel_input::KeyEdge::Released
+                                                }
+                                            },
                                             routing_epoch: delivery.payload.routing_epoch,
                                             event_id: delivery.event_id.0,
                                             lease_epoch: delivery.lease_epoch.0,
@@ -247,7 +250,10 @@ impl SessionControllerSource {
                                             repeat: delivery.payload.repeat,
                                         };
                                         actions.push((
-                                            controller_action_from_message(action),
+                                            delivery
+                                                .payload
+                                                .action
+                                                .map(controller_action_from_message),
                                             controller_family_from_message(delivery.payload.family),
                                             binding,
                                             ControllerExecutionAuthority {
@@ -912,6 +918,7 @@ pub struct UiHost<A: Application> {
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
+    admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
 }
 
 /// Runtime-owned state for one independently presented viewport of an application.
@@ -932,6 +939,7 @@ pub struct UiHostViewport<Message> {
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
+    admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
 }
 
 impl<Message> UiHostViewport<Message> {
@@ -1069,7 +1077,7 @@ pub enum HostEvent {
     Ui(UiEvent),
     Controller(ControllerAction),
     AdmittedController {
-        action: ControllerAction,
+        action: Option<ControllerAction>,
         binding: ControllerExecutionBinding,
     },
     Shortcut(Shortcut),
@@ -1552,6 +1560,7 @@ impl<A: Application> UiHost<A> {
                 .poll_interval()
                 .map(|interval| Instant::now() + interval),
             pending_long_press: None,
+            admitted_controller_presses: std::collections::BTreeSet::new(),
         }
     }
 
@@ -1589,6 +1598,10 @@ impl<A: Application> UiHost<A> {
             pending_long_press: std::mem::replace(
                 &mut self.pending_long_press,
                 viewport.pending_long_press,
+            ),
+            admitted_controller_presses: std::mem::replace(
+                &mut self.admitted_controller_presses,
+                viewport.admitted_controller_presses,
             ),
         }
     }
@@ -1645,6 +1658,7 @@ impl<A: Application> UiHost<A> {
             overlay_failures,
             next_application_deadline,
             pending_long_press: None,
+            admitted_controller_presses: std::collections::BTreeSet::new(),
         }
     }
 
@@ -2204,8 +2218,19 @@ impl<A: Application> UiHost<A> {
                 HostEvent::AdmittedController { action, binding } => {
                     let admitted =
                         controller_authority.is_some_and(|authority| authority.admits(binding));
-                    let mut outcome = if admitted {
-                        self.dispatch_controller_action(action)
+                    let paired = admitted
+                        && action.is_some_and(|action| match binding.edge {
+                            nickel_input::KeyEdge::Pressed => {
+                                self.admitted_controller_presses
+                                    .insert((binding.device_generation, action));
+                                true
+                            }
+                            nickel_input::KeyEdge::Released => self
+                                .admitted_controller_presses
+                                .remove(&(binding.device_generation, action)),
+                        });
+                    let mut outcome = if paired && binding.edge == nickel_input::KeyEdge::Pressed {
+                        self.dispatch_controller_action(action.expect("paired press has action"))
                     } else {
                         HostEventOutcome::default()
                     };
@@ -2957,7 +2982,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                     .into_iter()
                     .map(|action| {
                         (
-                            action,
+                            Some(action),
                             controller.active_family().unwrap_or_default(),
                             None::<(ControllerExecutionBinding, ControllerExecutionAuthority)>,
                         )
@@ -3002,9 +3027,9 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         ..HostBatch::default()
                     })
                 } else {
-                    host.handle_controller_action(action)
+                    host.handle_controller_action(action.expect("local controller action"))
                 };
-                if action == ControllerAction::Confirm
+                if action == Some(ControllerAction::Confirm)
                     && outcome.text_input_active
                     && host.controller_targets_text_input()
                 {
@@ -3680,6 +3705,8 @@ mod tests {
     #[test]
     fn admitted_controller_revalidates_identity_at_execution_and_tags_effects() {
         let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: nickel_input::KeyEdge::Pressed,
             routing_epoch: 9,
             event_id: 41,
             lease_epoch: 7,
@@ -3702,7 +3729,7 @@ mod tests {
             events: vec![
                 HostEvent::Controller(ControllerAction::Down),
                 HostEvent::AdmittedController {
-                    action: ControllerAction::Confirm,
+                    action: Some(ControllerAction::Confirm),
                     binding,
                 },
             ],
@@ -3729,7 +3756,7 @@ mod tests {
         let rejected = host.step(HostBatch {
             controller_authority: Some(authority),
             events: vec![HostEvent::AdmittedController {
-                action: ControllerAction::Confirm,
+                action: Some(ControllerAction::Confirm),
                 binding: stale_repeat,
             }],
             ..HostBatch::default()

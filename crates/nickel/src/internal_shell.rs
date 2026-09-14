@@ -737,7 +737,7 @@ impl InternalShellCoordinator {
                 nickel_ui::HostEvent::AdmittedController { action, binding }
                     if controller_authority.is_some_and(|authority| authority.admits(*binding)) =>
                 {
-                    Some(*action)
+                    *action
                 }
                 nickel_ui::HostEvent::AdmittedController { .. } => None,
                 _ => None,

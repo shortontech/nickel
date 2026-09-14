@@ -22,6 +22,16 @@ pub fn event_for_reported_name(
     reported_name: &str,
 ) -> Option<ControllerEvent> {
     let id = ControllerId(usize::from(event.id) as u64);
+    event_for_reported_name_with_id(event, id, identity, reported_name)
+}
+
+/// Convert an event using the connection-lifetime ID assigned by the owner.
+pub fn event_for_reported_name_with_id(
+    event: &Event,
+    id: ControllerId,
+    identity: Option<ControllerIdentity>,
+    reported_name: &str,
+) -> Option<ControllerEvent> {
     Some(match event.event {
         EventType::Connected => ControllerEvent::Connected {
             id,

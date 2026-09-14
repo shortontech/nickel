@@ -12,7 +12,7 @@ use nickel_input::{
     },
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ControllerAction {
     Launcher,
     Up,
@@ -43,6 +43,9 @@ pub struct ControllerEnvelope {
 /// authority. Primitive fields keep the UI crate independent of its transport.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ControllerExecutionBinding {
+    /// One physical connection lifetime, not the backend's reusable native slot.
+    pub device_generation: u64,
+    pub edge: KeyEdge,
     pub routing_epoch: u64,
     pub event_id: u64,
     pub lease_epoch: u64,
@@ -168,6 +171,7 @@ pub struct ControllerInput {
     epoch: Instant,
     connected: bool,
     families: BTreeMap<ControllerId, ControllerFamily>,
+    devices: NativeControllerGenerations,
     active_family: Option<ControllerFamily>,
     barrier_unix_ms: u64,
     last_poll_events: usize,
@@ -184,12 +188,14 @@ impl ControllerInput {
             .is_some_and(|gilrs| gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected()));
         let mut normalizer = ControllerNormalizer::default();
         let mut families = BTreeMap::new();
+        let mut devices = NativeControllerGenerations::default();
         if let Some(gilrs) = &gilrs {
             for (id, gamepad) in gilrs
                 .gamepads()
                 .filter(|(_, gamepad)| gamepad.is_connected())
             {
-                let id = ControllerId(usize::from(id) as u64);
+                let native = usize::from(id) as u64;
+                let id = devices.connect(native);
                 families.insert(
                     id,
                     ControllerFamily::from_reported_identity(gamepad.name(), gamepad.vendor_id()),
@@ -213,6 +219,7 @@ impl ControllerInput {
             epoch: Instant::now(),
             connected,
             families,
+            devices,
             active_family: None,
             barrier_unix_ms: 0,
             last_poll_events: 0,
@@ -397,10 +404,20 @@ impl ControllerInput {
             let admitted = fence.admits(event.time);
             let reported_name = gilrs.gamepad(event.id).name().to_owned();
 
+            let native = usize::from(event.id) as u64;
+            let id = if matches!(event.event, gilrs::EventType::Connected) {
+                self.devices.connect(native)
+            } else if let Some(id) = self.devices.current(native) {
+                id
+            } else {
+                // A backend event without an observed connection has no trustworthy
+                // connection lifetime and must not inherit a reused native slot.
+                continue;
+            };
             let identity = matches!(event.event, gilrs::EventType::Connected).then(|| {
                 let gamepad = gilrs.gamepad(event.id);
                 self.families.insert(
-                    ControllerId(usize::from(event.id) as u64),
+                    id,
                     ControllerFamily::from_reported_identity(gamepad.name(), gamepad.vendor_id()),
                 );
                 ControllerIdentity {
@@ -409,11 +426,13 @@ impl ControllerInput {
                     fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
                 }
             });
-            let disconnected = matches!(event.event, gilrs::EventType::Disconnected)
-                .then_some(ControllerId(usize::from(event.id) as u64));
-            if let Some(event) =
-                nickel_input::gilrs::event_for_reported_name(&event, identity, &reported_name)
-            {
+            let disconnected = matches!(event.event, gilrs::EventType::Disconnected).then_some(id);
+            if let Some(event) = nickel_input::gilrs::event_for_reported_name_with_id(
+                &event,
+                id,
+                identity,
+                &reported_name,
+            ) {
                 let now_ms = now.saturating_duration_since(self.epoch).as_millis() as u64;
                 let was_held = self.normalizer.has_held_input();
                 let signals = self.normalizer.handle(event, now_ms);
@@ -437,6 +456,7 @@ impl ControllerInput {
             }
             if let Some(id) = disconnected {
                 self.families.remove(&id);
+                self.devices.disconnect(native, id);
             }
         }
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
@@ -459,6 +479,35 @@ impl ControllerInput {
     }
 }
 
+/// Assigns a never-reused identity to each connected lifetime of a backend slot.
+#[derive(Default)]
+struct NativeControllerGenerations {
+    next: u64,
+    current: BTreeMap<u64, ControllerId>,
+}
+
+impl NativeControllerGenerations {
+    fn connect(&mut self, native: u64) -> ControllerId {
+        if let Some(id) = self.current.get(&native) {
+            return *id;
+        }
+        self.next = self.next.wrapping_add(1).max(1);
+        let id = ControllerId(self.next);
+        self.current.insert(native, id);
+        id
+    }
+
+    fn current(&self, native: u64) -> Option<ControllerId> {
+        self.current.get(&native).copied()
+    }
+
+    fn disconnect(&mut self, native: u64, id: ControllerId) {
+        if self.current.get(&native) == Some(&id) {
+            self.current.remove(&native);
+        }
+    }
+}
+
 fn signal_envelope(
     signal: ControllerSignal,
     family: ControllerFamily,
@@ -472,7 +521,7 @@ fn signal_envelope(
         } => (*id, *edge, *repeat),
         _ => return None,
     };
-    let action = signal_action_for_family(signal, family);
+    let action = signal_physical_action_for_family(&signal, family);
     Some(ControllerEnvelope {
         device,
         action,
@@ -525,6 +574,7 @@ fn signal_action(signal: ControllerSignal) -> Option<ControllerAction> {
     signal_action_for_family(signal, ControllerFamily::Generic)
 }
 
+#[cfg(test)]
 fn signal_action_for_family(
     signal: ControllerSignal,
     family: ControllerFamily,
@@ -555,6 +605,26 @@ fn signal_action_for_family(
     }
 }
 
+fn signal_physical_action_for_family(
+    signal: &ControllerSignal,
+    family: ControllerFamily,
+) -> Option<ControllerAction> {
+    match signal {
+        ControllerSignal::Button { button, repeat, .. }
+            if !(*repeat && *button == ControllerButton::Start) =>
+        {
+            button_action(button, family)
+        }
+        ControllerSignal::Direction { direction, .. } => Some(match direction {
+            AxisDirection::Up => ControllerAction::Up,
+            AxisDirection::Down => ControllerAction::Down,
+            AxisDirection::Left => ControllerAction::Left,
+            AxisDirection::Right => ControllerAction::Right,
+        }),
+        _ => None,
+    }
+}
+
 fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
     match signal {
         ControllerSignal::Button { id, .. } | ControllerSignal::Direction { id, .. } => Some(*id),
@@ -565,8 +635,8 @@ fn signal_id(signal: &ControllerSignal) -> Option<ControllerId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ControllerAction, ControllerFamily, ControllerFence, signal_action,
-        signal_action_for_family, signal_envelope,
+        ControllerAction, ControllerFamily, ControllerFence, NativeControllerGenerations,
+        signal_action, signal_action_for_family, signal_envelope,
     };
     use nickel_input::NativeCode;
     use nickel_input::controller::{
@@ -591,6 +661,22 @@ mod tests {
                 ..fence
             }
             .admits(SystemTime::now())
+        );
+    }
+
+    #[test]
+    fn reused_native_slot_gets_a_fresh_connection_generation() {
+        let mut devices = NativeControllerGenerations::default();
+        let first = devices.connect(7);
+        assert_eq!(devices.connect(7), first, "duplicate connect is idempotent");
+        devices.disconnect(7, first);
+        let replacement = devices.connect(7);
+        assert_ne!(replacement, first);
+        devices.disconnect(7, first);
+        assert_eq!(
+            devices.current(7),
+            Some(replacement),
+            "stale disconnect cannot retire replacement"
         );
     }
 
@@ -678,7 +764,7 @@ mod tests {
         assert_eq!(released.edge, nickel_input::KeyEdge::Released);
         assert!(!released.repeat);
         assert_eq!(released.family, ControllerFamily::PlayStation);
-        assert_eq!(released.action, None);
+        assert_eq!(released.action, Some(ControllerAction::Confirm));
 
         let repeated = signal_envelope(
             ControllerSignal::Direction {

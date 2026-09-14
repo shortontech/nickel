@@ -5743,24 +5743,27 @@ impl NickelSession {
         {
             return;
         }
-        // Releases and neutral bookkeeping cross the broker and retire held state, but do not
-        // synthesize a second semantic action.
-        if payload.edge != nickel_session_protocol::InputState::Pressed {
-            return;
-        }
-        let Some(action) = payload.action.map(nickel_controller_action) else {
-            return;
-        };
+        let action = payload.action.map(nickel_controller_action);
         self.internal_shell
             .as_mut()
             .expect("checked above")
             .set_controller_family(nickel_controller_family(payload.family));
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
-        if action == nickel_ui::ControllerAction::Launcher && binding.1.launcher_intercepted {
+        if action == Some(nickel_ui::ControllerAction::Launcher)
+            && payload.edge == nickel_session_protocol::InputState::Pressed
+            && binding.1.launcher_intercepted
+        {
             self.toggle_launcher_from(InvocationSource::Keyboard);
         } else if let Some(target) = binding.1.target {
             let execution_binding = nickel_ui::ControllerExecutionBinding {
+                device_generation: payload.device_generation,
+                edge: match payload.edge {
+                    nickel_session_protocol::InputState::Pressed => nickel_input::KeyEdge::Pressed,
+                    nickel_session_protocol::InputState::Released => {
+                        nickel_input::KeyEdge::Released
+                    }
+                },
                 routing_epoch: payload.routing_epoch,
                 event_id: delivery.event_id.0,
                 lease_epoch: delivery.lease_epoch.0,
