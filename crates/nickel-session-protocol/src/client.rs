@@ -453,6 +453,7 @@ mod tests {
                                     family: crate::ControllerFamilyMessage::Xbox,
                                     routing_epoch: 11,
                                     evidence: None,
+                                    surface_generation: Some(12),
                                 },
                             },
                         )],
@@ -499,6 +500,7 @@ mod tests {
                     family: crate::ControllerFamilyMessage::Xbox,
                     routing_epoch: 11,
                     evidence: None,
+                    surface_generation: Some(12),
                 },
                 ..
             })]

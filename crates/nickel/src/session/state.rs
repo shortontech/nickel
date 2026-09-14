@@ -1831,6 +1831,7 @@ use smithay::{
 fn controller_envelope_payload(
     event: nickel_ui::ControllerEnvelope,
     routing_epoch: u64,
+    surface_generation: Option<u64>,
 ) -> ControllerEnvelopePayload {
     ControllerEnvelopePayload {
         device_generation: event.device.0,
@@ -1853,6 +1854,7 @@ fn controller_envelope_payload(
             backend_order: event.evidence.backend_order,
             produced_unix_ms: event.evidence.produced_unix_ms,
         }),
+        surface_generation,
     }
 }
 
@@ -5796,7 +5798,7 @@ impl NickelSession {
             return;
         }
         let now_ms = self.start_time.elapsed().as_millis() as u64;
-        let _ = self.controller_broker.begin_transfer(
+        let _ = self.controller_broker.security_takeover(
             ControllerHostId(0),
             self.controller_internal_connection,
             now_ms,
@@ -5849,6 +5851,10 @@ impl NickelSession {
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         self.controller_broker.expire_transfer(now_ms);
         let (routing_epoch, route) = self.refresh_controller_route();
+        let surface_generation = route
+            .target
+            .map(|target| target.snapshot_token())
+            .or_else(|| route.external_surface.map(|surface| surface.0));
         self.fence_changed_external_controller_surface();
         let protected_route = route
             .target
@@ -5867,7 +5873,7 @@ impl NickelSession {
             );
         }
         for event in events {
-            let payload = controller_envelope_payload(event, routing_epoch);
+            let payload = controller_envelope_payload(event, routing_epoch, surface_generation);
             let disposition = self.controller_broker.ingest(payload);
             if matches!(
                 disposition,
@@ -5896,7 +5902,15 @@ impl NickelSession {
     ) {
         let payload = delivery.payload;
         let binding = self.refresh_controller_route();
-        if binding.0 != payload.routing_epoch || self.internal_shell.is_none() {
+        let current_surface_generation = binding
+            .1
+            .target
+            .map(|target| target.snapshot_token())
+            .or_else(|| binding.1.external_surface.map(|surface| surface.0));
+        if binding.0 != payload.routing_epoch
+            || current_surface_generation != payload.surface_generation
+            || self.internal_shell.is_none()
+        {
             return;
         }
         let Some(active_lease) = self.controller_broker.active_lease() else {
@@ -5935,6 +5949,7 @@ impl NickelSession {
                 stream_generation: delivery.stream_generation.0,
                 cutoff: None,
                 repeat: payload.repeat,
+                surface_generation: payload.surface_generation,
             };
             self.internal_ui.step(
                 target,
@@ -5945,6 +5960,7 @@ impl NickelSession {
                         connection_generation: active_lease.connection_generation.0,
                         stream_generation: delivery.stream_generation.0,
                         cutoff: None,
+                        surface_generation: current_surface_generation,
                     }),
                     events: vec![nickel_ui::HostEvent::AdmittedController {
                         action,
@@ -9685,6 +9701,13 @@ impl NickelSession {
         surface_id: Option<&ObjectId>,
         window_id: Option<WindowId>,
     ) {
+        if window_id.is_some_and(|window| {
+            self.controller_external_lease_binding
+                .is_some_and(|binding| binding.surface == window)
+        }) {
+            // Publish revoke/cutoff while the exact retired mapping identity is still known.
+            self.begin_controller_security_takeover();
+        }
         if let Some(id) = window_id {
             self.remote_launch_maps.remove(&id);
         }

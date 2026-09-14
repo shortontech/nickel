@@ -361,6 +361,9 @@ impl SessionControllerSource {
                                             stream_generation: delivery.stream_generation.0,
                                             cutoff: None,
                                             repeat: delivery.payload.repeat,
+                                            surface_generation: delivery
+                                                .payload
+                                                .surface_generation,
                                         };
                                         actions.push((
                                             delivery
@@ -375,6 +378,9 @@ impl SessionControllerSource {
                                                 connection_generation: connection_generation.0,
                                                 stream_generation: delivery.stream_generation.0,
                                                 cutoff: None,
+                                                surface_generation: delivery
+                                                    .payload
+                                                    .surface_generation,
                                             },
                                         ));
                                     }
@@ -3260,10 +3266,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         SessionControllerSource::Connecting { .. }
                             | SessionControllerSource::Attached { .. }
                     );
+                    let broker_actions = self.session_controller.poll_actions();
                     (
-                        self.session_controller
-                            .poll_actions()
+                        broker_actions
                             .into_iter()
+                            .filter(|_| focused)
                             .map(|(action, family, binding, authority)| {
                                 (action, family, Some((binding, authority)))
                             })
@@ -4035,6 +4042,7 @@ mod tests {
             connection_generation: 3,
             stream_generation: 2,
             cutoff: Some(41),
+            surface_generation: Some(10),
             repeat: false,
         };
         let authority = ControllerExecutionAuthority {
@@ -4043,7 +4051,12 @@ mod tests {
             connection_generation: 3,
             stream_generation: 2,
             cutoff: Some(41),
+            surface_generation: Some(10),
         };
+        assert!(!authority.admits(ControllerExecutionBinding {
+            surface_generation: Some(11),
+            ..binding
+        }));
         let mut host = UiHost::new(EffectApplication::default(), 160, 48);
         let outcome = host.step(HostBatch {
             window_focused: Some(true),
@@ -5769,6 +5782,7 @@ mod tests {
                                         family: ControllerFamilyMessage::Xbox,
                                         routing_epoch: 8,
                                         evidence: None,
+                                        surface_generation: Some(10),
                                     },
                                 }),
                                 BrokerMessage::Revoke {

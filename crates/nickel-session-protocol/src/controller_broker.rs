@@ -291,6 +291,38 @@ impl<T> ControllerBroker<T> {
         }
     }
 
+    /// Cancels every pending external ownership identity at a security boundary. An unacknowledged
+    /// predecessor remains poisoned; the abandoned requested lease can never be granted or
+    /// revived by a late acknowledgement.
+    pub fn security_takeover(
+        &mut self,
+        internal: HostId,
+        connection: ConnectionGeneration,
+        now_ms: u64,
+        timeout_ms: u64,
+    ) -> TransferStatus {
+        if let Some(transfer) = self.transfer {
+            if transfer.to == internal && transfer.to_connection == connection {
+                return TransferStatus::Pending {
+                    requested_lease: transfer.requested_lease,
+                    cutoff: transfer.cutoff,
+                };
+            }
+            if !transfer.quiescent {
+                self.poisoned_predecessor = Some(PoisonedPredecessor {
+                    lease: transfer.from,
+                    cutoff: transfer.cutoff,
+                });
+            }
+            self.install_reset(transfer.cutoff);
+            return TransferStatus::Failed;
+        }
+        if self.active.is_some_and(|lease| lease.host != internal) {
+            return self.begin_transfer(internal, connection, now_ms, timeout_ms);
+        }
+        TransferStatus::Failed
+    }
+
     pub fn acknowledge_quiescence(
         &mut self,
         host: HostId,
@@ -710,6 +742,40 @@ mod tests {
             broker.ingest("protected"),
             IngressDisposition::RejectedTransfer { .. }
         ));
+    }
+
+    #[test]
+    fn security_takeover_retires_pending_external_lease_and_late_ack() {
+        let mut broker = ControllerBroker::new(4);
+        let internal = broker.attach(HostId(0));
+        let external = broker.attach(HostId(1));
+        let old = broker.grant(HostId(0), internal).unwrap();
+        let TransferStatus::Pending {
+            requested_lease,
+            cutoff,
+        } = broker.begin_transfer(HostId(1), external, 0, 10)
+        else {
+            panic!("external transfer must be pending")
+        };
+
+        assert_eq!(
+            broker.security_takeover(HostId(0), internal, 1, 10),
+            TransferStatus::Failed
+        );
+        assert_eq!(broker.active_lease(), None);
+        assert!(matches!(
+            broker.ingest("late"),
+            IngressDisposition::RejectedResetBarrier { .. }
+        ));
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(0), internal, old.epoch, cutoff),
+            TransferStatus::Failed
+        );
+        assert!(broker.active_lease().is_none());
+        broker.set_neutral(true);
+        let protected = broker.grant(HostId(0), internal).unwrap();
+        assert_ne!(protected.epoch, requested_lease);
+        assert!(broker.grant(HostId(1), external).is_none());
     }
 
     #[test]

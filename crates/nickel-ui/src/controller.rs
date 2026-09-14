@@ -72,6 +72,7 @@ pub struct ControllerExecutionBinding {
     pub connection_generation: u64,
     pub stream_generation: u64,
     pub cutoff: Option<u64>,
+    pub surface_generation: Option<u64>,
     pub repeat: bool,
 }
 
@@ -82,6 +83,7 @@ pub struct ControllerExecutionAuthority {
     pub connection_generation: u64,
     pub stream_generation: u64,
     pub cutoff: Option<u64>,
+    pub surface_generation: Option<u64>,
 }
 
 impl ControllerExecutionAuthority {
@@ -91,6 +93,7 @@ impl ControllerExecutionAuthority {
             && self.connection_generation == binding.connection_generation
             && self.stream_generation == binding.stream_generation
             && self.cutoff == binding.cutoff
+            && self.surface_generation == binding.surface_generation
             && self.cutoff.is_none_or(|cutoff| binding.event_id <= cutoff)
     }
 }

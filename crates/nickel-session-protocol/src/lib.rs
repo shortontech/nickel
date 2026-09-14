@@ -609,6 +609,9 @@ pub struct ControllerEnvelopePayload {
     pub routing_epoch: u64,
     /// Authenticated source evidence. Raw identity is not copied to public diagnostics.
     pub evidence: Option<ControllerSourceEvidencePayload>,
+    /// Exact compositor mapping lifetime selected at admission.
+    #[serde(default)]
+    pub surface_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
