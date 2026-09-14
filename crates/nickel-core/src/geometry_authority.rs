@@ -73,7 +73,7 @@ pub enum FieldOwner {
     Unknown,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Presentation {
     Normal,
     Maximized,
