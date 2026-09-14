@@ -6242,6 +6242,18 @@ mod tests {
         );
         assert_eq!(host.application().background_activations, 0);
         assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("dialog")));
+        assert!(
+            host.query(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Background".into(),
+            })
+            .is_empty()
+        );
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .all(|node| node.id != background)
+        );
 
         let accessible = host
             .perform_accessibility_action(background, SemanticAction::Invoke(ActionKind::Activate));
@@ -6381,11 +6393,12 @@ mod tests {
         assert!(opened.changed);
         assert!(host.application().cancelled);
         assert!(
-            host.query_unique(&crate::SemanticSelector::RoleAndName {
+            host.query(&crate::SemanticSelector::RoleAndName {
                 role: SemanticRole::Button,
                 name: "After cancel".into(),
             })
-            .is_ok()
+            .is_empty(),
+            "the rebuilt background remains outside the committed modal scope"
         );
         assert!(
             host.query_unique(&crate::SemanticSelector::RoleAndName {
@@ -6613,12 +6626,20 @@ mod tests {
         host.handle_event(UiEvent::ControllerBack);
         assert!(host.inspect().open_overlay.is_none());
 
-        struct TooltipApplication;
+        #[derive(Default)]
+        struct TooltipApplication {
+            activations: usize,
+        }
         impl Application for TooltipApplication {
             type Message = ();
-            fn update(&mut self, (): Self::Message) {}
+            fn update(&mut self, (): Self::Message) {
+                self.activations += 1;
+            }
             fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
-                Button::new((), "Help").id("anchor")
+                Container::new().children([
+                    Button::new((), "Help").id("anchor"),
+                    Button::new((), "Background").id("background"),
+                ])
             }
             fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
                 vec![
@@ -6642,10 +6663,20 @@ mod tests {
             }
         }
 
-        let mut host = UiHost::new(TooltipApplication, 320, 200);
+        let mut host = UiHost::new(TooltipApplication::default(), 320, 200);
         let anchor = host
-            .query_unique(&crate::SemanticSelector::Role(SemanticRole::Button))
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Help".into(),
+            })
             .expect("tooltip anchor");
+        let background = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Background".into(),
+            })
+            .expect("background action")
+            .id;
         let anchor_id = anchor.id.clone();
         assert!(host.request_focus(anchor_id.clone()).changed);
         assert!(
@@ -6664,6 +6695,28 @@ mod tests {
                 && node.label.as_deref() == Some("Explains this control")
         }));
         assert_eq!(host.inspect().keyboard_focus.as_ref(), Some(&anchor_id));
+        assert!(
+            host.query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Background".into(),
+            })
+            .is_ok(),
+            "a tooltip must not hide background semantics"
+        );
+        assert!(
+            host.accessibility_nodes()
+                .iter()
+                .any(|node| node.id == background)
+        );
+        let activated =
+            host.perform_semantic_action(background, SemanticAction::Invoke(ActionKind::Activate));
+        assert_eq!(activated.messages.len(), 1);
+        assert_eq!(host.application().activations, 1);
+        assert_eq!(
+            host.inspect().open_overlay,
+            Some(OverlayId::new("help-tooltip")),
+            "background activation must not dismiss a tooltip"
+        );
     }
 
     #[test]

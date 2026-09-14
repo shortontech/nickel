@@ -422,6 +422,7 @@ pub struct UiFrame<Message = String> {
     overlay_invokers: Vec<(UiId, crate::OverlayId)>,
     primary_overlay_invokers: Vec<(UiId, crate::OverlayId)>,
     active_overlay: Option<(crate::OverlayId, Rect)>,
+    active_overlay_kind: Option<crate::TransientKind>,
     active_overlay_dismiss: Option<crate::DismissPolicy>,
 }
 
@@ -453,6 +454,7 @@ impl<Message> Default for UiFrame<Message> {
             overlay_invokers: Vec::new(),
             primary_overlay_invokers: Vec::new(),
             active_overlay: None,
+            active_overlay_kind: None,
             active_overlay_dismiss: None,
         }
     }
@@ -639,6 +641,7 @@ impl<Message: Clone> UiFrame<Message> {
             root.children.push(index);
         }
         self.active_overlay = Some((surface.id, rect));
+        self.active_overlay_kind = Some(surface.kind);
         self.active_overlay_dismiss = Some(surface.dismiss);
         Ok(())
     }
@@ -708,7 +711,7 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     pub(crate) fn reconcile_transient_focus(&self, state: &mut UiStateStore) {
-        let Some((overlay, _)) = &self.active_overlay else {
+        let Some(overlay) = self.active_interaction_overlay() else {
             return;
         };
         if let Some(selected) = state.navigation().controller_selected().cloned()
@@ -1206,6 +1209,7 @@ impl<Message: Clone> UiFrame<Message> {
             Rect::new(left, top, right - left, bottom - top)
         });
         self.active_overlay = Some((menu.id.clone(), active_rect));
+        self.active_overlay_kind = Some(crate::TransientKind::ContextMenu);
         self.active_overlay_dismiss = Some(crate::DismissPolicy::default());
         let overlay_root = menu.id.as_ui_id();
         let overlay_accessibility = self
@@ -1538,9 +1542,8 @@ impl<Message: Clone> UiFrame<Message> {
             .iter()
             .enumerate()
             .filter(|(_, node)| {
-                self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
-                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
-                })
+                self.active_interaction_overlay()
+                    .is_none_or(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), &node.id))
             })
             .filter(|(_, node)| node.semantic_role.is_some() || !node.semantic_actions.is_empty())
             .map(|(index, node)| SemanticNodeSnapshot {
@@ -1582,9 +1585,9 @@ impl<Message: Clone> UiFrame<Message> {
         let included = |index: usize| {
             let node = &self.resolved.nodes[index];
             (node.semantic_role.is_some() || !node.semantic_actions.is_empty())
-                && self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
-                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
-                })
+                && self
+                    .active_interaction_overlay()
+                    .is_none_or(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), &node.id))
         };
         let mut remaining = max_bytes;
         let mut count = 0;
@@ -2126,9 +2129,15 @@ impl<Message: Clone> UiFrame<Message> {
     }
 
     fn target_is_in_active_overlay(&self, target: &UiId) -> bool {
-        self.active_overlay
-            .as_ref()
-            .is_none_or(|(overlay, _)| self.is_descendant_or_self(overlay.as_ui_id(), target))
+        self.active_interaction_overlay()
+            .is_none_or(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), target))
+    }
+
+    fn active_interaction_overlay(&self) -> Option<&crate::OverlayId> {
+        match self.active_overlay_kind {
+            Some(crate::TransientKind::Tooltip) => None,
+            _ => self.active_overlay.as_ref().map(|(overlay, _)| overlay),
+        }
     }
 
     pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
@@ -2233,6 +2242,7 @@ impl<Message: Clone> UiFrame<Message> {
         self.messages
             .iter()
             .filter(|region| &region.message == message)
+            .filter(|region| self.target_is_in_active_overlay(&region.id))
             .map(|region| {
                 let node = self.resolved.find(&region.id);
                 SemanticTarget {
@@ -3975,9 +3985,8 @@ impl<Message: Clone> UiFrame<Message> {
                 })
             })
             .filter(|node| {
-                self.active_overlay.as_ref().is_none_or(|(overlay, _)| {
-                    self.is_descendant_or_self(overlay.as_ui_id(), &node.id)
-                })
+                self.active_interaction_overlay()
+                    .is_none_or(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), &node.id))
             })
             .map(|node| &node.id)
             .collect::<Vec<_>>();
@@ -3994,9 +4003,8 @@ impl<Message: Clone> UiFrame<Message> {
         // Keyboard entry follows the surface's focus order. A default controller
         // pane must not skip controls that precede it, such as a search header.
         let scope = self
-            .active_overlay
-            .as_ref()
-            .map(|(id, _)| id.as_ui_id())
+            .active_interaction_overlay()
+            .map(crate::OverlayId::as_ui_id)
             .or_else(|| self.resolved.nodes.first().map(|node| &node.id));
         let ids = self
             .focus_targets()
@@ -4519,7 +4527,7 @@ impl<Message: Clone> UiFrame<Message> {
         state: &UiStateStore,
         include_scrolls: bool,
     ) -> Vec<UiId> {
-        if let Some((overlay, _)) = &self.active_overlay {
+        if let Some(overlay) = self.active_interaction_overlay() {
             let mut targets = self
                 .messages
                 .iter()
@@ -4687,9 +4695,8 @@ impl<Message: Clone> UiFrame<Message> {
             .navigation_mut()
             .set_controller_selected(Some(selected.clone()));
         if self
-            .active_overlay
-            .as_ref()
-            .is_some_and(|(overlay, _)| self.is_descendant_or_self(overlay.as_ui_id(), &selected))
+            .active_interaction_overlay()
+            .is_some_and(|overlay| self.is_descendant_or_self(overlay.as_ui_id(), &selected))
         {
             invalidation = invalidation.merge(state.set_focus(Some(selected.clone())));
         }
@@ -5103,9 +5110,21 @@ impl<Message: Clone> UiFrame<Message> {
                 })
             })
             .collect();
+        if let Some(overlay) = self.active_interaction_overlay().cloned() {
+            let scoped = self
+                .resolved
+                .nodes
+                .iter()
+                .filter(|node| self.is_descendant_or_self(overlay.as_ui_id(), &node.id))
+                .map(|node| node.id.clone())
+                .collect::<BTreeSet<_>>();
+            self.accessibility.retain(|node| scoped.contains(&node.id));
+        }
         self.semantic_role_name_index.clear();
         for (index, node) in self.resolved.nodes.iter().enumerate() {
-            if let (Some(role), Some(name)) = (node.semantic_role, &node.accessibility_label) {
+            if self.target_is_in_active_overlay(&node.id)
+                && let (Some(role), Some(name)) = (node.semantic_role, &node.accessibility_label)
+            {
                 self.semantic_role_name_index
                     .entry((role, name.clone()))
                     .or_default()
