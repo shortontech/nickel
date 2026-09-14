@@ -1482,10 +1482,6 @@ fn unknown_suspension_within_bound(unknown_since: Option<u64>, now: u64) -> bool
     unknown_since.is_none_or(|since| now.saturating_sub(since) < MAX_UNKNOWN_SUSPENSION_MS)
 }
 
-fn active_needs_geometry_reconcile(active: &WindowDrag) -> bool {
-    active.issued_settlements.is_empty() || active.unknown_since.is_some()
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TerminalSettlementOutcome {
     key: RetainedSettlementKey,
@@ -1525,6 +1521,8 @@ struct WindowDragCoordinator {
     last_retention_outcome: Option<SettlementRetentionOutcome>,
     last_terminal_apply: Option<NativeApplyState>,
     last_terminal_reason: Option<CancellationReason>,
+    native_move_size_windows: HashSet<isize>,
+    consumed_buttons: HashSet<u16>,
 }
 
 #[derive(Clone, Copy)]
@@ -1742,6 +1740,7 @@ impl WindowDragCoordinator {
     fn admit(&mut self, admission: WindowDragAdmission) -> bool {
         let window = admission.fingerprint.window;
         if self.active.is_some()
+            || self.native_move_size_windows.contains(&window)
             || self
                 .retained_settlements
                 .values()
@@ -1818,6 +1817,7 @@ impl WindowDragCoordinator {
             return false;
         }
         self.current_lifetimes.insert(window, lifetime);
+        self.consumed_buttons.insert(admission.initiating_button);
         self.active = Some(WindowDrag {
             operation,
             completion,
@@ -1861,11 +1861,7 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
-        let observation = if active_needs_geometry_reconcile(&active) {
-            observe_window_drag(&mut active, time, false)
-        } else {
-            Ok(true)
-        };
+        let observation = observe_window_drag(&mut active, time, false);
         match observation {
             Err(reason) => {
                 let _ = self.reducer.cancel(active.operation, reason);
@@ -2002,6 +1998,7 @@ impl WindowDragCoordinator {
 
     fn native_move_size(&mut self, window: isize, started: bool, now: u64) {
         if started {
+            self.native_move_size_windows.insert(window);
             if self
                 .active
                 .as_ref()
@@ -2035,16 +2032,20 @@ impl WindowDragCoordinator {
                     .observe(fact, ObservationCausality::Independent);
                 self.finish_retained(key, retained);
             }
-        } else if self
-            .retained_settlements
-            .values()
-            .any(|retained| retained.lifetime.fingerprint.window == window)
-        {
-            self.observe_retained_settlement(now);
+        } else {
+            self.native_move_size_windows.remove(&window);
+            if self
+                .retained_settlements
+                .values()
+                .any(|retained| retained.lifetime.fingerprint.window == window)
+            {
+                self.observe_retained_settlement(now);
+            }
         }
     }
 
     fn window_destroyed(&mut self, window: isize) {
+        self.native_move_size_windows.remove(&window);
         if self
             .active
             .as_ref()
@@ -2064,6 +2065,10 @@ impl WindowDragCoordinator {
                 self.fail_retained(key, retained);
             }
         }
+    }
+
+    fn consume_release(&mut self, button: u16) -> bool {
+        self.consumed_buttons.remove(&button)
     }
 }
 
@@ -2375,6 +2380,14 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if !permits_contested_workflow(NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.load(Ordering::Acquire)) {
         if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
             coordinator.cancel(CancellationReason::AuthorityUnknown);
+            let consumed_release = match event.kind {
+                NativePointerKind::PrimaryReleased => coordinator.consume_release(1),
+                NativePointerKind::SecondaryReleased => coordinator.consume_release(2),
+                _ => false,
+            };
+            if consumed_release {
+                return HookDisposition::Suppress;
+            }
         }
         return HookDisposition::Forward;
     }
@@ -2388,6 +2401,12 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     {
         let release = pointer_release_binding(event.kind, operation.completion.press_epoch);
         let current_release = release == Some(operation.completion);
+        if current_release {
+            let CompletionGesture::Button(button) = operation.completion.gesture else {
+                unreachable!("pointer completion has a button gesture");
+            };
+            coordinator.consume_release(button);
+        }
         if event.kind == NativePointerKind::Moved || current_release {
             if event.kind == NativePointerKind::Moved
                 && now.saturating_sub(operation.initiated_at) >= 250
@@ -2430,6 +2449,21 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             let _ = coordinator.reducer.release(operation.operation, binding);
             return HookDisposition::Forward;
         }
+    }
+    let released_button = match event.kind {
+        NativePointerKind::PrimaryReleased => Some(1),
+        NativePointerKind::SecondaryReleased => Some(2),
+        _ => None,
+    };
+    if released_button.is_some_and(|button| {
+        WINDOW_DRAG
+            .lock()
+            .is_ok_and(|mut coordinator| coordinator.consume_release(button))
+    }) {
+        // Nickel suppressed the matching press. Keep suppressing its release
+        // after cancellation or native takeover so Windows never sees an
+        // unmatched button-up tail.
+        return HookDisposition::Suppress;
     }
     if !matches!(
         event.kind,
@@ -2534,7 +2568,6 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let observation = coordinator
         .active
         .as_mut()
-        .filter(|active| active_needs_geometry_reconcile(active))
         .map(|active| observe_window_drag(active, now, false));
     match observation {
         Some(Err(reason)) => {
@@ -2651,6 +2684,21 @@ fn classify_window_drag_observation(
 ) -> Result<bool, CancellationReason> {
     let fact = native_geometry(observed);
     if !operation.issued_settlements.is_empty() {
+        let compatible_with_own_write = observed == operation.last_observed
+            || operation
+                .issued_settlements
+                .iter()
+                .any(|settlement| settlement.request.placement == observed);
+        if compatible_with_own_write {
+            // Geometry equality cannot prove Win32 request causality, so do
+            // not settle or transfer authority. It can, however, exclude a
+            // competing geometry value and permit the gesture to continue.
+            operation.last_observed = observed;
+            for settlement in &mut operation.issued_settlements {
+                settlement.expire(now);
+            }
+            return Ok(true);
+        }
         for settlement in &mut operation.issued_settlements {
             settlement.observe(fact, ObservationCausality::Unknown);
             settlement.expire(now);
@@ -4993,10 +5041,10 @@ mod tests {
         ActiveSettlementExit, DwmPreviewState, NativeApplyState, NativePreviewDiagnostics,
         NativeWindowFingerprint, NativeWindowLifetime, RetainedNativeSettlement,
         SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
-        WindowDragAdmission, WindowDragCoordinator, active_needs_geometry_reconcile,
-        application_icon, apply_window_drag, clamp_preview_x, classify_window_drag_observation,
-        contain_rect, contested_authority, contested_drag_within_bound, enqueue_issued_settlement,
-        executable_icon, is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
+        clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
+        contested_drag_within_bound, enqueue_issued_settlement, executable_icon,
+        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
         parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
         project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
         should_restore_on_activation, unknown_suspension_within_bound, windows_pid_descends_from,
@@ -5086,19 +5134,20 @@ mod tests {
     #[test]
     fn unmatched_native_request_suspends_and_expires_as_unconfirmed() {
         let mut drag = contested_drag();
-        let observed = drag.last_observed;
+        let baseline = drag.last_observed;
         drag.issued_settlements.push_back(Settlement::new(
             NativeRequest {
                 id: NativeRequestId(7),
                 mapping_generation: 1,
                 desired: drag.authority.revisions(),
-                placement: LogicalRect { x: 50, ..observed },
+                placement: LogicalRect { x: 50, ..baseline },
             },
             SettlementLimits {
                 deadline_tick: 250,
                 max_corrections: 0,
             },
         ));
+        let observed = LogicalRect { x: 30, ..baseline };
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
             Ok(false)
@@ -5134,26 +5183,26 @@ mod tests {
         ));
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 249, false),
-            Ok(false)
+            Ok(true)
         );
-        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
+        assert_ne!(drag.authority.base_placement.owner, FieldOwner::Unknown);
         assert!(!drag.issued_settlements.is_empty());
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
-            Ok(false)
+            Ok(true)
         );
     }
 
     #[test]
-    fn pending_unknown_observation_suspends_before_another_write() {
+    fn pending_baseline_observation_does_not_suspend_own_write() {
         let mut drag = drag_with_pending_settlement(60);
         let observed = drag.last_observed;
 
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 10, false),
-            Ok(false)
+            Ok(true)
         );
-        assert_eq!(drag.unknown_since, Some(10));
+        assert_eq!(drag.unknown_since, None);
         assert_eq!(drag.issued_settlements.len(), 1);
     }
 
@@ -5162,7 +5211,12 @@ mod tests {
         let mut coordinator = WindowDragCoordinator::default();
         let mut drag = drag_with_pending_settlement(70);
         for (tick, request) in [(50, 71), (100, 72), (200, 73), (300, 74)] {
-            assert!(!active_needs_geometry_reconcile(&drag), "tick {tick}");
+            let observed = drag.last_observed;
+            assert_eq!(
+                classify_window_drag_observation(&mut drag, observed, tick, false),
+                Ok(true),
+                "tick {tick}"
+            );
             let mut next = drag.issued_settlements[0];
             next.request.id = NativeRequestId(request);
             next.limits.deadline_tick = tick + 250;
@@ -5174,6 +5228,47 @@ mod tests {
         assert_eq!(drag.unknown_since, None);
         assert_eq!(drag.issued_settlements.len(), 5);
         assert!(drag.issued_settlements.len() <= super::MAX_ACTIVE_WINDOW_SETTLEMENTS);
+    }
+
+    #[test]
+    fn observed_native_move_size_blocks_admission_until_end() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        coordinator.native_move_size(7, true, 10);
+        assert!(coordinator.native_move_size_windows.contains(&7));
+        assert!(!coordinator.admit(WindowDragAdmission {
+            fingerprint: fingerprint(7, 13),
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 11,
+        }));
+
+        coordinator.native_move_size(7, false, 12);
+        assert!(!coordinator.native_move_size_windows.contains(&7));
+        assert!(coordinator.admit(WindowDragAdmission {
+            fingerprint: fingerprint(7, 13),
+            start: POINT::default(),
+            rectangle,
+            resize_edge: None,
+            initiating_button: 1,
+            time: 13,
+        }));
+    }
+
+    #[test]
+    fn cancellation_retains_consumed_button_until_release_tail() {
+        let mut coordinator = WindowDragCoordinator::default();
+        coordinator.consumed_buttons.insert(1);
+        coordinator.cancel(CancellationReason::NativeTakeover);
+        assert!(coordinator.consume_release(1));
+        assert!(!coordinator.consume_release(1));
     }
 
     #[test]
