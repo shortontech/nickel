@@ -2579,8 +2579,10 @@ pub(crate) enum InternalCaptureState {
 }
 
 struct XdgConfigureSettlement {
-    serial: smithay::utils::Serial,
-    incorporated: nickel_core::geometry_authority::DesiredRevisions,
+    configures: std::collections::VecDeque<(
+        smithay::utils::Serial,
+        nickel_core::geometry_authority::DesiredRevisions,
+    )>,
     settlement: nickel_core::geometry_authority::Settlement,
 }
 
@@ -10257,8 +10259,7 @@ impl NickelSession {
         self.xdg_geometry_settlements.insert(
             id,
             XdgConfigureSettlement {
-                serial: configure,
-                incorporated: desired_revisions,
+                configures: std::collections::VecDeque::new(),
                 settlement: Settlement::new(
                     NativeRequest {
                         id: request_id,
@@ -10273,6 +10274,7 @@ impl NickelSession {
                 ),
             },
         );
+        self.record_xdg_configure_incorporation(window, configure);
         let timer = self.event_loop_handle.insert_source(
             smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
             move |_, _, state| {
@@ -10312,8 +10314,7 @@ impl NickelSession {
         };
         let Some(acked) = acked else { return };
         let request_id = record.settlement.request.id;
-        let incorporated_revisions = record.incorporated;
-        let configured = record.serial;
+        let configures = record.configures.iter().copied().collect::<Vec<_>>();
         let current_revisions = self
             .geometry_authorities
             .get(&id)
@@ -10335,10 +10336,9 @@ impl NickelSession {
             return;
         };
         let Some(causality) = crate::session::grabs::resize_grab::xdg_commit_causality(
-            configured,
+            &configures,
             acked,
             request_id,
-            incorporated_revisions,
             current_revisions,
         ) else {
             return;
@@ -10351,6 +10351,34 @@ impl NickelSession {
         {
             record.settlement.observe(fact, causality);
         }
+    }
+
+    /// Retain the desired fields actually incorporated by a later configure.
+    /// Callers must invoke this at the configure emission boundary; an ACK for
+    /// an unrecorded serial is deliberately not inferred from serial ordering.
+    pub(crate) fn record_xdg_configure_incorporation(
+        &mut self,
+        window: &Window,
+        serial: smithay::utils::Serial,
+    ) {
+        const MAX_RETAINED_CONFIGURES: usize = 16;
+        let Some(id) = self.window_geometry_authority_id(window) else {
+            return;
+        };
+        let Some(revisions) = self
+            .geometry_authorities
+            .get(&id)
+            .map(|authority| authority.revisions())
+        else {
+            return;
+        };
+        let Some(record) = self.xdg_geometry_settlements.get_mut(&id) else {
+            return;
+        };
+        if record.configures.len() == MAX_RETAINED_CONFIGURES {
+            record.configures.pop_front();
+        }
+        record.configures.push_back((serial, revisions));
     }
 
     pub(crate) fn record_x11_client_desired_geometry(

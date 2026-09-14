@@ -128,15 +128,19 @@ pub fn operation_resize_edges(edges: ResizeEdge) -> Option<ResizeEdges> {
 }
 
 pub(crate) fn xdg_commit_causality(
-    configured: smithay::utils::Serial,
+    configured: &[(
+        smithay::utils::Serial,
+        nickel_core::geometry_authority::DesiredRevisions,
+    )],
     acknowledged: smithay::utils::Serial,
     request: nickel_core::geometry_authority::NativeRequestId,
-    incorporated: nickel_core::geometry_authority::DesiredRevisions,
     current: nickel_core::geometry_authority::DesiredRevisions,
 ) -> Option<nickel_core::geometry_authority::ObservationCausality> {
-    if acknowledged != configured {
-        None
-    } else if incorporated == current {
+    let incorporated = configured
+        .iter()
+        .rev()
+        .find_map(|(serial, revisions)| (*serial == acknowledged).then_some(*revisions))?;
+    if incorporated == current {
         Some(nickel_core::geometry_authority::ObservationCausality::Correlated(request))
     } else {
         Some(nickel_core::geometry_authority::ObservationCausality::Independent)
@@ -466,10 +470,9 @@ mod tests {
         let incorporated = authority.revisions();
         assert_eq!(
             xdg_commit_causality(
-                12_u32.into(),
+                &[(12_u32.into(), incorporated)],
                 12_u32.into(),
                 NativeRequestId(7),
-                incorporated,
                 authority.revisions(),
             ),
             Some(ObservationCausality::Correlated(NativeRequestId(7)))
@@ -490,24 +493,35 @@ mod tests {
         );
         assert_eq!(
             xdg_commit_causality(
-                12_u32.into(),
+                &[(12_u32.into(), incorporated)],
                 12_u32.into(),
                 NativeRequestId(7),
-                incorporated,
                 authority.revisions()
             ),
             Some(ObservationCausality::Independent)
         );
         assert_eq!(
             xdg_commit_causality(
-                12_u32.into(),
+                &[(12_u32.into(), authority.revisions())],
                 13_u32.into(),
                 NativeRequestId(7),
-                authority.revisions(),
                 authority.revisions(),
             ),
             None,
             "newer acknowledgements are not inferred to incorporate an older configure"
+        );
+        assert_eq!(
+            xdg_commit_causality(
+                &[
+                    (12_u32.into(), incorporated),
+                    (13_u32.into(), authority.revisions()),
+                ],
+                13_u32.into(),
+                NativeRequestId(7),
+                authority.revisions(),
+            ),
+            Some(ObservationCausality::Correlated(NativeRequestId(7))),
+            "a later recorded configure can incorporate the final desired fields"
         );
     }
 
