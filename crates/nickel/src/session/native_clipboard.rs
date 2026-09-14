@@ -236,7 +236,19 @@ impl super::state::NickelSession {
             .set_clipboard_limit(self.native_clipboard.text_limit.unwrap_or(0));
         let mut released = event.clone();
         released.edge = nickel_input::KeyEdge::Released;
-        let recipient = id.snapshot_token();
+        let surface_lifetime = id.snapshot_token();
+        let text_transaction = clipboard.as_ref().map(|_| event.order.0);
+        let recipient_lease = if text_transaction.is_some() {
+            self.native_field_lease(id)
+                .ok_or("native clipboard field is unavailable")?
+                .1
+        } else {
+            surface_lifetime
+        };
+        let recipient = nickel_ui::NormalizedRecipientBinding {
+            lease: recipient_lease,
+            lifetime: surface_lifetime,
+        };
         let elapsed = self.start_time.elapsed().as_micros() as u64;
         let ingress = |event: nickel_input::KeyEvent, clipboard_text| {
             let order = event.order.0;
@@ -256,20 +268,17 @@ impl super::state::NickelSession {
                     order,
                     monotonic_micros: elapsed,
                 },
-                recipient: nickel_ui::NormalizedRecipientBinding {
-                    lease: recipient,
-                    lifetime: recipient,
-                },
+                recipient,
                 operation: None,
                 transform_generation: None,
-                text_transaction: Some(order),
+                text_transaction,
                 transfer_cutoff: None,
                 broker_event_id: None,
-                host_connection_generation: recipient,
+                host_connection_generation: surface_lifetime,
                 operation_epoch: None,
                 role: "session-native-clipboard".into(),
                 coordinate_meaning: "not-applicable".into(),
-                composition_recipient_epoch: Some(recipient),
+                composition_recipient_epoch: Some(recipient_lease),
             })
         };
         self.internal_ui.step(

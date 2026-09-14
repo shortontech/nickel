@@ -92,6 +92,7 @@ mod tests {
                     assert!(admission.order > 0);
                     assert_eq!(recipient.lease, id.snapshot_token());
                     assert_eq!(recipient.lifetime, id.snapshot_token());
+                    assert_eq!(batch.normalized_authorities.len(), 1);
                     Some(*device)
                 }
                 _ => None,

@@ -10,8 +10,8 @@ use std::{
 
 use nickel_ui::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
-    InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer, Text, UiEvent, View,
-    ViewContext,
+    InternalSurfaceSet, LinearGradient, NormalizedIngressAuthority, NormalizedRecipientBinding,
+    Point as UiPoint, SoftwareRenderer, Text, UiEvent, View, ViewContext,
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 
@@ -2169,10 +2169,12 @@ impl InternalUiRuntime {
         batch.clipboard_text_limit = Some(self.clipboard_limit);
         for event in &mut batch.events {
             if let HostEvent::NormalizedIngress(envelope) = event {
-                envelope.recipient = nickel_ui::NormalizedRecipientBinding {
-                    lease: id.snapshot_token(),
-                    lifetime: id.snapshot_token(),
-                };
+                if envelope.recipient.lifetime != id.snapshot_token() {
+                    envelope.recipient = nickel_ui::NormalizedRecipientBinding {
+                        lease: id.snapshot_token(),
+                        lifetime: id.snapshot_token(),
+                    };
+                }
                 envelope.host_connection_generation = id.snapshot_token();
                 batch
                     .normalized_authorities

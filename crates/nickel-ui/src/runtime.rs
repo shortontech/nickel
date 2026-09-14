@@ -1297,6 +1297,29 @@ pub struct NormalizedRecipientBinding {
     pub lifetime: u64,
 }
 
+/// Owner-side snapshot used to revalidate normalized input at the final UI
+/// execution boundary. Optional bindings are compared exactly: an operation,
+/// transform, or text transaction cannot be added, removed, or replaced after
+/// the owner admits the batch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedIngressAuthority {
+    pub recipient: NormalizedRecipientBinding,
+    pub operation: Option<u64>,
+    pub transform_generation: Option<u64>,
+    pub text_transaction: Option<u64>,
+}
+
+impl NormalizedIngressAuthority {
+    pub fn admits(self, envelope: &NormalizedInputEnvelope) -> bool {
+        self.recipient.lease != 0
+            && self.recipient.lifetime != 0
+            && envelope.recipient == self.recipient
+            && envelope.operation == self.operation
+            && envelope.transform_generation == self.transform_generation
+            && envelope.text_transaction == self.text_transaction
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalAction {
     ToggleLauncher,
@@ -3779,8 +3802,9 @@ mod tests {
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
         ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
-        NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
-        NormalizedSourceBinding, PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        NormalizedAdmissionBinding, NormalizedIngressAuthority, NormalizedInputEnvelope,
+        NormalizedRecipientBinding, NormalizedSourceBinding, PresentScheduler, Shortcut,
+        ShortcutOutcome, UiHost, ViewContext,
         local_controller_poll_lease, queue_continuous_input, wait_duration,
     };
 
@@ -3844,6 +3868,7 @@ mod tests {
             composition_recipient_epoch: None,
         })
     }
+
     use crate::{
         ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
         ControllerExecutionBinding, ControllerExecutionDisposition, ControllerExecutionEvidence,

@@ -59,7 +59,7 @@ pub use runtime::{
     FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
     HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
     MessageEvidence, NormalizedAdmissionBinding, NormalizedInputEnvelope,
-    NormalizedRecipientBinding, NormalizedSourceBinding, OutboundFileDrag,
+    NormalizedIngressAuthority, NormalizedRecipientBinding, NormalizedSourceBinding, OutboundFileDrag,
     OverlayDeclarationFailure, Popover, SemanticActionFailure, Shortcut, ShortcutOutcome, Tooltip,
     UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
 };
