@@ -51,6 +51,16 @@ fn bounded_generated_transfer_timeout_and_overflow_sequences_fence_delivery() {
                         IngressDisposition::RejectedResetBarrier { .. }
                     ));
                     broker.set_neutral(true);
+                    assert!(broker.grant(HostId(1), a).is_none());
+                    assert_eq!(
+                        broker.acknowledge_quiescence(
+                            lease.host,
+                            lease.connection_generation,
+                            lease.epoch,
+                            cutoff,
+                        ),
+                        TransferStatus::Failed
+                    );
                     lease = broker.grant(HostId(1), a).unwrap();
                 }
             } else {
