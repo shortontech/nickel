@@ -16,7 +16,7 @@ nested fixture, historical observation, or the presence of test source.
 | --- | --- | --- | --- | --- | --- |
 | Platform-neutral core | operation identity, admission, completion, handoff, cancellation, tails | pass | pass as dependency | not applicable | none for enumerated transitions |
 | Platform-neutral core | revisioned geometry, compensation, late/superseded fencing | pass | pass as dependency | not applicable | native settlement is platform-specific |
-| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 387 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
+| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 388 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
 | Linux Smithay | physical keyboard/pointer/touch normalization | pass in serialized session and focused library suites | pass | untested | real devices, focus/grab and lock/suspend teardown |
 | Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
 | Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
@@ -30,7 +30,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact current-tip results below were recorded at `2e7352c`. Older focused evidence remains listed
+Exact current-tip results below were recorded at `03e0cee`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -49,7 +49,7 @@ cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file
 ```
 
 Pass. Reported library totals include `nickel-core` 182/0, `nickel-file` 181/0,
-`nickel-session-protocol` 55/0, `nickel-ui` 387/0 with 2 ignored, and
+`nickel-session-protocol` 55/0, `nickel-ui` 388/0 with 2 ignored, and
 `nickel-ui-testkit` 29/0. The testkit touch scenario exercises separately supplied normalized
 authority rather than envelope self-certification.
 
@@ -57,7 +57,7 @@ authority rather than envelope self-certification.
 cargo test -p nickel --lib session:: -- --test-threads=1
 ```
 
-Pass: 457 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
+Pass: 458 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
 nonzero recipient leases, controller execution fencing, touch-generation cancellation, native
 keyboard/clipboard routing, screenshot Escape handling, focus lifecycle, XDG/XWayland operations,
 and geometry ownership. The ignored rows explicitly require live native facilities.
