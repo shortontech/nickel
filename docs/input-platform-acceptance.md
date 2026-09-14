@@ -16,7 +16,7 @@ nested fixture, historical observation, or the presence of test source.
 | --- | --- | --- | --- | --- | --- |
 | Platform-neutral core | operation identity, admission, completion, handoff, cancellation, tails | pass | pass as dependency | not applicable | none for enumerated transitions |
 | Platform-neutral core | revisioned geometry, compensation, late/superseded fencing | pass | pass as dependency | not applicable | native settlement is platform-specific |
-| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 369 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
+| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 387 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
 | Linux Smithay | physical keyboard/pointer/touch normalization | pass in serialized session and focused library suites | pass | untested | real devices, focus/grab and lock/suspend teardown |
 | Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
 | Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
@@ -30,8 +30,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact current-tip results below were recorded at `43dd616`; the final X11 history-only correction
-at `a4bc570` then passed the strict workspace gates and its focused 14-test authority suite. Older focused evidence remains listed
+Exact current-tip results below were recorded at `2e7352c`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -49,8 +48,8 @@ cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file
   -p nickel-ui-testkit --lib -- --test-threads=1
 ```
 
-Pass. Reported library totals include `nickel-core` 181/0, `nickel-file` 181/0,
-`nickel-session-protocol` 48/0, `nickel-ui` 369/0 with 2 ignored, and
+Pass. Reported library totals include `nickel-core` 182/0, `nickel-file` 181/0,
+`nickel-session-protocol` 55/0, `nickel-ui` 387/0 with 2 ignored, and
 `nickel-ui-testkit` 29/0. The testkit touch scenario exercises separately supplied normalized
 authority rather than envelope self-certification.
 
