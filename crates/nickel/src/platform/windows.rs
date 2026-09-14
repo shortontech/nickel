@@ -1524,6 +1524,7 @@ struct WindowDragCoordinator {
     terminal_settlement_outcomes: VecDeque<TerminalSettlementOutcome>,
     last_retention_outcome: Option<SettlementRetentionOutcome>,
     last_terminal_apply: Option<NativeApplyState>,
+    last_terminal_reason: Option<CancellationReason>,
 }
 
 #[derive(Clone, Copy)]
@@ -1537,23 +1538,29 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
-    fn suspend_for_independent_native_geometry(
+    fn terminalize_native_takeover(
         &mut self,
         mut active: WindowDrag,
-        observed: LogicalRect,
-        now: u64,
+        observed: Option<LogicalRect>,
     ) {
-        let fact = native_geometry(observed);
-        active
-            .authority
-            .observe(fact, ObservationCausality::Independent);
-        for settlement in &mut active.issued_settlements {
-            settlement.observe(fact, ObservationCausality::Independent);
+        if let Some(observed) = observed {
+            let fact = native_geometry(observed);
+            active
+                .authority
+                .observe(fact, ObservationCausality::Independent);
+            active.last_observed = observed;
+        } else {
+            active.authority.base_placement.control = ControlMode::Delegated;
         }
-        active.last_observed = observed;
-        active.unknown_since.get_or_insert(now);
+        for settlement in &mut active.issued_settlements {
+            settlement.supersede();
+        }
         self.record_terminal_active_settlements(&mut active);
-        self.active = Some(active);
+        let _ = self
+            .reducer
+            .cancel(active.operation, CancellationReason::NativeTakeover);
+        self.last_terminal_reason = Some(CancellationReason::NativeTakeover);
+        self.finish_active(active, ActiveSettlementExit::Failed);
     }
 
     fn expire_unknown_suspension(&mut self, now: u64) -> bool {
@@ -1946,6 +1953,7 @@ impl WindowDragCoordinator {
     fn cancel(&mut self, reason: CancellationReason) {
         if let Some(active) = self.active.take() {
             let _ = self.reducer.cancel(active.operation, reason);
+            self.last_terminal_reason = Some(reason);
             self.finish_active(active, ActiveSettlementExit::RetainForReconciliation);
         }
     }
@@ -2001,15 +2009,11 @@ impl WindowDragCoordinator {
             {
                 let active = self.active.take().expect("matching active drag exists");
                 let mut rectangle = RECT::default();
-                if unsafe { GetWindowRect(HWND(window as *mut c_void), &mut rectangle) }.is_err() {
-                    let _ = self
-                        .reducer
-                        .cancel(active.operation, CancellationReason::AuthorityUnknown);
-                    self.finish_active(active, ActiveSettlementExit::Unconfirmed);
-                } else {
-                    let observed = logical_rect(rectangle);
-                    self.suspend_for_independent_native_geometry(active, observed, now);
-                }
+                let observed =
+                    unsafe { GetWindowRect(HWND(window as *mut c_void), &mut rectangle) }
+                        .is_ok()
+                        .then(|| logical_rect(rectangle));
+                self.terminalize_native_takeover(active, observed);
             }
             let keys = self
                 .retained_settlements
@@ -5173,7 +5177,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_competing_geometry_still_enters_unknown_suspension() {
+    fn explicit_native_takeover_is_immediately_terminal() {
         let mut coordinator = WindowDragCoordinator::default();
         let drag = drag_with_pending_settlement(75);
         let lifetime = drag.lifetime;
@@ -5182,11 +5186,12 @@ mod tests {
             ..drag.last_observed
         };
 
-        coordinator.suspend_for_independent_native_geometry(drag, competing, 80);
-        let drag = coordinator.active.as_ref().unwrap();
-        assert_eq!(drag.unknown_since, Some(80));
-        assert_eq!(drag.authority.base_placement.owner, FieldOwner::External);
-        assert!(active_needs_geometry_reconcile(&drag));
+        coordinator.terminalize_native_takeover(drag, Some(competing));
+        assert!(coordinator.active.is_none());
+        assert_eq!(
+            coordinator.last_terminal_reason,
+            Some(CancellationReason::NativeTakeover)
+        );
         assert_eq!(
             coordinator.terminal_settlement_outcomes.back(),
             Some(&TerminalSettlementOutcome {
