@@ -179,7 +179,26 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        let ingress = internal_normalized_ingress(
+            input,
+            None,
+            "on-screen-keyboard",
+            self.keyboard_host.inspect(),
+            None,
+        );
+        self.keyboard_host_event(ingress, width, height)
+    }
+
+    pub(crate) fn keyboard_host_event(
+        &mut self,
+        ingress: HostEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
+        let input = normalized_input(&ingress)
+            .expect("keyboard host event must be normalized")
+            .clone();
         // Only primary clicks activate keyboard keys. Other buttons must neither
         // replace the primary lease nor consume its release-time recipient epoch.
         if matches!(&input, InputEvent::Pointer(PointerEvent::Button { button, .. })
@@ -314,10 +333,7 @@ impl LiveShell {
         self.keyboard_step(
             HostBatch {
                 surface_size: Some((width, height)),
-                events: vec![HostEvent::Normalized {
-                    input,
-                    clipboard_text: None,
-                }],
+                events: vec![ingress],
                 ..HostBatch::default()
             },
             epoch,

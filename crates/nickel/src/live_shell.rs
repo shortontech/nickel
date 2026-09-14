@@ -2,9 +2,67 @@ mod preference_persistence;
 
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+static INTERNAL_INGRESS_ORDER: AtomicU64 = AtomicU64::new(1);
+static INTERNAL_INGRESS_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn internal_normalized_ingress(
+    input: nickel_input::InputEvent,
+    clipboard_text: Option<String>,
+    owner: &'static str,
+    recipient: nickel_ui::HostInspection,
+    transform_generation: Option<u64>,
+) -> HostEvent {
+    let device = input.device();
+    let device_generation = device.map_or(0, |device| device.0);
+    let order = INTERNAL_INGRESS_ORDER.fetch_add(1, Ordering::Relaxed);
+    let epoch = INTERNAL_INGRESS_EPOCH.get_or_init(Instant::now);
+    HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+        input,
+        clipboard_text,
+        source: nickel_ui::NormalizedSourceBinding {
+            seat: 0,
+            backend_stream: if device.is_some() {
+                format!("routed-native-input:{owner}")
+            } else {
+                format!("internal-lifecycle:{owner}")
+            },
+            stream_generation: 1,
+            device_generation,
+            identity_capability: if device.is_some() {
+                "normalized-device-generation".into()
+            } else {
+                "system-event-without-device".into()
+            },
+            reconnect_generation: device_generation,
+        },
+        admission: nickel_ui::NormalizedAdmissionBinding {
+            order,
+            monotonic_micros: epoch.elapsed().as_micros() as u64,
+        },
+        recipient: nickel_ui::NormalizedRecipientBinding {
+            lease: recipient.window_focused as u64,
+            lifetime: recipient.frame_generation,
+        },
+        operation: None,
+        transform_generation,
+        text_transaction: None,
+    })
+}
+
+fn normalized_input(event: &HostEvent) -> Option<&nickel_input::InputEvent> {
+    match event {
+        HostEvent::Normalized { input, .. } => Some(input),
+        HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
+        _ => None,
+    }
+}
 
 use nickel_core::task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher};
 use nickel_core::{
@@ -1843,6 +1901,15 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
+        let ingress =
+            internal_normalized_ingress(event, None, "desktop", self.desktop_host.inspect(), None);
+        self.desktop_host_event(ingress)
+    }
+
+    pub(crate) fn desktop_host_event(&mut self, ingress: HostEvent) -> bool {
+        let event = normalized_input(&ingress)
+            .expect("desktop host event must be normalized")
+            .clone();
         if matches!(
             event,
             nickel_input::InputEvent::Pointer(nickel_input::PointerEvent::Leave { .. })
@@ -1854,10 +1921,7 @@ impl LiveShell {
             let had_hover = application.pointer_seen;
             application.pointer_seen = false;
             let outcome = self.desktop_host.step(HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: event,
-                    clipboard_text: None,
-                }],
+                events: vec![ingress],
                 application_changed: had_hover,
                 ..Default::default()
             });
@@ -1992,10 +2056,7 @@ impl LiveShell {
             );
         if overlay_owns_event {
             let outcome = self.desktop_host.step(HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: event,
-                    clipboard_text: None,
-                }],
+                events: vec![ingress],
                 application_changed: pointer_cancelled,
                 ..HostBatch::default()
             });
@@ -2288,11 +2349,13 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> nickel_ui::HostEventOutcome {
+        let recipient = if self.run_visible {
+            self.run_host.inspect()
+        } else {
+            self.launcher_host.inspect()
+        };
         self.launcher_host_event_with_clipboard_limit(
-            HostEvent::Normalized {
-                input,
-                clipboard_text,
-            },
+            internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None),
             width,
             height,
             None,
@@ -2595,11 +2658,28 @@ impl LiveShell {
             return false;
         }
         self.sync_notification_host(width, height);
+        let ingress = internal_normalized_ingress(
+            input,
+            None,
+            "notification",
+            self.notification_host.inspect(),
+            None,
+        );
+        self.notification_host_event(ingress, width, height)
+    }
+
+    pub(crate) fn notification_host_event(
+        &mut self,
+        ingress: HostEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
+        if self.notification.is_none() && !self.notification_history_visible {
+            return false;
+        }
+        self.sync_notification_host(width, height);
         let outcome = self.notification_host.step(HostBatch {
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            }],
+            events: vec![ingress],
             ..HostBatch::default()
         });
         outcome.changed | self.apply_notification_effects()
@@ -3526,14 +3606,20 @@ impl LiveShell {
         &mut self,
         input: nickel_input::InputEvent,
     ) -> nickel_ui::HostEventOutcome {
+        let Some(frame) = self.preview_frame.as_ref() else {
+            return nickel_ui::HostEventOutcome::default();
+        };
+        let ingress =
+            internal_normalized_ingress(input, None, "window-preview", frame.inspect(), None);
+        self.preview_host_event(ingress)
+    }
+
+    pub(crate) fn preview_host_event(&mut self, ingress: HostEvent) -> nickel_ui::HostEventOutcome {
         let Some(frame) = self.preview_frame.as_mut() else {
             return nickel_ui::HostEventOutcome::default();
         };
         let outcome = frame.step(HostBatch {
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            }],
+            events: vec![ingress],
             ..HostBatch::default()
         });
         let actions = frame.take_actions();
@@ -3773,17 +3859,25 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        let recipient = self
+            .application_menu_host
+            .as_ref()
+            .map(|host| host.inspect())
+            .or_else(|| self.window_menu_host.as_ref().map(|host| host.inspect()))
+            .unwrap_or_else(|| self.launcher_host.inspect());
         self.window_menu_host_event(
-            HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            },
+            internal_normalized_ingress(input, None, "window-menu", recipient, None),
             width,
             height,
         )
     }
 
-    fn window_menu_host_event(&mut self, event: HostEvent, width: u32, height: u32) -> bool {
+    pub(crate) fn window_menu_host_event(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+    ) -> bool {
         if self.application_menu_target.is_some() {
             if self.application_menu_host.is_none() {
                 let _ = self.application_menu_scene();
@@ -5178,11 +5272,10 @@ impl LiveShell {
                 ..HostBatch::default()
             });
         }
+        let ingress =
+            internal_normalized_ingress(input, None, "lock", self.lock_host.inspect(), None);
         let outcome = self.lock_host.step(HostBatch {
-            events: vec![HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            }],
+            events: vec![ingress],
             ..HostBatch::default()
         });
         let changed = outcome.changed;

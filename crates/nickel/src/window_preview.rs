@@ -781,6 +781,10 @@ impl WindowPreviewFrame {
         self.change_token
     }
 
+    pub fn inspect(&self) -> nickel_ui::HostInspection {
+        self.host.inspect()
+    }
+
     pub fn next_deadline(&self) -> Option<Instant> {
         self.next_deadline
     }

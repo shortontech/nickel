@@ -793,17 +793,14 @@ impl InternalShellCoordinator {
             if matches!(
                 entry.role,
                 SurfaceRole::Launcher | SurfaceRole::ControlCenter
-            ) && let nickel_ui::HostEvent::Normalized {
-                input,
-                clipboard_text,
-            } = event
-            {
+            ) && matches!(
+                &event,
+                nickel_ui::HostEvent::Normalized { .. }
+                    | nickel_ui::HostEvent::NormalizedIngress(_)
+            ) {
                 let mut outcome = if entry.role == SurfaceRole::Launcher {
                     self.shell.launcher_host_event_with_clipboard_limit(
-                        nickel_ui::HostEvent::Normalized {
-                            input,
-                            clipboard_text,
-                        },
+                        event,
                         entry.size.0,
                         entry.size.1,
                         batch.clipboard_text_limit,
@@ -814,14 +811,8 @@ impl InternalShellCoordinator {
                         SurfaceRole::VolumeOsd,
                         SurfaceRole::OnScreenKeyboard,
                     ]);
-                    self.shell.control_host_event(
-                        nickel_ui::HostEvent::Normalized {
-                            input,
-                            clipboard_text,
-                        },
-                        entry.size,
-                        batch.clipboard_text_limit,
-                    )
+                    self.shell
+                        .control_host_event(event, entry.size, batch.clipboard_text_limit)
                 };
                 changed |= outcome.changed;
                 crate::session_host::record_clipboard_outcome(
@@ -831,39 +822,51 @@ impl InternalShellCoordinator {
                 continue;
             }
             if entry.role == SurfaceRole::OnScreenKeyboard
-                && let nickel_ui::HostEvent::Normalized { input, .. } = event
+                && matches!(
+                    &event,
+                    nickel_ui::HostEvent::Normalized { .. }
+                        | nickel_ui::HostEvent::NormalizedIngress(_)
+                )
             {
                 // Preserve the press-time recipient lease through native release.
                 changed |= self
                     .shell
-                    .keyboard_host_input(input, entry.size.0, entry.size.1);
+                    .keyboard_host_event(event, entry.size.0, entry.size.1);
                 continue;
             }
             // Desktop reducers need the original button, key edge, modifier snapshot,
             // and contact identity. Do not fabricate them from lossy UiEvent actions.
             if entry.role == SurfaceRole::Desktop {
-                if let nickel_ui::HostEvent::Normalized { input, .. } = event {
-                    changed |= self.shell.desktop_input(input);
+                if matches!(
+                    &event,
+                    nickel_ui::HostEvent::Normalized { .. }
+                        | nickel_ui::HostEvent::NormalizedIngress(_)
+                ) {
+                    changed |= self.shell.desktop_host_event(event);
                 }
                 continue;
             }
-            if let nickel_ui::HostEvent::Normalized { input, .. } = event {
+            if matches!(
+                &event,
+                nickel_ui::HostEvent::Normalized { .. }
+                    | nickel_ui::HostEvent::NormalizedIngress(_)
+            ) {
                 match entry.role {
                     SurfaceRole::WindowPreview => {
                         dependent_roles
                             .extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu]);
-                        changed |= self.shell.preview_host_input(input).changed;
+                        changed |= self.shell.preview_host_event(event).changed;
                     }
                     SurfaceRole::WindowContextMenu => {
                         dependent_roles.extend([SurfaceRole::Panel, SurfaceRole::WindowPreview]);
                         changed |=
                             self.shell
-                                .window_menu_host_input(input, entry.size.0, entry.size.1);
+                                .window_menu_host_event(event, entry.size.0, entry.size.1);
                     }
                     SurfaceRole::Notification => {
                         changed |=
                             self.shell
-                                .notification_host_input(input, entry.size.0, entry.size.1);
+                                .notification_host_event(event, entry.size.0, entry.size.1);
                     }
                     _ => {}
                 }
