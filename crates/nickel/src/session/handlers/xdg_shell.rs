@@ -1183,6 +1183,10 @@ impl NickelSession {
         // focus while starting. Once metadata identifies an ordinary Codex
         // project window, complete the deferred focus handoff.
         if is_codex_project_chat {
+            let target = KeyboardFocusTarget::Wayland(surface.wl_surface().clone());
+            if !self.complete_deferred_metadata_focus(Some(target)) {
+                return;
+            }
             if let Some(id) = self
                 .surface_windows
                 .get(&surface.wl_surface().id())
@@ -1195,11 +1199,6 @@ impl NickelSession {
                 candidate
                     .set_activated(candidate.wl_surface().as_deref() == Some(surface.wl_surface()));
             });
-            self.surrender_internal_focus();
-            self.realize_seat_focus(
-                Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
-                nickel_core::focus::FocusScope::Ordinary,
-            );
             self.send_tracked_xdg_configures_for_all_windows();
         }
     }

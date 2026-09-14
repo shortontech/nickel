@@ -12202,6 +12202,23 @@ impl NickelSession {
         )
     }
 
+    /// Complete a deferred native focus handoff without withdrawing the current
+    /// compositor-owned projection until the native request has been admitted.
+    ///
+    /// Metadata can turn an already-mapped toplevel into a focus candidate. In
+    /// protected states that ordinary request must fail without revoking the
+    /// lock surface's controller lease or clearing its internal focus.
+    pub(crate) fn complete_deferred_metadata_focus(
+        &mut self,
+        target: Option<crate::session::focus::KeyboardFocusTarget>,
+    ) -> bool {
+        if !self.realize_seat_focus(target, FocusScope::Ordinary) {
+            return false;
+        }
+        self.surrender_internal_focus();
+        true
+    }
+
     fn focus_internal_surface(&mut self, surface: nickel_ui::InternalSurfaceId) -> bool {
         if !self.internal_ui.is_visible(surface) {
             return false;
@@ -19277,6 +19294,28 @@ mod protocol_tests {
         // An ordinary XDG focus request must be rejected before it can mutate
         // either protected focus projection or the controller routing lease.
         assert!(!session.realize_seat_focus(None, nickel_core::focus::FocusScope::Ordinary));
+
+        assert_eq!(
+            session.seat.get_keyboard().unwrap().current_focus(),
+            prior_seat_focus
+        );
+        assert_eq!(session.internal_ui.focused(), Some(lock));
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        assert!(session.seat_focus.acknowledged().is_none());
+    }
+
+    #[test]
+    fn mapped_metadata_focus_preserves_locked_internal_owner_and_controller_lease() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.lock_session();
+        let lock = session.internal_ui.focused().expect("focused lock surface");
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
+
+        // Model a mapped Codex window becoming identifiable through an app-id
+        // metadata change while the lock surface owns protected input.
+        assert!(!session.complete_deferred_metadata_focus(None));
 
         assert_eq!(
             session.seat.get_keyboard().unwrap().current_focus(),
