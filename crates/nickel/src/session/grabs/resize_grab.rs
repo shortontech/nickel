@@ -698,10 +698,9 @@ mod tests {
         )
         .expect("active resize admitted");
         let id = operation.id();
-        let mut correlation = ResizeSurfaceState::WaitingForLastCommit {
+        let mut correlation = ResizeSurfaceState::Resizing {
             edges: ResizeEdge::TOP_LEFT,
             initial_rect: initial_rect(),
-            terminal_configures: vec![12_u32.into()],
         };
 
         let transition = reducer.cancel(id, CancellationReason::Superseded);
