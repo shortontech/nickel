@@ -18684,6 +18684,77 @@ mod protocol_tests {
     }
 
     #[test]
+    fn removed_touch_output_cancels_native_target_and_drops_later_tail() {
+        use nickel_session_protocol::TestInput;
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = preview_test_session();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "fallback".into(),
+                logical_width: 800,
+                logical_height: 600,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        session
+            .apply_test_output(TestOutput::Connect {
+                name: "touchscreen".into(),
+                logical_width: 800,
+                logical_height: 600,
+                scale_120: 120,
+                transform: OutputTransform::Normal,
+            })
+            .unwrap();
+        let contact = Some(9).into();
+        let native_slot = session.client_touch_slots.begin(
+            "nickel-synthetic-input",
+            contact,
+            Some("touchscreen"),
+        );
+        session.active_touch_slots.insert(native_slot);
+
+        session
+            .apply_test_output(TestOutput::Disconnect {
+                name: "touchscreen".into(),
+            })
+            .unwrap();
+
+        assert!(session.active_touch_slots.is_empty());
+        assert_eq!(
+            session
+                .client_touch_slots
+                .get("nickel-synthetic-input", contact),
+            None
+        );
+        assert!(!session.client_touch_slots.owns_output("touchscreen"));
+
+        // These go through the production session input reducer. With no retained native target
+        // binding they stop before delivery (whose first observable side effect is recording the
+        // interaction output) and cannot recreate the retired contact.
+        session.last_interaction_output_name = None;
+        session
+            .inject_test_input(TestInput::TouchMotion {
+                slot: 9,
+                x: 10,
+                y: 10,
+            })
+            .unwrap();
+        session
+            .inject_test_input(TestInput::TouchUp { slot: 9 })
+            .unwrap();
+        assert!(session.last_interaction_output_name.is_none());
+        assert!(session.active_touch_slots.is_empty());
+        assert_eq!(
+            session
+                .client_touch_slots
+                .get("nickel-synthetic-input", contact),
+            None
+        );
+    }
+
+    #[test]
     fn keyboard_reservation_resize_and_close_change_only_the_owner_output() {
         let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
         let (_event_loop, mut session) = preview_test_session();

@@ -1884,6 +1884,9 @@ impl NickelSession {
     }
 
     pub(crate) fn reconcile_output_removal(&mut self, name: &str) {
+        if self.client_touch_slots.owns_output(name) {
+            self.cancel_all_touch_authority();
+        }
         if self.primary_output_name.as_deref() == Some(name) {
             self.primary_output_name = self.space.outputs().next().map(|output| output.name());
         }

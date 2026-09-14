@@ -53,6 +53,7 @@ struct ClientTouchContact {
 pub(super) struct ClientTouchSlots {
     device_generations: std::collections::HashMap<String, u64>,
     contacts: std::collections::HashMap<ClientTouchContact, smithay::backend::input::TouchSlot>,
+    contact_outputs: std::collections::HashMap<ClientTouchContact, String>,
     next_generation: u64,
     next_slot: u32,
     free_slots: Vec<u32>,
@@ -85,10 +86,11 @@ impl ClientTouchSlots {
         self.contacts.keys().any(|contact| contact.device == device)
     }
 
-    fn begin(
+    pub(super) fn begin(
         &mut self,
         device: &str,
         contact: smithay::backend::input::TouchSlot,
+        output_name: Option<&str>,
     ) -> smithay::backend::input::TouchSlot {
         let key = ClientTouchContact {
             device: device.to_owned(),
@@ -107,11 +109,15 @@ impl ClientTouchSlots {
             slot
         });
         let slot = Some(native_slot).into();
-        self.contacts.insert(key, slot);
+        self.contacts.insert(key.clone(), slot);
+        if let Some(output_name) = output_name {
+            self.contact_outputs
+                .insert(key.clone(), output_name.to_owned());
+        }
         slot
     }
 
-    fn get(
+    pub(super) fn get(
         &self,
         device: &str,
         contact: smithay::backend::input::TouchSlot,
@@ -137,6 +143,11 @@ impl ClientTouchSlots {
             generation,
             contact: contact.into(),
         })?;
+        self.contact_outputs.remove(&ClientTouchContact {
+            device: device.to_owned(),
+            generation,
+            contact: contact.into(),
+        });
         let native = i32::from(slot);
         if native >= 0 {
             // Smithay retains the target until the terminal frame. Do not make this identity
@@ -159,7 +170,14 @@ impl ClientTouchSlots {
                 .map(|slot| slot as u32),
         );
         self.contacts.clear();
+        self.contact_outputs.clear();
         self.free_slots.append(&mut self.pending_recycle);
+    }
+
+    pub(super) fn owns_output(&self, output_name: &str) -> bool {
+        self.contact_outputs
+            .values()
+            .any(|mapped| mapped == output_name)
     }
 }
 
@@ -2026,6 +2044,9 @@ impl NickelSession {
                 pointer.frame(self);
             }
             InputEvent::TouchDown { event, .. } => {
+                let mapped_output_name = output_name
+                    .map(str::to_owned)
+                    .or_else(|| self.space.outputs().next().map(|output| output.name()));
                 let geometry = self.touch_output_geometry(output_name)?;
                 let location = event.position_transformed(geometry.size) + geometry.loc.to_f64();
                 let client_present =
@@ -2069,9 +2090,11 @@ impl NickelSession {
                     self.request_on_screen_keyboard();
                 }
                 self.record_interaction_output(location);
-                let client_slot = self
-                    .client_touch_slots
-                    .begin(&event.device().id(), event.slot());
+                let client_slot = self.client_touch_slots.begin(
+                    &event.device().id(),
+                    event.slot(),
+                    mapped_output_name.as_deref(),
+                );
                 self.active_touch_slots.insert(client_slot);
                 let touch = self.seat.get_touch().unwrap();
                 touch.down(
@@ -2399,8 +2422,8 @@ mod tests {
     fn client_touch_slots_separate_equal_contacts_across_devices() {
         let mut slots = super::ClientTouchSlots::default();
         let contact = Some(3).into();
-        let first = slots.begin("touch-a", contact);
-        let second = slots.begin("touch-b", contact);
+        let first = slots.begin("touch-a", contact, Some("left"));
+        let second = slots.begin("touch-b", contact, Some("right"));
 
         assert_ne!(first, second);
         assert_eq!(slots.get("touch-a", contact), Some(first));
@@ -2414,7 +2437,7 @@ mod tests {
     fn client_touch_device_loss_requires_domain_cancel_and_fences_old_generation() {
         let mut slots = super::ClientTouchSlots::default();
         let contact = Some(5).into();
-        let old = slots.begin("touch-a", contact);
+        let old = slots.begin("touch-a", contact, Some("left"));
 
         assert!(slots.device_removed("touch-a"));
         slots.cancel_all();
@@ -2426,7 +2449,7 @@ mod tests {
             None,
             "the replacement generation cannot inherit the removed contact"
         );
-        let replacement = slots.begin("touch-a", contact);
+        let replacement = slots.begin("touch-a", contact, Some("left"));
         // Whole-domain cancellation ended the old lifetime, so recycling its numeric Smithay
         // slot is safe. The generation-bearing contact key, not numeric non-reuse, is the fence.
         assert_eq!(slots.get("touch-a", contact), Some(replacement));
@@ -2437,16 +2460,31 @@ mod tests {
     }
 
     #[test]
+    fn client_touch_output_retirement_forgets_native_target_bindings() {
+        let mut slots = super::ClientTouchSlots::default();
+        let contact = Some(6).into();
+        let active = slots.begin("touch-a", contact, Some("touchscreen"));
+
+        assert!(slots.owns_output("touchscreen"));
+        assert_eq!(slots.get("touch-a", contact), Some(active));
+
+        slots.cancel_all();
+
+        assert!(!slots.owns_output("touchscreen"));
+        assert_eq!(slots.get("touch-a", contact), None);
+    }
+
+    #[test]
     fn client_touch_slots_recycle_only_after_terminal_release() {
         let mut slots = super::ClientTouchSlots::default();
         let contact = Some(1).into();
 
         for _ in 0..4_096 {
-            let active = slots.begin("touch-a", contact);
-            assert_eq!(slots.begin("touch-a", contact), active);
+            let active = slots.begin("touch-a", contact, Some("left"));
+            assert_eq!(slots.begin("touch-a", contact, Some("left")), active);
             assert_eq!(slots.end("touch-a", contact), Some(active));
             assert!(slots.contacts.is_empty());
-            let before_frame = slots.begin("touch-b", contact);
+            let before_frame = slots.begin("touch-b", contact, Some("right"));
             assert_ne!(before_frame, active);
             assert_eq!(slots.end("touch-b", contact), Some(before_frame));
             slots.finish_frame();
