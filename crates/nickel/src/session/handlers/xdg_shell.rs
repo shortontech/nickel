@@ -1,3 +1,8 @@
+use nickel_core::window_operation::{
+    BeginRequest, CompletionBinding, CompletionGesture, MappingGeneration, NativeLifetimeId,
+    OperationKind, SeatId, Source, SourceGeneration, SourceId, WindowId as OperationWindowId,
+    WindowMapping,
+};
 use nickel_session_protocol::ShellRole;
 use smithay::{
     desktop::{
@@ -31,7 +36,7 @@ use smithay::{
 use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
-    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab},
+    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, move_grab::WindowMoveOperation},
     shell_layout,
     window_registry::{WindowAdmission, WindowId, WindowMetadataSource, WindowRegistry},
 };
@@ -224,6 +229,10 @@ impl XdgShellHandler for NickelSession {
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         self.forget_toplevel_geometry(&surface);
         let surface_id = surface.wl_surface().id();
+        let window_id = self.surface_windows.get(&surface_id).copied();
+        if let Some(window_id) = window_id {
+            self.cancel_xdg_move_for_mapping(window_id, true);
+        }
         if let Some(window) = self.xdg_toplevel_windows.get(&surface_id).cloned() {
             self.space.unmap_elem(&window);
         }
@@ -231,7 +240,6 @@ impl XdgShellHandler for NickelSession {
         self.restored_xdg_toplevels.remove(&surface_id);
         self.xdg_toplevel_windows.remove(&surface_id);
         self.xdg_toplevel_locations.remove(&surface_id);
-        let window_id = self.surface_windows.get(&surface_id).copied();
         let destroyed_surface_had_focus = self
             .seat
             .get_keyboard()
@@ -336,12 +344,53 @@ impl XdgShellHandler for NickelSession {
             let Some(initial_window_location) = self.space.element_location(&window) else {
                 return;
             };
+            let Some(registry_id) = self.surface_windows.get(&wl_surface.id()).copied() else {
+                return;
+            };
+            let Ok(button) = u16::try_from(start_data.button) else {
+                return;
+            };
+            // Nickel currently exposes one Smithay pointer-seat stream. The
+            // checked XDG serial/focus above is both its gesture generation and
+            // native admission evidence; the registry id is allocated anew for
+            // each mapped window lifetime.
+            let operation = WindowMoveOperation::begin(
+                &mut self.window_operations,
+                BeginRequest {
+                    seat: SeatId::new(1),
+                    subject: WindowMapping {
+                        window: OperationWindowId::new(registry_id.0),
+                        native_lifetime: NativeLifetimeId::new(u64::from(
+                            wl_surface.id().protocol_id(),
+                        )),
+                        generation: MappingGeneration::new(registry_id.0),
+                    },
+                    kind: OperationKind::Move,
+                    origin: CompletionBinding {
+                        source: Source {
+                            id: SourceId::new(1),
+                            generation: SourceGeneration::new(u64::from(u32::from(serial))),
+                        },
+                        gesture: CompletionGesture::Button(button),
+                    },
+                    optional_update_sources: Vec::new(),
+                },
+            );
+            let Some(operation) = operation else {
+                tracing::info!(
+                    surface = ?wl_surface.id(),
+                    ?serial,
+                    "diagnostic: xdg toplevel move rejected by shared operation admission"
+                );
+                return;
+            };
 
             let grab = MoveSurfaceGrab {
                 start_data,
                 window,
                 initial_window_location,
                 restored_from_maximized: false,
+                operation: Some(operation),
             };
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -804,8 +853,11 @@ impl NickelSession {
                     .wl_surface()
                     .is_some_and(|focused| focused.id() == surface_id)
             });
-        self.space.unmap_elem(&window);
         let registry_id = self.surface_windows.get(&surface_id).copied();
+        if let Some(registry_id) = registry_id {
+            self.cancel_xdg_move_for_mapping(registry_id, false);
+        }
+        self.space.unmap_elem(&window);
         window.set_activated(false);
         self.restore_focus_after_window_removal(
             had_focus || registry_id.is_some_and(|id| self.windows.is_active(id)),
@@ -813,6 +865,26 @@ impl NickelSession {
         self.notify_protocol_snapshot();
         self.request_output_redraw();
         Some(window)
+    }
+
+    fn cancel_xdg_move_for_mapping(&mut self, registry_id: WindowId, destroyed: bool) {
+        let window = OperationWindowId::new(registry_id.0);
+        let Some(operation) = self.window_operations.operation_for_window(window) else {
+            return;
+        };
+        let reason = if destroyed {
+            nickel_core::window_operation::CancellationReason::TargetDestroyed
+        } else {
+            nickel_core::window_operation::CancellationReason::TargetUnmapped
+        };
+        let _ = self.window_operations.cancel(operation, reason);
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.unset_grab(
+                self,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                smithay::backend::input::InputTime::now(),
+            );
+        }
     }
 
     fn update_window_metadata(&mut self, surface: &ToplevelSurface) {

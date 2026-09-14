@@ -636,6 +636,7 @@ impl XwmHandler for NickelSession {
                 window: mapped,
                 initial_window_location,
                 restored_from_maximized: false,
+                operation: None,
             },
             smithay::utils::SERIAL_COUNTER.next_serial(),
             smithay::input::pointer::Focus::Clear,

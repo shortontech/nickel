@@ -2529,6 +2529,8 @@ pub struct NickelSession {
     pub popups: PopupManager,
 
     pub seat: Seat<Self>,
+    /// Shared semantic admission/lifecycle for migrated window operations.
+    pub(crate) window_operations: nickel_core::window_operation::WindowOperationReducer,
     pub(crate) on_screen_keyboard: crate::session::on_screen_keyboard::OnScreenKeyboardState,
     pub windows: WindowRegistry,
     pub surface_windows: HashMap<ObjectId, WindowId>,
@@ -6941,6 +6943,7 @@ impl NickelSession {
             xwayland_registration: None,
             popups,
             seat,
+            window_operations: Default::default(),
             on_screen_keyboard: Default::default(),
             windows: WindowRegistry::default(),
             surface_windows: HashMap::new(),

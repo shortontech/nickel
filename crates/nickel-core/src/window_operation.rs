@@ -309,6 +309,13 @@ impl WindowOperationReducer {
         self.terminal.get(&id).copied()
     }
 
+    /// Returns the current interactive writer for a stable window identity.
+    /// Native adapters use this to revoke a mapping before destroying it.
+    #[must_use]
+    pub fn operation_for_window(&self, window: WindowId) -> Option<OperationId> {
+        self.windows.get(&window).copied()
+    }
+
     pub fn begin(&mut self, request: BeginRequest) -> (Option<OperationId>, Transition) {
         if let Some(&by) = self.seats.get(&request.seat) {
             return (

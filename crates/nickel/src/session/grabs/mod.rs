@@ -145,8 +145,6 @@ macro_rules! forward_pointer_grab_events {
         ) -> &smithay::input::pointer::GrabStartData<crate::session::NickelSession> {
             &self.start_data
         }
-
-        fn unset(&mut self, _data: &mut crate::session::NickelSession) {}
     };
 }
 

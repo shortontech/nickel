@@ -94,6 +94,8 @@ impl ResizeSurfaceGrab {
 impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
     forward_pointer_grab_events!();
 
+    fn unset(&mut self, _data: &mut NickelSession) {}
+
     fn motion(
         &mut self,
         data: &mut NickelSession,
