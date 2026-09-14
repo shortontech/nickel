@@ -662,6 +662,25 @@ impl WindowOperationReducer {
     }
 
     pub fn rebase_geometry_source(&mut self, operation: OperationId, source: Source) -> Transition {
+        let Some(current) = self.operations.get(&operation) else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::UnknownOperation,
+            ));
+        };
+        let Some(anchor) = current.geometry.map(|geometry| geometry.constrained) else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryUnavailable,
+            ));
+        };
+        self.rebase_geometry(operation, source, anchor)
+    }
+
+    pub fn rebase_geometry(
+        &mut self,
+        operation: OperationId,
+        source: Source,
+        anchor: LogicalRect,
+    ) -> Transition {
         let Some(current) = self.operations.get_mut(&operation) else {
             return Transition::disposition(Disposition::Rejected(
                 RejectionReason::UnknownOperation,
@@ -676,8 +695,9 @@ impl WindowOperationReducer {
                 RejectionReason::GeometryUnavailable,
             ));
         };
-        geometry.intent = geometry.intent.rebase(geometry.constrained);
-        geometry.unconstrained = geometry.constrained;
+        geometry.intent = geometry.intent.rebase(anchor);
+        geometry.unconstrained = anchor;
+        geometry.constrained = anchor;
         geometry.anchor_epoch = AnchorEpoch::new(geometry.anchor_epoch.get() + 1);
         geometry.source_epoch = SourceEpoch::new(geometry.source_epoch.get() + 1);
         geometry.update_source = source;
@@ -686,7 +706,7 @@ impl WindowOperationReducer {
             anchor_epoch: geometry.anchor_epoch,
             source_epoch: geometry.source_epoch,
             source,
-            anchor: geometry.constrained,
+            anchor,
         }])
     }
 

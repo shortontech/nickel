@@ -37,8 +37,9 @@ use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
     grabs::{
-        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab, move_grab::WindowPointerOperation,
-        resize_grab::operation_resize_edges,
+        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
+        move_grab::WindowPointerOperation,
+        resize_grab::{operation_geometry_constraints, operation_resize_edges},
     },
     shell_layout,
     window_registry::{WindowAdmission, WindowId, WindowMetadataSource, WindowRegistry},
@@ -357,7 +358,8 @@ impl XdgShellHandler for NickelSession {
             // checked XDG serial/focus above is both its gesture generation and
             // native admission evidence; the registry id is allocated anew for
             // each mapped window lifetime.
-            let operation = WindowPointerOperation::begin(
+            let size = window.geometry().size;
+            let operation = WindowPointerOperation::begin_with_geometry(
                 &mut self.window_operations,
                 BeginRequest {
                     seat: SeatId::new(1),
@@ -378,6 +380,20 @@ impl XdgShellHandler for NickelSession {
                         gesture: CompletionGesture::Button(button),
                     },
                     optional_update_sources: Vec::new(),
+                },
+                nickel_core::window_operation::GeometrySeed {
+                    anchor: nickel_core::geometry::LogicalRect {
+                        x: initial_window_location.x,
+                        y: initial_window_location.y,
+                        width: size.w,
+                        height: size.h,
+                    },
+                    constraints: nickel_core::geometry_authority::GeometryConstraints {
+                        min_width: 1,
+                        min_height: 1,
+                        max_width: None,
+                        max_height: None,
+                    },
                 },
             );
             let Some(operation) = operation else {
@@ -442,7 +458,7 @@ impl XdgShellHandler for NickelSession {
             let Ok(button) = u16::try_from(start_data.button) else {
                 return;
             };
-            let Some(operation) = WindowPointerOperation::begin(
+            let Some(operation) = WindowPointerOperation::begin_with_geometry(
                 &mut self.window_operations,
                 BeginRequest {
                     seat: SeatId::new(1),
@@ -463,6 +479,15 @@ impl XdgShellHandler for NickelSession {
                         gesture: CompletionGesture::Button(button),
                     },
                     optional_update_sources: Vec::new(),
+                },
+                nickel_core::window_operation::GeometrySeed {
+                    anchor: nickel_core::geometry::LogicalRect {
+                        x: initial_window_location.x,
+                        y: initial_window_location.y,
+                        width: initial_window_size.w,
+                        height: initial_window_size.h,
+                    },
+                    constraints: operation_geometry_constraints(&window),
                 },
             ) else {
                 return;

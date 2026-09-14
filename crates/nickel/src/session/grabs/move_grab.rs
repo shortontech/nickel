@@ -1,7 +1,7 @@
 use crate::session::{NickelSession, focus::PointerFocusTarget};
 use nickel_core::window_operation::{
-    BeginRequest, CancellationReason, CompletionBinding, Disposition, Effect, OperationId,
-    ResourceLeaseId, WindowOperationReducer,
+    BeginRequest, CancellationReason, CompletionBinding, Disposition, Effect, GeometrySeed,
+    GeometryUpdate, OperationId, ResourceLeaseId, WindowOperationReducer,
 };
 use smithay::{
     desktop::Window,
@@ -36,10 +36,29 @@ fn crossed_maximized_restore_threshold(delta: Point<f64, Logical>) -> bool {
 }
 
 impl WindowPointerOperation {
+    #[cfg(test)]
     pub fn begin(reducer: &mut WindowOperationReducer, request: BeginRequest) -> Option<Self> {
         let completion = request.origin;
         let (operation, transition) = reducer.begin(request);
-        let operation = operation?;
+        Self::finish_begin(reducer, operation?, transition, completion)
+    }
+
+    pub fn begin_with_geometry(
+        reducer: &mut WindowOperationReducer,
+        request: BeginRequest,
+        geometry: GeometrySeed,
+    ) -> Option<Self> {
+        let completion = request.origin;
+        let (operation, transition) = reducer.begin_with_geometry(request, geometry);
+        Self::finish_begin(reducer, operation?, transition, completion)
+    }
+
+    fn finish_begin(
+        reducer: &mut WindowOperationReducer,
+        operation: OperationId,
+        transition: nickel_core::window_operation::Transition,
+        completion: CompletionBinding,
+    ) -> Option<Self> {
         let request = transition.effects.iter().find_map(|effect| match effect {
             Effect::Acquire { request, .. } => Some(*request),
             _ => None,
@@ -61,13 +80,35 @@ impl WindowPointerOperation {
         })
     }
 
-    pub(crate) fn admits_motion(&self, reducer: &mut WindowOperationReducer) -> bool {
-        let transition = reducer.update(self.id, self.completion.source);
-        transition.disposition == Disposition::Applied
-            && transition.effects.contains(&Effect::ApplyUpdate {
-                operation: self.id,
-                source: self.completion.source,
+    pub(crate) fn propose(
+        &self,
+        reducer: &mut WindowOperationReducer,
+        x: i64,
+        y: i64,
+    ) -> Option<nickel_core::geometry::LogicalRect> {
+        let transition = reducer.update_geometry(
+            self.id,
+            self.completion.source,
+            GeometryUpdate::AbsoluteDisplacement { x, y },
+        );
+        transition
+            .effects
+            .into_iter()
+            .find_map(|effect| match effect {
+                Effect::GeometryProposed { constrained, .. } => Some(constrained),
+                _ => None,
             })
+    }
+
+    pub(crate) fn rebase(
+        &self,
+        reducer: &mut WindowOperationReducer,
+        anchor: nickel_core::geometry::LogicalRect,
+    ) -> bool {
+        reducer
+            .rebase_geometry(self.id, self.completion.source, anchor)
+            .disposition
+            == Disposition::Applied
     }
 
     pub(crate) fn complete(&self, reducer: &mut WindowOperationReducer) -> bool {
@@ -124,10 +165,6 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
-        if !self.operation.admits_motion(&mut data.window_operations) {
-            return;
-        }
-
         let drag_delta = event.location - self.start_data.location;
         if !self.restored_from_maximized
             && crossed_maximized_restore_threshold(drag_delta)
@@ -137,11 +174,29 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
             self.initial_window_location = location;
             self.start_data.location = event.location;
             self.restored_from_maximized = true;
+            let size = self.window.geometry().size;
+            if !self.operation.rebase(
+                &mut data.window_operations,
+                nickel_core::geometry::LogicalRect {
+                    x: location.x,
+                    y: location.y,
+                    width: size.w,
+                    height: size.h,
+                },
+            ) {
+                return;
+            }
         }
 
         let delta = event.location - self.start_data.location;
-        let new_location = self.initial_window_location.to_f64() + delta;
-        self.last_window_location = new_location.to_i32_round();
+        let Some(proposal) = self.operation.propose(
+            &mut data.window_operations,
+            delta.x.round() as i64,
+            delta.y.round() as i64,
+        ) else {
+            return;
+        };
+        self.last_window_location = Point::from((proposal.x, proposal.y));
         data.map_compositor_moved_window(self.window.clone(), self.last_window_location, true);
     }
 
@@ -196,10 +251,13 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nickel_core::geometry_authority::ControlMode;
     use nickel_core::window_operation::{
         CompletionGesture, MappingGeneration, NativeLifetimeId, OperationKind, OperationPhase,
         SeatId, Source, SourceGeneration, SourceId, WindowId, WindowMapping,
+    };
+    use nickel_core::{
+        geometry::LogicalRect,
+        geometry_authority::{ControlMode, GeometryConstraints},
     };
 
     fn request(button: u16) -> BeginRequest {
@@ -223,16 +281,43 @@ mod tests {
         }
     }
 
+    fn geometry() -> GeometrySeed {
+        GeometrySeed {
+            anchor: LogicalRect {
+                x: 20,
+                y: 30,
+                width: 640,
+                height: 480,
+            },
+            constraints: GeometryConstraints {
+                min_width: 1,
+                min_height: 1,
+                max_width: None,
+                max_height: None,
+            },
+        }
+    }
+
     #[test]
     fn production_adapter_drives_shared_begin_update_and_completion() {
         let mut reducer = WindowOperationReducer::default();
-        let operation = WindowPointerOperation::begin(&mut reducer, request(0x110)).unwrap();
+        let operation =
+            WindowPointerOperation::begin_with_geometry(&mut reducer, request(0x110), geometry())
+                .unwrap();
 
         assert_eq!(
             reducer.operation(operation.id()).unwrap().phase,
             OperationPhase::Active
         );
-        assert!(operation.admits_motion(&mut reducer));
+        assert_eq!(
+            operation.propose(&mut reducer, 12, -4),
+            Some(LogicalRect {
+                x: 32,
+                y: 26,
+                width: 640,
+                height: 480,
+            })
+        );
         assert!(operation.complete(&mut reducer));
         assert!(reducer.operation(operation.id()).is_none());
     }

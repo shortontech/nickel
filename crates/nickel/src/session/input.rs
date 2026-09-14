@@ -5,11 +5,12 @@ use nickel_core::window_input::{
     reduce_pointer_press,
 };
 use nickel_core::{
-    geometry_authority::ControlMode,
+    geometry::LogicalRect,
+    geometry_authority::{ControlMode, GeometryConstraints},
     window_operation::{
-        BeginRequest, CompletionBinding, CompletionGesture, MappingGeneration, NativeLifetimeId,
-        OperationKind, SeatId, Source, SourceGeneration, SourceId, WindowId as OperationWindowId,
-        WindowMapping,
+        BeginRequest, CompletionBinding, CompletionGesture, GeometrySeed, MappingGeneration,
+        NativeLifetimeId, OperationKind, SeatId, Source, SourceGeneration, SourceId,
+        WindowId as OperationWindowId, WindowMapping,
     },
 };
 use smithay::{
@@ -32,8 +33,9 @@ use smithay::{
 use crate::session::{
     grabs::{
         MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
-        move_grab::WindowPointerOperation, move_internal_grab::operation_window,
-        resize_grab::operation_resize_edges,
+        move_grab::WindowPointerOperation,
+        move_internal_grab::operation_window,
+        resize_grab::{operation_geometry_constraints, operation_resize_edges},
     },
     state::NickelSession,
     window_frame::{self, FramePart},
@@ -364,7 +366,9 @@ impl NickelSession {
             || u64::from(surface.id().protocol_id()),
             |x11| u64::from(x11.window_id()),
         );
-        WindowPointerOperation::begin(
+        let location = self.space.element_location(window)?;
+        let size = window.geometry().size;
+        WindowPointerOperation::begin_with_geometry(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
@@ -378,6 +382,15 @@ impl NickelSession {
                 origin,
                 optional_update_sources: Vec::new(),
             },
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: location.x,
+                    y: location.y,
+                    width: size.w,
+                    height: size.h,
+                },
+                constraints: operation_geometry_constraints(window),
+            },
         )
     }
 
@@ -388,7 +401,8 @@ impl NickelSession {
         serial: smithay::utils::Serial,
     ) -> Option<WindowPointerOperation> {
         let identity = surface.snapshot_token();
-        WindowPointerOperation::begin(
+        let placement = self.internal_ui.placement(surface)?;
+        WindowPointerOperation::begin_with_geometry(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
@@ -403,6 +417,20 @@ impl NickelSession {
                 control: ControlMode::Enforced,
                 origin: Self::compositor_pointer_binding(button, serial)?,
                 optional_update_sources: Vec::new(),
+            },
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: placement.geometry.0,
+                    y: placement.geometry.1,
+                    width: i32::try_from(placement.geometry.2).ok()?,
+                    height: i32::try_from(placement.geometry.3).ok()?,
+                },
+                constraints: GeometryConstraints {
+                    min_width: 1,
+                    min_height: 1,
+                    max_width: None,
+                    max_height: None,
+                },
             },
         )
     }
@@ -1292,7 +1320,6 @@ impl NickelSession {
                             self.maximize_window(id);
                         }
                         FramePart::Titlebar => {
-                            let placement = self.internal_ui.placement(surface).cloned()?;
                             let operation =
                                 self.begin_internal_surface_move(surface, button, serial)?;
                             let start_data = GrabStartData {
@@ -1305,8 +1332,6 @@ impl NickelSession {
                                 MoveInternalSurfaceGrab {
                                     start_data,
                                     surface,
-                                    initial_location: (placement.geometry.0, placement.geometry.1)
-                                        .into(),
                                     operation,
                                 },
                                 serial,
@@ -1347,7 +1372,6 @@ impl NickelSession {
                     && let Some((surface, _)) = self
                         .internal_ui
                         .application_surface_at((location.x, location.y))
-                    && let Some(placement) = self.internal_ui.placement(surface).cloned()
                 {
                     self.hotkeys.begin_pointer_chord();
                     self.internal_ui.focus_surface(surface);
@@ -1363,7 +1387,6 @@ impl NickelSession {
                         MoveInternalSurfaceGrab {
                             start_data,
                             surface,
-                            initial_location: (placement.geometry.0, placement.geometry.1).into(),
                             operation,
                         },
                         serial,

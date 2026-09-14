@@ -1,7 +1,10 @@
 use crate::session::{
     NickelSession, focus::PointerFocusTarget, grabs::move_grab::WindowPointerOperation,
 };
-use nickel_core::window_operation::{HorizontalEdge, ResizeEdges, VerticalEdge};
+use nickel_core::{
+    geometry_authority::GeometryConstraints,
+    window_operation::{HorizontalEdge, ResizeEdges, VerticalEdge},
+};
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
@@ -132,6 +135,29 @@ pub(crate) fn xdg_commit_causality(
     }
 }
 
+pub(crate) fn operation_geometry_constraints(window: &Window) -> GeometryConstraints {
+    let (min_size, max_size) = if let Some(surface) = window.x11_surface() {
+        (
+            surface.min_size().unwrap_or_else(|| Size::from((1, 1))),
+            surface
+                .max_size()
+                .unwrap_or_else(|| Size::from((i32::MAX, i32::MAX))),
+        )
+    } else {
+        compositor::with_states(window.toplevel().unwrap().wl_surface(), |states| {
+            let mut guard = states.cached_state.get::<SurfaceCachedState>();
+            let data = guard.current();
+            (data.min_size, data.max_size)
+        })
+    };
+    GeometryConstraints {
+        min_width: min_size.w.max(1),
+        min_height: min_size.h.max(1),
+        max_width: (max_size.w != 0).then_some(max_size.w.max(1)),
+        max_height: (max_size.h != 0).then_some(max_size.h.max(1)),
+    }
+}
+
 impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
     forward_pointer_grab_events!();
 
@@ -187,73 +213,18 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
 
-        if !self.operation.admits_motion(&mut data.window_operations) {
+        let delta = event.location - self.start_data.location;
+        let Some(proposal) = self.operation.propose(
+            &mut data.window_operations,
+            delta.x.round() as i64,
+            delta.y.round() as i64,
+        ) else {
             return;
-        }
-
-        let mut delta = event.location - self.start_data.location;
-
-        let mut new_window_width = self.initial_rect.size.w;
-        let mut new_window_height = self.initial_rect.size.h;
-
-        if self.edges.intersects(ResizeEdge::LEFT | ResizeEdge::RIGHT) {
-            if self.edges.intersects(ResizeEdge::LEFT) {
-                delta.x = -delta.x;
-            }
-
-            new_window_width = (self.initial_rect.size.w as f64 + delta.x) as i32;
-        }
-
-        if self.edges.intersects(ResizeEdge::TOP | ResizeEdge::BOTTOM) {
-            if self.edges.intersects(ResizeEdge::TOP) {
-                delta.y = -delta.y;
-            }
-
-            new_window_height = (self.initial_rect.size.h as f64 + delta.y) as i32;
-        }
-
-        let (min_size, max_size) = if let Some(surface) = self.window.x11_surface() {
-            (
-                surface.min_size().unwrap_or_else(|| Size::from((1, 1))),
-                surface
-                    .max_size()
-                    .unwrap_or_else(|| Size::from((i32::MAX, i32::MAX))),
-            )
-        } else {
-            compositor::with_states(self.window.toplevel().unwrap().wl_surface(), |states| {
-                let mut guard = states.cached_state.get::<SurfaceCachedState>();
-                let data = guard.current();
-                (data.min_size, data.max_size)
-            })
         };
-
-        let min_width = min_size.w.max(1);
-        let min_height = min_size.h.max(1);
-
-        let max_width = if max_size.w == 0 {
-            i32::MAX
-        } else {
-            max_size.w
-        };
-        let max_height = if max_size.h == 0 {
-            i32::MAX
-        } else {
-            max_size.h
-        };
-
-        self.last_window_size = Size::from((
-            new_window_width.max(min_width).min(max_width),
-            new_window_height.max(min_height).min(max_height),
-        ));
+        self.last_window_size = Size::from((proposal.width, proposal.height));
 
         if let Some(x11) = self.window.x11_surface() {
-            let mut location = self.initial_rect.loc;
-            if self.edges.contains(ResizeEdge::LEFT) {
-                location.x += self.initial_rect.size.w - self.last_window_size.w;
-            }
-            if self.edges.contains(ResizeEdge::TOP) {
-                location.y += self.initial_rect.size.h - self.last_window_size.h;
-            }
+            let location = Point::from((proposal.x, proposal.y));
             let geometry = Rectangle::new(location, self.last_window_size);
             if let Err(error) = x11.configure(geometry) {
                 tracing::warn!(?error, "X11 interactive resize failed");

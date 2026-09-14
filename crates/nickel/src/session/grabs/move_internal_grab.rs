@@ -12,7 +12,6 @@ use smithay::utils::{Logical, Point};
 pub struct MoveInternalSurfaceGrab {
     pub start_data: GrabStartData<NickelSession>,
     pub surface: InternalSurfaceId,
-    pub initial_location: Point<i32, Logical>,
     pub operation: WindowPointerOperation,
 }
 
@@ -41,9 +40,6 @@ impl PointerGrab<NickelSession> for MoveInternalSurfaceGrab {
         event: &MotionEvent,
     ) {
         handle.motion(data, None, event);
-        if !self.operation.admits_motion(&mut data.window_operations) {
-            return;
-        }
         let delta = event.location - self.start_data.location;
         let Some(mut placement) = data.internal_ui.placement(self.surface).cloned() else {
             self.operation.cancel_for(
@@ -53,8 +49,15 @@ impl PointerGrab<NickelSession> for MoveInternalSurfaceGrab {
             handle.unset_grab(self, data, event.serial, event.time, true);
             return;
         };
-        placement.geometry.0 = self.initial_location.x + delta.x.round() as i32;
-        placement.geometry.1 = self.initial_location.y + delta.y.round() as i32;
+        let Some(proposal) = self.operation.propose(
+            &mut data.window_operations,
+            delta.x.round() as i64,
+            delta.y.round() as i64,
+        ) else {
+            return;
+        };
+        placement.geometry.0 = proposal.x;
+        placement.geometry.1 = proposal.y;
         if data.apply_internal_move(self.surface, placement) {
             data.request_output_redraw();
         }

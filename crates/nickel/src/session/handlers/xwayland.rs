@@ -36,8 +36,9 @@ use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
     grabs::{
-        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab, move_grab::WindowPointerOperation,
-        resize_grab::operation_resize_edges,
+        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
+        move_grab::WindowPointerOperation,
+        resize_grab::{operation_geometry_constraints, operation_resize_edges},
     },
     handlers::{SelectionOwner, bounded_selection_mime_types},
     shell_layout,
@@ -680,7 +681,8 @@ impl XwmHandler for NickelSession {
         let Ok(completion_button) = u16::try_from(start_data.button) else {
             return;
         };
-        let Some(operation) = WindowPointerOperation::begin(
+        let initial_rect = Rectangle::new(initial_window_location, mapped.geometry().size);
+        let Some(operation) = WindowPointerOperation::begin_with_geometry(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
@@ -700,10 +702,18 @@ impl XwmHandler for NickelSession {
                 },
                 optional_update_sources: Vec::new(),
             },
+            nickel_core::window_operation::GeometrySeed {
+                anchor: nickel_core::geometry::LogicalRect {
+                    x: initial_rect.loc.x,
+                    y: initial_rect.loc.y,
+                    width: initial_rect.size.w,
+                    height: initial_rect.size.h,
+                },
+                constraints: operation_geometry_constraints(&mapped),
+            },
         ) else {
             return;
         };
-        let initial_rect = Rectangle::new(initial_window_location, mapped.geometry().size);
         pointer.set_grab(
             self,
             ResizeSurfaceGrab::start_with_operation(
@@ -773,7 +783,8 @@ impl XwmHandler for NickelSession {
         let Ok(completion_button) = u16::try_from(start_data.button) else {
             return;
         };
-        let Some(operation) = WindowPointerOperation::begin(
+        let size = mapped.geometry().size;
+        let Some(operation) = WindowPointerOperation::begin_with_geometry(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
@@ -792,6 +803,20 @@ impl XwmHandler for NickelSession {
                     gesture: CompletionGesture::Button(completion_button),
                 },
                 optional_update_sources: Vec::new(),
+            },
+            nickel_core::window_operation::GeometrySeed {
+                anchor: nickel_core::geometry::LogicalRect {
+                    x: initial_window_location.x,
+                    y: initial_window_location.y,
+                    width: size.w,
+                    height: size.h,
+                },
+                constraints: nickel_core::geometry_authority::GeometryConstraints {
+                    min_width: 1,
+                    min_height: 1,
+                    max_width: None,
+                    max_height: None,
+                },
             },
         ) else {
             return;
