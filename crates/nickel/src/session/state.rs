@@ -6200,7 +6200,11 @@ impl NickelSession {
                 .controller_broker
                 .is_attached(host, connection_generation) =>
             {
-                if !self.controller_host_is_current_recipient(peer_pid) {
+                if !self.controller_host_is_current_recipient(peer_pid)
+                    && !self
+                        .controller_broker
+                        .revocation_pending(host, connection_generation)
+                {
                     self.controller_broker.detach(host, connection_generation);
                     return ServerMessage::ControllerHost(ControllerHostResponse::Messages {
                         lease_epoch: None,
@@ -6241,6 +6245,9 @@ impl NickelSession {
                 lease_epoch,
                 cutoff,
             } => {
+                let was_pending = self
+                    .controller_broker
+                    .revocation_pending(host, connection_generation);
                 let status = self.controller_broker.acknowledge_quiescence(
                     host,
                     connection_generation,
@@ -6249,6 +6256,22 @@ impl NickelSession {
                 );
                 self.controller_neutral_probe_requested
                     .store(true, Ordering::Release);
+                if was_pending
+                    && !self
+                        .controller_broker
+                        .revocation_pending(host, connection_generation)
+                    && !self.controller_host_is_current_recipient(peer_pid)
+                {
+                    if self
+                        .controller_external_lease_binding
+                        .is_some_and(|binding| {
+                            binding.host == host && binding.connection == connection_generation
+                        })
+                    {
+                        self.controller_external_lease_binding = None;
+                    }
+                    self.controller_broker.detach(host, connection_generation);
+                }
                 controller_transfer_response(status)
             }
             ControllerHostRequest::ReportExecutionOverflow {

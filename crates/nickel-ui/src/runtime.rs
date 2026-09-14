@@ -49,6 +49,20 @@ impl ControllerRoleLease {
     }
 }
 
+#[cfg(any(unix, windows))]
+fn adopt_pending_controller_lease(
+    connection: nickel_session_protocol::controller_broker::ConnectionGeneration,
+    lease_epoch: Option<nickel_session_protocol::controller_broker::LeaseEpoch>,
+    oracle: Option<nickel_session_protocol::ControllerExecutionOracle>,
+) -> Option<(
+    nickel_session_protocol::controller_broker::LeaseEpoch,
+    ControllerRoleLease,
+)> {
+    let (lease, oracle) = lease_epoch.zip(oracle)?;
+    (oracle.lease_epoch == lease && oracle.connection_generation == connection)
+        .then_some((lease, ControllerRoleLease::session(connection.0, lease.0)))
+}
+
 fn local_controller_poll_lease(
     mode: ControllerDiscoveryMode,
     lease: Option<ControllerRoleLease>,
@@ -97,8 +111,10 @@ enum SessionControllerSource {
 }
 
 #[cfg(any(unix, windows))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SessionControllerPhase {
     Lease,
+    PendingLease,
     Poll,
     Acknowledge,
     Reset,
@@ -279,6 +295,7 @@ impl SessionControllerSource {
                 }
                 Ok(Some(response)) => {
                     let mut actions = Vec::new();
+                    let mut pending_lease_poll = false;
                     let request = match (phase, response) {
                         (
                             SessionControllerPhase::Lease,
@@ -296,9 +313,12 @@ impl SessionControllerSource {
                         (
                             SessionControllerPhase::Lease,
                             ControllerHostResponse::LeasePending { .. },
-                        ) => Some(ControllerHostRequest::Poll {
-                            connection_generation,
-                        }),
+                        ) => {
+                            pending_lease_poll = true;
+                            Some(ControllerHostRequest::Poll {
+                                connection_generation,
+                            })
+                        }
                         (
                             SessionControllerPhase::Lease,
                             ControllerHostResponse::LeaseFailed,
@@ -307,13 +327,25 @@ impl SessionControllerSource {
                             return Vec::new();
                         }
                         (
-                            SessionControllerPhase::Poll,
+                            SessionControllerPhase::Poll | SessionControllerPhase::PendingLease,
                             ControllerHostResponse::Messages {
                                 lease_epoch,
                                 messages,
                                 execution_oracle,
                             },
                         ) => {
+                            if phase == SessionControllerPhase::PendingLease {
+                                if let Some((granted, granted_role)) =
+                                    adopt_pending_controller_lease(
+                                        connection_generation,
+                                        lease_epoch,
+                                        execution_oracle,
+                                    )
+                                {
+                                    lease = Some(granted);
+                                    role_lease = Some(granted_role);
+                                }
+                            }
                             if let Some(report) = pending_overflow.take() {
                                 lease = None;
                                 role_lease = None;
@@ -459,6 +491,10 @@ impl SessionControllerSource {
                             ControllerHostRequest::ReportExecutionOverflow { .. }
                         ) {
                             SessionControllerPhase::Reset
+                        } else if pending_lease_poll
+                            || (phase == SessionControllerPhase::PendingLease && lease.is_none())
+                        {
+                            SessionControllerPhase::PendingLease
                         } else {
                             SessionControllerPhase::Poll
                         };
@@ -6860,6 +6896,37 @@ mod tests {
         assert_eq!(
             super::file_uri_list(&paths),
             b"file:///tmp/a%20file.txt\r\nfile:///tmp/nonutf8-%FF\r\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pending_session_lease_adopts_later_exact_poll_grant() {
+        use nickel_session_protocol::{
+            ControllerExecutionOracle,
+            controller_broker::{ConnectionGeneration, LeaseEpoch, StreamGeneration},
+        };
+
+        let connection = ConnectionGeneration(7);
+        let lease = LeaseEpoch(11);
+        let oracle = ControllerExecutionOracle {
+            routing_epoch: 3,
+            lease_epoch: lease,
+            connection_generation: connection,
+            stream_generation: StreamGeneration(2),
+            surface_generation: Some(9),
+        };
+        let (adopted, role) =
+            super::adopt_pending_controller_lease(connection, Some(lease), Some(oracle)).unwrap();
+        assert_eq!(adopted, lease);
+        assert_eq!(role, super::ControllerRoleLease::session(7, 11));
+        assert!(
+            super::adopt_pending_controller_lease(
+                ConnectionGeneration(8),
+                Some(lease),
+                Some(oracle)
+            )
+            .is_none()
         );
     }
 

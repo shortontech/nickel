@@ -652,6 +652,16 @@ impl<T> ControllerBroker<T> {
         self.connection_matches(host, connection)
     }
 
+    /// Whether this exact executor must remain attached long enough to receive and acknowledge
+    /// its cutoff. Callers may retire it after acknowledgement or verified termination.
+    pub fn revocation_pending(&self, host: HostId, connection: ConnectionGeneration) -> bool {
+        self.transfer.is_some_and(|transfer| {
+            transfer.from.host == host && transfer.from.connection_generation == connection
+        }) || self.poisoned_predecessor.is_some_and(|poison| {
+            poison.lease.host == host && poison.lease.connection_generation == connection
+        })
+    }
+
     pub fn exhaust(&mut self) {
         self.fail_closed();
     }
