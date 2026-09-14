@@ -2578,6 +2578,12 @@ pub(crate) enum InternalCaptureState {
     Complete(PathBuf, nickel_session_protocol::CaptureResult),
 }
 
+struct XdgConfigureSettlement {
+    serial: smithay::utils::Serial,
+    incorporated: nickel_core::geometry_authority::DesiredRevisions,
+    settlement: nickel_core::geometry_authority::Settlement,
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -2805,13 +2811,7 @@ pub struct NickelSession {
     >,
     pub(crate) x11_geometry_settlements:
         HashMap<WindowId, nickel_core::geometry_authority::Settlement>,
-    pub(crate) xdg_geometry_settlements: HashMap<
-        WindowId,
-        (
-            smithay::utils::Serial,
-            nickel_core::geometry_authority::Settlement,
-        ),
-    >,
+    xdg_geometry_settlements: HashMap<WindowId, XdgConfigureSettlement>,
     pub(crate) x11_next_native_request: u64,
     presentation_restore_revisions: HashMap<
         (WindowId, nickel_core::geometry_authority::Presentation),
@@ -10065,9 +10065,10 @@ impl NickelSession {
             .min(u128::from(u64::MAX)) as u64;
         self.xdg_geometry_settlements.insert(
             id,
-            (
-                configure,
-                Settlement::new(
+            XdgConfigureSettlement {
+                serial: configure,
+                incorporated: desired_revisions,
+                settlement: Settlement::new(
                     NativeRequest {
                         id: request_id,
                         mapping_generation: id.0,
@@ -10079,24 +10080,26 @@ impl NickelSession {
                         max_corrections: 1,
                     },
                 ),
-            ),
+            },
         );
         let timer = self.event_loop_handle.insert_source(
             smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
             move |_, _, state| {
-                if let Some((_, settlement)) = state.xdg_geometry_settlements.get_mut(&id)
-                    && settlement.request.id == request_id
+                if let Some(record) = state.xdg_geometry_settlements.get_mut(&id)
+                    && record.settlement.request.id == request_id
                 {
-                    settlement.expire(settlement.limits.deadline_tick);
+                    record
+                        .settlement
+                        .expire(record.settlement.limits.deadline_tick);
                 }
                 smithay::reexports::calloop::timer::TimeoutAction::Drop
             },
         );
         if timer.is_err()
-            && let Some((_, settlement)) = self.xdg_geometry_settlements.get_mut(&id)
-            && settlement.request.id == request_id
+            && let Some(record) = self.xdg_geometry_settlements.get_mut(&id)
+            && record.settlement.request.id == request_id
         {
-            settlement.fail();
+            record.settlement.fail();
         }
     }
 
@@ -10113,14 +10116,13 @@ impl NickelSession {
             .geometry_authorities
             .get(&id)
             .map_or(1, |authority| authority.topology_version);
-        let Some((expected, settlement)) = self.xdg_geometry_settlements.get(&id) else {
+        let Some(record) = self.xdg_geometry_settlements.get(&id) else {
             return;
         };
-        if !acked.is_some_and(|acked| acked.is_no_older_than(expected)) {
-            return;
-        }
-        let request_id = settlement.request.id;
-        let incorporated_revisions = settlement.request.desired;
+        let Some(acked) = acked else { return };
+        let request_id = record.settlement.request.id;
+        let incorporated_revisions = record.incorporated;
+        let configured = record.serial;
         let current_revisions = self
             .geometry_authorities
             .get(&id)
@@ -10141,21 +10143,22 @@ impl NickelSession {
         let Some(current_revisions) = current_revisions else {
             return;
         };
-        let causality = crate::session::grabs::resize_grab::xdg_commit_causality(
+        let Some(causality) = crate::session::grabs::resize_grab::xdg_commit_causality(
+            configured,
+            acked,
             request_id,
             incorporated_revisions,
             current_revisions,
-        );
-        // A newer configure may acknowledge the older serial while
-        // incorporating different desired fields. The helper reports that as
-        // independent instead of attributing it to the superseded request.
+        ) else {
+            return;
+        };
         if let Some(authority) = self.geometry_authorities.get_mut(&id) {
             authority.observe(fact, causality);
         }
-        if let Some((_, settlement)) = self.xdg_geometry_settlements.get_mut(&id)
-            && settlement.request.id == request_id
+        if let Some(record) = self.xdg_geometry_settlements.get_mut(&id)
+            && record.settlement.request.id == request_id
         {
-            settlement.observe(fact, causality);
+            record.settlement.observe(fact, causality);
         }
     }
 
