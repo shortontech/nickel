@@ -2692,6 +2692,20 @@ fn xdg_configure_extends_existing_request(
         && record.settlement.request.placement == placement
 }
 
+fn fail_x11_settlement_on_timer_registration(
+    settlement: &mut nickel_core::geometry_authority::Settlement,
+    request_id: nickel_core::geometry_authority::NativeRequestId,
+) -> Option<Option<nickel_core::geometry_authority::TaggedGeometry>> {
+    if settlement.request.id != request_id
+        || settlement.status != nickel_core::geometry_authority::SettlementStatus::Pending
+    {
+        return None;
+    }
+    let observed = settlement.observed;
+    settlement.fail();
+    Some(observed)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InteractiveResizeToken {
     window: WindowId,
@@ -10802,12 +10816,15 @@ impl NickelSession {
             },
         );
         let timer_failed = timer.is_err();
-        if timer_failed
-            && let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
-            && settlement.request.id == request_id
-        {
-            settlement.fail();
-        }
+        let failed_current = timer_failed
+            .then(|| {
+                self.x11_geometry_settlements
+                    .get_mut(&id)
+                    .and_then(|settlement| {
+                        fail_x11_settlement_on_timer_registration(settlement, request_id)
+                    })
+            })
+            .flatten();
         if timer_failed {
             let failed = self
                 .x11_issued_geometry_requests
@@ -10822,6 +10839,20 @@ impl NickelSession {
                 failed.fail();
                 self.retain_x11_geometry_outcome(id, failed);
             }
+        }
+        if let Some(unresolved_fact) = failed_current {
+            if let Some(fact) = unresolved_fact
+                && let Some(authority) = self.geometry_authorities.get_mut(&id)
+            {
+                authority.observe(
+                    fact,
+                    nickel_core::geometry_authority::ObservationCausality::Unknown,
+                );
+            }
+            self.cancel_geometry_window_operation(
+                id,
+                nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+            );
         }
     }
 
@@ -14377,18 +14408,65 @@ mod protocol_tests {
         advance_preview_content_generation, apply_shell_behavior_value, bounded_preview_ids,
         clamp_decorated_content_to_work_area, clamp_window_location, clamped_restore_geometry,
         command_requires_shell_identity, drag_icon_location, external_controller_surface_changed,
-        identification_expiry_is_current, internal_restore_is_current, maximized_content_geometry,
-        output_contains_logical_point, output_index_for_shell_surface,
-        output_rescue_revision_is_current, pending_launch_window_disposition,
-        placement_restore_is_current, prepare_shell_behavior_update,
-        preview_mapping_has_exact_size, protocol_preview_from_cached,
-        record_preview_capture_attempt, restored_drag_content_geometry,
-        retain_live_idle_inhibitors, retain_superseded_xdg_settlement, retire_displaced_window,
-        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        fail_x11_settlement_on_timer_registration, identification_expiry_is_current,
+        internal_restore_is_current, maximized_content_geometry, output_contains_logical_point,
+        output_index_for_shell_surface, output_rescue_revision_is_current,
+        pending_launch_window_disposition, placement_restore_is_current,
+        prepare_shell_behavior_update, preview_mapping_has_exact_size,
+        protocol_preview_from_cached, record_preview_capture_attempt,
+        restored_drag_content_geometry, retain_live_idle_inhibitors,
+        retain_superseded_xdg_settlement, retire_displaced_window, retire_pointer_surface,
+        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke, xdg_configure_extends_existing_request,
     };
+
+    #[test]
+    fn x11_timer_registration_failure_is_terminal_and_preserves_observed_fact() {
+        use nickel_core::geometry_authority::{
+            CoordinateUnits, GeometryAuthority, GeometryMeaning, NativeRequest, NativeRequestId,
+            ObservationCausality, Presentation, Settlement, SettlementLimits, SettlementStatus,
+            TaggedGeometry,
+        };
+        let placement = nickel_core::geometry::LogicalRect {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        let authority = GeometryAuthority::new(placement, Presentation::Normal);
+        let request_id = NativeRequestId(41);
+        let mut settlement = Settlement::new(
+            NativeRequest {
+                id: request_id,
+                mapping_generation: 7,
+                desired: authority.revisions(),
+                placement,
+            },
+            SettlementLimits {
+                deadline_tick: 750,
+                max_corrections: 1,
+            },
+        );
+        let observed = TaggedGeometry {
+            rect: nickel_core::geometry::LogicalRect { x: 11, ..placement },
+            meaning: GeometryMeaning::CanonicalManagedBounds,
+            units: CoordinateUnits::CanonicalLogical,
+            topology_version: 1,
+        };
+        settlement.observe(observed, ObservationCausality::Unknown);
+
+        assert_eq!(
+            fail_x11_settlement_on_timer_registration(&mut settlement, request_id),
+            Some(Some(observed))
+        );
+        assert_eq!(settlement.status, SettlementStatus::Failed);
+        assert_eq!(
+            fail_x11_settlement_on_timer_registration(&mut settlement, request_id),
+            None
+        );
+    }
 
     #[test]
     fn repeated_xdg_configure_extends_only_the_same_desired_request() {
