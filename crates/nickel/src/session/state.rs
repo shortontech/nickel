@@ -12126,6 +12126,21 @@ impl NickelSession {
             now,
             DEFAULT_FOCUS_REQUEST_TIMEOUT,
         );
+        let rejection = if self.locked && scope != FocusScope::Lock {
+            Some(FocusRejectionReason::AuthorityLost)
+        } else if !target.as_ref().is_none_or(IsAlive::alive) {
+            Some(FocusRejectionReason::NativeDenied)
+        } else {
+            None
+        };
+        if let Some(reason) = rejection {
+            return self.seat_focus.acknowledge_if(
+                &request,
+                self.start_time.elapsed(),
+                false,
+                reason,
+            );
+        }
         self.seat
             .get_keyboard()
             .unwrap()
@@ -12134,18 +12149,12 @@ impl NickelSession {
             .seat
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus());
-        let eligible = observed == target
-            && target.as_ref().is_none_or(IsAlive::alive)
-            && (scope == FocusScope::Lock || !self.locked);
+        let eligible = observed == target;
         self.seat_focus.acknowledge_if(
             &request,
             self.start_time.elapsed(),
             eligible,
-            if self.locked && scope != FocusScope::Lock {
-                FocusRejectionReason::AuthorityLost
-            } else {
-                FocusRejectionReason::NativeDenied
-            },
+            FocusRejectionReason::NativeDenied,
         )
     }
 
@@ -19194,6 +19203,28 @@ mod protocol_tests {
         assert!(!session.focus_internal_surface(launcher));
         assert_eq!(session.internal_ui.focused(), None);
         assert_eq!(session.native_controller_route().target, None);
+        assert!(session.seat_focus.acknowledged().is_none());
+    }
+
+    #[test]
+    fn denied_ordinary_seat_focus_preserves_locked_internal_owner_and_controller_lease() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        session.lock_session();
+        let lock = session.internal_ui.focused().expect("focused lock surface");
+        assert_eq!(session.native_controller_route().target, Some(lock));
+        let prior_seat_focus = session.seat.get_keyboard().unwrap().current_focus();
+
+        // An ordinary XDG focus request must be rejected before it can mutate
+        // either protected focus projection or the controller routing lease.
+        assert!(!session.realize_seat_focus(None, nickel_core::focus::FocusScope::Ordinary));
+
+        assert_eq!(
+            session.seat.get_keyboard().unwrap().current_focus(),
+            prior_seat_focus
+        );
+        assert_eq!(session.internal_ui.focused(), Some(lock));
+        assert_eq!(session.native_controller_route().target, Some(lock));
         assert!(session.seat_focus.acknowledged().is_none());
     }
 

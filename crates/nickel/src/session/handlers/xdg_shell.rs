@@ -112,6 +112,10 @@ fn new_toplevel_may_focus(_current_focus_is_shell: Option<bool>, _has_parent: bo
     true
 }
 
+fn modal_toplevel_may_focus(locked: bool, mapped: bool) -> bool {
+    !locked && mapped
+}
+
 fn parent_relative_dialog_location(
     parent: Rectangle<i32, Logical>,
     child: (i32, i32),
@@ -553,7 +557,9 @@ impl XdgDialogHandler for NickelSession {
             return;
         };
         tracing::info!(surface = ?toplevel.wl_surface().id(), ?hint, "xdg dialog hint changed");
-        if hint == ToplevelDialogHint::Modal && self.space.element_location(&window).is_some() {
+        if hint == ToplevelDialogHint::Modal
+            && modal_toplevel_may_focus(self.locked, self.space.element_location(&window).is_some())
+        {
             self.space.raise_element(&window, true);
             self.space.elements().for_each(|candidate| {
                 candidate.set_activated(candidate == &window);
@@ -1297,9 +1303,10 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_xdg_toplevel, is_codex_project_chat, new_toplevel_may_focus,
-        parent_relative_dialog_location, popup_constraint_area, popup_output_for_anchor,
-        shell_owned_window_is_application, unauthenticated_reserved_shell_role,
+        admit_xdg_toplevel, is_codex_project_chat, modal_toplevel_may_focus,
+        new_toplevel_may_focus, parent_relative_dialog_location, popup_constraint_area,
+        popup_output_for_anchor, shell_owned_window_is_application,
+        unauthenticated_reserved_shell_role,
     };
     use nickel_session_protocol::ShellRole;
     use smithay::utils::Rectangle;
@@ -1378,6 +1385,14 @@ mod tests {
         assert!(new_toplevel_may_focus(Some(false), false));
         assert!(new_toplevel_may_focus(Some(false), true));
         assert!(new_toplevel_may_focus(Some(true), true));
+    }
+
+    #[test]
+    fn modal_toplevel_cannot_request_focus_across_the_lock_boundary() {
+        assert!(modal_toplevel_may_focus(false, true));
+        assert!(!modal_toplevel_may_focus(true, true));
+        assert!(!modal_toplevel_may_focus(false, false));
+        assert!(!modal_toplevel_may_focus(true, false));
     }
 
     #[test]
