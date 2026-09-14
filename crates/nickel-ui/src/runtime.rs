@@ -1195,6 +1195,9 @@ pub struct OverlayDeclarationFailure {
     pub error: SemanticActionError,
 }
 
+// Normalized ingress is intentionally inline: batches are short-lived and this keeps the
+// authority-bearing input transaction in one allocation through validation and dispatch.
+#[allow(clippy::large_enum_variant)]
 pub enum HostEvent {
     Ui(UiEvent),
     Controller(ControllerAction),
@@ -3779,10 +3782,9 @@ mod tests {
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
         ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
-        NormalizedAdmissionBinding, NormalizedIngressAuthority, NormalizedInputEnvelope,
-        NormalizedRecipientBinding, NormalizedSourceBinding, PresentScheduler, Shortcut,
-        ShortcutOutcome, UiHost, ViewContext, local_controller_poll_lease, queue_continuous_input,
-        wait_duration,
+        NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
+        NormalizedSourceBinding, PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        local_controller_poll_lease, queue_continuous_input, wait_duration,
     };
 
     #[test]

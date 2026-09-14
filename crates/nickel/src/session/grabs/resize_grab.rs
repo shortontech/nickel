@@ -274,7 +274,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                 height: self.last_window_size.h,
             };
             let token = geometry_authorized
-                .then(|| self.last_authorization)
+                .then_some(self.last_authorization)
                 .flatten()
                 .or_else(|| {
                     geometry_authorized
