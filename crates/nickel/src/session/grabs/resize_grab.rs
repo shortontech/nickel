@@ -23,6 +23,12 @@ use smithay::{
 };
 use std::cell::RefCell;
 
+type ResizeCommit = (
+    Window,
+    Option<smithay::utils::Serial>,
+    Option<Point<i32, Logical>>,
+);
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct ResizeEdge: u32 {
@@ -393,14 +399,7 @@ pub(crate) fn current_resize_edges(surface: &WlSurface) -> Option<ResizeEdge> {
 }
 
 /// Should be called on `WlSurface::commit`
-pub fn handle_commit(
-    space: &mut Space<Window>,
-    surface: &WlSurface,
-) -> Option<(
-    Window,
-    Option<smithay::utils::Serial>,
-    Option<Point<i32, Logical>>,
-)> {
+pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<ResizeCommit> {
     let window = space
         .elements()
         .find(|window| {

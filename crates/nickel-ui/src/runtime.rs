@@ -334,17 +334,16 @@ impl SessionControllerSource {
                                 execution_oracle,
                             },
                         ) => {
-                            if phase == SessionControllerPhase::PendingLease {
-                                if let Some((granted, granted_role)) =
+                            if phase == SessionControllerPhase::PendingLease
+                                && let Some((granted, granted_role)) =
                                     adopt_pending_controller_lease(
                                         connection_generation,
                                         lease_epoch,
                                         execution_oracle,
                                     )
-                                {
-                                    lease = Some(granted);
-                                    role_lease = Some(granted_role);
-                                }
+                            {
+                                lease = Some(granted);
+                                role_lease = Some(granted_role);
                             }
                             if let Some(report) = pending_overflow.take() {
                                 lease = None;
