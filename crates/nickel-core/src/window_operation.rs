@@ -6,6 +6,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::geometry_authority::ControlMode;
+
 macro_rules! opaque_id {
     ($name:ident) => {
         #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -254,6 +256,7 @@ pub struct BeginRequest {
     pub seat: SeatId,
     pub subject: WindowMapping,
     pub kind: OperationKind,
+    pub control: ControlMode,
     pub origin: CompletionBinding,
     pub optional_update_sources: Vec<Source>,
 }
@@ -264,6 +267,7 @@ pub struct Operation {
     pub seat: SeatId,
     pub subject: WindowMapping,
     pub kind: OperationKind,
+    pub control: ControlMode,
     pub phase: OperationPhase,
     /// Immutable provenance. Completion never consults this field.
     pub origin: CompletionBinding,
@@ -331,6 +335,7 @@ impl WindowOperationReducer {
             seat: request.seat,
             subject: request.subject,
             kind: request.kind,
+            control: request.control,
             phase: OperationPhase::Admission,
             origin: request.origin,
             binding_epoch: BindingEpoch::new(0),
@@ -655,6 +660,7 @@ mod tests {
             seat: SeatId::new(seat),
             subject: mapping(window),
             kind: OperationKind::Move,
+            control: ControlMode::Enforced,
             origin: binding(1),
             optional_update_sources: Vec::new(),
         }) else {
@@ -687,13 +693,55 @@ mod tests {
         let mut reducer = WindowOperationReducer::default();
         let (operation, acquisition) = begin(&mut reducer, 1, 1);
         activate(&mut reducer, operation, acquisition);
+        let unrelated_button = CompletionBinding {
+            source: source(1),
+            gesture: CompletionGesture::Button(2),
+        };
 
-        let result = reducer.release(operation, binding(2));
+        let result = reducer.release(operation, unrelated_button);
 
         assert_eq!(result.disposition, Disposition::IgnoredUnrelated);
         assert_eq!(
             reducer.operation(operation).unwrap().phase,
             OperationPhase::Active
+        );
+    }
+
+    #[test]
+    fn externally_contested_control_is_retained_as_operation_authority() {
+        let mut reducer = WindowOperationReducer::default();
+        let (Some(operation), transition) = reducer.begin(BeginRequest {
+            seat: SeatId::new(1),
+            subject: mapping(1),
+            kind: OperationKind::Move,
+            control: ControlMode::ExternallyContested,
+            origin: binding(1),
+            optional_update_sources: Vec::new(),
+        }) else {
+            panic!("begin rejected")
+        };
+        assert!(matches!(
+            transition.effects.as_slice(),
+            [Effect::Acquire { .. }]
+        ));
+        assert_eq!(
+            reducer.operation(operation).unwrap().control,
+            ControlMode::ExternallyContested
+        );
+        assert_eq!(
+            reducer
+                .cancel(operation, CancellationReason::NativeTakeover)
+                .effects,
+            vec![
+                Effect::RequestCompensation {
+                    operation,
+                    decision: CompensationDecision::SkipAuthorityLost,
+                },
+                Effect::Terminal {
+                    operation,
+                    outcome: TerminalOutcome::Cancelled(CancellationReason::NativeTakeover),
+                },
+            ]
         );
     }
 
@@ -785,6 +833,7 @@ mod tests {
             seat: SeatId::new(1),
             subject: mapping(2),
             kind: OperationKind::Move,
+            control: ControlMode::Enforced,
             origin: binding(2),
             optional_update_sources: Vec::new(),
         });
@@ -807,6 +856,7 @@ mod tests {
             seat: SeatId::new(2),
             subject: replacement,
             kind: OperationKind::Move,
+            control: ControlMode::Enforced,
             origin: binding(2),
             optional_update_sources: Vec::new(),
         });
@@ -871,6 +921,7 @@ mod tests {
             seat: SeatId::new(1),
             subject: mapping(2),
             kind: OperationKind::Move,
+            control: ControlMode::Enforced,
             origin: binding(1),
             optional_update_sources: Vec::new(),
         });

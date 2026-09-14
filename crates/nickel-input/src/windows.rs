@@ -511,6 +511,7 @@ mod native_runtime {
         pub keyboard: Arc<dyn Fn(NativeKeyboardEvent, bool, bool) -> HookDisposition + Send + Sync>,
         pub modifier_released: Arc<dyn Fn(AggregateModifier) + Send + Sync>,
         pub pointer: Arc<dyn Fn(NativePointerEvent) -> HookDisposition + Send + Sync>,
+        pub pointer_reconcile: Arc<dyn Fn(bool, bool) + Send + Sync>,
         pub registered_hotkey: Arc<dyn Fn(i32) + Send + Sync>,
         pub ready: Arc<dyn Fn(Result<NativeHookReadiness, String>) + Send + Sync>,
     }
@@ -518,7 +519,9 @@ mod native_runtime {
     static CALLBACKS: OnceLock<Mutex<Option<NativeHookCallbacks>>> = OnceLock::new();
     static REGISTERED_HOTKEY_ID: AtomicUsize = AtomicUsize::new(0);
     static ALT_RELEASE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
+    static POINTER_RECONCILE_TIMER_ID: AtomicUsize = AtomicUsize::new(0);
     const ALT_RELEASE_TIMER: usize = 0x4e05;
+    const POINTER_RECONCILE_TIMER: usize = 0x4e06;
 
     fn callbacks() -> &'static Mutex<Option<NativeHookCallbacks>> {
         CALLBACKS.get_or_init(Default::default)
@@ -652,6 +655,16 @@ mod native_runtime {
         with_callbacks(|callbacks| (callbacks.modifier_released)(AggregateModifier::Alt));
     }
 
+    fn reconcile_pointer_buttons(timer: usize) {
+        if timer != POINTER_RECONCILE_TIMER_ID.load(Ordering::Acquire) {
+            return;
+        }
+        // SAFETY: these are read-only physical button-state queries on the hook thread.
+        let (primary, secondary) =
+            unsafe { (GetAsyncKeyState(0x01) < 0, GetAsyncKeyState(0x02) < 0) };
+        with_callbacks(|callbacks| (callbacks.pointer_reconcile)(primary, secondary));
+    }
+
     pub fn run_native_hook_loop(
         callbacks_value: NativeHookCallbacks,
         hotkey: NativeHotkeyRegistration,
@@ -692,6 +705,12 @@ mod native_runtime {
             pointer_hook: pointer.is_some(),
         }));
 
+        // Reconcile a low-level release that Windows failed to deliver. The
+        // callback is intentionally read-only with respect to native input and
+        // runs on this same hook thread at a bounded cadence.
+        let pointer_reconcile_timer = unsafe { SetTimer(None, POINTER_RECONCILE_TIMER, 50, None) };
+        POINTER_RECONCILE_TIMER_ID.store(pointer_reconcile_timer, Ordering::Release);
+
         let mut message = MSG::default();
         // SAFETY: message is writable storage owned by this thread.
         while unsafe { GetMessageW(&mut message, None, 0, 0).as_bool() } {
@@ -699,11 +718,16 @@ mod native_runtime {
                 with_callbacks(|callbacks| (callbacks.registered_hotkey)(hotkey.id));
             } else if message.message == WM_TIMER {
                 reconcile_modifier_release(message.wParam.0);
+                reconcile_pointer_buttons(message.wParam.0);
             }
         }
         REGISTERED_HOTKEY_ID.store(0, Ordering::Release);
         // SAFETY: these handles were returned to this thread and have not been unhooked.
         unsafe {
+            if pointer_reconcile_timer != 0 {
+                let _ = KillTimer(None, pointer_reconcile_timer);
+            }
+            POINTER_RECONCILE_TIMER_ID.store(0, Ordering::Release);
             if registered {
                 let _ = UnregisterHotKey(None, hotkey.id);
             }

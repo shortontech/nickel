@@ -7,7 +7,7 @@ use std::{
     os::windows::ffi::OsStringExt,
     path::PathBuf,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::Ordering,
         mpsc::{self, Receiver, Sender},
     },
@@ -96,7 +96,17 @@ use windows::{
     core::{BOOL, PCWSTR, PWSTR, w},
 };
 
-use nickel_core::hotkeys::{HotkeyAction, KeyCode, KeyEdge};
+use nickel_core::{
+    geometry_authority::ControlMode,
+    hotkeys::{HotkeyAction, KeyCode, KeyEdge},
+    window_operation::{
+        BeginRequest, CancellationReason, CompletionBinding, CompletionGesture, Disposition,
+        Effect as WindowOperationEffect, FailureReason, HorizontalEdge, MappingGeneration,
+        NativeLifetimeId, OperationId, OperationKind, ResizeEdges, ResourceLeaseId, SeatId, Source,
+        SourceGeneration, SourceId, VerticalEdge, WindowId as OperationWindowId, WindowMapping,
+        WindowOperationReducer,
+    },
+};
 use nickel_input::{
     AggregateModifier, PhysicalKey, PointerButton, Shortcut, ShortcutKey, ShortcutTrigger,
     global::{GlobalShortcutEdge, Registration, RegistrationError, RegistrationTable},
@@ -1120,6 +1130,7 @@ fn run_super_key_hook(
             keyboard: Arc::new(handle_native_keyboard_hook),
             modifier_released: Arc::new(handle_native_modifier_release),
             pointer: Arc::new(handle_native_pointer_hook),
+            pointer_reconcile: Arc::new(handle_native_pointer_reconcile),
             registered_hotkey: Arc::new(move |id| {
                 if id == activation_run.id
                     && let Ok(mut registrations) = activation_registrations.lock()
@@ -1300,17 +1311,218 @@ static DWM_PREVIEW_STATE: Mutex<DwmPreviewState> = Mutex::new(DwmPreviewState {
 });
 static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
-static WINDOW_DRAG: Mutex<Option<WindowDrag>> = Mutex::new(None);
+static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
+    LazyLock::new(|| Mutex::new(WindowDragCoordinator::default()));
 const PANEL_APPBAR_CALLBACK: u32 = 0x8000 + 17;
 const ABN_FULLSCREENAPP_CODE: usize = 2;
 
 #[derive(Clone, Copy)]
 struct WindowDrag {
+    operation: OperationId,
+    completion: CompletionBinding,
+    control: ControlMode,
     window: isize,
     start: POINT,
     rectangle: RECT,
     resize_edge: Option<u32>,
+    initiated_at: u32,
     last_update: u32,
+    last_apply: NativeApplyState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeApplyState {
+    NotSubmitted,
+    AcceptedSettlementUnknown,
+    Rejected,
+}
+
+#[derive(Default)]
+struct WindowDragCoordinator {
+    reducer: WindowOperationReducer,
+    active: Option<WindowDrag>,
+    next_mapping_generation: u64,
+    last_terminal_apply: Option<NativeApplyState>,
+}
+
+#[derive(Clone, Copy)]
+struct WindowDragAdmission {
+    window: isize,
+    start: POINT,
+    rectangle: RECT,
+    resize_edge: Option<u32>,
+    initiating_button: u16,
+    time: u32,
+}
+
+impl WindowDragCoordinator {
+    fn admit(&mut self, admission: WindowDragAdmission) -> bool {
+        if self.active.is_some() {
+            return false;
+        }
+        if let Some(last_apply) = self.last_terminal_apply {
+            tracing::trace!(
+                ?last_apply,
+                "previous foreign-window operation native apply state"
+            );
+        }
+        let Some(kind) = operation_kind(admission.resize_edge) else {
+            return false;
+        };
+        let completion = CompletionBinding {
+            source: windows_pointer_source(),
+            gesture: CompletionGesture::Button(admission.initiating_button),
+        };
+        self.next_mapping_generation = self.next_mapping_generation.saturating_add(1);
+        let mapping_generation = self.next_mapping_generation;
+        let (Some(operation), begin) = self.reducer.begin(BeginRequest {
+            seat: SeatId::new(1),
+            subject: WindowMapping {
+                window: OperationWindowId::new(admission.window as usize as u64),
+                native_lifetime: NativeLifetimeId::new(mapping_generation),
+                generation: MappingGeneration::new(mapping_generation),
+            },
+            kind,
+            control: ControlMode::ExternallyContested,
+            origin: completion,
+            optional_update_sources: Vec::new(),
+        }) else {
+            return false;
+        };
+        let [WindowOperationEffect::Acquire { request, .. }] = begin.effects.as_slice() else {
+            self.reducer
+                .cancel(operation, CancellationReason::AcquisitionFailed);
+            return false;
+        };
+        let request = *request;
+        if self
+            .reducer
+            .acquired(operation, request, ResourceLeaseId::new(operation.get()))
+            .disposition
+            != Disposition::Applied
+            || self.reducer.activate(operation).disposition != Disposition::Applied
+        {
+            self.reducer
+                .cancel(operation, CancellationReason::AcquisitionFailed);
+            return false;
+        }
+        self.active = Some(WindowDrag {
+            operation,
+            completion,
+            control: ControlMode::ExternallyContested,
+            window: admission.window,
+            start: admission.start,
+            rectangle: admission.rectangle,
+            resize_edge: admission.resize_edge,
+            initiated_at: admission.time,
+            last_update: admission.time,
+            last_apply: NativeApplyState::NotSubmitted,
+        });
+        true
+    }
+
+    fn update(&mut self, pointer: POINT, time: u32) -> Result<(), ()> {
+        let Some(mut active) = self.active else {
+            return Err(());
+        };
+        if self
+            .reducer
+            .update(active.operation, active.completion.source)
+            .disposition
+            != Disposition::Applied
+        {
+            return Err(());
+        }
+        active.last_apply = update_window_drag(active, pointer);
+        active.last_update = time;
+        self.active = Some(active);
+        if active.last_apply == NativeApplyState::Rejected {
+            self.reducer
+                .fail(active.operation, FailureReason::NativeApplyFailed);
+            self.last_terminal_apply = Some(active.last_apply);
+            self.active = None;
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn release(&mut self, binding: CompletionBinding) {
+        let Some(active) = self.active else {
+            return;
+        };
+        if self.reducer.release(active.operation, binding).disposition == Disposition::Applied {
+            self.last_terminal_apply = Some(active.last_apply);
+            self.active = None;
+        }
+    }
+
+    fn cancel(&mut self, reason: CancellationReason) {
+        if let Some(active) = self.active.take() {
+            let _ = self.reducer.cancel(active.operation, reason);
+            self.last_terminal_apply = Some(active.last_apply);
+        }
+    }
+}
+
+fn windows_pointer_source() -> Source {
+    Source {
+        id: SourceId::new(1),
+        generation: SourceGeneration::new(1),
+    }
+}
+
+fn pointer_release_binding(kind: NativePointerKind) -> Option<CompletionBinding> {
+    let button = match kind {
+        NativePointerKind::PrimaryReleased => 1,
+        NativePointerKind::SecondaryReleased => 2,
+        _ => return None,
+    };
+    Some(CompletionBinding {
+        source: windows_pointer_source(),
+        gesture: CompletionGesture::Button(button),
+    })
+}
+
+fn completion_button_physically_held(binding: CompletionBinding) -> bool {
+    let CompletionGesture::Button(button) = binding.gesture else {
+        return false;
+    };
+    let virtual_key = if button == 1 { 0x01 } else { 0x02 };
+    // SAFETY: this is a read-only physical button-state query on the hook thread.
+    unsafe { GetAsyncKeyState(virtual_key) < 0 }
+}
+
+fn observed_native_takeover(operation: WindowDrag) -> bool {
+    // Nickel never captures the pointer for this foreign-window operation. A
+    // capture owned by the subject therefore proves native control has taken
+    // over; ExternallyContested operations must yield rather than claim exclusion.
+    debug_assert_eq!(operation.control, ControlMode::ExternallyContested);
+    let capture = unsafe { GetCapture() };
+    !capture.0.is_null() && capture.0 as isize == operation.window
+}
+
+fn operation_kind(resize_edge: Option<u32>) -> Option<OperationKind> {
+    let Some(edge) = resize_edge else {
+        return Some(OperationKind::Move);
+    };
+    let horizontal = if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
+        Some(HorizontalEdge::Left)
+    } else if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
+        Some(HorizontalEdge::Right)
+    } else {
+        None
+    };
+    let vertical = if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
+        Some(VerticalEdge::Top)
+    } else if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
+        Some(VerticalEdge::Bottom)
+    } else {
+        None
+    };
+    ResizeEdges::new(horizontal, vertical)
+        .ok()
+        .map(OperationKind::Resize)
 }
 
 #[derive(Clone)]
@@ -1525,18 +1737,35 @@ fn send_hotkey_outcomes(outcomes: Vec<nickel_input::ShortcutOutcome<HotkeyAction
 
 fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     crate::windows_remote_control::observe_physical_pointer(event);
+    // Injected hook traffic is not the physical Windows pointer source and may
+    // neither start, update, nor complete its operation binding.
+    if event.injected {
+        return HookDisposition::Forward;
+    }
     let point = POINT {
         x: event.x,
         y: event.y,
     };
-    if let Ok(mut drag) = WINDOW_DRAG.lock()
-        && let Some(operation) = *drag
+    if let Ok(mut coordinator) = WINDOW_DRAG.lock()
+        && let Some(operation) = coordinator.active
     {
-        let release = matches!(
-            event.kind,
-            NativePointerKind::PrimaryReleased | NativePointerKind::SecondaryReleased
-        );
-        if event.kind == NativePointerKind::Moved || release {
+        let release = pointer_release_binding(event.kind);
+        let current_release = release == Some(operation.completion);
+        if event.kind == NativePointerKind::Moved || current_release {
+            if observed_native_takeover(operation) {
+                coordinator.cancel(CancellationReason::NativeTakeover);
+                return HookDisposition::Forward;
+            }
+            if event.kind == NativePointerKind::Moved
+                && event.time.wrapping_sub(operation.initiated_at) >= 250
+                && !completion_button_physically_held(operation.completion)
+            {
+                // Low-level button-up delivery is not infallible. Once another
+                // hook event proves the initiating button has been released,
+                // terminate instead of allowing an unbounded stuck drag.
+                coordinator.cancel(CancellationReason::CompletionSourceLost);
+                return HookDisposition::Forward;
+            }
             // Moving is inexpensive and should track the compositor closely. Resizing can make
             // applications such as Windows Terminal reflow and redraw their entire contents, so
             // retain a modest cap there without making ordinary dragging feel like 30 FPS.
@@ -1545,18 +1774,28 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
             } else {
                 8
             };
-            if release || event.time.wrapping_sub(operation.last_update) >= minimum_interval {
-                update_window_drag(operation, point);
-                if !release {
-                    drag.as_mut().expect("drag operation exists").last_update = event.time;
+            if current_release || event.time.wrapping_sub(operation.last_update) >= minimum_interval
+            {
+                if coordinator.update(point, event.time).is_err() {
+                    return if current_release {
+                        HookDisposition::Suppress
+                    } else {
+                        HookDisposition::Forward
+                    };
                 }
             }
-            if release {
-                *drag = None;
+            if current_release {
+                coordinator.release(operation.completion);
                 return HookDisposition::Suppress;
             }
             // Observe pointer motion without consuming it. Suppressing WM_MOUSEMOVE freezes the
             // real cursor while the window chases coordinates reported by the hook.
+            return HookDisposition::Forward;
+        }
+        if let Some(binding) = release {
+            // Route unrelated releases through the reducer. They neither end
+            // the operation nor consume the native event.
+            let _ = coordinator.reducer.release(operation.operation, binding);
             return HookDisposition::Forward;
         }
     }
@@ -1619,15 +1858,25 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if unsafe { GetWindowRect(target, &mut rectangle) }.is_err() {
         return HookDisposition::Forward;
     }
-    if let Ok(mut drag) = WINDOW_DRAG.lock() {
-        *drag = Some(WindowDrag {
+    let resize_edge =
+        (gesture == SuperPointerGesture::Resize).then(|| resize_hit_test(target, point));
+    let initiating_button = if event.kind == NativePointerKind::PrimaryPressed {
+        1
+    } else {
+        2
+    };
+    let admitted = WINDOW_DRAG.lock().is_ok_and(|mut coordinator| {
+        coordinator.admit(WindowDragAdmission {
             window: target.0 as isize,
             start: point,
             rectangle,
-            resize_edge: (gesture == SuperPointerGesture::Resize)
-                .then(|| resize_hit_test(target, point)),
-            last_update: event.time,
-        });
+            resize_edge,
+            initiating_button,
+            time: event.time,
+        })
+    });
+    if !admitted {
+        return HookDisposition::Forward;
     }
     unsafe {
         let _ = SetForegroundWindow(target);
@@ -1635,7 +1884,24 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     HookDisposition::Suppress
 }
 
-fn update_window_drag(operation: WindowDrag, pointer: POINT) {
+fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
+    let Ok(mut coordinator) = WINDOW_DRAG.lock() else {
+        return;
+    };
+    let Some(active) = coordinator.active else {
+        return;
+    };
+    let held = match active.completion.gesture {
+        CompletionGesture::Button(1) => primary_held,
+        CompletionGesture::Button(2) => secondary_held,
+        _ => false,
+    };
+    if !held {
+        coordinator.cancel(CancellationReason::CompletionSourceLost);
+    }
+}
+
+fn update_window_drag(operation: WindowDrag, pointer: POINT) -> NativeApplyState {
     let delta_x = pointer.x - operation.start.x;
     let delta_y = pointer.y - operation.start.y;
     let mut rectangle = operation.rectangle;
@@ -1675,8 +1941,8 @@ fn update_window_drag(operation: WindowDrag, pointer: POINT) {
         rectangle.bottom = rectangle.top + height;
     }
     let window = HWND(operation.window as *mut c_void);
-    unsafe {
-        let _ = SetWindowPos(
+    let accepted = unsafe {
+        SetWindowPos(
             window,
             None,
             rectangle.left,
@@ -1684,7 +1950,14 @@ fn update_window_drag(operation: WindowDrag, pointer: POINT) {
             rectangle.right - rectangle.left,
             rectangle.bottom - rectangle.top,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-        );
+        )
+        .is_ok()
+    };
+    if accepted {
+        // ASYNCWINDOWPOS reports queue admission, not native settlement.
+        NativeApplyState::AcceptedSettlementUnknown
+    } else {
+        NativeApplyState::Rejected
     }
 }
 
