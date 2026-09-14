@@ -851,6 +851,12 @@ pub trait Application: Sized {
         false
     }
 
+    /// Explicit shortcut consumption. Override this when a handled shortcut
+    /// can be a no-op or when rejection must stop widget fallback.
+    fn shortcut_outcome(&mut self, shortcut: Shortcut) -> ShortcutOutcome {
+        ShortcutOutcome::from_changed(self.shortcut(shortcut))
+    }
+
     /// Offers normalized RGBA clipboard pixels to the focused application.
     /// Returning true makes image data win over simultaneous clipboard text.
     fn paste_clipboard_image(&mut self, _width: u32, _height: u32, _rgba: &[u8]) -> bool {
@@ -1102,6 +1108,39 @@ pub enum HostEvent {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalAction {
     ToggleLauncher,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShortcutOutcome {
+    pub disposition: crate::EventDisposition,
+    pub changed: bool,
+}
+
+impl ShortcutOutcome {
+    pub const fn from_changed(changed: bool) -> Self {
+        Self {
+            disposition: if changed {
+                crate::EventDisposition::Handled
+            } else {
+                crate::EventDisposition::Unhandled
+            },
+            changed,
+        }
+    }
+
+    pub const fn handled(changed: bool) -> Self {
+        Self {
+            disposition: crate::EventDisposition::Handled,
+            changed,
+        }
+    }
+
+    pub const fn rejected(reason: &'static str) -> Self {
+        Self {
+            disposition: crate::EventDisposition::Rejected(reason),
+            changed: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2248,10 +2287,11 @@ impl<A: Application> UiHost<A> {
                     outcome
                 }
                 HostEvent::Shortcut(shortcut) => {
-                    let changed = self.application.shortcut(shortcut);
+                    let shortcut = self.application.shortcut_outcome(shortcut);
                     HostEventOutcome {
-                        changed,
-                        invalidation: if changed {
+                        changed: shortcut.changed,
+                        disposition: shortcut.disposition,
+                        invalidation: if shortcut.changed {
                             Invalidation::Layout
                         } else {
                             Invalidation::None
@@ -2567,6 +2607,7 @@ impl<A: Application> UiHost<A> {
             combined.invalidation = Invalidation::Layout;
         }
         if adapted.consume {
+            combined.disposition = crate::EventDisposition::Handled;
             return combined;
         }
         self.state.set_clipboard_offer(clipboard_text);
@@ -2576,12 +2617,17 @@ impl<A: Application> UiHost<A> {
             let event = match command {
                 InputCommand::Ui(event) => Some(event),
                 InputCommand::Application { shortcut, fallback } => {
-                    if self.application.shortcut(shortcut) {
+                    let shortcut = self.application.shortcut_outcome(shortcut);
+                    combined.disposition = combined.disposition.merge(shortcut.disposition);
+                    if shortcut.changed {
                         combined.changed = true;
                         combined.invalidation = combined.invalidation.merge(Invalidation::Layout);
-                        None
-                    } else {
-                        fallback
+                    }
+                    match shortcut.disposition {
+                        crate::EventDisposition::Unhandled => fallback,
+                        crate::EventDisposition::Handled | crate::EventDisposition::Rejected(_) => {
+                            None
+                        }
                     }
                 }
                 InputCommand::Copy => Some(UiEvent::TextCopy),
@@ -4284,6 +4330,81 @@ mod tests {
             crate::EventDisposition::Rejected("action unavailable")
         );
         assert_eq!(rejected.semantic_failures.len(), 1);
+    }
+
+    #[test]
+    fn explicit_shortcut_disposition_controls_widget_fallback() {
+        struct ShortcutApplication {
+            disposition: crate::EventDisposition,
+            activations: usize,
+        }
+
+        impl Application for ShortcutApplication {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {
+                self.activations += 1;
+            }
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Activate")
+            }
+
+            fn shortcut_outcome(&mut self, _shortcut: Shortcut) -> super::ShortcutOutcome {
+                super::ShortcutOutcome {
+                    disposition: self.disposition,
+                    changed: false,
+                }
+            }
+        }
+
+        for disposition in [
+            crate::EventDisposition::Handled,
+            crate::EventDisposition::Rejected("disabled"),
+        ] {
+            let mut host = UiHost::new(
+                ShortcutApplication {
+                    disposition,
+                    activations: 0,
+                },
+                160,
+                48,
+            );
+            let target = host.semantic_nodes()[0].id.clone();
+            host.request_focus(target);
+            let outcome = host.handle_input(&key(1, false), None);
+            assert_eq!(outcome.disposition, disposition);
+            assert!(!outcome.changed);
+            assert_eq!(host.application().activations, 0);
+        }
+    }
+
+    #[test]
+    fn adapter_consumption_is_explicitly_handled() {
+        struct ConsumingAdapterApplication;
+
+        impl Application for ConsumingAdapterApplication {
+            type Message = ();
+
+            fn update(&mut self, (): Self::Message) {}
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Button::new((), "Ignored")
+            }
+
+            fn adapt_input(
+                _host: &mut UiHost<Self>,
+                _input: &nickel_input::InputEvent,
+            ) -> super::AdapterOutcome {
+                super::AdapterOutcome::consumed(false)
+            }
+        }
+
+        let mut host = UiHost::new(ConsumingAdapterApplication, 160, 48);
+        let outcome = host.handle_input(&key(1, false), None);
+        assert_eq!(outcome.disposition, crate::EventDisposition::Handled);
+        assert!(!outcome.changed);
+        assert!(outcome.messages.is_empty());
     }
 
     #[test]
