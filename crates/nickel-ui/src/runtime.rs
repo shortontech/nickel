@@ -3508,8 +3508,7 @@ mod tests {
         ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
         PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
-        local_controller_poll_lease,
-        queue_continuous_input, wait_duration,
+        local_controller_poll_lease, queue_continuous_input, wait_duration,
     };
 
     #[test]
