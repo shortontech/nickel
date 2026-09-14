@@ -11509,8 +11509,14 @@ impl NickelSession {
         } else {
             FocusScope::Ordinary
         };
-        self.realize_seat_focus(None, scope);
+        if !self.realize_seat_focus(None, scope) {
+            // A rejected native handoff cannot authorize a parallel internal
+            // projection or retain the controller lease from the old owner.
+            self.surrender_internal_focus();
+            return false;
+        }
         if !self.internal_ui.focus_surface(surface) {
+            self.surrender_internal_focus();
             return false;
         }
         self.grant_controller_role_lease(surface);
@@ -18304,6 +18310,22 @@ mod protocol_tests {
 
         session.internal_ui.set_visible(launcher, false);
         assert_eq!(session.native_controller_route().target, None);
+    }
+
+    #[test]
+    fn rejected_native_handoff_clears_stale_internal_focus_and_lease() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        assert!(session.toggle_internal_launcher());
+        let launcher = session.internal_ui.focused().unwrap();
+        assert_eq!(session.native_controller_route().target, Some(launcher));
+
+        // Simulate authority changing between target selection and realization.
+        session.locked = true;
+        assert!(!session.focus_internal_surface(launcher));
+        assert_eq!(session.internal_ui.focused(), None);
+        assert_eq!(session.native_controller_route().target, None);
+        assert!(session.seat_focus.acknowledged().is_none());
     }
 
     #[test]
