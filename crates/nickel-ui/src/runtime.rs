@@ -5657,15 +5657,35 @@ mod tests {
         assert_eq!(host.application().text, "accessible");
         assert_eq!(host.inspect().modality, InputModality::Accessibility);
 
-        let rejected = host
+        let activated = host
             .perform_semantic_action(text_field.id, SemanticAction::Invoke(ActionKind::Activate));
-        assert!(!rejected.changed);
-        assert_eq!(rejected.semantic_failures.len(), 1);
+        assert!(activated.changed);
+        assert!(activated.semantic_failures.is_empty());
         assert_eq!(
-            rejected.semantic_failures[0].error,
-            SemanticActionError::ActionUnavailable
+            host.inspect().target_mode,
+            crate::WidgetTargetMode::TextEditing
         );
-        assert_eq!(host.inspect().frame_generation, 3);
+        assert_eq!(host.inspect().frame_generation, 4);
+
+        let mut accessibility_host = UiHost::new(InputApplication::default(), 320, 48);
+        let accessibility_editor = accessibility_host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.role == Some(SemanticRole::TextField))
+            .unwrap();
+        let accessibility_activation = accessibility_host.perform_accessibility_action(
+            accessibility_editor.id,
+            SemanticAction::Invoke(ActionKind::Activate),
+        );
+        assert!(accessibility_activation.changed);
+        assert_eq!(
+            accessibility_host.inspect().target_mode,
+            crate::WidgetTargetMode::TextEditing
+        );
+        assert_eq!(
+            accessibility_host.inspect().modality,
+            InputModality::Accessibility
+        );
 
         let missing = host.perform_semantic_action(
             UiId::from("missing"),

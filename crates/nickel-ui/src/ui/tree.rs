@@ -1728,6 +1728,17 @@ impl<Message: Clone> UiFrame<Message> {
             InteractionIntent::Event(event) => self.reduce_event(state, event),
             InteractionIntent::Invoke { target, action } => {
                 if action == SemanticAction::Invoke(ActionKind::Activate)
+                    && self.is_text_input(&target)
+                {
+                    let mut outcome = EventOutcome::default();
+                    match self.begin_default_activation(state, &target, &mut outcome) {
+                        DefaultActivation::Handled(invalidation) => {
+                            outcome.invalidation = invalidation;
+                            outcome
+                        }
+                        DefaultActivation::Continue => outcome,
+                    }
+                } else if action == SemanticAction::Invoke(ActionKind::Activate)
                     && let Some(invalidation) = self.open_primary_overlay(state, &target)
                 {
                     EventOutcome {
@@ -1942,9 +1953,11 @@ impl<Message: Clone> UiFrame<Message> {
     ) -> DefaultActivation {
         if self.is_text_input(target) {
             return DefaultActivation::Handled(
-                state
-                    .navigation_mut()
-                    .set_target_mode(crate::WidgetTargetMode::TextEditing),
+                state.set_focus(Some(target.clone())).merge(
+                    state
+                        .navigation_mut()
+                        .set_target_mode(crate::WidgetTargetMode::TextEditing),
+                ),
             );
         }
         if let Some(invalidation) = self.activate_text_command(state, target, outcome) {
@@ -3168,6 +3181,10 @@ impl<Message: Clone> UiFrame<Message> {
                 Invalidation::None
             }
             UiEvent::ControllerActivate | UiEvent::KeyboardNavigateActivate => {
+                // Controller confirmation wins arbitration with an outstanding
+                // pointer press. Retire its capture before activating so the
+                // eventual physical release cannot emit the same action again.
+                let pointer_cancellation = state.set_pressed(None).merge(state.set_capture(None));
                 let selected = state
                     .navigation()
                     .controller_selected()
@@ -3178,7 +3195,8 @@ impl<Message: Clone> UiFrame<Message> {
                         self.begin_default_activation(state, target, &mut outcome)
                 {
                     return EventOutcome {
-                        invalidation: invalidation
+                        invalidation: pointer_cancellation
+                            .merge(invalidation)
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
                         disposition: crate::EventDisposition::Handled,
                         ..outcome
@@ -3208,7 +3226,7 @@ impl<Message: Clone> UiFrame<Message> {
                             }));
                         return EventOutcome {
                             messages: outcome.messages,
-                            invalidation,
+                            invalidation: pointer_cancellation.merge(invalidation),
                             clipboard_text: None,
                             disposition: crate::EventDisposition::Handled,
                         };
@@ -3225,7 +3243,8 @@ impl<Message: Clone> UiFrame<Message> {
                     {
                         return EventOutcome {
                             messages: outcome.messages,
-                            invalidation: state.navigation_mut().set_controller_editing(true),
+                            invalidation: pointer_cancellation
+                                .merge(state.navigation_mut().set_controller_editing(true)),
                             clipboard_text: None,
                             disposition: crate::EventDisposition::Handled,
                         };
@@ -3242,7 +3261,9 @@ impl<Message: Clone> UiFrame<Message> {
                         let invalidation = self.select_scope_entry(state, &node.id);
                         return EventOutcome {
                             messages: outcome.messages,
-                            invalidation: invalidation.merge(dropdown_invalidation),
+                            invalidation: pointer_cancellation
+                                .merge(invalidation)
+                                .merge(dropdown_invalidation),
                             clipboard_text: None,
                             disposition: crate::EventDisposition::Handled,
                         };
@@ -3276,11 +3297,12 @@ impl<Message: Clone> UiFrame<Message> {
                 if overlay_action {
                     let dismissed = state.dismiss_overlay(crate::DismissReason::Action);
                     let restored = state.focused().cloned();
-                    dropdown
+                    pointer_cancellation
+                        .merge(dropdown)
                         .merge(dismissed)
                         .merge(state.navigation_mut().set_controller_selected(restored))
                 } else {
-                    dropdown
+                    pointer_cancellation.merge(dropdown)
                 }
             }
             UiEvent::ControllerContextMenu => {
@@ -3389,16 +3411,12 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::AccessibilityActivate(id) => {
-                if let Some(invalidation) = self.activate_text_command(state, &id, &mut outcome) {
+                if let DefaultActivation::Handled(invalidation) =
+                    self.begin_default_activation(state, &id, &mut outcome)
+                {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
-                        ..outcome
-                    };
-                }
-                if let Some(invalidation) = self.open_primary_overlay(state, &id) {
-                    return EventOutcome {
-                        invalidation,
                         ..outcome
                     };
                 }

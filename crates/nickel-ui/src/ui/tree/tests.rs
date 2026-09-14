@@ -2333,6 +2333,34 @@ fn pointer_keyboard_controller_and_accessibility_share_typed_activation() {
 }
 
 #[test]
+fn controller_confirm_cancels_pending_pointer_activation_before_release() {
+    let tree = UiFrame::layout(
+        Button::new(TestMessage::Option(7), "Seven").id("seven"),
+        Rect::new(0.0, 0.0, 100.0, 42.0),
+    );
+    let mut state = UiStateStore::default();
+    tree.reconcile_state(&mut state);
+    tree.handle_event(&mut state, UiEvent::FocusNext);
+    let point = Point { x: 10.0, y: 10.0 };
+
+    assert!(
+        tree.handle_event(&mut state, UiEvent::PointerPressed(point))
+            .messages
+            .is_empty()
+    );
+    assert_eq!(
+        tree.handle_event(&mut state, UiEvent::ControllerActivate)
+            .messages,
+        vec![TestMessage::Option(7)]
+    );
+    assert!(
+        tree.handle_event(&mut state, UiEvent::PointerReleased(point))
+            .messages
+            .is_empty()
+    );
+}
+
+#[test]
 fn context_only_target_supports_every_invocation_route() {
     let build = |state: &mut UiStateStore| {
         UiFrame::layout_with_state(
