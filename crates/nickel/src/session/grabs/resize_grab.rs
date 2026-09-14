@@ -69,7 +69,9 @@ pub struct ResizeSurfaceGrab {
     edges: ResizeEdge,
 
     initial_rect: Rectangle<i32, Logical>,
+    last_window_location: Point<i32, Logical>,
     last_window_size: Size<i32, Logical>,
+    last_authorization: Option<crate::session::state::InteractiveResizeToken>,
     operation: WindowPointerOperation,
     terminal: bool,
 }
@@ -98,7 +100,9 @@ impl ResizeSurfaceGrab {
             window,
             edges,
             initial_rect,
+            last_window_location: initial_rect.loc,
             last_window_size: initial_rect.size,
+            last_authorization: None,
             operation,
             terminal: false,
         }
@@ -176,34 +180,20 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         if !compensate {
             return;
         }
-        if let Some(x11) = self.window.x11_surface() {
-            let current = Rectangle::new(
-                data.space
-                    .element_location(&self.window)
-                    .unwrap_or(self.initial_rect.loc),
-                self.last_window_size,
-            );
-            if current != self.window.geometry() {
-                return;
+        let constraints = operation_geometry_constraints(&self.window);
+        if let Some(token) = data.compensate_interactive_resize(&self.window, constraints) {
+            let final_configure = data
+                .apply_authorized_interactive_resize(&self.window, token, false)
+                .flatten();
+            if let Some(xdg) = self.window.toplevel() {
+                ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                    *state = ResizeSurfaceState::WaitingForLastCommit {
+                        edges: self.edges,
+                        initial_rect: self.initial_rect,
+                        final_configure,
+                    };
+                });
             }
-            if let Err(error) = x11.configure(self.initial_rect) {
-                tracing::warn!(?error, "X11 cancelled resize compensation failed");
-            }
-            data.space
-                .map_element(self.window.clone(), self.initial_rect.loc, false);
-        } else if let Some(xdg) = self.window.toplevel() {
-            xdg.with_pending_state(|state| {
-                state.states.unset(xdg_toplevel::State::Resizing);
-                state.size = Some(self.initial_rect.size);
-            });
-            let final_configure = xdg.send_pending_configure();
-            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                *state = ResizeSurfaceState::WaitingForLastCommit {
-                    edges: self.edges,
-                    initial_rect: self.initial_rect,
-                    final_configure,
-                };
-            });
         }
     }
 
@@ -225,22 +215,24 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         ) else {
             return;
         };
+        self.last_window_location = Point::from((proposal.x, proposal.y));
         self.last_window_size = Size::from((proposal.width, proposal.height));
-
-        if let Some(x11) = self.window.x11_surface() {
-            let location = Point::from((proposal.x, proposal.y));
-            let geometry = Rectangle::new(location, self.last_window_size);
-            if let Err(error) = x11.configure(geometry) {
-                tracing::warn!(?error, "X11 interactive resize failed");
-            }
-            data.space.map_element(self.window.clone(), location, false);
-        } else {
-            let xdg = self.window.toplevel().unwrap();
-            xdg.with_pending_state(|state| {
-                state.states.set(xdg_toplevel::State::Resizing);
-                state.size = Some(self.last_window_size);
-            });
-            xdg.send_pending_configure();
+        let desired = crate::session::shell_layout::Geometry {
+            x: proposal.x,
+            y: proposal.y,
+            width: proposal.width,
+            height: proposal.height,
+        };
+        let constraints = operation_geometry_constraints(&self.window);
+        let Some(token) = data.authorize_interactive_resize(&self.window, desired, constraints)
+        else {
+            return;
+        };
+        if data
+            .apply_authorized_interactive_resize(&self.window, token, true)
+            .is_some()
+        {
+            self.last_authorization = Some(token);
         }
     }
 
@@ -257,46 +249,38 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             && self.operation.complete(&mut data.window_operations)
         {
             // The initiating button released; free the seat before settlement.
-            if self.window.x11_surface().is_some() {
-                let mut location = self.initial_rect.loc;
-                if self.edges.contains(ResizeEdge::LEFT) {
-                    location.x += self.initial_rect.size.w - self.last_window_size.w;
-                }
-                if self.edges.contains(ResizeEdge::TOP) {
-                    location.y += self.initial_rect.size.h - self.last_window_size.h;
-                }
-                data.record_x11_interactive_final(
+            let desired = crate::session::shell_layout::Geometry {
+                x: self.last_window_location.x,
+                y: self.last_window_location.y,
+                width: self.last_window_size.w,
+                height: self.last_window_size.h,
+            };
+            let token = self.last_authorization.or_else(|| {
+                data.authorize_interactive_resize(
                     &self.window,
-                    crate::session::shell_layout::Geometry {
-                        x: location.x,
-                        y: location.y,
-                        width: self.last_window_size.w,
-                        height: self.last_window_size.h,
-                    },
-                );
+                    desired,
+                    operation_geometry_constraints(&self.window),
+                )
+            });
+            if self.window.x11_surface().is_some() {
+                data.record_x11_interactive_final(&self.window, desired);
             }
+            data.finish_interactive_resize(&self.window);
             self.terminal = true;
             handle.unset_grab(self, data, event.serial, event.time, true);
 
             if let Some(xdg) = self.window.toplevel() {
-                xdg.with_pending_state(|state| {
-                    state.states.unset(xdg_toplevel::State::Resizing);
-                    state.size = Some(self.last_window_size);
-                });
-                let final_configure = xdg.send_pending_configure();
+                let final_configure = token
+                    .and_then(|token| {
+                        data.apply_authorized_interactive_resize(&self.window, token, false)
+                    })
+                    .flatten();
                 if let Some(final_configure) = final_configure {
-                    let mut location = self.initial_rect.loc;
-                    if self.edges.contains(ResizeEdge::LEFT) {
-                        location.x += self.initial_rect.size.w - self.last_window_size.w;
-                    }
-                    if self.edges.contains(ResizeEdge::TOP) {
-                        location.y += self.initial_rect.size.h - self.last_window_size.h;
-                    }
                     data.record_xdg_desired_geometry(
                         &self.window,
                         crate::session::shell_layout::Geometry {
-                            x: location.x,
-                            y: location.y,
+                            x: self.last_window_location.x,
+                            y: self.last_window_location.y,
                             width: self.last_window_size.w.max(1),
                             height: self.last_window_size.h.max(1),
                         },

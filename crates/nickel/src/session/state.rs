@@ -2584,6 +2584,12 @@ struct XdgConfigureSettlement {
     settlement: nickel_core::geometry_authority::Settlement,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InteractiveResizeToken {
+    window: WindowId,
+    placement: nickel_core::geometry_authority::AuthorizedPlacement,
+}
+
 pub struct NickelSession {
     pub start_time: std::time::Instant,
     pub socket_name: OsString,
@@ -2809,6 +2815,8 @@ pub struct NickelSession {
         nickel_ui::InternalSurfaceId,
         nickel_core::geometry_authority::CompensationBaseline,
     >,
+    interactive_resize_baselines:
+        HashMap<WindowId, nickel_core::geometry_authority::CompensationBaseline>,
     pub(crate) x11_geometry_settlements:
         HashMap<WindowId, nickel_core::geometry_authority::Settlement>,
     xdg_geometry_settlements: HashMap<WindowId, XdgConfigureSettlement>,
@@ -7566,6 +7574,7 @@ impl NickelSession {
             displaced_output_windows: HashMap::new(),
             geometry_authorities: HashMap::new(),
             internal_move_baselines: HashMap::new(),
+            interactive_resize_baselines: HashMap::new(),
             x11_geometry_settlements: HashMap::new(),
             xdg_geometry_settlements: HashMap::new(),
             x11_next_native_request: 0,
@@ -9959,6 +9968,117 @@ impl NickelSession {
         self.apply_compositor_moved_window_effect(window, location, activate);
     }
 
+    pub(crate) fn authorize_interactive_resize(
+        &mut self,
+        window: &Window,
+        desired: Geometry,
+        constraints: nickel_core::geometry_authority::GeometryConstraints,
+    ) -> Option<InteractiveResizeToken> {
+        let id = self.window_geometry_authority_id(window)?;
+        if !self.geometry_authorities.contains_key(&id) {
+            let location = self.space.element_location(window)?;
+            let size = window.geometry().size;
+            self.geometry_authorities.insert(
+                id,
+                nickel_core::geometry_authority::GeometryAuthority::new(
+                    Geometry {
+                        x: location.x,
+                        y: location.y,
+                        width: size.w.max(1),
+                        height: size.h.max(1),
+                    },
+                    nickel_core::geometry_authority::Presentation::Normal,
+                ),
+            );
+        }
+        let authority = self.geometry_authorities.get_mut(&id)?;
+        let baseline = self
+            .interactive_resize_baselines
+            .entry(id)
+            .or_insert_with(|| authority.baseline());
+        let placement = authority.authorize_placement(desired, constraints);
+        baseline.note_owned(
+            nickel_core::geometry_authority::GeometryField::Placement,
+            placement.revision,
+        );
+        Some(InteractiveResizeToken {
+            window: id,
+            placement,
+        })
+    }
+
+    pub(crate) fn apply_authorized_interactive_resize(
+        &mut self,
+        window: &Window,
+        token: InteractiveResizeToken,
+        resizing: bool,
+    ) -> Option<Option<smithay::utils::Serial>> {
+        if self.window_geometry_authority_id(window) != Some(token.window) {
+            return None;
+        }
+        let authority = self.geometry_authorities.get(&token.window)?;
+        if !authority.permits_placement(token.placement) {
+            return None;
+        }
+        let desired = token.placement.desired;
+        if let Some(x11) = window.x11_surface() {
+            x11.configure(Rectangle::new(
+                (desired.x, desired.y).into(),
+                (desired.width, desired.height).into(),
+            ))
+            .ok()?;
+            self.space
+                .map_element(window.clone(), (desired.x, desired.y), false);
+            Some(None)
+        } else {
+            let xdg = window.toplevel()?;
+            xdg.with_pending_state(|state| {
+                if resizing {
+                    state.states.set(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Resizing,
+                    );
+                } else {
+                    state.states.unset(
+                        smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State::Resizing,
+                    );
+                }
+                state.size = Some((desired.width, desired.height).into());
+            });
+            Some(xdg.send_pending_configure())
+        }
+    }
+
+    pub(crate) fn compensate_interactive_resize(
+        &mut self,
+        window: &Window,
+        constraints: nickel_core::geometry_authority::GeometryConstraints,
+    ) -> Option<InteractiveResizeToken> {
+        let id = self.window_geometry_authority_id(window)?;
+        let baseline = self.interactive_resize_baselines.remove(&id)?;
+        let authority = self.geometry_authorities.get_mut(&id)?;
+        let report = authority.compensate(baseline, constraints);
+        if !matches!(
+            report.placement,
+            nickel_core::geometry_authority::CompensationResult::Exact
+                | nickel_core::geometry_authority::CompensationResult::Adjusted
+        ) {
+            return None;
+        }
+        Some(InteractiveResizeToken {
+            window: id,
+            placement: nickel_core::geometry_authority::AuthorizedPlacement {
+                desired: authority.constrained_proposal,
+                revision: authority.base_placement.revision,
+            },
+        })
+    }
+
+    pub(crate) fn finish_interactive_resize(&mut self, window: &Window) {
+        if let Some(id) = self.window_geometry_authority_id(window) {
+            self.interactive_resize_baselines.remove(&id);
+        }
+    }
+
     /// Executes a placement already authorized by `record_desired_geometry`.
     fn apply_compositor_moved_window_effect(
         &mut self,
@@ -10011,11 +10131,20 @@ impl NickelSession {
         id: WindowId,
         desired: Geometry,
     ) -> nickel_core::geometry_authority::NativeRequestId {
+        let placement_revision = self.record_desired_geometry(id, desired);
+        self.bind_x11_geometry_request(id, desired, placement_revision)
+    }
+
+    fn bind_x11_geometry_request(
+        &mut self,
+        id: WindowId,
+        desired: Geometry,
+        placement_revision: nickel_core::geometry_authority::GeometryRevision,
+    ) -> nickel_core::geometry_authority::NativeRequestId {
         use nickel_core::geometry_authority::{
             NativeRequest, NativeRequestId, Settlement, SettlementLimits,
         };
 
-        let placement_revision = self.record_desired_geometry(id, desired);
         self.x11_next_native_request = self
             .x11_next_native_request
             .checked_add(1)
@@ -10079,7 +10208,12 @@ impl NickelSession {
         let Some(id) = self.window_geometry_authority_id(window) else {
             return;
         };
-        self.record_desired_geometry(id, desired);
+        let Some(authority) = self.geometry_authorities.get(&id) else {
+            return;
+        };
+        if authority.base_placement.value != desired || authority.constrained_proposal != desired {
+            return;
+        }
         self.x11_next_native_request = self
             .x11_next_native_request
             .checked_add(1)
@@ -10219,7 +10353,16 @@ impl NickelSession {
         desired: Geometry,
     ) -> Option<nickel_core::geometry_authority::NativeRequestId> {
         let id = self.window_geometry_authority_id(window)?;
-        Some(self.record_x11_desired_geometry(id, desired))
+        let revision = {
+            let authority = self.geometry_authorities.get(&id)?;
+            if authority.base_placement.value != desired
+                || authority.constrained_proposal != desired
+            {
+                return None;
+            }
+            authority.base_placement.revision
+        };
+        Some(self.bind_x11_geometry_request(id, desired, revision))
     }
 
     pub(crate) fn observe_x11_geometry(

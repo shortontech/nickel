@@ -365,6 +365,15 @@ impl GeometryAuthority {
         }
     }
 
+    /// A native effect may consume only the latest capability, even when a
+    /// superseding write requested an equal-valued rectangle.
+    pub fn permits_placement(&self, authorized: AuthorizedPlacement) -> bool {
+        self.base_placement.owner == FieldOwner::Nickel
+            && self.base_placement.control.permits_nickel_write()
+            && self.base_placement.revision == authorized.revision
+            && self.constrained_proposal == authorized.desired
+    }
+
     /// Recomputes a temporary effective placement without replacing the user's base placement.
     pub fn constrain_placement(&mut self, constraints: GeometryConstraints) -> LogicalRect {
         self.constrained_proposal = constraints.constrain(self.base_placement.value);
@@ -651,6 +660,20 @@ mod tests {
         let report = authority.compensate(baseline, constraints(200));
         assert_eq!(report.placement, CompensationResult::SkippedSuperseded);
         assert_eq!(authority.base_placement.value, rect(90));
+    }
+
+    #[test]
+    fn equal_valued_newer_write_revokes_native_effect_token() {
+        let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+        let first = authority.authorize_placement(rect(110), constraints(200));
+        assert!(authority.permits_placement(first));
+
+        let second = authority.authorize_placement(rect(110), constraints(200));
+        assert!(!authority.permits_placement(first));
+        assert!(authority.permits_placement(second));
+
+        authority.base_placement.owner = FieldOwner::External;
+        assert!(!authority.permits_placement(second));
     }
 
     #[test]
