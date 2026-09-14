@@ -498,6 +498,32 @@ pub enum InputEvent {
     DeviceRemoved { device: DeviceId, order: EventOrder },
 }
 
+impl InputEvent {
+    pub fn device(&self) -> Option<DeviceId> {
+        match self {
+            Self::Key(event) => Some(event.device),
+            Self::Text(TextEvent::Commit { device, .. } | TextEvent::Preedit { device, .. }) => {
+                Some(*device)
+            }
+            Self::Pointer(event) => Some(match event {
+                PointerEvent::Motion { device, .. }
+                | PointerEvent::Button { device, .. }
+                | PointerEvent::Axis { device, .. }
+                | PointerEvent::Enter { device, .. }
+                | PointerEvent::Leave { device, .. } => *device,
+            }),
+            Self::Touch(event) => Some(match event {
+                TouchEvent::Started { device, .. }
+                | TouchEvent::Moved { device, .. }
+                | TouchEvent::Ended { device, .. }
+                | TouchEvent::Cancelled { device, .. } => *device,
+            }),
+            Self::DeviceRemoved { device, .. } => Some(*device),
+            Self::FocusGained { .. } | Self::FocusLost { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ShortcutKey {
     Physical(PhysicalKey),

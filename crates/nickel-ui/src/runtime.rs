@@ -1192,7 +1192,44 @@ pub enum HostEvent {
         input: nickel_input::InputEvent,
         clipboard_text: Option<String>,
     },
+    /// Authority-bearing normalized ingress. New production adapters must use
+    /// this instead of the compatibility `Normalized` form.
+    NormalizedIngress(NormalizedInputEnvelope),
     Poll,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedInputEnvelope {
+    pub input: nickel_input::InputEvent,
+    pub clipboard_text: Option<String>,
+    pub source: NormalizedSourceBinding,
+    pub admission: NormalizedAdmissionBinding,
+    pub recipient: NormalizedRecipientBinding,
+    pub operation: Option<u64>,
+    pub transform_generation: Option<u64>,
+    pub text_transaction: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NormalizedSourceBinding {
+    pub seat: u64,
+    pub backend_stream: String,
+    pub stream_generation: u64,
+    pub device_generation: u64,
+    pub identity_capability: String,
+    pub reconnect_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedAdmissionBinding {
+    pub order: u64,
+    pub monotonic_micros: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NormalizedRecipientBinding {
+    pub lease: u64,
+    pub lifetime: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2275,7 +2312,12 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
-            if let HostEvent::Normalized { input, .. } = &event {
+            let normalized_input = match &event {
+                HostEvent::Normalized { input, .. } => Some(input),
+                HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
+                _ => None,
+            };
+            if let Some(input) = normalized_input {
                 match input {
                     nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started {
                         device,
@@ -2404,6 +2446,9 @@ impl<A: Application> UiHost<A> {
                     input,
                     clipboard_text,
                 } => self.dispatch_input(&input, clipboard_text.as_deref()),
+                HostEvent::NormalizedIngress(envelope) => {
+                    self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
+                }
                 HostEvent::Poll => {
                     let changed = self.application.poll();
                     self.next_application_deadline = self
@@ -2868,6 +2913,8 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     stopped: bool,
     error: Option<Box<dyn Error>>,
     pending_continuous_input: Vec<nickel_input::InputEvent>,
+    normalized_admission_order: u64,
+    normalized_ingress_epoch: Instant,
 }
 
 impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
@@ -2907,6 +2954,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             stopped: false,
             error: None,
             pending_continuous_input: Vec::new(),
+            normalized_admission_order: 0,
+            normalized_ingress_epoch: now,
         }
     }
 
@@ -2963,10 +3012,35 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 None => return,
             };
             if !consume {
-                events.push(HostEvent::Normalized {
+                self.normalized_admission_order =
+                    self.normalized_admission_order.wrapping_add(1).max(1);
+                let device_generation = input.device().map_or(0, |device| device.0);
+                let recipient = self.host.as_ref().map(|host| host.inspect());
+                events.push(HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                     input,
                     clipboard_text: clipboard_text.clone(),
-                });
+                    source: NormalizedSourceBinding {
+                        seat: 0,
+                        backend_stream: "winit".into(),
+                        stream_generation: 1,
+                        device_generation,
+                        identity_capability: "backend_generation".into(),
+                        reconnect_generation: device_generation,
+                    },
+                    admission: NormalizedAdmissionBinding {
+                        order: self.normalized_admission_order,
+                        monotonic_micros: Instant::now()
+                            .saturating_duration_since(self.normalized_ingress_epoch)
+                            .as_micros() as u64,
+                    },
+                    recipient: NormalizedRecipientBinding {
+                        lease: recipient.as_ref().is_some_and(|state| state.window_focused) as u64,
+                        lifetime: recipient.map_or(0, |state| state.frame_generation),
+                    },
+                    operation: None,
+                    transform_generation: Some(self.scale.to_bits().into()),
+                    text_transaction: None,
+                }));
             }
         }
         if adapter_exit {
