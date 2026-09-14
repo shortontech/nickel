@@ -5734,7 +5734,7 @@ impl NickelSession {
                 && (!self.locked || lease.role == SurfaceRole::Lock)
         });
 
-        let external_surface = if target.is_none() {
+        let external_surface = if lease.is_none() {
             self.windows
                 .snapshot()
                 .into_iter()
@@ -5745,6 +5745,7 @@ impl NickelSession {
         };
         ControllerRoute {
             target: lease.map(|lease| lease.target),
+            external_surface,
             launcher_intercepted: self.internal_shell.is_some()
                 && !lease.is_some_and(|lease| lease.role == SurfaceRole::Screenshot),
         }

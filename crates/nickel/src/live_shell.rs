@@ -2648,6 +2648,7 @@ impl LiveShell {
         self.apply_notification_effects()
     }
 
+    #[cfg(test)]
     pub(crate) fn notification_host_input(
         &mut self,
         input: nickel_input::InputEvent,
