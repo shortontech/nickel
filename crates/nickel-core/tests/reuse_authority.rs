@@ -427,3 +427,28 @@ fn remote_set_bounds_authorizes_exact_geometry_before_effects() {
     assert!(action.contains("apply_authorized_complete_window_geometry"));
     assert!(!action.contains("record_desired_geometry(id, geometry)"));
 }
+
+#[test]
+fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let binding = state
+        .split("fn bind_x11_geometry_request")
+        .nth(1)
+        .unwrap()
+        .split("fn schedule_x11_settlement_deadline")
+        .next()
+        .unwrap();
+    assert!(binding.contains("ledger.len() == 16"));
+    assert!(binding.contains("evicted.supersede()"));
+    assert!(binding.contains("retain_x11_geometry_outcome"));
+    let teardown = state
+        .split("pub fn forget_x11_geometry")
+        .nth(1)
+        .unwrap()
+        .split("pub fn toggle_maximized_toplevel")
+        .next()
+        .unwrap();
+    assert!(teardown.matches("fail_and_retain_x11_requests").count() >= 2);
+    assert!(!teardown.contains("x11_issued_geometry_requests.clear()"));
+}
