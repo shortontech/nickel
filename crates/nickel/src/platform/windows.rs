@@ -1489,6 +1489,13 @@ enum NativeApplyState {
     Rejected,
 }
 
+#[derive(Clone, Copy)]
+enum ActiveSettlementExit {
+    RetainForReconciliation,
+    Failed,
+    Unconfirmed,
+}
+
 #[derive(Default)]
 struct WindowDragCoordinator {
     reducer: WindowOperationReducer,
@@ -1514,6 +1521,49 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn finish_active(&mut self, mut active: WindowDrag, exit: ActiveSettlementExit) {
+        self.last_terminal_apply = Some(active.last_apply);
+        let Some(mut settlement) = active.settlement.take() else {
+            if self.current_lifetimes.get(&active.window) == Some(&active.lifetime) {
+                self.current_lifetimes.remove(&active.window);
+            }
+            return;
+        };
+        let key = (active.lifetime, settlement.request.id);
+        let retained = RetainedNativeSettlement {
+            lifetime: active.lifetime,
+            authority: active.authority,
+            settlement,
+            last_observed: active.last_observed,
+        };
+        match exit {
+            ActiveSettlementExit::RetainForReconciliation
+                if retained.settlement.status != SettlementStatus::Pending =>
+            {
+                self.finish_retained(key, retained);
+            }
+            ActiveSettlementExit::RetainForReconciliation
+                if self.lifetime_is_current(active.lifetime) =>
+            {
+                self.retain_settlement(key, retained);
+            }
+            ActiveSettlementExit::RetainForReconciliation | ActiveSettlementExit::Failed => {
+                self.fail_retained(key, retained);
+            }
+            ActiveSettlementExit::Unconfirmed => {
+                settlement = retained.settlement;
+                settlement.expire(u64::MAX);
+                self.finish_retained(
+                    key,
+                    RetainedNativeSettlement {
+                        settlement,
+                        ..retained
+                    },
+                );
+            }
+        }
+    }
+
     fn record_terminal_settlement(
         &mut self,
         key: RetainedSettlementKey,
@@ -1700,17 +1750,13 @@ impl WindowDragCoordinator {
             let _ = self
                 .reducer
                 .cancel(active.operation, CancellationReason::TargetDestroyed);
-            self.last_terminal_apply = Some(active.last_apply);
-            if self.current_lifetimes.get(&active.window) == Some(&active.lifetime) {
-                self.current_lifetimes.remove(&active.window);
-            }
+            self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
         match observe_window_drag(&mut active, time, false) {
             Err(reason) => {
                 let _ = self.reducer.cancel(active.operation, reason);
-                self.last_terminal_apply = Some(active.last_apply);
-                self.current_lifetimes.remove(&active.window);
+                self.finish_active(active, ActiveSettlementExit::Unconfirmed);
                 return Err(());
             }
             Ok(false) => {
@@ -1743,15 +1789,13 @@ impl WindowDragCoordinator {
             time,
         );
         active.last_update = time;
-        self.active = Some(active);
         if active.last_apply == NativeApplyState::Rejected {
             self.reducer
                 .fail(active.operation, FailureReason::NativeApplyFailed);
-            self.last_terminal_apply = Some(active.last_apply);
-            self.active = None;
-            self.current_lifetimes.remove(&active.window);
+            self.finish_active(active, ActiveSettlementExit::RetainForReconciliation);
             Err(())
         } else {
+            self.active = Some(active);
             Ok(())
         }
     }
@@ -1785,8 +1829,7 @@ impl WindowDragCoordinator {
     fn cancel(&mut self, reason: CancellationReason) {
         if let Some(active) = self.active.take() {
             let _ = self.reducer.cancel(active.operation, reason);
-            self.last_terminal_apply = Some(active.last_apply);
-            self.current_lifetimes.remove(&active.window);
+            self.finish_active(active, ActiveSettlementExit::RetainForReconciliation);
         }
     }
 
@@ -2391,7 +2434,7 @@ fn apply_window_drag(
             max_height: None,
         },
     );
-    operation.settlement = Some(Settlement::new(
+    let settlement = Settlement::new(
         NativeRequest {
             id: NativeRequestId(request_id),
             mapping_generation,
@@ -2402,7 +2445,7 @@ fn apply_window_drag(
             deadline_tick: now.saturating_add(250),
             max_corrections: 0,
         },
-    ));
+    );
     let window = HWND(operation.window as *mut c_void);
     let accepted = unsafe {
         SetWindowPos(
@@ -2418,6 +2461,7 @@ fn apply_window_drag(
     };
     if accepted {
         // ASYNCWINDOWPOS reports queue admission, not native settlement.
+        operation.settlement = Some(settlement);
         NativeApplyState::AcceptedSettlementUnknown
     } else {
         NativeApplyState::Rejected
@@ -4776,15 +4820,15 @@ mod tests {
     };
 
     use super::{
-        DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, NativeWindowFingerprint,
-        NativeWindowLifetime, RetainedNativeSettlement, SettlementRetentionOutcome,
-        TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag, WindowDragAdmission,
-        WindowDragCoordinator, application_icon, clamp_preview_x, classify_window_drag_observation,
-        contain_rect, contested_authority, executable_icon, is_nickel_host_terminal,
-        is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
-        permits_contested_workflow, project_native_preview_diagnostics, project_windows_shortcuts,
-        rectangle_covers, restore_legacy_icon_alpha, should_restore_on_activation,
-        windows_pid_descends_from,
+        ActiveSettlementExit, DwmPreviewState, NativeApplyState, NativePreviewDiagnostics,
+        NativeWindowFingerprint, NativeWindowLifetime, RetainedNativeSettlement,
+        SettlementRetentionOutcome, TerminalSettlementOutcome, TrayNotifyIconData, WindowDrag,
+        WindowDragAdmission, WindowDragCoordinator, application_icon, apply_window_drag,
+        clamp_preview_x, classify_window_drag_observation, contain_rect, contested_authority,
+        executable_icon, is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
+        parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
+        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
+        should_restore_on_activation, windows_pid_descends_from,
     };
 
     fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
@@ -4828,6 +4872,24 @@ mod tests {
                 height: 200,
             },
         }
+    }
+
+    fn drag_with_pending_settlement(request: u64) -> WindowDrag {
+        let mut drag = contested_drag();
+        drag.last_apply = NativeApplyState::AcceptedSettlementUnknown;
+        drag.settlement = Some(Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(request),
+                mapping_generation: drag.lifetime.generation,
+                desired: drag.authority.revisions(),
+                placement: drag.last_observed,
+            },
+            SettlementLimits {
+                deadline_tick: 260,
+                max_corrections: 0,
+            },
+        ));
+        drag
     }
 
     #[test]
@@ -4910,6 +4972,68 @@ mod tests {
     fn contested_workflow_fails_closed_without_native_ownership_hook() {
         assert!(!permits_contested_workflow(false));
         assert!(permits_contested_workflow(true));
+    }
+
+    #[test]
+    fn cancelling_active_drag_retains_issued_async_request_for_reconciliation() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let drag = drag_with_pending_settlement(40);
+        coordinator
+            .current_lifetimes
+            .insert(drag.window, drag.lifetime);
+        coordinator.active = Some(drag);
+
+        coordinator.cancel(CancellationReason::UserCancelled);
+
+        assert!(coordinator.active.is_none());
+        assert!(
+            coordinator
+                .retained_settlements
+                .keys()
+                .any(|(_, request)| *request == NativeRequestId(40))
+        );
+    }
+
+    #[test]
+    fn active_lifetime_and_observation_failures_leave_keyed_terminal_evidence() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let failed = drag_with_pending_settlement(41);
+        let failed_key = (failed.lifetime, NativeRequestId(41));
+        coordinator.finish_active(failed, ActiveSettlementExit::Failed);
+        let unconfirmed = drag_with_pending_settlement(42);
+        let unconfirmed_key = (unconfirmed.lifetime, NativeRequestId(42));
+        coordinator.finish_active(unconfirmed, ActiveSettlementExit::Unconfirmed);
+
+        assert_eq!(
+            coordinator
+                .terminal_settlement_outcomes
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![
+                TerminalSettlementOutcome {
+                    key: failed_key,
+                    status: SettlementStatus::Failed,
+                },
+                TerminalSettlementOutcome {
+                    key: unconfirmed_key,
+                    status: SettlementStatus::Unconfirmed,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn rejected_later_async_apply_preserves_previous_pending_request() {
+        let mut drag = drag_with_pending_settlement(43);
+        let rectangle = drag.last_observed;
+        let state = apply_window_drag(&mut drag, rectangle, 44, 1, 20);
+
+        assert_eq!(state, NativeApplyState::Rejected);
+        assert_eq!(
+            drag.settlement.map(|settlement| settlement.request.id),
+            Some(NativeRequestId(43))
+        );
     }
 
     #[test]
