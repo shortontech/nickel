@@ -12561,9 +12561,7 @@ impl NickelSession {
             && let Some(surface) = window.x11_surface()
         {
             let maximize = !surface.is_maximized();
-            if maximize {
-                self.supersede_interactive_resize_for_presentation(id);
-            }
+            self.supersede_interactive_resize_for_presentation(id);
             let _ = surface.set_maximized(maximize);
             if maximize {
                 self.apply_maximized_x11_geometry(&window, surface, true);
@@ -12899,14 +12897,23 @@ impl NickelSession {
     }
 
     pub fn unmaximize_toplevel(&mut self, surface: &ToplevelSurface) {
-        let restore = self.maximized_restore.remove(&surface.wl_surface().id());
-        let Some(restore) = restore else {
+        if !self
+            .maximized_restore
+            .contains_key(&surface.wl_surface().id())
+        {
             return;
-        };
+        }
         let window_id = self
             .surface_windows
             .get(&surface.wl_surface().id())
             .copied();
+        if let Some(id) = window_id {
+            self.supersede_xdg_resize_for_presentation(id, surface);
+        }
+        let restore = self
+            .maximized_restore
+            .remove(&surface.wl_surface().id())
+            .expect("maximized restore checked before resize supersession");
         let restore_is_current = window_id.is_some_and(|id| {
             self.presentation_restore_is_current(
                 id,
@@ -12952,6 +12959,9 @@ impl NickelSession {
             .surface_windows
             .get(&surface.wl_surface().id())
             .copied();
+        if let Some(id) = window_id {
+            self.supersede_xdg_resize_for_presentation(id, surface);
+        }
         self.fullscreen_restore
             .entry(surface.wl_surface().id())
             .or_insert(Geometry {
@@ -12984,13 +12994,23 @@ impl NickelSession {
     }
 
     pub fn unfullscreen_toplevel(&mut self, surface: &ToplevelSurface) {
-        let Some(restore) = self.fullscreen_restore.remove(&surface.wl_surface().id()) else {
+        if !self
+            .fullscreen_restore
+            .contains_key(&surface.wl_surface().id())
+        {
             return;
-        };
+        }
         let window_id = self
             .surface_windows
             .get(&surface.wl_surface().id())
             .copied();
+        if let Some(id) = window_id {
+            self.supersede_xdg_resize_for_presentation(id, surface);
+        }
+        let restore = self
+            .fullscreen_restore
+            .remove(&surface.wl_surface().id())
+            .expect("fullscreen restore checked before resize supersession");
         let restore_is_current = window_id.is_some_and(|id| {
             self.presentation_restore_is_current(
                 id,
@@ -13040,6 +13060,10 @@ impl NickelSession {
         let Some(geometry) = self.space.output_geometry(&output) else {
             return;
         };
+        let authority_id = self.x11_windows.get(&surface.window_id()).copied();
+        if let Some(id) = authority_id {
+            self.supersede_interactive_resize_for_presentation(id);
+        }
         self.x11_fullscreen_restore
             .entry(surface.window_id())
             .or_insert_with(|| surface.geometry());
@@ -13058,7 +13082,6 @@ impl NickelSession {
             (bounds.x, bounds.y).into(),
             (bounds.width, bounds.height).into(),
         );
-        let authority_id = self.x11_windows.get(&surface.window_id()).copied();
         if let Some(id) = authority_id {
             self.record_presentation_geometry(
                 id,
@@ -13075,11 +13098,21 @@ impl NickelSession {
     }
 
     pub fn unfullscreen_x11(&mut self, surface: &smithay::xwayland::X11Surface) {
-        let Some(restore) = self.x11_fullscreen_restore.remove(&surface.window_id()) else {
+        if !self
+            .x11_fullscreen_restore
+            .contains_key(&surface.window_id())
+        {
             return;
-        };
-        let _ = surface.set_fullscreen(false);
+        }
         let window_id = self.x11_windows.get(&surface.window_id()).copied();
+        if let Some(id) = window_id {
+            self.supersede_interactive_resize_for_presentation(id);
+        }
+        let restore = self
+            .x11_fullscreen_restore
+            .remove(&surface.window_id())
+            .expect("X11 fullscreen restore checked before resize supersession");
+        let _ = surface.set_fullscreen(false);
         let restore_is_current = window_id.is_some_and(|id| {
             self.presentation_restore_is_current(
                 id,
@@ -15792,7 +15825,7 @@ mod protocol_tests {
     }
 
     #[test]
-    fn x11_maximize_fence_cancels_active_resize_baseline_and_late_motion() {
+    fn x11_unmaximize_fence_cancels_active_resize_baseline_and_late_motion() {
         use nickel_core::{
             geometry::LogicalRect,
             geometry_authority::{
@@ -15814,7 +15847,8 @@ mod protocol_tests {
             width: 300,
             height: 200,
         };
-        let authority = GeometryAuthority::new(geometry, Presentation::Normal);
+        let mut authority = GeometryAuthority::new(geometry, Presentation::Normal);
+        authority.set_presentation(Presentation::Maximized);
         session
             .interactive_resize_baselines
             .insert(id, authority.baseline());
@@ -15867,8 +15901,8 @@ mod protocol_tests {
             .expect("active X11 resize admitted");
         let operation_id = operation.id();
 
-        // This is the shared fence called by the X11 maximize branch before
-        // set_maximized/configure publishes the presentation geometry.
+        // This is the shared fence called by both directions of the X11
+        // maximize toggle before set_maximized/configure publishes geometry.
         session.supersede_interactive_resize_for_presentation(id);
 
         assert!(!session.interactive_resize_baselines.contains_key(&id));
