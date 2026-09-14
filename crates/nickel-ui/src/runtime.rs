@@ -1154,6 +1154,35 @@ fn controller_ui_event(action: ControllerAction) -> Option<UiEvent> {
     }
 }
 
+const MAX_ADMITTED_CONTROLLER_PRESSES: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct AdmittedControllerPress {
+    device_generation: u64,
+    action: ControllerAction,
+    routing_epoch: u64,
+    lease_epoch: u64,
+    connection_generation: u64,
+    stream_generation: u64,
+    cutoff: Option<u64>,
+    surface_generation: Option<u64>,
+}
+
+impl AdmittedControllerPress {
+    fn new(binding: ControllerExecutionBinding, action: ControllerAction) -> Self {
+        Self {
+            device_generation: binding.device_generation,
+            action,
+            routing_epoch: binding.routing_epoch,
+            lease_epoch: binding.lease_epoch,
+            connection_generation: binding.connection_generation,
+            stream_generation: binding.stream_generation,
+            cutoff: binding.cutoff,
+            surface_generation: binding.surface_generation,
+        }
+    }
+}
+
 pub struct UiHost<A: Application> {
     application: A,
     state: UiStateStore,
@@ -1167,7 +1196,8 @@ pub struct UiHost<A: Application> {
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
-    admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
+    admitted_controller_presses: std::collections::BTreeSet<AdmittedControllerPress>,
+    controller_press_authority: Option<ControllerExecutionAuthority>,
     normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
@@ -1189,7 +1219,8 @@ pub struct UiHostViewport<Message> {
     overlay_failures: Vec<OverlayDeclarationFailure>,
     next_application_deadline: Option<Instant>,
     pending_long_press: Option<PendingLongPress>,
-    admitted_controller_presses: std::collections::BTreeSet<(u64, ControllerAction)>,
+    admitted_controller_presses: std::collections::BTreeSet<AdmittedControllerPress>,
+    controller_press_authority: Option<ControllerExecutionAuthority>,
     normalized_source_orders: std::collections::BTreeMap<(u64, String), (u64, u64, u64)>,
 }
 
@@ -1743,6 +1774,8 @@ pub struct HostEventOutcome {
 pub enum ControllerExecutionDisposition {
     Executed,
     RejectedStale,
+    RejectedUnpairedRelease,
+    ResetOverflow,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1924,6 +1957,7 @@ impl<A: Application> UiHost<A> {
                 .map(|interval| Instant::now() + interval),
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
+            controller_press_authority: None,
             normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
@@ -1966,6 +2000,10 @@ impl<A: Application> UiHost<A> {
             admitted_controller_presses: std::mem::replace(
                 &mut self.admitted_controller_presses,
                 viewport.admitted_controller_presses,
+            ),
+            controller_press_authority: std::mem::replace(
+                &mut self.controller_press_authority,
+                viewport.controller_press_authority,
             ),
             normalized_source_orders: std::mem::replace(
                 &mut self.normalized_source_orders,
@@ -2027,6 +2065,7 @@ impl<A: Application> UiHost<A> {
             next_application_deadline,
             pending_long_press: None,
             admitted_controller_presses: std::collections::BTreeSet::new(),
+            controller_press_authority: None,
             normalized_source_orders: std::collections::BTreeMap::new(),
         }
     }
@@ -2439,6 +2478,16 @@ impl<A: Application> UiHost<A> {
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
+        if let Some(authority) = controller_authority
+            && self.controller_press_authority != Some(authority)
+        {
+            self.admitted_controller_presses.clear();
+            self.controller_press_authority = Some(authority);
+        }
+        if batch.window_focused == Some(false) {
+            self.admitted_controller_presses.clear();
+            self.controller_press_authority = None;
+        }
         #[cfg(test)]
         let mut normalized_authorities = batch.normalized_authorities;
         #[cfg(not(test))]
@@ -2540,6 +2589,17 @@ impl<A: Application> UiHost<A> {
             };
             if let Some(input) = normalized_input {
                 match input {
+                    nickel_input::InputEvent::FocusLost { .. } => {
+                        self.admitted_controller_presses.clear();
+                        self.controller_press_authority = None;
+                    }
+                    nickel_input::InputEvent::DeviceRemoved { device, .. } => {
+                        self.admitted_controller_presses
+                            .retain(|press| press.device_generation != device.0);
+                    }
+                    _ => {}
+                }
+                match input {
                     nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Started {
                         device,
                         contact,
@@ -2611,17 +2671,42 @@ impl<A: Application> UiHost<A> {
                 HostEvent::AdmittedController { action, binding } => {
                     let admitted =
                         controller_authority.is_some_and(|authority| authority.admits(binding));
-                    let paired = admitted
-                        && action.is_some_and(|action| match binding.edge {
-                            nickel_input::KeyEdge::Pressed => {
-                                self.admitted_controller_presses
-                                    .insert((binding.device_generation, action));
+                    let mut overflow_reset = false;
+                    let paired = match (binding.edge, action) {
+                        (nickel_input::KeyEdge::Released, Some(action)) => {
+                            let key = AdmittedControllerPress::new(binding, action);
+                            let paired = admitted && self.admitted_controller_presses.remove(&key);
+                            if !paired {
+                                self.admitted_controller_presses.retain(|press| {
+                                    press.device_generation != binding.device_generation
+                                        || press.action != action
+                                });
+                            }
+                            paired
+                        }
+                        (nickel_input::KeyEdge::Released, None) => {
+                            self.admitted_controller_presses.retain(|press| {
+                                press.device_generation != binding.device_generation
+                            });
+                            false
+                        }
+                        (nickel_input::KeyEdge::Pressed, Some(action)) if admitted => {
+                            let key = AdmittedControllerPress::new(binding, action);
+                            if !self.admitted_controller_presses.contains(&key)
+                                && self.admitted_controller_presses.len()
+                                    >= MAX_ADMITTED_CONTROLLER_PRESSES
+                            {
+                                self.admitted_controller_presses.clear();
+                                self.controller_press_authority = None;
+                                overflow_reset = true;
+                                false
+                            } else {
+                                self.admitted_controller_presses.insert(key);
                                 true
                             }
-                            nickel_input::KeyEdge::Released => self
-                                .admitted_controller_presses
-                                .remove(&(binding.device_generation, action)),
-                        });
+                        }
+                        (nickel_input::KeyEdge::Pressed, _) => admitted,
+                    };
                     let mut outcome = if paired && binding.edge == nickel_input::KeyEdge::Pressed {
                         self.dispatch_controller_action(action.expect("paired press has action"))
                     } else {
@@ -2631,10 +2716,14 @@ impl<A: Application> UiHost<A> {
                         .controller_executions
                         .push(ControllerExecutionEvidence {
                             binding,
-                            disposition: if admitted {
-                                ControllerExecutionDisposition::Executed
-                            } else {
+                            disposition: if overflow_reset {
+                                ControllerExecutionDisposition::ResetOverflow
+                            } else if !admitted {
                                 ControllerExecutionDisposition::RejectedStale
+                            } else if binding.edge == nickel_input::KeyEdge::Released && !paired {
+                                ControllerExecutionDisposition::RejectedUnpairedRelease
+                            } else {
+                                ControllerExecutionDisposition::Executed
                             },
                             message_count: outcome.messages.len(),
                             effect_count: 0,
@@ -4116,9 +4205,9 @@ mod tests {
         AdmittedNormalizedInput, Application, Completion, CompletionFailure, CompletionFailureKind,
         ContinuousQueueOutcome, ControllerDiscoveryMode, ControllerPollSchedule, ControllerRole,
         ControllerRoleLease, EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent,
-        HostFailure, HostFailureStage, MessageEvidence, NormalizedAdmissionBinding,
-        NormalizedInputEnvelope, NormalizedRecipientBinding, NormalizedSourceBinding,
-        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        HostFailure, HostFailureStage, MAX_ADMITTED_CONTROLLER_PRESSES, MessageEvidence,
+        NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
+        NormalizedSourceBinding, PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
         grant_native_ingress_if_focused, local_controller_poll_lease, native_input_class,
         native_input_source_binding, native_pointer_source_binding, queue_continuous_input,
         revoke_native_ingress, transform_is_current, wait_duration,
@@ -4819,6 +4908,172 @@ mod tests {
                 message_count: 0,
                 effect_count: 0,
             }]
+        );
+    }
+
+    #[test]
+    fn controller_release_is_unpaired_after_focus_or_lease_boundary() {
+        let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 1,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+        };
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding,
+            }],
+            ..HostBatch::default()
+        });
+        host.step(HostBatch {
+            window_focused: Some(false),
+            ..HostBatch::default()
+        });
+        let release = ControllerExecutionBinding {
+            edge: KeyEdge::Released,
+            event_id: 2,
+            ..binding
+        };
+        let outcome = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: release,
+            }],
+            ..HostBatch::default()
+        });
+
+        assert_eq!(
+            outcome.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedUnpairedRelease
+        );
+    }
+
+    #[test]
+    fn rejected_controller_release_retires_the_affected_press() {
+        let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 1,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+        };
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding,
+            }],
+            ..HostBatch::default()
+        });
+        let stale_release = ControllerExecutionBinding {
+            edge: KeyEdge::Released,
+            routing_epoch: 8,
+            event_id: 2,
+            ..binding
+        };
+        let stale = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: stale_release,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            stale.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedStale
+        );
+
+        let valid_release = ControllerExecutionBinding {
+            edge: KeyEdge::Released,
+            event_id: 3,
+            ..binding
+        };
+        let valid = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: valid_release,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            valid.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedUnpairedRelease
+        );
+    }
+
+    #[test]
+    fn controller_press_ledger_is_bounded_and_resets_on_overflow() {
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+        };
+        let mut host = UiHost::new(EffectApplication::default(), 160, 48);
+        let mut last = None;
+        for device_generation in 1..=MAX_ADMITTED_CONTROLLER_PRESSES as u64 + 1 {
+            let binding = ControllerExecutionBinding {
+                device_generation,
+                edge: KeyEdge::Pressed,
+                routing_epoch: 9,
+                event_id: device_generation,
+                lease_epoch: 7,
+                connection_generation: 3,
+                stream_generation: 2,
+                cutoff: None,
+                surface_generation: Some(10),
+                repeat: false,
+            };
+            last = Some(host.step(HostBatch {
+                controller_authority: Some(authority),
+                events: vec![HostEvent::AdmittedController {
+                    action: Some(ControllerAction::Confirm),
+                    binding,
+                }],
+                ..HostBatch::default()
+            }));
+        }
+
+        assert!(host.admitted_controller_presses.is_empty());
+        assert_eq!(
+            last.unwrap().controller_executions[0].disposition,
+            ControllerExecutionDisposition::ResetOverflow
         );
     }
 
