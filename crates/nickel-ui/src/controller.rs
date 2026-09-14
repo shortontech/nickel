@@ -191,6 +191,11 @@ impl ControllerInput {
         self.connected
     }
 
+    /// Whether normalized physical controller state still requires a release/neutral barrier.
+    pub fn held_input(&self) -> bool {
+        self.normalizer.has_held_input()
+    }
+
     /// Device nodes already identified as controllers by the active backend.
     /// This supports native state queries without scanning unrelated input devices.
     #[cfg(target_os = "linux")]

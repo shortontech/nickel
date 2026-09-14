@@ -57,6 +57,11 @@ use smithay::reexports::{
 pub(crate) use state::InternalCaptureState;
 pub use state::NickelSession;
 
+struct NativeControllerBatch {
+    events: Vec<nickel_ui::ControllerEnvelope>,
+    neutral: bool,
+}
+
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--available-backends")) {
         if cfg!(feature = "backend-winit") {
@@ -173,12 +178,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let (controller_changed, controller_events) = smithay::reexports::calloop::channel::channel();
+    let (controller_changed, controller_events) =
+        smithay::reexports::calloop::channel::channel::<NativeControllerBatch>();
     event_loop
         .handle()
         .insert_source(controller_events, |event, _, state| {
-            if let smithay::reexports::calloop::channel::Event::Msg(events) = event {
-                state.handle_native_controller_batch(events);
+            if let smithay::reexports::calloop::channel::Event::Msg(batch) = event {
+                state.handle_brokered_controller_batch(batch.events, batch.neutral);
             }
         })?;
     thread::Builder::new()
@@ -187,7 +193,13 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut controller = nickel_ui::ControllerInput::new();
             loop {
                 let events = controller.wait_global_envelopes(Duration::from_secs(1));
-                if !events.is_empty() && controller_changed.send(events).is_err() {
+                if controller_changed
+                    .send(NativeControllerBatch {
+                        events,
+                        neutral: !controller.held_input(),
+                    })
+                    .is_err()
+                {
                     return;
                 }
             }

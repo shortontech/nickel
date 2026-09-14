@@ -1767,15 +1767,22 @@ use nickel_core::{
     task_switcher::{SwitchWindow, TaskSwitchEffect, TaskSwitcher},
     workspaces::{WorkspaceError, WorkspaceId, WorkspaceTransition, Workspaces},
 };
+use nickel_session_protocol::controller_broker::{
+    BrokerMessage as ControllerBrokerMessage,
+    ConnectionGeneration as ControllerConnectionGeneration, ControllerBroker,
+    DEFAULT_CONTROLLER_QUEUE_LIMIT, DEFAULT_TRANSFER_DEADLINE_MS, HostId as ControllerHostId,
+    TransferStatus as ControllerTransferStatus,
+};
 use nickel_session_protocol::{
-    ClientEnvelope, Command as SessionCommand, ErrorCode, Event as SessionEvent,
-    Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview,
-    Query, Request, SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
-    ShellBehaviorSetting, ShellBehaviorSnapshot, ShellBehaviorTransaction, ShellBehaviorValue,
-    ShellPopoverAnchor, ShellRole, ShellSurfaceIdentity, ShellSurfaceSnapshot,
-    Snapshot as SessionSnapshot, TestOutput, WindowAction as ProtocolWindowAction,
-    WindowId as ProtocolWindowId, WindowSnapshot, WorkspaceId as ProtocolWorkspaceId,
-    WorkspaceSnapshot, WorkspaceState, decode, encode,
+    ClientEnvelope, Command as SessionCommand, ControllerActionMessage, ControllerEnvelopePayload,
+    ControllerFamilyMessage, ControllerHostRequest, ControllerHostResponse, ErrorCode,
+    Event as SessionEvent, Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform,
+    PreviewFrame as ProtocolPreview, Query, Request, SecureStorageState as ProtocolSecureStorage,
+    ServerEnvelope, ServerMessage, ShellBehaviorSetting, ShellBehaviorSnapshot,
+    ShellBehaviorTransaction, ShellBehaviorValue, ShellPopoverAnchor, ShellRole,
+    ShellSurfaceIdentity, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
+    WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
+    WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType, find_popup_root_surface},
@@ -1820,6 +1827,87 @@ use smithay::{
     },
     xwayland::{X11Wm, xwm::XwmId},
 };
+
+fn controller_envelope_payload(
+    event: nickel_ui::ControllerEnvelope,
+    routing_epoch: u64,
+) -> ControllerEnvelopePayload {
+    ControllerEnvelopePayload {
+        device_generation: event.device.0,
+        action: event.action.map(controller_action_message),
+        edge: match event.edge {
+            nickel_input::KeyEdge::Pressed => nickel_session_protocol::InputState::Pressed,
+            nickel_input::KeyEdge::Released => nickel_session_protocol::InputState::Released,
+        },
+        repeat: event.repeat,
+        family: controller_family_message(event.family),
+        routing_epoch,
+    }
+}
+
+fn controller_action_message(action: nickel_ui::ControllerAction) -> ControllerActionMessage {
+    match action {
+        nickel_ui::ControllerAction::Launcher => ControllerActionMessage::Launcher,
+        nickel_ui::ControllerAction::Up => ControllerActionMessage::Up,
+        nickel_ui::ControllerAction::Down => ControllerActionMessage::Down,
+        nickel_ui::ControllerAction::Left => ControllerActionMessage::Left,
+        nickel_ui::ControllerAction::Right => ControllerActionMessage::Right,
+        nickel_ui::ControllerAction::Confirm => ControllerActionMessage::Confirm,
+        nickel_ui::ControllerAction::Cancel => ControllerActionMessage::Cancel,
+        nickel_ui::ControllerAction::ContextMenu => ControllerActionMessage::ContextMenu,
+        nickel_ui::ControllerAction::PreviousPane => ControllerActionMessage::PreviousPane,
+        nickel_ui::ControllerAction::NextPane => ControllerActionMessage::NextPane,
+    }
+}
+
+fn nickel_controller_action(action: ControllerActionMessage) -> nickel_ui::ControllerAction {
+    match action {
+        ControllerActionMessage::Launcher => nickel_ui::ControllerAction::Launcher,
+        ControllerActionMessage::Up => nickel_ui::ControllerAction::Up,
+        ControllerActionMessage::Down => nickel_ui::ControllerAction::Down,
+        ControllerActionMessage::Left => nickel_ui::ControllerAction::Left,
+        ControllerActionMessage::Right => nickel_ui::ControllerAction::Right,
+        ControllerActionMessage::Confirm => nickel_ui::ControllerAction::Confirm,
+        ControllerActionMessage::Cancel => nickel_ui::ControllerAction::Cancel,
+        ControllerActionMessage::ContextMenu => nickel_ui::ControllerAction::ContextMenu,
+        ControllerActionMessage::PreviousPane => nickel_ui::ControllerAction::PreviousPane,
+        ControllerActionMessage::NextPane => nickel_ui::ControllerAction::NextPane,
+    }
+}
+
+fn controller_family_message(family: nickel_ui::ControllerFamily) -> ControllerFamilyMessage {
+    match family {
+        nickel_ui::ControllerFamily::PlayStation => ControllerFamilyMessage::PlayStation,
+        nickel_ui::ControllerFamily::Xbox => ControllerFamilyMessage::Xbox,
+        nickel_ui::ControllerFamily::Switch => ControllerFamilyMessage::Switch,
+        nickel_ui::ControllerFamily::Generic => ControllerFamilyMessage::Generic,
+    }
+}
+
+fn nickel_controller_family(family: ControllerFamilyMessage) -> nickel_ui::ControllerFamily {
+    match family {
+        ControllerFamilyMessage::PlayStation => nickel_ui::ControllerFamily::PlayStation,
+        ControllerFamilyMessage::Xbox => nickel_ui::ControllerFamily::Xbox,
+        ControllerFamilyMessage::Switch => nickel_ui::ControllerFamily::Switch,
+        ControllerFamilyMessage::Generic => nickel_ui::ControllerFamily::Generic,
+    }
+}
+
+fn controller_transfer_response(status: ControllerTransferStatus) -> ControllerHostResponse {
+    match status {
+        ControllerTransferStatus::Pending {
+            requested_lease,
+            cutoff,
+        } => ControllerHostResponse::LeasePending {
+            requested_lease,
+            cutoff,
+        },
+        ControllerTransferStatus::Granted(lease) => ControllerHostResponse::LeaseGranted {
+            lease_epoch: lease.epoch,
+        },
+        ControllerTransferStatus::Failed => ControllerHostResponse::LeaseFailed,
+    }
+}
 
 /// Nickel-owned overlay color used to dim shell content without painting a
 /// pure-black translucent background.
@@ -2554,6 +2642,8 @@ pub struct NickelSession {
     launcher_focus: FocusTransactions<ObjectId>,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
+    controller_broker: ControllerBroker<ControllerEnvelopePayload>,
+    controller_internal_connection: ControllerConnectionGeneration,
     pending_launch_observations: Vec<PendingLaunchObservation>,
     /// Legacy datagram compatibility is absent from normal compositor-owned
     /// sessions. It exists only when an explicit external-control mode asks
@@ -5586,50 +5676,155 @@ impl NickelSession {
 
     /// Bind one native-reader drain to the current session route. A transition
     /// caused by an earlier event retires the remainder of that old-route batch.
-    pub(crate) fn handle_native_controller_batch(
+    pub(crate) fn handle_brokered_controller_batch(
         &mut self,
         events: Vec<nickel_ui::ControllerEnvelope>,
+        neutral: bool,
     ) {
-        let binding = self.refresh_controller_route();
+        let now_ms = self.start_time.elapsed().as_millis() as u64;
+        self.controller_broker.expire_transfer(now_ms);
+        let routing_epoch = self.refresh_controller_route().0;
         for event in events {
-            if self.refresh_controller_route() != binding {
-                break;
-            }
-            if self.internal_shell.is_none() {
-                break;
-            }
-            if event.edge != nickel_input::KeyEdge::Pressed {
-                continue;
-            }
-            let Some(action) = event.action else {
-                continue;
-            };
-            self.internal_shell
-                .as_mut()
-                .expect("checked above")
-                .set_controller_family(event.family);
-
-            self.cancel_remote_pointer();
-            self.cancel_remote_keyboard();
-            if action == nickel_ui::ControllerAction::Launcher && binding.1.launcher_intercepted {
-                self.toggle_launcher_from(InvocationSource::Keyboard);
-            } else if let Some(target) = binding.1.target {
-                self.internal_ui.step(
-                    target,
-                    nickel_ui::HostBatch {
-                        events: vec![nickel_ui::HostEvent::Controller(action)],
-                        ..nickel_ui::HostBatch::default()
-                    },
+            let payload = controller_envelope_payload(event, routing_epoch);
+            let disposition = self.controller_broker.ingest(payload);
+            if matches!(
+                disposition,
+                nickel_session_protocol::controller_broker::IngressDisposition::OverflowReset { .. }
+            ) {
+                tracing::error!(
+                    ?disposition,
+                    "controller broker overflow installed stream reset"
                 );
-                self.flush_internal_shell_input();
-                self.note_input_activity();
-                self.request_output_redraw();
-            }
-
-            if self.refresh_controller_route() != binding {
-                break;
             }
         }
+        let messages = self
+            .controller_broker
+            .drain(ControllerHostId(0), self.controller_internal_connection);
+        for message in messages {
+            if let ControllerBrokerMessage::Deliver(delivery) = message {
+                self.dispatch_brokered_controller(delivery.payload);
+            }
+        }
+        self.controller_broker.set_neutral(neutral);
+    }
+
+    fn dispatch_brokered_controller(&mut self, payload: ControllerEnvelopePayload) {
+        let binding = self.refresh_controller_route();
+        if binding.0 != payload.routing_epoch || self.internal_shell.is_none() {
+            return;
+        }
+        // Releases and neutral bookkeeping cross the broker and retire held state, but do not
+        // synthesize a second semantic action.
+        if payload.edge != nickel_session_protocol::InputState::Pressed {
+            return;
+        }
+        let Some(action) = payload.action.map(nickel_controller_action) else {
+            return;
+        };
+        self.internal_shell
+            .as_mut()
+            .expect("checked above")
+            .set_controller_family(nickel_controller_family(payload.family));
+        self.cancel_remote_pointer();
+        self.cancel_remote_keyboard();
+        if action == nickel_ui::ControllerAction::Launcher && binding.1.launcher_intercepted {
+            self.toggle_launcher_from(InvocationSource::Keyboard);
+        } else if let Some(target) = binding.1.target {
+            self.internal_ui.step(
+                target,
+                nickel_ui::HostBatch {
+                    events: vec![nickel_ui::HostEvent::Controller(action)],
+                    ..nickel_ui::HostBatch::default()
+                },
+            );
+            self.flush_internal_shell_input();
+            self.note_input_activity();
+            self.request_output_redraw();
+        }
+    }
+
+    fn handle_controller_host_request(
+        &mut self,
+        peer_pid: u32,
+        request: ControllerHostRequest,
+    ) -> ServerMessage {
+        let now_ms = self.start_time.elapsed().as_millis() as u64;
+        self.controller_broker.expire_transfer(now_ms);
+        let host = ControllerHostId(u64::from(peer_pid));
+        let response = match request {
+            ControllerHostRequest::Attach => ControllerHostResponse::Attached {
+                host,
+                connection_generation: self.controller_broker.attach(host),
+            },
+            ControllerHostRequest::RequestLease {
+                connection_generation,
+            } => {
+                let status = self.controller_broker.begin_transfer(
+                    host,
+                    connection_generation,
+                    now_ms,
+                    DEFAULT_TRANSFER_DEADLINE_MS,
+                );
+                let status = match status {
+                    ControllerTransferStatus::Pending { cutoff, .. } => {
+                        let revocation = self
+                            .controller_broker
+                            .drain(ControllerHostId(0), self.controller_internal_connection)
+                            .into_iter()
+                            .find_map(|message| match message {
+                                ControllerBrokerMessage::Revoke {
+                                    lease_epoch,
+                                    cutoff: bound,
+                                    ..
+                                } if bound == cutoff => Some(lease_epoch),
+                                _ => None,
+                            });
+                        revocation.map_or(status, |lease| {
+                            self.controller_broker.acknowledge_quiescence(
+                                ControllerHostId(0),
+                                self.controller_internal_connection,
+                                lease,
+                                cutoff,
+                            )
+                        })
+                    }
+                    status => status,
+                };
+                controller_transfer_response(status)
+            }
+            ControllerHostRequest::Poll {
+                connection_generation,
+            } => {
+                let lease_epoch = self
+                    .controller_broker
+                    .active_lease()
+                    .filter(|lease| {
+                        lease.host == host && lease.connection_generation == connection_generation
+                    })
+                    .map(|lease| lease.epoch);
+                ControllerHostResponse::Messages {
+                    lease_epoch,
+                    messages: self.controller_broker.drain(host, connection_generation),
+                }
+            }
+            ControllerHostRequest::AcknowledgeQuiescence {
+                connection_generation,
+                lease_epoch,
+                cutoff,
+            } => controller_transfer_response(self.controller_broker.acknowledge_quiescence(
+                host,
+                connection_generation,
+                lease_epoch,
+                cutoff,
+            )),
+            ControllerHostRequest::Detach {
+                connection_generation,
+            } => {
+                self.controller_broker.detach(host, connection_generation);
+                ControllerHostResponse::Detached
+            }
+        };
+        ServerMessage::ControllerHost(response)
     }
 
     /// Hide the compositor-hosted launcher because an ordinary client is
@@ -6884,6 +7079,12 @@ impl NickelSession {
         let configured_desktops = ShellSettings::load_default().desktop_count;
         let _ = workspaces.set_count(usize::from(configured_desktops));
 
+        let mut controller_broker = ControllerBroker::new(DEFAULT_CONTROLLER_QUEUE_LIMIT);
+        let controller_internal_connection = controller_broker.attach(ControllerHostId(0));
+        controller_broker
+            .grant(ControllerHostId(0), controller_internal_connection)
+            .expect("initial in-process controller host is neutral and attached");
+
         let mut session = Self {
             start_time,
             display_handle: dh,
@@ -6965,6 +7166,8 @@ impl NickelSession {
             launcher_focus: FocusTransactions::default(),
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
+            controller_broker,
+            controller_internal_connection,
             pending_launch_observations: Vec::new(),
             compatibility_control,
             shell_surface_identities: HashMap::new(),
@@ -16472,7 +16675,7 @@ mod protocol_tests {
             family: nickel_ui::ControllerFamily::Xbox,
         };
 
-        session.handle_native_controller_batch(vec![event, event]);
+        session.handle_brokered_controller_batch(vec![event, event], false);
 
         assert!(
             session.internal_shell.as_ref().unwrap().launcher_visible(),

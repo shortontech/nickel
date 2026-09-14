@@ -4,7 +4,7 @@ pub mod controller_broker;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-pub const PROTOCOL_VERSION: u16 = 28;
+pub const PROTOCOL_VERSION: u16 = 29;
 pub const MAX_FRAME_BYTES: usize = 196_608;
 pub const MAX_PREVIEW_WIDTH: u16 = 256;
 pub const MAX_PREVIEW_HEIGHT: u16 = 144;
@@ -40,6 +40,7 @@ pub struct ServerEnvelope {
 pub enum Request {
     RegisterShell { pid: u32 },
     Subscribe,
+    ControllerHost(ControllerHostRequest),
     Query(Query),
     Command(Command),
 }
@@ -561,7 +562,87 @@ pub enum ServerMessage {
     RemotePairing(RemotePairingSnapshot),
     Preview(PreviewFrame),
     ShellSemanticTarget(ResolvedShellTarget),
+    ControllerHost(ControllerHostResponse),
     Event(Event),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerActionMessage {
+    Launcher,
+    Up,
+    Down,
+    Left,
+    Right,
+    Confirm,
+    Cancel,
+    ContextMenu,
+    PreviousPane,
+    NextPane,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ControllerFamilyMessage {
+    PlayStation,
+    Xbox,
+    Switch,
+    #[default]
+    Generic,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerEnvelopePayload {
+    /// One connected controller lifetime; reconnect allocates a fresh value.
+    pub device_generation: u64,
+    pub action: Option<ControllerActionMessage>,
+    pub edge: InputState,
+    pub repeat: bool,
+    pub family: ControllerFamilyMessage,
+    /// Session route observed at the first authoritative admission boundary.
+    pub routing_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum ControllerHostRequest {
+    Attach,
+    RequestLease {
+        connection_generation: controller_broker::ConnectionGeneration,
+    },
+    Poll {
+        connection_generation: controller_broker::ConnectionGeneration,
+    },
+    AcknowledgeQuiescence {
+        connection_generation: controller_broker::ConnectionGeneration,
+        lease_epoch: controller_broker::LeaseEpoch,
+        cutoff: controller_broker::EventId,
+    },
+    Detach {
+        connection_generation: controller_broker::ConnectionGeneration,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ControllerHostResponse {
+    Attached {
+        host: controller_broker::HostId,
+        connection_generation: controller_broker::ConnectionGeneration,
+    },
+    LeasePending {
+        requested_lease: controller_broker::LeaseEpoch,
+        cutoff: controller_broker::EventId,
+    },
+    LeaseGranted {
+        lease_epoch: controller_broker::LeaseEpoch,
+    },
+    LeaseFailed,
+    Messages {
+        lease_epoch: Option<controller_broker::LeaseEpoch>,
+        messages: Vec<controller_broker::BrokerMessage<ControllerEnvelopePayload>>,
+    },
+    Detached,
 }
 
 /// Native optional-preview work only. Byte counts are logical texture/PBO

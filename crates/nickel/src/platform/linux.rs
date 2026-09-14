@@ -1272,6 +1272,7 @@ fn session_request_operation(request: &SessionRequest) -> &'static str {
     match request {
         SessionRequest::RegisterShell { .. } => "register-shell",
         SessionRequest::Subscribe => "subscribe",
+        SessionRequest::ControllerHost(_) => "controller-host",
         SessionRequest::Query(query) => match query {
             SessionQuery::OnScreenKeyboard => "query-on-screen-keyboard",
             SessionQuery::Snapshot => "query-snapshot",

@@ -282,7 +282,7 @@ impl<T> ControllerBroker<T> {
         if self.transfer.is_some() {
             return IngressDisposition::RejectedTransfer { event_id };
         }
-        if self.reset_barrier || !self.neutral {
+        if self.reset_barrier {
             return IngressDisposition::RejectedResetBarrier { event_id };
         }
         let Some(lease) = self.active else {
@@ -431,6 +431,18 @@ mod tests {
         assert!(
             matches!(broker.ingest("fresh"), IngressDisposition::Delivered { lease, .. } if lease.host == HostId(2))
         );
+    }
+
+    #[test]
+    fn active_lease_retains_release_delivery_while_stream_is_not_neutral() {
+        let mut broker = ControllerBroker::new(4);
+        let connection = broker.attach(HostId(1));
+        broker.grant(HostId(1), connection).unwrap();
+        broker.set_neutral(false);
+        assert!(matches!(
+            broker.ingest("release"),
+            IngressDisposition::Delivered { .. }
+        ));
     }
 
     #[test]

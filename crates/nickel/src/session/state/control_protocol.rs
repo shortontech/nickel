@@ -721,6 +721,9 @@ impl NickelSession {
                 }
                 ServerMessage::Event(SessionEvent::Snapshot(self.protocol_snapshot()))
             }
+            Request::ControllerHost(request) => {
+                self.handle_controller_host_request(peer_pid, request)
+            }
             Request::Query(query) => self.handle_authority_request(query.into()),
             Request::Command(command) => {
                 if command_requires_shell_identity(&command)

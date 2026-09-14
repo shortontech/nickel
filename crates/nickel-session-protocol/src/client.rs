@@ -1,6 +1,10 @@
 //! Bounded local request transport for ordinary session clients.
 
-use crate::{ClientEnvelope, MAX_FRAME_BYTES, Request, ServerEnvelope, ServerMessage};
+use crate::{
+    ClientEnvelope, ControllerHostRequest, ControllerHostResponse, MAX_FRAME_BYTES, Request,
+    ServerEnvelope, ServerMessage,
+    controller_broker::{BrokerMessage, ConnectionGeneration, EventId, HostId, LeaseEpoch},
+};
 use std::{
     io,
     os::unix::net::UnixDatagram,
@@ -14,6 +18,163 @@ struct ReplyPath(PathBuf);
 impl Drop for ReplyPath {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Persistent authenticated controller channel for a session-managed host.
+///
+/// `connect_from_environment` returns `Ok(None)` only when no Nickel session is advertised. Any
+/// discovery, authentication, or transport failure is an error and must not enable local polling.
+pub struct ControllerConnection {
+    socket: UnixDatagram,
+    _path: ReplyPath,
+    token: String,
+    host: HostId,
+    generation: ConnectionGeneration,
+    timeout: Duration,
+}
+
+pub struct ControllerPoll {
+    pub lease_epoch: Option<LeaseEpoch>,
+    pub messages: Vec<BrokerMessage<crate::ControllerEnvelopePayload>>,
+}
+
+impl ControllerConnection {
+    pub fn connect_from_environment(timeout: Duration) -> io::Result<Option<Self>> {
+        let Some(server) = std::env::var_os("NICKEL_SESSION_CONTROL") else {
+            return Ok(None);
+        };
+        let token = std::env::var("NICKEL_SESSION_TOKEN").map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "session capability unavailable",
+            )
+        })?;
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "session runtime unavailable")
+        })?;
+        Self::connect_at(Path::new(&server), Path::new(&runtime), token, timeout).map(Some)
+    }
+
+    fn connect_at(
+        server: &Path,
+        runtime: &Path,
+        token: String,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let path = runtime.join(format!(
+            "ni-controller-{:x}-{id:x}.sock",
+            std::process::id()
+        ));
+        let socket = UnixDatagram::bind(&path)?;
+        socket.connect(server)?;
+        socket.set_read_timeout(Some(timeout))?;
+        socket.set_write_timeout(Some(timeout))?;
+        let mut connection = Self {
+            socket,
+            _path: ReplyPath(path),
+            token,
+            host: HostId(0),
+            generation: ConnectionGeneration(0),
+            timeout,
+        };
+        match connection.exchange(ControllerHostRequest::Attach)? {
+            ControllerHostResponse::Attached {
+                host,
+                connection_generation,
+            } => {
+                connection.host = host;
+                connection.generation = connection_generation;
+                Ok(connection)
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "session rejected controller attachment",
+            )),
+        }
+    }
+
+    pub fn host(&self) -> HostId {
+        self.host
+    }
+
+    pub fn connection_generation(&self) -> ConnectionGeneration {
+        self.generation
+    }
+
+    pub fn request_lease(&self) -> io::Result<ControllerHostResponse> {
+        self.exchange(ControllerHostRequest::RequestLease {
+            connection_generation: self.generation,
+        })
+    }
+
+    pub fn poll(&self) -> io::Result<ControllerPoll> {
+        match self.exchange(ControllerHostRequest::Poll {
+            connection_generation: self.generation,
+        })? {
+            ControllerHostResponse::Messages {
+                lease_epoch,
+                messages,
+            } => Ok(ControllerPoll {
+                lease_epoch,
+                messages,
+            }),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid controller poll response",
+            )),
+        }
+    }
+
+    pub fn acknowledge_quiescence(
+        &self,
+        lease: LeaseEpoch,
+        cutoff: EventId,
+    ) -> io::Result<ControllerHostResponse> {
+        self.exchange(ControllerHostRequest::AcknowledgeQuiescence {
+            connection_generation: self.generation,
+            lease_epoch: lease,
+            cutoff,
+        })
+    }
+
+    fn exchange(&self, request: ControllerHostRequest) -> io::Result<ControllerHostResponse> {
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let frame = crate::encode(&ClientEnvelope {
+            token: self.token.clone(),
+            request_id: id,
+            request: Request::ControllerHost(request),
+        })
+        .map_err(io::Error::other)?;
+        self.socket.set_read_timeout(Some(self.timeout))?;
+        self.socket.send(&frame)?;
+        let mut buffer = vec![0; MAX_FRAME_BYTES];
+        let count = self.socket.recv(&mut buffer)?;
+        let envelope =
+            crate::decode::<ServerEnvelope>(&buffer[..count]).map_err(io::Error::other)?;
+        if envelope.request_id != id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "controller response correlation mismatch",
+            ));
+        }
+        match envelope.message {
+            ServerMessage::ControllerHost(response) => Ok(response),
+            ServerMessage::Error { message, .. } => Err(io::Error::other(message)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid controller response",
+            )),
+        }
+    }
+}
+
+impl Drop for ControllerConnection {
+    fn drop(&mut self) {
+        let _ = self.exchange(ControllerHostRequest::Detach {
+            connection_generation: self.generation,
+        });
     }
 }
 
@@ -116,6 +277,109 @@ mod tests {
             std::fs::remove_file(&path).unwrap();
             assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
         }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn controller_connection_reuses_authenticated_socket_and_preserves_messages() {
+        let root = std::env::temp_dir().join(format!(
+            "nickel-controller-protocol-{}-{}",
+            std::process::id(),
+            NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let server_path = root.join("server");
+        let server = UnixDatagram::bind(&server_path).unwrap();
+        let worker = std::thread::spawn(move || {
+            let mut buffer = vec![0; MAX_FRAME_BYTES];
+            let mut first_peer = None;
+            for step in 0..3 {
+                let (length, peer) = server.recv_from(&mut buffer).unwrap();
+                assert_eq!(
+                    first_peer.get_or_insert_with(|| peer.as_pathname().unwrap().to_path_buf()),
+                    peer.as_pathname().unwrap()
+                );
+                let request: ClientEnvelope = crate::decode(&buffer[..length]).unwrap();
+                assert_eq!(request.token, "secret");
+                let response = match (step, request.request) {
+                    (0, Request::ControllerHost(ControllerHostRequest::Attach)) => {
+                        ControllerHostResponse::Attached {
+                            host: HostId(42),
+                            connection_generation: ConnectionGeneration(3),
+                        }
+                    }
+                    (
+                        1,
+                        Request::ControllerHost(ControllerHostRequest::Poll {
+                            connection_generation: ConnectionGeneration(3),
+                        }),
+                    ) => ControllerHostResponse::Messages {
+                        lease_epoch: Some(LeaseEpoch(7)),
+                        messages: vec![BrokerMessage::Deliver(
+                            crate::controller_broker::Delivery {
+                                event_id: EventId(19),
+                                connection_generation: ConnectionGeneration(3),
+                                lease_epoch: LeaseEpoch(7),
+                                stream_generation: crate::controller_broker::StreamGeneration(8),
+                                payload: crate::ControllerEnvelopePayload {
+                                    device_generation: 44,
+                                    action: None,
+                                    edge: crate::InputState::Released,
+                                    repeat: false,
+                                    family: crate::ControllerFamilyMessage::Xbox,
+                                    routing_epoch: 11,
+                                },
+                            },
+                        )],
+                    },
+                    (
+                        2,
+                        Request::ControllerHost(ControllerHostRequest::Detach {
+                            connection_generation: ConnectionGeneration(3),
+                        }),
+                    ) => ControllerHostResponse::Detached,
+                    _ => panic!("unexpected controller request"),
+                };
+                server
+                    .send_to(
+                        &crate::encode(&ServerEnvelope {
+                            request_id: request.request_id,
+                            message: ServerMessage::ControllerHost(response),
+                        })
+                        .unwrap(),
+                        peer.as_pathname().unwrap(),
+                    )
+                    .unwrap();
+            }
+        });
+        let connection = ControllerConnection::connect_at(
+            &server_path,
+            &root,
+            "secret".into(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        assert_eq!(connection.host(), HostId(42));
+        let poll = connection.poll().unwrap();
+        assert_eq!(poll.lease_epoch, Some(LeaseEpoch(7)));
+        assert!(matches!(
+            poll.messages.as_slice(),
+            [BrokerMessage::Deliver(crate::controller_broker::Delivery {
+                event_id: EventId(19),
+                payload: crate::ControllerEnvelopePayload {
+                    device_generation: 44,
+                    action: None,
+                    edge: crate::InputState::Released,
+                    repeat: false,
+                    family: crate::ControllerFamilyMessage::Xbox,
+                    routing_epoch: 11,
+                },
+                ..
+            })]
+        ));
+        drop(connection);
+        worker.join().unwrap();
+        std::fs::remove_file(server_path).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
 }
