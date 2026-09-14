@@ -584,8 +584,11 @@ fn queue_continuous_input(
 }
 
 fn transform_is_current(sample: &AdmittedNormalizedInput, current_generation: u64) -> bool {
-    sample.envelope.transform_generation == Some(current_generation)
-        && sample.authority.transform_generation == Some(current_generation)
+    matches!(
+        sample.envelope.input,
+        nickel_input::InputEvent::FocusLost { .. }
+    ) || (sample.envelope.transform_generation == Some(current_generation)
+        && sample.authority.transform_generation == Some(current_generation))
 }
 
 fn revoke_native_ingress(
@@ -605,6 +608,32 @@ fn grant_native_ingress(recipient: &mut NormalizedRecipientBinding, focus_genera
         lease: focus_generation,
         lifetime: focus_generation,
     };
+}
+
+fn grant_native_ingress_if_focused(
+    recipient: &mut NormalizedRecipientBinding,
+    focus_observed: bool,
+    focus_generation: u64,
+) -> bool {
+    if !focus_observed {
+        return false;
+    }
+    grant_native_ingress(recipient, focus_generation);
+    true
+}
+
+fn native_pointer_source_binding(
+    stream_generation: u64,
+    device_generation: u64,
+) -> NormalizedSourceBinding {
+    NormalizedSourceBinding {
+        seat: 0,
+        backend_stream: "winit-pointer-seat-0".into(),
+        stream_generation,
+        device_generation,
+        identity_capability: "backend_generation".into(),
+        reconnect_generation: device_generation,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -3137,6 +3166,8 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     normalized_ingress_epoch: Instant,
     native_host_generation: u64,
     standalone_recipient: NormalizedRecipientBinding,
+    native_pointer_recipient: NormalizedRecipientBinding,
+    native_pointer_stream_generation: u64,
     native_stream_reset_pending: bool,
 }
 
@@ -3147,37 +3178,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
     ) -> AdmittedNormalizedInput {
         self.normalized_admission_order = self.normalized_admission_order.wrapping_add(1).max(1);
         let device_generation = input.device().map_or(0, |device| device.0);
-        #[cfg(any(unix, windows))]
-        let recipient = self
-            .session_controller
-            .recipient_binding()
-            .or_else(|| {
-                self.session_controller
-                    .is_absent()
-                    .then_some(self.standalone_recipient)
-            })
-            .unwrap_or(NormalizedRecipientBinding {
-                lease: 0,
-                lifetime: 0,
-            });
-        #[cfg(not(any(unix, windows)))]
-        let recipient = self.standalone_recipient;
-        #[cfg(any(unix, windows))]
-        let role = if self.session_controller.is_absent() {
-            "standalone-window"
-        } else {
-            "session-attached-window"
-        };
-        #[cfg(not(any(unix, windows)))]
-        let role = "standalone-window";
-        let source = NormalizedSourceBinding {
-            seat: 0,
-            backend_stream: "winit".into(),
-            stream_generation: self.native_host_generation,
-            device_generation,
-            identity_capability: "backend_generation".into(),
-            reconnect_generation: device_generation,
-        };
+        let recipient = self.native_pointer_recipient;
+        let role = "native-pointer-seat-0";
+        let source =
+            native_pointer_source_binding(self.native_pointer_stream_generation, device_generation);
         let authority = NormalizedIngressAuthority {
             source: source.clone(),
             recipient,
@@ -3221,8 +3225,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             .max(1);
         revoke_native_ingress(
-            &mut self.standalone_recipient,
-            &mut self.native_host_generation,
+            &mut self.native_pointer_recipient,
+            &mut self.native_pointer_stream_generation,
             reset_generation,
         );
         self.native_stream_reset_pending = true;
@@ -3275,6 +3279,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 lease: 0,
                 lifetime: native_host_generation,
             },
+            native_pointer_recipient: NormalizedRecipientBinding {
+                lease: 0,
+                lifetime: native_host_generation,
+            },
+            native_pointer_stream_generation: native_host_generation,
             native_stream_reset_pending: false,
         }
     }
@@ -3338,6 +3347,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         .max(1);
                     grant_native_ingress(&mut self.standalone_recipient, generation);
+                    grant_native_ingress(&mut self.native_pointer_recipient, generation);
                 }
                 self.normalized_admission_order =
                     self.normalized_admission_order.wrapping_add(1).max(1);
@@ -3408,6 +3418,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 if matches!(events.last(), Some(HostEvent::NormalizedIngress(envelope)) if matches!(envelope.input, nickel_input::InputEvent::FocusLost { .. }))
                 {
                     self.standalone_recipient.lease = 0;
+                    self.native_pointer_recipient.lease = 0;
                 }
             }
         }
@@ -3459,17 +3470,22 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             return;
         }
         let samples = std::mem::take(&mut self.pending_continuous_input);
-        self.native_stream_reset_pending = false;
+        let reset_pending = std::mem::take(&mut self.native_stream_reset_pending);
         let mut events = Vec::new();
         let mut authorities = Vec::new();
         let mut changed = false;
         let mut exit = false;
+        let mut reset_reconciled = false;
         for sample in samples {
             if sample.envelope.recipient.lease == 0
                 || !transform_is_current(&sample, self.transform_generation)
             {
                 continue;
             }
+            reset_reconciled |= matches!(
+                sample.envelope.input,
+                nickel_input::InputEvent::FocusLost { .. }
+            );
             match self.adapter.normalized_input(
                 self.host.as_mut().unwrap(),
                 &sample.envelope.input,
@@ -3495,6 +3511,9 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             event_loop.exit();
         }
         if events.is_empty() && !changed {
+            if reset_pending && reset_reconciled {
+                self.recover_native_pointer_focus(event_loop, window);
+            }
             return;
         }
         if let Some(host) = &mut self.host {
@@ -3506,6 +3525,50 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             });
             self.apply_input_outcome(window, outcome);
             self.start_pending_file_drag(window);
+        }
+        if reset_pending && reset_reconciled {
+            self.recover_native_pointer_focus(event_loop, window);
+        }
+    }
+
+    fn recover_native_pointer_focus(&mut self, event_loop: &ActiveEventLoop, window: &Window) {
+        let generation = NEXT_NATIVE_HOST_GENERATION
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .max(1);
+        if !grant_native_ingress_if_focused(
+            &mut self.native_pointer_recipient,
+            window.has_focus(),
+            generation,
+        ) {
+            return;
+        }
+        let order = self.normalized_admission_order.wrapping_add(1).max(1);
+        let sample = self.admit_continuous_input(nickel_input::InputEvent::FocusGained {
+            order: nickel_input::EventOrder(order),
+        });
+        let adapted = self.host.as_mut().map(|host| {
+            self.adapter
+                .normalized_input(host, &sample.envelope.input, HostServices { window })
+        });
+        match adapted {
+            Some(Ok(outcome)) if outcome.disposition != crate::EventDisposition::Unhandled => {
+                self.apply_adapter_outcome(event_loop, outcome);
+            }
+            Some(Ok(outcome)) => {
+                if outcome.exit {
+                    event_loop.exit();
+                }
+                let Some(host) = &mut self.host else { return };
+                let host_outcome = host.step(HostBatch {
+                    events: vec![HostEvent::NormalizedIngress(sample.envelope)],
+                    normalized_authorities: vec![sample.authority],
+                    application_changed: outcome.changed,
+                    ..Default::default()
+                });
+                self.apply_input_outcome(window, host_outcome);
+            }
+            Some(Err(error)) => self.fail(event_loop, error),
+            None => {}
         }
     }
 
@@ -4022,8 +4085,9 @@ mod tests {
         ControllerRoleLease, EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent,
         HostFailure, HostFailureStage, MessageEvidence, NormalizedAdmissionBinding,
         NormalizedInputEnvelope, NormalizedRecipientBinding, NormalizedSourceBinding,
-        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext, grant_native_ingress,
-        local_controller_poll_lease, queue_continuous_input, revoke_native_ingress,
+        PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
+        grant_native_ingress_if_focused, local_controller_poll_lease,
+        native_pointer_source_binding, queue_continuous_input, revoke_native_ingress,
         transform_is_current, wait_duration,
     };
 
@@ -4463,9 +4527,28 @@ mod tests {
         assert_eq!(recipient.lease, 0);
         assert_eq!(recipient.lifetime, 42);
 
-        grant_native_ingress(&mut recipient, 43);
+        assert!(!grant_native_ingress_if_focused(&mut recipient, false, 43));
+        assert_eq!(recipient.lease, 0);
+
+        assert!(grant_native_ingress_if_focused(&mut recipient, true, 43));
         assert_eq!(recipient.lease, 43);
         assert_eq!(recipient.lifetime, 43);
+    }
+
+    #[test]
+    fn native_pointer_stream_has_input_class_authority_separate_from_controller() {
+        let pointer = native_pointer_source_binding(17, 9);
+        let controller = NormalizedSourceBinding {
+            seat: 0,
+            backend_stream: "controller-broker".into(),
+            stream_generation: 17,
+            device_generation: 9,
+            identity_capability: "broker".into(),
+            reconnect_generation: 9,
+        };
+
+        assert_eq!(pointer.backend_stream, "winit-pointer-seat-0");
+        assert_ne!(pointer, controller);
     }
 
     #[test]
