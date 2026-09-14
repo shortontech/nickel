@@ -1,7 +1,7 @@
 #[path = "windows_remote_observation.rs"]
 pub(crate) mod remote_observation;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     env,
     ffi::c_void,
     os::windows::ffi::OsStringExt,
@@ -18,8 +18,8 @@ use std::{
 use windows::{
     Win32::{
         Foundation::{
-            COLORREF, CloseHandle, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, LocalFree, POINT,
-            RECT, SIZE, WPARAM,
+            COLORREF, CloseHandle, FILETIME, GlobalFree, HANDLE, HWND, LPARAM, LRESULT, LocalFree,
+            POINT, RECT, SIZE, WPARAM,
         },
         Graphics::Dwm::{
             DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
@@ -43,8 +43,9 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         System::SystemInformation::GetTickCount64,
         System::Threading::{
-            AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
-            PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+            AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, GetProcessTimes,
+            OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+            QueryFullProcessImageNameW,
         },
         System::{
             Com::{
@@ -72,10 +73,10 @@ use windows::{
             },
             WindowsAndMessaging::{
                 BringWindowToTop, CallWindowProcW, CopyImage, CreateWindowExW, DI_NORMAL,
-                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_SYSTEM_MOVESIZEEND,
-                EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT, GA_ROOTOWNER, GCLP_HICON,
-                GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor, GetClassLongPtrW,
-                GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
+                DefWindowProcW, DestroyIcon, DrawIconEx, EVENT_OBJECT_DESTROY,
+                EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, EnumWindows, GA_ROOT,
+                GA_ROOTOWNER, GCLP_HICON, GCLP_HICONSM, GWL_EXSTYLE, GWLP_WNDPROC, GetAncestor,
+                GetClassLongPtrW, GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow,
                 GetLastActivePopup, GetSystemMenu, GetSystemMetrics, GetWindowLongPtrW,
                 GetWindowRect, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
                 HICON, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT,
@@ -1331,11 +1332,14 @@ static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
 static NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-struct NativeMoveSizeHook(HWINEVENTHOOK);
+struct NativeMoveSizeHook {
+    move_size: HWINEVENTHOOK,
+    window_destroy: HWINEVENTHOOK,
+}
 
 impl NativeMoveSizeHook {
     fn install() -> Option<Self> {
-        let hook = unsafe {
+        let move_size = unsafe {
             SetWinEventHook(
                 EVENT_SYSTEM_MOVESIZESTART,
                 EVENT_SYSTEM_MOVESIZEEND,
@@ -1346,7 +1350,30 @@ impl NativeMoveSizeHook {
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         };
-        (!hook.is_invalid()).then_some(Self(hook))
+        if move_size.is_invalid() {
+            return None;
+        }
+        let window_destroy = unsafe {
+            SetWinEventHook(
+                EVENT_OBJECT_DESTROY,
+                EVENT_OBJECT_DESTROY,
+                None,
+                Some(native_window_destroyed),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            )
+        };
+        if window_destroy.is_invalid() {
+            unsafe {
+                let _ = UnhookWinEvent(move_size);
+            }
+            return None;
+        }
+        Some(Self {
+            move_size,
+            window_destroy,
+        })
     }
 }
 
@@ -1354,8 +1381,27 @@ impl Drop for NativeMoveSizeHook {
     fn drop(&mut self) {
         NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.store(false, Ordering::Release);
         unsafe {
-            let _ = UnhookWinEvent(self.0);
+            let _ = UnhookWinEvent(self.move_size);
+            let _ = UnhookWinEvent(self.window_destroy);
         }
+    }
+}
+
+unsafe extern "system" fn native_window_destroyed(
+    _: HWINEVENTHOOK,
+    _: u32,
+    window: HWND,
+    object_id: i32,
+    child_id: i32,
+    _: u32,
+    _: u32,
+) {
+    // OBJID_WINDOW is zero and CHILDID_SELF is zero. Other object teardown does not end the HWND.
+    if window.is_invalid() || object_id != 0 || child_id != 0 {
+        return;
+    }
+    if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
+        coordinator.window_destroyed(window.0 as isize);
     }
 }
 
@@ -1387,6 +1433,7 @@ struct WindowDrag {
     operation: OperationId,
     completion: CompletionBinding,
     window: isize,
+    lifetime: NativeWindowLifetime,
     start: POINT,
     resize_edge: Option<u32>,
     initiated_at: u64,
@@ -1398,10 +1445,34 @@ struct WindowDrag {
 }
 
 struct RetainedNativeSettlement {
-    window: isize,
+    lifetime: NativeWindowLifetime,
     authority: GeometryAuthority,
     settlement: Settlement,
     last_observed: LogicalRect,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct NativeWindowFingerprint {
+    window: isize,
+    process_id: u32,
+    thread_id: u32,
+    process_created: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct NativeWindowLifetime {
+    fingerprint: NativeWindowFingerprint,
+    generation: u64,
+}
+
+type RetainedSettlementKey = (NativeWindowLifetime, NativeRequestId);
+
+const MAX_RETAINED_WINDOW_SETTLEMENTS: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettlementRetentionOutcome {
+    Retained,
+    EvictedOldest { evicted: RetainedSettlementKey },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1417,13 +1488,16 @@ struct WindowDragCoordinator {
     active: Option<WindowDrag>,
     next_mapping_generation: u64,
     next_native_request: u64,
-    retained_settlements: HashMap<(isize, NativeRequestId), RetainedNativeSettlement>,
+    current_lifetimes: HashMap<isize, NativeWindowLifetime>,
+    retained_settlements: HashMap<RetainedSettlementKey, RetainedNativeSettlement>,
+    retained_order: VecDeque<RetainedSettlementKey>,
+    last_retention_outcome: Option<SettlementRetentionOutcome>,
     last_terminal_apply: Option<NativeApplyState>,
 }
 
 #[derive(Clone, Copy)]
 struct WindowDragAdmission {
-    window: isize,
+    fingerprint: NativeWindowFingerprint,
     start: POINT,
     rectangle: RECT,
     resize_edge: Option<u32>,
@@ -1432,12 +1506,51 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn lifetime_is_current(&self, lifetime: NativeWindowLifetime) -> bool {
+        self.current_lifetimes
+            .get(&lifetime.fingerprint.window)
+            .is_some_and(|current| *current == lifetime)
+    }
+
+    fn retain_settlement(
+        &mut self,
+        key: RetainedSettlementKey,
+        retained: RetainedNativeSettlement,
+    ) {
+        let outcome = if self.retained_settlements.len() >= MAX_RETAINED_WINDOW_SETTLEMENTS {
+            let evicted = self
+                .retained_order
+                .pop_front()
+                .expect("a full retained-settlement map has an order entry");
+            self.retained_settlements.remove(&evicted);
+            if self.current_lifetimes.get(&evicted.0.fingerprint.window) == Some(&evicted.0) {
+                self.current_lifetimes.remove(&evicted.0.fingerprint.window);
+            }
+            tracing::warn!(
+                ?evicted,
+                "evicted oldest pending native settlement at capacity"
+            );
+            SettlementRetentionOutcome::EvictedOldest { evicted }
+        } else {
+            SettlementRetentionOutcome::Retained
+        };
+        self.retained_order.push_back(key);
+        self.retained_settlements.insert(key, retained);
+        self.last_retention_outcome = Some(outcome);
+    }
+
+    fn take_retained(&mut self, key: RetainedSettlementKey) -> Option<RetainedNativeSettlement> {
+        self.retained_order.retain(|candidate| *candidate != key);
+        self.retained_settlements.remove(&key)
+    }
+
     fn admit(&mut self, admission: WindowDragAdmission) -> bool {
+        let window = admission.fingerprint.window;
         if self.active.is_some()
             || self
                 .retained_settlements
                 .values()
-                .any(|retained| retained.window == admission.window)
+                .any(|retained| retained.lifetime.fingerprint == admission.fingerprint)
         {
             return false;
         }
@@ -1456,12 +1569,16 @@ impl WindowDragCoordinator {
         };
         self.next_mapping_generation = self.next_mapping_generation.saturating_add(1);
         let mapping_generation = self.next_mapping_generation;
+        let lifetime = NativeWindowLifetime {
+            fingerprint: admission.fingerprint,
+            generation: mapping_generation,
+        };
         let rectangle = admission.rectangle;
         let (Some(operation), begin) = self.reducer.begin_with_geometry(
             BeginRequest {
                 seat: SeatId::new(1),
                 subject: WindowMapping {
-                    window: OperationWindowId::new(admission.window as usize as u64),
+                    window: OperationWindowId::new(window as usize as u64),
                     native_lifetime: NativeLifetimeId::new(mapping_generation),
                     generation: MappingGeneration::new(mapping_generation),
                 },
@@ -1504,10 +1621,12 @@ impl WindowDragCoordinator {
                 .cancel(operation, CancellationReason::AcquisitionFailed);
             return false;
         }
+        self.current_lifetimes.insert(window, lifetime);
         self.active = Some(WindowDrag {
             operation,
             completion,
-            window: admission.window,
+            window,
+            lifetime,
             start: admission.start,
             resize_edge: admission.resize_edge,
             initiated_at: admission.time,
@@ -1524,10 +1643,23 @@ impl WindowDragCoordinator {
         let Some(mut active) = self.active.take() else {
             return Err(());
         };
+        if !self.lifetime_is_current(active.lifetime)
+            || native_window_fingerprint(active.window) != Some(active.lifetime.fingerprint)
+        {
+            let _ = self
+                .reducer
+                .cancel(active.operation, CancellationReason::TargetDestroyed);
+            self.last_terminal_apply = Some(active.last_apply);
+            if self.current_lifetimes.get(&active.window) == Some(&active.lifetime) {
+                self.current_lifetimes.remove(&active.window);
+            }
+            return Err(());
+        }
         match observe_window_drag(&mut active, time, false) {
             Err(reason) => {
                 let _ = self.reducer.cancel(active.operation, reason);
                 self.last_terminal_apply = Some(active.last_apply);
+                self.current_lifetimes.remove(&active.window);
                 return Err(());
             }
             Ok(false) => {
@@ -1566,6 +1698,7 @@ impl WindowDragCoordinator {
                 .fail(active.operation, FailureReason::NativeApplyFailed);
             self.last_terminal_apply = Some(active.last_apply);
             self.active = None;
+            self.current_lifetimes.remove(&active.window);
             Err(())
         } else {
             Ok(())
@@ -1578,16 +1711,18 @@ impl WindowDragCoordinator {
         };
         if self.reducer.release(active.operation, binding).disposition == Disposition::Applied {
             if let Some(settlement) = active.settlement.take() {
-                let key = (active.window, settlement.request.id);
-                self.retained_settlements.insert(
+                let key = (active.lifetime, settlement.request.id);
+                self.retain_settlement(
                     key,
                     RetainedNativeSettlement {
-                        window: active.window,
+                        lifetime: active.lifetime,
                         authority: active.authority.clone(),
                         settlement,
                         last_observed: active.last_observed,
                     },
                 );
+            } else {
+                self.current_lifetimes.remove(&active.window);
             }
             self.last_terminal_apply = Some(active.last_apply);
             self.active = None;
@@ -1600,6 +1735,7 @@ impl WindowDragCoordinator {
         if let Some(active) = self.active.take() {
             let _ = self.reducer.cancel(active.operation, reason);
             self.last_terminal_apply = Some(active.last_apply);
+            self.current_lifetimes.remove(&active.window);
         }
     }
 
@@ -1610,13 +1746,36 @@ impl WindowDragCoordinator {
             .copied()
             .collect::<Vec<_>>();
         for key in keys {
-            let Some(mut retained) = self.retained_settlements.remove(&key) else {
+            let Some(mut retained) = self.take_retained(key) else {
                 continue;
             };
+            if !self.lifetime_is_current(retained.lifetime)
+                || native_window_fingerprint(retained.lifetime.fingerprint.window)
+                    != Some(retained.lifetime.fingerprint)
+            {
+                retained.authority.base_placement.control = ControlMode::Delegated;
+                if self
+                    .current_lifetimes
+                    .get(&retained.lifetime.fingerprint.window)
+                    == Some(&retained.lifetime)
+                {
+                    self.current_lifetimes
+                        .remove(&retained.lifetime.fingerprint.window);
+                }
+                continue;
+            }
             let mut rectangle = RECT::default();
-            let window = HWND(retained.window as *mut c_void);
+            let window = HWND(retained.lifetime.fingerprint.window as *mut c_void);
             if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
                 retained.authority.base_placement.control = ControlMode::Delegated;
+                if self
+                    .current_lifetimes
+                    .get(&retained.lifetime.fingerprint.window)
+                    == Some(&retained.lifetime)
+                {
+                    self.current_lifetimes
+                        .remove(&retained.lifetime.fingerprint.window);
+                }
                 continue;
             }
             let observed = logical_rect(rectangle);
@@ -1627,12 +1786,21 @@ impl WindowDragCoordinator {
             retained.settlement.expire(now);
             if retained.settlement.status == SettlementStatus::Pending {
                 retained.last_observed = observed;
+                self.retained_order.push_back(key);
                 self.retained_settlements.insert(key, retained);
             } else {
                 retained
                     .authority
                     .observe(fact, ObservationCausality::Unknown);
                 retained.authority.base_placement.control = ControlMode::Delegated;
+                if self
+                    .current_lifetimes
+                    .get(&retained.lifetime.fingerprint.window)
+                    == Some(&retained.lifetime)
+                {
+                    self.current_lifetimes
+                        .remove(&retained.lifetime.fingerprint.window);
+                }
             }
         }
     }
@@ -1649,10 +1817,12 @@ impl WindowDragCoordinator {
             let keys = self
                 .retained_settlements
                 .iter()
-                .filter_map(|(key, retained)| (retained.window == window).then_some(*key))
+                .filter_map(|(key, retained)| {
+                    (retained.lifetime.fingerprint.window == window).then_some(*key)
+                })
                 .collect::<Vec<_>>();
             for key in keys {
-                let Some(mut retained) = self.retained_settlements.remove(&key) else {
+                let Some(mut retained) = self.take_retained(key) else {
                     continue;
                 };
                 let fact = native_geometry(retained.last_observed);
@@ -1663,15 +1833,73 @@ impl WindowDragCoordinator {
                     .authority
                     .observe(fact, ObservationCausality::Independent);
                 retained.authority.base_placement.control = ControlMode::Delegated;
+                if self.current_lifetimes.get(&window) == Some(&retained.lifetime) {
+                    self.current_lifetimes.remove(&window);
+                }
             }
         } else if self
             .retained_settlements
             .values()
-            .any(|retained| retained.window == window)
+            .any(|retained| retained.lifetime.fingerprint.window == window)
         {
             self.observe_retained_settlement(now);
         }
     }
+
+    fn window_destroyed(&mut self, window: isize) {
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.window == window)
+        {
+            self.cancel(CancellationReason::TargetDestroyed);
+        }
+        self.current_lifetimes.remove(&window);
+        let keys = self
+            .retained_settlements
+            .keys()
+            .copied()
+            .filter(|(lifetime, _)| lifetime.fingerprint.window == window)
+            .collect::<Vec<_>>();
+        for key in keys {
+            if let Some(mut retained) = self.take_retained(key) {
+                retained.authority.base_placement.control = ControlMode::Delegated;
+            }
+        }
+    }
+}
+
+fn native_window_fingerprint(window: isize) -> Option<NativeWindowFingerprint> {
+    let hwnd = HWND(window as *mut c_void);
+    if unsafe { !IsWindow(hwnd).as_bool() } {
+        return None;
+    }
+    let mut process_id = 0;
+    let thread_id = unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    if thread_id == 0 || process_id == 0 {
+        return None;
+    }
+    let process =
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    let result =
+        unsafe { GetProcessTimes(process, &mut created, &mut exited, &mut kernel, &mut user) };
+    unsafe {
+        let _ = CloseHandle(process);
+    }
+    if result.is_err() {
+        return None;
+    }
+    Some(NativeWindowFingerprint {
+        window,
+        process_id,
+        thread_id,
+        process_created: (u64::from(created.dwHighDateTime) << 32)
+            | u64::from(created.dwLowDateTime),
+    })
 }
 
 fn windows_pointer_source() -> Source {
@@ -2068,8 +2296,11 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
         2
     };
     let admitted = WINDOW_DRAG.lock().is_ok_and(|mut coordinator| {
+        let Some(fingerprint) = native_window_fingerprint(target.0 as isize) else {
+            return false;
+        };
         coordinator.admit(WindowDragAdmission {
-            window: target.0 as isize,
+            fingerprint,
             start: point,
             rectangle,
             resize_edge,
@@ -4521,14 +4752,24 @@ mod tests {
     };
 
     use super::{
-        DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, TrayNotifyIconData,
-        WindowDrag, WindowDragAdmission, WindowDragCoordinator, application_icon, clamp_preview_x,
-        classify_window_drag_observation, contain_rect, contested_authority, executable_icon,
-        is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
-        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
-        should_restore_on_activation, windows_pid_descends_from,
+        DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, NativeWindowFingerprint,
+        NativeWindowLifetime, RetainedNativeSettlement, SettlementRetentionOutcome,
+        TrayNotifyIconData, WindowDrag, WindowDragAdmission, WindowDragCoordinator,
+        application_icon, clamp_preview_x, classify_window_drag_observation, contain_rect,
+        contested_authority, executable_icon, is_nickel_host_terminal, is_shell_infrastructure,
+        native_hotkey_requests, parse_windows_command, permits_contested_workflow,
+        project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
+        restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
     };
+
+    fn fingerprint(window: isize, process_created: u64) -> NativeWindowFingerprint {
+        NativeWindowFingerprint {
+            window,
+            process_id: 7,
+            thread_id: 11,
+            process_created,
+        }
+    }
 
     fn contested_drag() -> WindowDrag {
         let rectangle = RECT {
@@ -4544,6 +4785,10 @@ mod tests {
                 gesture: CompletionGesture::Button(1),
             },
             window: 1,
+            lifetime: NativeWindowLifetime {
+                fingerprint: fingerprint(1, 13),
+                generation: 1,
+            },
             start: POINT::default(),
             resize_edge: None,
             initiated_at: 0,
@@ -4652,7 +4897,7 @@ mod tests {
             bottom: 220,
         };
         assert!(coordinator.admit(WindowDragAdmission {
-            window: 1,
+            fingerprint: fingerprint(1, 13),
             start: POINT::default(),
             rectangle,
             resize_edge: None,
@@ -4688,7 +4933,7 @@ mod tests {
             bottom: 220,
         };
         assert!(coordinator.admit(WindowDragAdmission {
-            window: 1,
+            fingerprint: fingerprint(1, 13),
             start: POINT::default(),
             rectangle,
             resize_edge: None,
@@ -4712,7 +4957,7 @@ mod tests {
         coordinator.release(completion);
 
         assert!(!coordinator.admit(WindowDragAdmission {
-            window: 1,
+            fingerprint: fingerprint(1, 13),
             start: POINT::default(),
             rectangle,
             resize_edge: None,
@@ -4720,7 +4965,7 @@ mod tests {
             time: 15,
         }));
         assert!(coordinator.admit(WindowDragAdmission {
-            window: 2,
+            fingerprint: fingerprint(2, 13),
             start: POINT::default(),
             rectangle,
             resize_edge: None,
@@ -4747,10 +4992,13 @@ mod tests {
                 max_corrections: 0,
             },
         );
-        coordinator.retained_settlements.insert(
-            (drag.window, settlement.request.id),
-            super::RetainedNativeSettlement {
-                window: drag.window,
+        coordinator
+            .current_lifetimes
+            .insert(drag.window, drag.lifetime);
+        coordinator.retain_settlement(
+            (drag.lifetime, settlement.request.id),
+            RetainedNativeSettlement {
+                lifetime: drag.lifetime,
                 authority: std::mem::replace(
                     &mut drag.authority,
                     contested_authority(RECT::default()),
@@ -4761,6 +5009,77 @@ mod tests {
         );
         coordinator.native_move_size(drag.window, true, 40);
         assert!(coordinator.retained_settlements.is_empty());
+    }
+
+    #[test]
+    fn retained_settlement_capacity_evicts_oldest_with_observable_outcome() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut first_key = None;
+        for generation in 1..=super::MAX_RETAINED_WINDOW_SETTLEMENTS + 1 {
+            let lifetime = NativeWindowLifetime {
+                fingerprint: fingerprint(generation as isize, 13),
+                generation: generation as u64,
+            };
+            let mut drag = contested_drag();
+            let settlement = Settlement::new(
+                NativeRequest {
+                    id: NativeRequestId(generation as u64),
+                    mapping_generation: generation as u64,
+                    desired: drag.authority.revisions(),
+                    placement: drag.last_observed,
+                },
+                SettlementLimits {
+                    deadline_tick: 260,
+                    max_corrections: 0,
+                },
+            );
+            let key = (lifetime, settlement.request.id);
+            first_key.get_or_insert(key);
+            coordinator.retain_settlement(
+                key,
+                RetainedNativeSettlement {
+                    lifetime,
+                    authority: drag.authority,
+                    settlement,
+                    last_observed: drag.last_observed,
+                },
+            );
+        }
+
+        assert_eq!(
+            coordinator.retained_settlements.len(),
+            super::MAX_RETAINED_WINDOW_SETTLEMENTS
+        );
+        assert!(
+            !coordinator
+                .retained_settlements
+                .contains_key(&first_key.unwrap())
+        );
+        assert_eq!(
+            coordinator.last_retention_outcome,
+            Some(SettlementRetentionOutcome::EvictedOldest {
+                evicted: first_key.unwrap(),
+            })
+        );
+    }
+
+    #[test]
+    fn recycled_window_mapping_cannot_validate_old_settlement_lifetime() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let old = NativeWindowLifetime {
+            fingerprint: fingerprint(44, 13),
+            generation: 1,
+        };
+        let replacement = NativeWindowLifetime {
+            fingerprint: fingerprint(44, 21),
+            generation: 2,
+        };
+        coordinator.current_lifetimes.insert(44, old);
+        assert!(coordinator.lifetime_is_current(old));
+
+        coordinator.current_lifetimes.insert(44, replacement);
+        assert!(!coordinator.lifetime_is_current(old));
+        assert!(coordinator.lifetime_is_current(replacement));
     }
 
     #[test]
