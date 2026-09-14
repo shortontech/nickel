@@ -3505,6 +3505,7 @@ mod tests {
         assert!(runtime.pointer_button((10.0, 60.0), true));
         assert_eq!(runtime.focused(), Some(application));
         assert!(runtime.surface_at((10.0, 60.0), true).is_none());
+        assert!(runtime.pointer_button((10.0, 60.0), false));
         assert!(runtime.keyboard(UiEvent::KeyboardActivate));
         assert_eq!(
             runtime
@@ -3515,7 +3516,7 @@ mod tests {
                 .downcast_ref::<Counter>()
                 .unwrap()
                 .0,
-            1
+            2
         );
         assert!(runtime.pointer_button((10.0, 10.0), true));
         assert_eq!(runtime.focused(), Some(application));
