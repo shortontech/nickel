@@ -1923,6 +1923,33 @@ fn controller_transfer_response(status: ControllerTransferStatus) -> ControllerH
     }
 }
 
+fn begin_controller_host_transfer(
+    broker: &mut ControllerBroker<ControllerEnvelopePayload>,
+    host: ControllerHostId,
+    connection: ControllerConnectionGeneration,
+    internal_connection: ControllerConnectionGeneration,
+    now_ms: u64,
+) -> ControllerTransferStatus {
+    let status = broker.begin_transfer(host, connection, now_ms, DEFAULT_TRANSFER_DEADLINE_MS);
+    let ControllerTransferStatus::Pending { cutoff, .. } = status else {
+        return status;
+    };
+    let revocation = broker
+        .drain(ControllerHostId(0), internal_connection)
+        .into_iter()
+        .find_map(|message| match message {
+            ControllerBrokerMessage::Revoke {
+                lease_epoch,
+                cutoff: bound,
+                ..
+            } if bound == cutoff => Some(lease_epoch),
+            _ => None,
+        });
+    revocation.map_or(status, |lease| {
+        broker.acknowledge_quiescence(ControllerHostId(0), internal_connection, lease, cutoff)
+    })
+}
+
 /// Nickel-owned overlay color used to dim shell content without painting a
 /// pure-black translucent background.
 pub(crate) const fn shell_scrim(alpha: f32) -> [f32; 4] {
@@ -6185,37 +6212,13 @@ impl NickelSession {
                 }) else {
                     return ServerMessage::ControllerHost(ControllerHostResponse::LeaseFailed);
                 };
-                let status = self.controller_broker.begin_transfer(
+                let status = begin_controller_host_transfer(
+                    &mut self.controller_broker,
                     host,
                     connection_generation,
+                    self.controller_internal_connection,
                     now_ms,
-                    DEFAULT_TRANSFER_DEADLINE_MS,
                 );
-                let status = match status {
-                    ControllerTransferStatus::Pending { cutoff, .. } => {
-                        let revocation = self
-                            .controller_broker
-                            .drain(ControllerHostId(0), self.controller_internal_connection)
-                            .into_iter()
-                            .find_map(|message| match message {
-                                ControllerBrokerMessage::Revoke {
-                                    lease_epoch,
-                                    cutoff: bound,
-                                    ..
-                                } if bound == cutoff => Some(lease_epoch),
-                                _ => None,
-                            });
-                        revocation.map_or(status, |lease| {
-                            self.controller_broker.acknowledge_quiescence(
-                                ControllerHostId(0),
-                                self.controller_internal_connection,
-                                lease,
-                                cutoff,
-                            )
-                        })
-                    }
-                    status => status,
-                };
                 if !matches!(status, ControllerTransferStatus::Failed) {
                     self.controller_external_lease_binding = Some(ExternalControllerLeaseBinding {
                         host,
@@ -19426,6 +19429,59 @@ mod protocol_tests {
                 nickel_session_protocol::ControllerHostResponse::LeaseFailed
             )
         ));
+    }
+
+    #[test]
+    fn focused_controller_host_retries_after_unrelated_internal_handoff() {
+        use nickel_session_protocol::controller_broker::{
+            ControllerBroker, HostId, TransferStatus,
+        };
+
+        let mut broker =
+            ControllerBroker::<nickel_session_protocol::ControllerEnvelopePayload>::new(8);
+        let internal = broker.attach(HostId(0));
+        let a = broker.attach(HostId(41));
+        let b = broker.attach(HostId(42));
+        let predecessor = broker.grant(HostId(41), a).unwrap();
+        broker.set_neutral(false);
+        let internal_pending = broker.begin_transfer(
+            HostId(0),
+            internal,
+            10,
+            nickel_session_protocol::controller_broker::DEFAULT_TRANSFER_DEADLINE_MS,
+        );
+        let TransferStatus::Pending { cutoff, .. } = internal_pending else {
+            panic!("A to internal handoff must start");
+        };
+
+        assert_eq!(
+            super::begin_controller_host_transfer(&mut broker, HostId(42), b, internal, 11),
+            TransferStatus::Failed,
+            "host B must retry instead of polling the internal destination's lease"
+        );
+        assert_eq!(
+            broker.begin_transfer(
+                HostId(0),
+                internal,
+                12,
+                nickel_session_protocol::controller_broker::DEFAULT_TRANSFER_DEADLINE_MS,
+            ),
+            internal_pending,
+            "the unrelated request must preserve the original revocation and destination"
+        );
+
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(41), a, predecessor.epoch, cutoff),
+            internal_pending
+        );
+        assert_eq!(broker.set_neutral(true).unwrap().host, HostId(0));
+        let TransferStatus::Granted(granted) =
+            super::begin_controller_host_transfer(&mut broker, HostId(42), b, internal, 13)
+        else {
+            panic!("host B retry must complete the bounded internal handoff");
+        };
+        assert_eq!(granted.host, HostId(42));
+        assert_eq!(granted.connection_generation, b);
     }
 
     #[test]

@@ -304,6 +304,9 @@ impl<T> ControllerBroker<T> {
             {
                 return self.rearm_transfer_destination(connection, now_ms, timeout_ms);
             }
+            if transfer.to != to || transfer.to_connection != connection {
+                return TransferStatus::Failed;
+            }
             return TransferStatus::Pending {
                 requested_lease: transfer.requested_lease,
                 cutoff: transfer.cutoff,
@@ -854,6 +857,38 @@ mod tests {
         assert!(
             matches!(broker.ingest("fresh"), IngressDisposition::Delivered { lease, .. } if lease.host == HostId(2))
         );
+    }
+
+    #[test]
+    fn pending_transfer_identity_is_visible_only_to_its_exact_destination() {
+        let mut broker = ControllerBroker::<()>::new(8);
+        let a = broker.attach(HostId(1));
+        let internal = broker.attach(HostId(0));
+        let b = broker.attach(HostId(2));
+        let predecessor = broker.grant(HostId(1), a).unwrap();
+        broker.set_neutral(false);
+
+        let pending = broker.begin_transfer(HostId(0), internal, 10, 100);
+        let TransferStatus::Pending { cutoff, .. } = pending else {
+            panic!("A to internal transfer must be pending");
+        };
+        assert_eq!(
+            broker.begin_transfer(HostId(2), b, 11, 100),
+            TransferStatus::Failed,
+            "host B must not adopt the internal destination's pending lease identity"
+        );
+        assert_eq!(broker.begin_transfer(HostId(0), internal, 12, 100), pending);
+
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), a, predecessor.epoch, cutoff),
+            pending
+        );
+        let internal_lease = broker.set_neutral(true).unwrap();
+        assert_eq!(internal_lease.host, HostId(0));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), b, 13, 100),
+            TransferStatus::Pending { .. }
+        ));
     }
 
     #[test]

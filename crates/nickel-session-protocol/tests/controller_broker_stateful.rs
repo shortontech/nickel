@@ -91,3 +91,47 @@ fn bounded_generated_transfer_timeout_and_overflow_sequences_fence_delivery() {
         }
     }
 }
+
+#[test]
+fn exact_a_internal_b_trace_never_exposes_an_unrelated_pending_lease() {
+    let mut broker = ControllerBroker::<()>::new(4);
+    let internal = broker.attach(HostId(0));
+    let a = broker.attach(HostId(1));
+    let b = broker.attach(HostId(2));
+    let a_lease = broker.grant(HostId(1), a).unwrap();
+    broker.set_neutral(false);
+
+    let internal_status = broker.begin_transfer(HostId(0), internal, 0, 10);
+    let TransferStatus::Pending { cutoff, .. } = internal_status else {
+        panic!("A to internal must enter revocation");
+    };
+    assert_eq!(
+        broker.begin_transfer(HostId(2), b, 1, 10),
+        TransferStatus::Failed
+    );
+    assert!(matches!(
+        broker.ingest(()),
+        IngressDisposition::RejectedTransfer { .. }
+    ));
+    assert_eq!(
+        broker.acknowledge_quiescence(HostId(1), a, a_lease.epoch, cutoff),
+        internal_status
+    );
+    let internal_lease = broker.set_neutral(true).unwrap();
+    assert_eq!(internal_lease.host, HostId(0));
+
+    let TransferStatus::Pending {
+        cutoff: internal_cutoff,
+        ..
+    } = broker.begin_transfer(HostId(2), b, 2, 10)
+    else {
+        panic!("B retry must revoke the internal successor");
+    };
+    let TransferStatus::Granted(b_lease) =
+        broker.acknowledge_quiescence(HostId(0), internal, internal_lease.epoch, internal_cutoff)
+    else {
+        panic!("neutral internal quiescence must grant B");
+    };
+    assert_eq!(b_lease.host, HostId(2));
+    assert_eq!(b_lease.connection_generation, b);
+}
