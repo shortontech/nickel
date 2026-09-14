@@ -2742,6 +2742,9 @@ impl<A: Application> UiHost<A> {
         if matches!(event, UiEvent::ControllerBack) {
             return TouchIntentArbitration::CancelGesture;
         }
+        if matches!(event, UiEvent::PointerContext(_)) {
+            return TouchIntentArbitration::RejectBusy;
+        }
         let relevant = matches!(
             event,
             UiEvent::FocusNext
@@ -2760,8 +2763,10 @@ impl<A: Application> UiHost<A> {
                 | UiEvent::ControllerAdjust(_)
                 | UiEvent::ControllerActivate
                 | UiEvent::ControllerContextMenu
+                | UiEvent::KeyboardContextMenu
                 | UiEvent::AccessibilityFocus(_)
                 | UiEvent::AccessibilityActivate(_)
+                | UiEvent::AccessibilityContextMenu(_)
         );
         if !relevant {
             return TouchIntentArbitration::Preserve;
@@ -2774,6 +2779,25 @@ impl<A: Application> UiHost<A> {
         ) else {
             return TouchIntentArbitration::Preserve;
         };
+        let context_target = match event {
+            UiEvent::ControllerContextMenu => self
+                .state
+                .navigation()
+                .controller_selected()
+                .or_else(|| self.state.focused())
+                .or_else(|| self.state.selection_owner()),
+            UiEvent::KeyboardContextMenu => self
+                .state
+                .focused()
+                .or_else(|| self.state.selection_owner()),
+            UiEvent::AccessibilityContextMenu(target) => Some(target),
+            _ => None,
+        };
+        if (outcome.invalidation != Invalidation::None || !outcome.messages.is_empty())
+            && let Some(target) = context_target
+        {
+            return self.arbitrate_activation_target(Some(target));
+        }
         let after = preview.current_target();
         if after.is_some_and(|target| target != owner) {
             TouchIntentArbitration::CancelThenDispatch
@@ -4621,6 +4645,7 @@ fn is_clipboard_paste(input: &nickel_input::InputEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::ui::ComponentBuilderExt;
     static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(1);
     use nickel_input::{
@@ -4822,6 +4847,26 @@ mod tests {
 
     struct AdjustmentApplication {
         value: f32,
+    }
+
+    #[derive(Default)]
+    struct ContextApplication {
+        invoked: Vec<&'static str>,
+    }
+
+    impl Application for ContextApplication {
+        type Message = &'static str;
+
+        fn update(&mut self, message: Self::Message) {
+            self.invoked.push(message);
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Container::new().children([
+                Button::new("A", "A").id("a").context_message("A-context"),
+                Button::new("B", "B").id("b").context_message("B-context"),
+            ])
+        }
     }
 
     impl Application for AdjustmentApplication {
@@ -7126,6 +7171,59 @@ mod tests {
         assert_eq!(outcome.disposition, crate::EventDisposition::Handled);
         assert!(host.state.pressed().is_none());
         assert!(host.state.captured().is_none());
+    }
+
+    #[test]
+    fn pointer_and_keyboard_context_arbitrate_primary_capture() {
+        let mut host = UiHost::new(ContextApplication::default(), 200, 48);
+        let nodes = host.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap();
+        let first_point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        let second_point = crate::Point {
+            x: second.bounds.origin.x + second.bounds.size.width / 2.0,
+            y: second.bounds.origin.y + second.bounds.size.height / 2.0,
+        };
+        host.handle_input(
+            &InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+                position: Some(first_point),
+            }),
+            None,
+        );
+
+        let pointer_context = host.handle_event(UiEvent::PointerContext(second_point));
+        assert_eq!(
+            pointer_context.disposition,
+            crate::EventDisposition::Rejected("input busy")
+        );
+        assert_eq!(host.state.captured(), Some(&first.id));
+        assert!(host.application().invoked.is_empty());
+
+        let keyboard_same = host.handle_event(UiEvent::KeyboardContextMenu);
+        assert_eq!(
+            keyboard_same.disposition,
+            crate::EventDisposition::Rejected("input busy")
+        );
+        assert_eq!(host.state.captured(), Some(&first.id));
+
+        host.state.set_focus(Some(second.id.clone()));
+        let keyboard_other = host.handle_event(UiEvent::KeyboardContextMenu);
+        assert_eq!(host.application().invoked, ["B-context"]);
+        assert!(host.state.captured().is_none());
+        assert!(keyboard_other.changed);
     }
 
     #[test]
