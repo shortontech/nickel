@@ -8310,13 +8310,16 @@ impl NickelSession {
                 size,
                 fallback_geometry,
             );
-            self.map_compositor_moved_window(window, rescue_location, false);
-            let rescue_revision = self
+            if !self.map_compositor_moved_window(window, rescue_location, false) {
+                continue;
+            }
+            let Some(rescue_revision) = self
                 .geometry_authorities
                 .get(&id)
-                .expect("mapped rescue publishes desired geometry")
-                .revisions()
-                .placement;
+                .map(|authority| authority.revisions().placement)
+            else {
+                continue;
+            };
             displaced.push(DisplacedWindow {
                 id,
                 relative_location,
@@ -10328,6 +10331,7 @@ impl NickelSession {
         }
         let desired = token.placement.desired;
         if let Some(x11) = window.x11_surface() {
+            self.bind_x11_geometry_request(token.window, desired, token.placement.revision)?;
             x11.configure(Rectangle::new(
                 (desired.x, desired.y).into(),
                 (desired.width, desired.height).into(),
@@ -10411,7 +10415,24 @@ impl NickelSession {
             } else {
                 window.geometry().size
             };
-            let _ = surface.configure(Rectangle::new(location, size));
+            let desired = Geometry {
+                x: location.x,
+                y: location.y,
+                width: size.w.max(1),
+                height: size.h.max(1),
+            };
+            if self
+                .bind_x11_geometry_request(id, desired, placement.revision)
+                .is_none()
+            {
+                return false;
+            }
+            if surface.configure(Rectangle::new(location, size)).is_err() {
+                if let Some(settlement) = self.x11_geometry_settlements.get_mut(&id) {
+                    settlement.fail();
+                }
+                return false;
+            }
         }
         let popup_root = window
             .toplevel()
@@ -10549,6 +10570,14 @@ impl NickelSession {
         let desired_revisions = self.geometry_authorities.get(&id).and_then(|authority| {
             revisions_for_authorized_x11_request(authority, desired, placement_revision)
         })?;
+        if let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
+            && settlement.status == nickel_core::geometry_authority::SettlementStatus::Pending
+            && settlement.request.mapping_generation == id.0
+        {
+            settlement.request.desired = desired_revisions;
+            settlement.request.placement = desired;
+            return Some(settlement.request.id);
+        }
         self.x11_next_native_request = self
             .x11_next_native_request
             .checked_add(1)

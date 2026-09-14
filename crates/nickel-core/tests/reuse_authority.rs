@@ -326,3 +326,56 @@ fn relayout_and_hidden_rescue_require_live_geometry_authority() {
     assert!(removal.matches("try_authorize_placement").count() >= 2);
     assert!(!removal.contains("authority.set_placement"));
 }
+
+#[test]
+fn interactive_x11_effects_bind_bounded_requests_before_native_writes() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    for (start, end) in [
+        (
+            "pub(crate) fn apply_authorized_interactive_resize",
+            "pub(crate) fn compensate_interactive_resize",
+        ),
+        (
+            "fn apply_compositor_moved_window_effect",
+            "fn apply_authorized_complete_window_geometry",
+        ),
+    ] {
+        let section = state
+            .split(start)
+            .nth(1)
+            .unwrap()
+            .split(end)
+            .next()
+            .unwrap();
+        assert!(
+            section.find("bind_x11_geometry_request").unwrap()
+                < section.find(".configure(Rectangle::new").unwrap()
+        );
+    }
+    let binding = state
+        .split("fn bind_x11_geometry_request")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn x11_has_pending_issued_request")
+        .next()
+        .unwrap();
+    assert!(binding.contains("settlement.request.placement = desired"));
+}
+
+#[test]
+fn mapped_output_rescue_records_displacement_only_after_success() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let mapped = state
+        .split("for (id, window, location, size) in mapped")
+        .nth(1)
+        .unwrap()
+        .split("for (id, (window, location)) in &mut self.minimized_windows")
+        .next()
+        .unwrap();
+    let apply = mapped.find("if !self.map_compositor_moved_window").unwrap();
+    let record = mapped.find("displaced.push").unwrap();
+    assert!(apply < record);
+    assert!(mapped[apply..record].contains("continue"));
+}
