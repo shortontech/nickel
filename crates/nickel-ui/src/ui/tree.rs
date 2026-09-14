@@ -501,7 +501,10 @@ impl<Message: Clone> UiFrame<Message> {
             .resolved
             .nodes
             .iter()
-            .filter(|node| &node.id == requested || node.id.as_str().ends_with(&suffix))
+            .filter(|node| {
+                (&node.id == requested || node.id.as_str().ends_with(&suffix))
+                    && self.target_is_in_active_overlay(&node.id)
+            })
             .map(|node| node.id.clone());
         let target = matches.next()?;
         matches.next().is_none().then_some(target)
@@ -1685,7 +1688,16 @@ impl<Message: Clone> UiFrame<Message> {
         source: InputSource,
         intent: InteractionIntent,
     ) -> Result<EventOutcome<Message>, SemanticActionError> {
-        if let InteractionIntent::Invoke { target, .. } = &intent
+        let direct_target = match &intent {
+            InteractionIntent::Invoke { target, .. }
+            | InteractionIntent::Event(
+                UiEvent::AccessibilityFocus(target)
+                | UiEvent::AccessibilityActivate(target)
+                | UiEvent::AccessibilityContextMenu(target),
+            ) => Some(target),
+            InteractionIntent::Event(_) => None,
+        };
+        if let Some(target) = direct_target
             && !self.target_is_in_active_overlay(target)
         {
             return Err(SemanticActionError::MissingTarget);

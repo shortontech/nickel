@@ -3436,10 +3436,31 @@ impl<A: Application> UiHost<A> {
             self.pointer_icon = self.tree.pointer_icon_at(*point);
         }
         let source = event.input_source();
-        let outcome = self
-            .tree
-            .transition(&mut self.state, source, InteractionIntent::Event(event))
-            .expect("ordinary UI events cannot fail semantic resolution");
+        let direct_target = match &event {
+            UiEvent::AccessibilityFocus(target)
+            | UiEvent::AccessibilityActivate(target)
+            | UiEvent::AccessibilityContextMenu(target) => Some(target.clone()),
+            _ => None,
+        };
+        let outcome =
+            match self
+                .tree
+                .transition(&mut self.state, source, InteractionIntent::Event(event))
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    let target = direct_target.expect("only direct-target UI events can fail");
+                    return HostEventOutcome {
+                        disposition: crate::EventDisposition::Rejected(match error {
+                            SemanticActionError::MissingTarget => "missing target",
+                            SemanticActionError::AmbiguousTarget => "ambiguous target",
+                            SemanticActionError::ActionUnavailable => "action unavailable",
+                        }),
+                        semantic_failures: vec![SemanticActionFailure { target, error }],
+                        ..HostEventOutcome::default()
+                    };
+                }
+            };
         let invalidation = outcome.invalidation;
         let disposition = outcome.disposition;
         let changed = invalidation != Invalidation::None || !outcome.messages.is_empty();
@@ -6282,6 +6303,103 @@ mod tests {
     }
 
     #[test]
+    fn raw_accessibility_events_cannot_reach_retained_background_ids_behind_modal() {
+        #[derive(Clone, Debug, PartialEq)]
+        enum ModalMessage {
+            Invoke,
+            Background,
+            BackgroundContext,
+        }
+
+        #[derive(Default)]
+        struct ModalApplication {
+            messages: Vec<ModalMessage>,
+        }
+
+        impl Application for ModalApplication {
+            type Message = ModalMessage;
+
+            fn update(&mut self, message: Self::Message) {
+                self.messages.push(message);
+            }
+
+            fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+                Container::new().children([
+                    Button::new(ModalMessage::Invoke, "Open")
+                        .id("invoker")
+                        .context_message(ModalMessage::Invoke),
+                    Button::new(ModalMessage::Background, "Background")
+                        .id("background")
+                        .context_message(ModalMessage::BackgroundContext),
+                ])
+            }
+
+            fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
+                vec![FrameOverlay::surface(
+                    crate::TransientSurface::dialog(
+                        "dialog",
+                        crate::OverlayAnchor::InvocationTarget(UiId::from("invoker")),
+                        crate::Size::new(120.0, 80.0),
+                        crate::OverlayStyle {
+                            background: 0x111111,
+                            foreground: 0xffffff,
+                            border: 0x888888,
+                            selected: 0x333333,
+                            radius: 8,
+                        },
+                    ),
+                    Button::new(ModalMessage::Invoke, "Confirm").id("confirm"),
+                )]
+            }
+        }
+
+        let mut host = UiHost::new(ModalApplication::default(), 320, 200);
+        let invoker = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Open".into(),
+            })
+            .expect("dialog invoker")
+            .id;
+        let background = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Background".into(),
+            })
+            .expect("background target distinct from invoker")
+            .id;
+        assert_ne!(background, invoker);
+        assert!(host.request_focus(invoker.clone()).changed);
+        assert!(
+            host.open_transient(OverlayId::new("dialog"), invoker)
+                .changed
+        );
+        let modal_focus = host.inspect().keyboard_focus;
+
+        for event in [
+            UiEvent::AccessibilityActivate(background.clone()),
+            UiEvent::AccessibilityFocus(background.clone()),
+            UiEvent::AccessibilityContextMenu(background.clone()),
+        ] {
+            let outcome = host.handle_event(event);
+            assert_eq!(
+                outcome.semantic_failures,
+                [crate::SemanticActionFailure {
+                    target: background.clone(),
+                    error: SemanticActionError::MissingTarget,
+                }]
+            );
+            assert_eq!(
+                outcome.disposition,
+                crate::EventDisposition::Rejected("missing target")
+            );
+            assert_eq!(host.inspect().keyboard_focus, modal_focus);
+            assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("dialog")));
+            assert!(host.application().messages.is_empty());
+        }
+    }
+
+    #[test]
     fn programmatic_modal_cancels_pointer_before_becoming_eligible() {
         let mut host = UiHost::new(
             ModalGestureApplication {
@@ -6637,8 +6755,10 @@ mod tests {
             }
             fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
                 Container::new().children([
-                    Button::new((), "Help").id("anchor"),
-                    Button::new((), "Background").id("background"),
+                    Button::new((), "Help").id("anchor").context_message(()),
+                    Button::new((), "Background")
+                        .id("background")
+                        .context_message(()),
                 ])
             }
             fn frame_overlays(&self, _context: ViewContext) -> Vec<FrameOverlay<Self::Message>> {
@@ -6708,10 +6828,21 @@ mod tests {
                 .iter()
                 .any(|node| node.id == background)
         );
-        let activated =
-            host.perform_semantic_action(background, SemanticAction::Invoke(ActionKind::Activate));
+        let activated = host.perform_semantic_action(
+            background.clone(),
+            SemanticAction::Invoke(ActionKind::Activate),
+        );
         assert_eq!(activated.messages.len(), 1);
         assert_eq!(host.application().activations, 1);
+        for event in [
+            UiEvent::AccessibilityFocus(background.clone()),
+            UiEvent::AccessibilityActivate(background.clone()),
+            UiEvent::AccessibilityContextMenu(background.clone()),
+        ] {
+            assert!(host.handle_event(event).semantic_failures.is_empty());
+        }
+        assert_eq!(host.inspect().keyboard_focus, Some(background));
+        assert_eq!(host.application().activations, 3);
         assert_eq!(
             host.inspect().open_overlay,
             Some(OverlayId::new("help-tooltip")),
