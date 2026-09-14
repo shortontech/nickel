@@ -24,6 +24,258 @@ use crate::{
     SoftwareRenderer, UiEvent, UiFrame, UiId, UiStateStore, View,
 };
 
+#[cfg(unix)]
+enum SessionControllerSource {
+    Absent,
+    Connecting {
+        connection: nickel_session_protocol::client::AsyncControllerConnection,
+    },
+    Attached {
+        connection: nickel_session_protocol::client::AsyncControllerConnection,
+        connection_generation: nickel_session_protocol::controller_broker::ConnectionGeneration,
+        lease: Option<nickel_session_protocol::controller_broker::LeaseEpoch>,
+        last_event: nickel_session_protocol::controller_broker::EventId,
+        phase: SessionControllerPhase,
+    },
+    Failed,
+}
+
+#[cfg(unix)]
+enum SessionControllerPhase {
+    Lease,
+    Poll,
+    Acknowledge,
+}
+
+#[cfg(unix)]
+impl SessionControllerSource {
+    fn discover() -> (Option<ControllerInput>, Self) {
+        use nickel_session_protocol::client::AsyncControllerConnection;
+
+        match AsyncControllerConnection::begin_from_environment(Duration::from_millis(100)) {
+            Ok(None) => (Some(ControllerInput::new()), Self::Absent),
+            Ok(Some(connection)) => (None, Self::Connecting { connection }),
+            Err(error) => {
+                tracing::warn!(%error, "advertised session controller connection failed closed");
+                (None, Self::Failed)
+            }
+        }
+    }
+
+    fn poll_actions(&mut self) -> Vec<(ControllerAction, ControllerFamily)> {
+        use nickel_session_protocol::{
+            ControllerHostRequest, ControllerHostResponse, InputState,
+            controller_broker::BrokerMessage,
+        };
+        let state = std::mem::replace(self, Self::Failed);
+        let (next, actions) = match state {
+            Self::Connecting { mut connection } => match connection.receive() {
+                Ok(None) => (Self::Connecting { connection }, Vec::new()),
+                Ok(Some(ControllerHostResponse::Attached {
+                    connection_generation,
+                    ..
+                })) => {
+                    if let Err(error) = connection.send(ControllerHostRequest::RequestLease {
+                        connection_generation,
+                    }) {
+                        tracing::warn!(%error, "session controller lease request failed closed");
+                        (Self::Failed, Vec::new())
+                    } else {
+                        (
+                            Self::Attached {
+                                connection,
+                                connection_generation,
+                                lease: None,
+                                last_event: nickel_session_protocol::controller_broker::EventId(0),
+                                phase: SessionControllerPhase::Lease,
+                            },
+                            Vec::new(),
+                        )
+                    }
+                }
+                Ok(Some(_)) => (Self::Failed, Vec::new()),
+                Err(error) => {
+                    tracing::warn!(%error, "session controller attachment failed closed");
+                    (Self::Failed, Vec::new())
+                }
+            },
+            Self::Attached {
+                mut connection,
+                connection_generation,
+                mut lease,
+                mut last_event,
+                phase,
+            } => match connection.receive() {
+                Ok(None) => (
+                    Self::Attached {
+                        connection,
+                        connection_generation,
+                        lease,
+                        last_event,
+                        phase,
+                    },
+                    Vec::new(),
+                ),
+                Err(error) => {
+                    tracing::warn!(%error, "session controller request failed closed");
+                    (Self::Failed, Vec::new())
+                }
+                Ok(Some(response)) => {
+                    let mut actions = Vec::new();
+                    let request = match (phase, response) {
+                        (
+                            SessionControllerPhase::Lease,
+                            ControllerHostResponse::LeaseGranted { lease_epoch },
+                        ) => {
+                            lease = Some(lease_epoch);
+                            Some(ControllerHostRequest::Poll {
+                                connection_generation,
+                            })
+                        }
+                        (
+                            SessionControllerPhase::Lease,
+                            ControllerHostResponse::LeasePending { .. }
+                            | ControllerHostResponse::LeaseFailed,
+                        ) => Some(ControllerHostRequest::Poll {
+                            connection_generation,
+                        }),
+                        (
+                            SessionControllerPhase::Poll,
+                            ControllerHostResponse::Messages {
+                                lease_epoch,
+                                messages,
+                            },
+                        ) => {
+                            let revocation = messages.iter().find_map(|message| match message {
+                                BrokerMessage::Revoke {
+                                    connection_generation: bound,
+                                    lease_epoch,
+                                    cutoff,
+                                } if *bound == connection_generation
+                                    && Some(*lease_epoch) == lease =>
+                                {
+                                    Some((*lease_epoch, *cutoff))
+                                }
+                                _ => None,
+                            });
+                            let reset = messages.iter().any(|message| {
+                                matches!(message, BrokerMessage::StreamReset { .. })
+                            });
+                            if reset || revocation.is_some() {
+                                lease = None;
+                                revocation.map(|(lease_epoch, cutoff)| {
+                                    ControllerHostRequest::AcknowledgeQuiescence {
+                                        connection_generation,
+                                        lease_epoch,
+                                        cutoff,
+                                    }
+                                })
+                            } else {
+                                lease = lease_epoch;
+                                if let Some(current_lease) = lease {
+                                    for message in messages {
+                                        let BrokerMessage::Deliver(delivery) = message else {
+                                            continue;
+                                        };
+                                        if delivery.connection_generation != connection_generation
+                                            || delivery.lease_epoch != current_lease
+                                            || delivery.event_id.0 <= last_event.0
+                                        {
+                                            continue;
+                                        }
+                                        last_event = delivery.event_id;
+                                        if delivery.payload.edge != InputState::Pressed {
+                                            continue;
+                                        }
+                                        let Some(action) = delivery.payload.action else {
+                                            continue;
+                                        };
+                                        actions.push((
+                                            controller_action_from_message(action),
+                                            controller_family_from_message(delivery.payload.family),
+                                        ));
+                                    }
+                                }
+                                Some(ControllerHostRequest::Poll {
+                                    connection_generation,
+                                })
+                            }
+                        }
+                        (SessionControllerPhase::Acknowledge, _) => {
+                            Some(ControllerHostRequest::Poll {
+                                connection_generation,
+                            })
+                        }
+                        _ => None,
+                    };
+                    if let Some(request) = request {
+                        let next_phase = if matches!(
+                            request,
+                            ControllerHostRequest::AcknowledgeQuiescence { .. }
+                        ) {
+                            SessionControllerPhase::Acknowledge
+                        } else {
+                            SessionControllerPhase::Poll
+                        };
+                        if let Err(error) = connection.send(request) {
+                            tracing::warn!(%error, "session controller request failed closed");
+                            (Self::Failed, Vec::new())
+                        } else {
+                            (
+                                Self::Attached {
+                                    connection,
+                                    connection_generation,
+                                    lease,
+                                    last_event,
+                                    phase: next_phase,
+                                },
+                                actions,
+                            )
+                        }
+                    } else {
+                        (Self::Failed, Vec::new())
+                    }
+                }
+            },
+            other => (other, Vec::new()),
+        };
+        *self = next;
+        actions
+    }
+}
+
+#[cfg(unix)]
+fn controller_action_from_message(
+    action: nickel_session_protocol::ControllerActionMessage,
+) -> ControllerAction {
+    use nickel_session_protocol::ControllerActionMessage::*;
+    match action {
+        Launcher => ControllerAction::Launcher,
+        Up => ControllerAction::Up,
+        Down => ControllerAction::Down,
+        Left => ControllerAction::Left,
+        Right => ControllerAction::Right,
+        Confirm => ControllerAction::Confirm,
+        Cancel => ControllerAction::Cancel,
+        ContextMenu => ControllerAction::ContextMenu,
+        PreviousPane => ControllerAction::PreviousPane,
+        NextPane => ControllerAction::NextPane,
+    }
+}
+
+#[cfg(unix)]
+fn controller_family_from_message(
+    family: nickel_session_protocol::ControllerFamilyMessage,
+) -> ControllerFamily {
+    use nickel_session_protocol::ControllerFamilyMessage::*;
+    match family {
+        PlayStation => ControllerFamily::PlayStation,
+        Xbox => ControllerFamily::Xbox,
+        Switch => ControllerFamily::Switch,
+        Generic => ControllerFamily::Generic,
+    }
+}
+
 #[derive(Debug, Default)]
 struct PresentScheduler {
     dirty: bool,
@@ -2377,7 +2629,9 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     renderer: Option<SoftwareRenderer>,
     input: nickel_input::winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
-    controller: ControllerInput,
+    controller: Option<ControllerInput>,
+    #[cfg(unix)]
+    session_controller: SessionControllerSource,
     controller_schedule: ControllerPollSchedule,
     next_caret_blink: Instant,
     next_adapter_poll: Option<Instant>,
@@ -2393,6 +2647,10 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
     fn new(application: A, adapter: H, display: OwnedDisplayHandle) -> Self {
         let now = Instant::now();
         let next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
+        #[cfg(unix)]
+        let (controller, session_controller) = SessionControllerSource::discover();
+        #[cfg(not(unix))]
+        let controller = Some(ControllerInput::new());
         Self {
             host: None,
             application: Some(application),
@@ -2403,7 +2661,9 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             renderer: None,
             input: nickel_input::winit::Adapter::default(),
             clipboard: arboard::Clipboard::new().ok(),
-            controller: ControllerInput::new(),
+            controller,
+            #[cfg(unix)]
+            session_controller,
             controller_schedule: ControllerPollSchedule::new(now),
             next_caret_blink: now + Duration::from_millis(500),
             next_adapter_poll,
@@ -2625,22 +2885,38 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 .host
                 .as_ref()
                 .is_some_and(|host| host.inspect().window_focused);
-            let actions = self.controller.poll_with_fence(now, focused, || {
-                self.adapter
-                    .controller_fence(HostServices { window: &window })
-            });
-            if let Some(family) = self.controller.active_family()
-                && self
-                    .host
-                    .as_mut()
-                    .is_some_and(|host| host.set_controller_family(family))
-            {
-                self.scheduler.invalidate();
-            }
-            for action in actions {
+            let (actions, controller_connected) = if let Some(controller) = &mut self.controller {
+                let actions = controller
+                    .poll_with_fence(now, focused, || {
+                        self.adapter
+                            .controller_fence(HostServices { window: &window })
+                    })
+                    .into_iter()
+                    .map(|action| (action, controller.active_family().unwrap_or_default()))
+                    .collect();
+                (actions, controller.connected())
+            } else {
+                #[cfg(unix)]
+                {
+                    let connected = matches!(
+                        self.session_controller,
+                        SessionControllerSource::Connecting { .. }
+                            | SessionControllerSource::Attached { .. }
+                    );
+                    (self.session_controller.poll_actions(), connected)
+                }
+                #[cfg(not(unix))]
+                {
+                    (Vec::new(), false)
+                }
+            };
+            for (action, family) in actions {
                 let Some(host) = self.host.as_mut() else {
                     break;
                 };
+                if host.set_controller_family(family) {
+                    self.scheduler.invalidate();
+                }
                 let outcome = host.handle_controller_action(action);
                 if action == ControllerAction::Confirm
                     && outcome.text_input_active
@@ -2674,7 +2950,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 }
             }
             self.controller_schedule
-                .mark_polled(now, self.controller.connected());
+                .mark_polled(now, controller_connected);
         }
         if self.scheduler.request_present() {
             window.request_redraw();
@@ -2961,6 +3237,8 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
+    #[cfg(unix)]
+    use super::SessionControllerSource;
     use super::{
         Application, Completion, CompletionFailure, CompletionFailureKind, ControllerPollSchedule,
         EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
@@ -4902,5 +5180,125 @@ mod tests {
             super::file_uri_list(&paths),
             b"file:///tmp/a%20file.txt\r\nfile:///tmp/nonutf8-%FF\r\n"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn session_controller_revocation_drops_queued_old_lease_before_acknowledging() {
+        use nickel_session_protocol::{
+            ClientEnvelope, ControllerActionMessage, ControllerEnvelopePayload,
+            ControllerFamilyMessage, ControllerHostRequest, ControllerHostResponse, InputState,
+            Request, ServerEnvelope, ServerMessage,
+            client::AsyncControllerConnection,
+            controller_broker::{
+                BrokerMessage, ConnectionGeneration, Delivery, EventId, HostId, LeaseEpoch,
+                StreamGeneration,
+            },
+        };
+        use std::os::unix::net::UnixDatagram;
+
+        let root = std::env::temp_dir().join(format!(
+            "nickel-ui-controller-host-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let server_path = root.join("server");
+        let server = UnixDatagram::bind(&server_path).unwrap();
+        let (acknowledged, acknowledgement) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut buffer = vec![0; nickel_session_protocol::MAX_FRAME_BYTES];
+            for step in 0..4 {
+                let (length, peer) = server.recv_from(&mut buffer).unwrap();
+                let envelope: ClientEnvelope =
+                    nickel_session_protocol::decode(&buffer[..length]).unwrap();
+                let response = match (step, envelope.request) {
+                    (0, Request::ControllerHost(ControllerHostRequest::Attach)) => {
+                        ControllerHostResponse::Attached {
+                            host: HostId(9),
+                            connection_generation: ConnectionGeneration(2),
+                        }
+                    }
+                    (1, Request::ControllerHost(ControllerHostRequest::RequestLease { .. })) => {
+                        ControllerHostResponse::LeaseGranted {
+                            lease_epoch: LeaseEpoch(4),
+                        }
+                    }
+                    (2, Request::ControllerHost(ControllerHostRequest::Poll { .. })) => {
+                        ControllerHostResponse::Messages {
+                            lease_epoch: None,
+                            messages: vec![
+                                BrokerMessage::Deliver(Delivery {
+                                    event_id: EventId(7),
+                                    connection_generation: ConnectionGeneration(2),
+                                    lease_epoch: LeaseEpoch(4),
+                                    stream_generation: StreamGeneration(1),
+                                    payload: ControllerEnvelopePayload {
+                                        device_generation: 3,
+                                        action: Some(ControllerActionMessage::Confirm),
+                                        edge: InputState::Pressed,
+                                        repeat: false,
+                                        family: ControllerFamilyMessage::Xbox,
+                                        routing_epoch: 8,
+                                    },
+                                }),
+                                BrokerMessage::Revoke {
+                                    connection_generation: ConnectionGeneration(2),
+                                    lease_epoch: LeaseEpoch(4),
+                                    cutoff: EventId(7),
+                                },
+                            ],
+                        }
+                    }
+                    (
+                        3,
+                        Request::ControllerHost(ControllerHostRequest::AcknowledgeQuiescence {
+                            connection_generation: ConnectionGeneration(2),
+                            lease_epoch: LeaseEpoch(4),
+                            cutoff: EventId(7),
+                        }),
+                    ) => ControllerHostResponse::LeaseFailed,
+                    _ => panic!("unexpected host controller request at step {step}"),
+                };
+                server
+                    .send_to(
+                        &nickel_session_protocol::encode(&ServerEnvelope {
+                            request_id: envelope.request_id,
+                            message: ServerMessage::ControllerHost(response),
+                        })
+                        .unwrap(),
+                        peer.as_pathname().unwrap(),
+                    )
+                    .unwrap();
+                if step == 3 {
+                    acknowledged.send(()).unwrap();
+                }
+            }
+        });
+        let connection = AsyncControllerConnection::begin_to(
+            &server_path,
+            &root,
+            "secret".into(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let mut source = SessionControllerSource::Connecting { connection };
+        let mut ack_seen = false;
+        for _ in 0..100 {
+            assert!(source.poll_actions().is_empty());
+            if acknowledgement.try_recv().is_ok() {
+                ack_seen = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(ack_seen, "revocation acknowledgement reached transport");
+        drop(source);
+        worker.join().unwrap();
+        std::fs::remove_file(server_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
     }
 }

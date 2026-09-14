@@ -21,6 +21,114 @@ impl Drop for ReplyPath {
     }
 }
 
+pub struct AsyncControllerConnection {
+    socket: UnixDatagram,
+    _path: ReplyPath,
+    token: String,
+    pending: Option<(u64, std::time::Instant)>,
+    timeout: Duration,
+}
+
+impl AsyncControllerConnection {
+    /// Starts attachment without waiting for a server response. `Ok(None)` means no session was
+    /// advertised; every advertised-session setup failure is an error.
+    pub fn begin_from_environment(timeout: Duration) -> io::Result<Option<Self>> {
+        let Some(advertisement) = crate::local_transport::advertisement_from_environment()? else {
+            return Ok(None);
+        };
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "session runtime unavailable")
+        })?;
+        Self::begin_to(
+            Path::new(&advertisement.endpoint),
+            Path::new(&runtime),
+            advertisement.capability,
+            timeout,
+        )
+        .map(Some)
+    }
+
+    pub fn begin_to(
+        server: &Path,
+        runtime: &Path,
+        token: String,
+        timeout: Duration,
+    ) -> io::Result<Self> {
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let path = Path::new(&runtime).join(format!(
+            "ni-controller-async-{:x}-{id:x}.sock",
+            std::process::id()
+        ));
+        let socket = UnixDatagram::bind(&path)?;
+        socket.connect(server)?;
+        socket.set_nonblocking(true)?;
+        let mut connection = Self {
+            socket,
+            _path: ReplyPath(path),
+            token,
+            pending: None,
+            timeout,
+        };
+        connection.send(ControllerHostRequest::Attach)?;
+        Ok(connection)
+    }
+
+    pub fn send(&mut self, request: ControllerHostRequest) -> io::Result<()> {
+        if self.pending.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "controller request already outstanding",
+            ));
+        }
+        let id = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let frame = crate::encode(&ClientEnvelope {
+            token: self.token.clone(),
+            request_id: id,
+            request: Request::ControllerHost(request),
+        })
+        .map_err(io::Error::other)?;
+        self.socket.send(&frame)?;
+        self.pending = Some((id, std::time::Instant::now()));
+        Ok(())
+    }
+
+    pub fn receive(&mut self) -> io::Result<Option<ControllerHostResponse>> {
+        let Some((id, sent_at)) = self.pending else {
+            return Ok(None);
+        };
+        if sent_at.elapsed() >= self.timeout {
+            self.pending = None;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "session controller request timed out",
+            ));
+        }
+        let mut buffer = vec![0; MAX_FRAME_BYTES];
+        let count = match self.socket.recv(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let envelope =
+            crate::decode::<ServerEnvelope>(&buffer[..count]).map_err(io::Error::other)?;
+        if envelope.request_id != id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "controller response correlation mismatch",
+            ));
+        }
+        self.pending = None;
+        match envelope.message {
+            ServerMessage::ControllerHost(response) => Ok(Some(response)),
+            ServerMessage::Error { message, .. } => Err(io::Error::other(message)),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid controller response",
+            )),
+        }
+    }
+}
+
 /// Persistent authenticated controller channel for a session-managed host.
 ///
 /// `connect_from_environment` returns `Ok(None)` only when no Nickel session is advertised. Any
@@ -47,7 +155,7 @@ impl ControllerConnection {
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "session runtime unavailable")
         })?;
-        Self::connect_at(
+        Self::connect_to(
             Path::new(&advertisement.endpoint),
             Path::new(&runtime),
             advertisement.capability,
@@ -56,7 +164,7 @@ impl ControllerConnection {
         .map(Some)
     }
 
-    fn connect_at(
+    pub fn connect_to(
         server: &Path,
         runtime: &Path,
         token: String,
@@ -346,7 +454,7 @@ mod tests {
                     .unwrap();
             }
         });
-        let connection = ControllerConnection::connect_at(
+        let connection = ControllerConnection::connect_to(
             &server_path,
             &root,
             "secret".into(),
@@ -373,6 +481,61 @@ mod tests {
         ));
         drop(connection);
         worker.join().unwrap();
+        std::fs::remove_file(server_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn asynchronous_controller_receive_never_waits_for_server_reply() {
+        let root = std::env::temp_dir().join(format!(
+            "nickel-async-controller-{}-{}",
+            std::process::id(),
+            NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let server_path = root.join("server");
+        let server = UnixDatagram::bind(&server_path).unwrap();
+        let (received_tx, received_rx) = std::sync::mpsc::channel();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let mut buffer = vec![0; MAX_FRAME_BYTES];
+            let (length, peer) = server.recv_from(&mut buffer).unwrap();
+            let request: ClientEnvelope = crate::decode(&buffer[..length]).unwrap();
+            received_tx.send(()).unwrap();
+            reply_rx.recv().unwrap();
+            server
+                .send_to(
+                    &crate::encode(&ServerEnvelope {
+                        request_id: request.request_id,
+                        message: ServerMessage::ControllerHost(ControllerHostResponse::Attached {
+                            host: HostId(5),
+                            connection_generation: ConnectionGeneration(6),
+                        }),
+                    })
+                    .unwrap(),
+                    peer.as_pathname().unwrap(),
+                )
+                .unwrap();
+        });
+        let mut connection = AsyncControllerConnection::begin_to(
+            &server_path,
+            &root,
+            "secret".into(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        received_rx.recv().unwrap();
+        assert!(connection.receive().unwrap().is_none());
+        reply_tx.send(()).unwrap();
+        let response = loop {
+            if let Some(response) = connection.receive().unwrap() {
+                break response;
+            }
+            std::thread::yield_now();
+        };
+        assert!(matches!(response, ControllerHostResponse::Attached { .. }));
+        worker.join().unwrap();
+        drop(connection);
         std::fs::remove_file(server_path).unwrap();
         std::fs::remove_dir(root).unwrap();
     }
