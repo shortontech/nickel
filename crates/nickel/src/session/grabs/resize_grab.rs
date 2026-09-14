@@ -398,6 +398,10 @@ pub(crate) fn current_resize_edges(surface: &WlSurface) -> Option<ResizeEdge> {
     })
 }
 
+pub(crate) fn clear_resize_correlation(surface: &WlSurface) {
+    ResizeSurfaceState::with(surface, ResizeSurfaceState::clear);
+}
+
 /// Should be called on `WlSurface::commit`
 pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<ResizeCommit> {
     let window = space

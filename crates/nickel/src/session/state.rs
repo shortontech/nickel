@@ -10965,6 +10965,13 @@ impl NickelSession {
                         == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
                 }
                 if expired {
+                    if let Some(window) = state.registry_native_window(id)
+                        && let Some(surface) = window.toplevel()
+                    {
+                        crate::session::grabs::resize_grab::clear_resize_correlation(
+                            surface.wl_surface(),
+                        );
+                    }
                     state.cancel_geometry_window_operation(
                         id,
                         nickel_core::window_operation::CancellationReason::AuthorityUnknown,
@@ -11031,15 +11038,21 @@ impl NickelSession {
         if let Some(authority) = self.geometry_authorities.get_mut(&id) {
             authority.observe(fact, causality);
         }
+        let mut applied_transition = false;
         if let Some(record) = self.xdg_geometry_settlements.get_mut(&id)
             && record.settlement.request.id == request_id
         {
+            let was_pending = record.settlement.status
+                == nickel_core::geometry_authority::SettlementStatus::Pending;
             record.settlement.observe(fact, causality);
+            applied_transition = was_pending
+                && matches!(
+                    record.settlement.status,
+                    nickel_core::geometry_authority::SettlementStatus::Applied
+                        | nickel_core::geometry_authority::SettlementStatus::AppliedWithAdjustment
+                );
         }
-        matches!(
-            causality,
-            nickel_core::geometry_authority::ObservationCausality::Correlated(_)
-        )
+        applied_transition
     }
 
     /// Retain the desired fields actually incorporated by a later configure.
