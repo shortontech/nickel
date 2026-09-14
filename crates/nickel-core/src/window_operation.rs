@@ -4,9 +4,12 @@
 //! module deliberately contains no native handles, protocol serials, or event
 //! types.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use crate::geometry_authority::ControlMode;
+use crate::{
+    geometry::LogicalRect,
+    geometry_authority::{ControlMode, GeometryConstraints, GeometryIntent, IntentError},
+};
 
 macro_rules! opaque_id {
     ($name:ident) => {
@@ -43,6 +46,8 @@ opaque_id!(OperationId);
 opaque_id!(AcquisitionId);
 opaque_id!(ResourceLeaseId);
 opaque_id!(BindingEpoch);
+opaque_id!(AnchorEpoch);
+opaque_id!(SourceEpoch);
 
 /// A mapping identity cannot be confused with a reusable native window ID.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -182,6 +187,10 @@ pub enum RejectionReason {
     WrongPhase,
     StaleAcquisition,
     HandoffAlreadyPending,
+    GeometryUnavailable,
+    InvalidConstraints,
+    GeometryOverflow,
+    SourceRebaseRequired,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,6 +224,20 @@ pub enum Effect {
     ApplyUpdate {
         operation: OperationId,
         source: Source,
+    },
+    GeometryProposed {
+        operation: OperationId,
+        anchor_epoch: AnchorEpoch,
+        source_epoch: SourceEpoch,
+        unconstrained: LogicalRect,
+        constrained: LogicalRect,
+    },
+    GeometryRebased {
+        operation: OperationId,
+        anchor_epoch: AnchorEpoch,
+        source_epoch: SourceEpoch,
+        source: Source,
+        anchor: LogicalRect,
     },
     SubmitFinalDesiredState {
         operation: OperationId,
@@ -261,6 +284,31 @@ pub struct BeginRequest {
     pub optional_update_sources: Vec<Source>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeometrySeed {
+    pub anchor: LogicalRect,
+    pub constraints: GeometryConstraints,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeometryUpdate {
+    /// Absolute displacement from the immutable anchor for this source epoch.
+    AbsoluteDisplacement { x: i64, y: i64 },
+    /// Admitted semantic delta accumulated without feeding constraints back.
+    Delta { x: i64, y: i64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OperationGeometry {
+    pub intent: GeometryIntent,
+    pub constraints: GeometryConstraints,
+    pub unconstrained: LogicalRect,
+    pub constrained: LogicalRect,
+    pub anchor_epoch: AnchorEpoch,
+    pub source_epoch: SourceEpoch,
+    pub update_source: Source,
+}
+
 #[derive(Clone, Debug)]
 pub struct Operation {
     pub id: OperationId,
@@ -274,6 +322,7 @@ pub struct Operation {
     pub binding_epoch: BindingEpoch,
     pub completion: CompletionBinding,
     pub optional_update_sources: HashSet<Source>,
+    pub geometry: Option<OperationGeometry>,
     resource: Option<ResourceLeaseId>,
     acquisition: AcquisitionId,
     handoff: Option<PendingHandoff>,
@@ -287,19 +336,65 @@ struct PendingHandoff {
     optional_update_sources: HashSet<Source>,
 }
 
-#[derive(Default)]
 pub struct WindowOperationReducer {
     next_operation: u64,
     next_acquisition: u64,
     operations: HashMap<OperationId, Operation>,
     seats: HashMap<SeatId, OperationId>,
     windows: HashMap<WindowId, OperationId>,
-    invalid_acquisitions: HashSet<AcquisitionId>,
+    invalid_acquisitions: VecDeque<AcquisitionId>,
+    retired_acquisition_watermark: AcquisitionId,
     terminal: HashMap<OperationId, TerminalOutcome>,
     compensation: HashMap<OperationId, CompensationDecision>,
+    terminal_order: VecDeque<OperationId>,
+    limits: RetentionLimits,
+}
+
+pub const DEFAULT_TERMINAL_RETENTION: usize = 256;
+pub const DEFAULT_INVALID_ACQUISITION_RETENTION: usize = 256;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetentionLimits {
+    pub terminal_records: usize,
+    pub invalid_acquisitions: usize,
+}
+
+impl Default for RetentionLimits {
+    fn default() -> Self {
+        Self {
+            terminal_records: DEFAULT_TERMINAL_RETENTION,
+            invalid_acquisitions: DEFAULT_INVALID_ACQUISITION_RETENTION,
+        }
+    }
+}
+
+impl Default for WindowOperationReducer {
+    fn default() -> Self {
+        Self {
+            next_operation: 0,
+            next_acquisition: 0,
+            operations: HashMap::new(),
+            seats: HashMap::new(),
+            windows: HashMap::new(),
+            invalid_acquisitions: VecDeque::new(),
+            retired_acquisition_watermark: AcquisitionId::new(0),
+            terminal: HashMap::new(),
+            compensation: HashMap::new(),
+            terminal_order: VecDeque::new(),
+            limits: RetentionLimits::default(),
+        }
+    }
 }
 
 impl WindowOperationReducer {
+    #[must_use]
+    pub fn with_limits(limits: RetentionLimits) -> Self {
+        Self {
+            limits,
+            ..Self::default()
+        }
+    }
+
     #[must_use]
     pub fn operation(&self, id: OperationId) -> Option<&Operation> {
         self.operations.get(&id)
@@ -313,6 +408,21 @@ impl WindowOperationReducer {
     #[must_use]
     pub fn compensation_decision(&self, id: OperationId) -> Option<CompensationDecision> {
         self.compensation.get(&id).copied()
+    }
+
+    #[must_use]
+    pub fn retained_terminal_records(&self) -> usize {
+        self.terminal_order.len()
+    }
+
+    #[must_use]
+    pub fn retained_invalid_acquisitions(&self) -> usize {
+        self.invalid_acquisitions.len()
+    }
+
+    #[must_use]
+    pub fn retired_acquisition_watermark(&self) -> AcquisitionId {
+        self.retired_acquisition_watermark
     }
 
     /// Returns the current interactive writer for a stable window identity.
@@ -334,6 +444,52 @@ impl WindowOperationReducer {
     }
 
     pub fn begin(&mut self, request: BeginRequest) -> (Option<OperationId>, Transition) {
+        self.begin_internal(request, None)
+    }
+
+    pub fn begin_with_geometry(
+        &mut self,
+        request: BeginRequest,
+        seed: GeometrySeed,
+    ) -> (Option<OperationId>, Transition) {
+        let Ok(constraints) = seed.constraints.validate() else {
+            return (
+                None,
+                Transition::disposition(Disposition::Rejected(RejectionReason::InvalidConstraints)),
+            );
+        };
+        let intent = GeometryIntent::new(seed.anchor);
+        let Ok(unconstrained) = intent.unconstrained() else {
+            return (
+                None,
+                Transition::disposition(Disposition::Rejected(RejectionReason::GeometryOverflow)),
+            );
+        };
+        let mut geometry = OperationGeometry {
+            intent,
+            constraints,
+            unconstrained,
+            constrained: constraints.constrain(unconstrained),
+            anchor_epoch: AnchorEpoch::new(0),
+            source_epoch: SourceEpoch::new(0),
+            update_source: request.origin.source,
+        };
+        let Ok(constrained) = constrain_operation_geometry(request.kind, unconstrained, &geometry)
+        else {
+            return (
+                None,
+                Transition::disposition(Disposition::Rejected(RejectionReason::GeometryOverflow)),
+            );
+        };
+        geometry.constrained = constrained;
+        self.begin_internal(request, Some(geometry))
+    }
+
+    fn begin_internal(
+        &mut self,
+        request: BeginRequest,
+        geometry: Option<OperationGeometry>,
+    ) -> (Option<OperationId>, Transition) {
         if let Some(&by) = self.seats.get(&request.seat) {
             return (
                 None,
@@ -365,6 +521,7 @@ impl WindowOperationReducer {
             binding_epoch: BindingEpoch::new(0),
             completion: request.origin,
             optional_update_sources: request.optional_update_sources.into_iter().collect(),
+            geometry,
             resource: None,
             acquisition,
             handoff: None,
@@ -449,6 +606,90 @@ impl WindowOperationReducer {
         Transition::applied(vec![Effect::ApplyUpdate { operation, source }])
     }
 
+    pub fn update_geometry(
+        &mut self,
+        operation: OperationId,
+        source: Source,
+        update: GeometryUpdate,
+    ) -> Transition {
+        let Some(current) = self.operations.get_mut(&operation) else {
+            return Transition::disposition(Disposition::IgnoredUnrelated);
+        };
+        if current.phase != OperationPhase::Active {
+            return Transition::disposition(Disposition::Rejected(RejectionReason::WrongPhase));
+        }
+        if source != current.completion.source && !current.optional_update_sources.contains(&source)
+        {
+            return Transition::disposition(Disposition::IgnoredUnrelated);
+        }
+        let kind = current.kind;
+        let Some(geometry) = current.geometry.as_mut() else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryUnavailable,
+            ));
+        };
+        if geometry.update_source != source {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::SourceRebaseRequired,
+            ));
+        }
+        let mut next_intent = geometry.intent;
+        if apply_geometry_update(&mut next_intent, kind, update).is_err() {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryOverflow,
+            ));
+        }
+        let Ok(unconstrained) = next_intent.unconstrained() else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryOverflow,
+            ));
+        };
+        let Ok(constrained) = constrain_operation_geometry(kind, unconstrained, geometry) else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryOverflow,
+            ));
+        };
+        geometry.intent = next_intent;
+        geometry.unconstrained = unconstrained;
+        geometry.constrained = constrained;
+        Transition::applied(vec![Effect::GeometryProposed {
+            operation,
+            anchor_epoch: geometry.anchor_epoch,
+            source_epoch: geometry.source_epoch,
+            unconstrained,
+            constrained,
+        }])
+    }
+
+    pub fn rebase_geometry_source(&mut self, operation: OperationId, source: Source) -> Transition {
+        let Some(current) = self.operations.get_mut(&operation) else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::UnknownOperation,
+            ));
+        };
+        if source != current.completion.source && !current.optional_update_sources.contains(&source)
+        {
+            return Transition::disposition(Disposition::IgnoredUnrelated);
+        }
+        let Some(geometry) = current.geometry.as_mut() else {
+            return Transition::disposition(Disposition::Rejected(
+                RejectionReason::GeometryUnavailable,
+            ));
+        };
+        geometry.intent = geometry.intent.rebase(geometry.constrained);
+        geometry.unconstrained = geometry.constrained;
+        geometry.anchor_epoch = AnchorEpoch::new(geometry.anchor_epoch.get() + 1);
+        geometry.source_epoch = SourceEpoch::new(geometry.source_epoch.get() + 1);
+        geometry.update_source = source;
+        Transition::applied(vec![Effect::GeometryRebased {
+            operation,
+            anchor_epoch: geometry.anchor_epoch,
+            source_epoch: geometry.source_epoch,
+            source,
+            anchor: geometry.constrained,
+        }])
+    }
+
     pub fn release(&mut self, operation: OperationId, binding: CompletionBinding) -> Transition {
         let Some(current) = self.operations.get(&operation) else {
             return Transition::disposition(Disposition::IgnoredUnrelated);
@@ -527,6 +768,20 @@ impl WindowOperationReducer {
             operation,
             epoch: current.binding_epoch,
         }];
+        if let Some(geometry) = current.geometry.as_mut() {
+            geometry.intent = geometry.intent.rebase(geometry.constrained);
+            geometry.unconstrained = geometry.constrained;
+            geometry.anchor_epoch = AnchorEpoch::new(geometry.anchor_epoch.get() + 1);
+            geometry.source_epoch = SourceEpoch::new(geometry.source_epoch.get() + 1);
+            geometry.update_source = current.completion.source;
+            effects.push(Effect::GeometryRebased {
+                operation,
+                anchor_epoch: geometry.anchor_epoch,
+                source_epoch: geometry.source_epoch,
+                source: geometry.update_source,
+                anchor: geometry.constrained,
+            });
+        }
         if let Some(lease) = old_lease {
             effects.push(Effect::ReleaseResource { lease });
         }
@@ -601,11 +856,12 @@ impl WindowOperationReducer {
         };
         self.seats.remove(&current.seat);
         self.windows.remove(&current.subject.window);
-        self.invalid_acquisitions.insert(current.acquisition);
+        self.remember_invalid_acquisition(current.acquisition);
         if let Some(handoff) = current.handoff.take() {
-            self.invalid_acquisitions.insert(handoff.request);
+            self.remember_invalid_acquisition(handoff.request);
         }
         self.terminal.insert(operation, outcome);
+        self.terminal_order.push_back(operation);
 
         let mut effects = Vec::new();
         if let Some(lease) = current.resource {
@@ -624,6 +880,12 @@ impl WindowOperationReducer {
                 });
             }
         }
+        while self.terminal_order.len() > self.limits.terminal_records {
+            if let Some(expired) = self.terminal_order.pop_front() {
+                self.terminal.remove(&expired);
+                self.compensation.remove(&expired);
+            }
+        }
         effects.push(Effect::Terminal { operation, outcome });
         Transition::applied(effects)
     }
@@ -633,10 +895,18 @@ impl WindowOperationReducer {
         request: AcquisitionId,
         lease: ResourceLeaseId,
     ) -> Transition {
-        if self.invalid_acquisitions.remove(&request) {
+        if request <= self.retired_acquisition_watermark {
             Transition::applied(vec![Effect::ReleaseResource { lease }])
         } else {
             Transition::disposition(Disposition::Rejected(RejectionReason::StaleAcquisition))
+        }
+    }
+
+    fn remember_invalid_acquisition(&mut self, request: AcquisitionId) {
+        self.retired_acquisition_watermark = self.retired_acquisition_watermark.max(request);
+        self.invalid_acquisitions.push_back(request);
+        while self.invalid_acquisitions.len() > self.limits.invalid_acquisitions {
+            self.invalid_acquisitions.pop_front();
         }
     }
 
@@ -649,6 +919,82 @@ impl WindowOperationReducer {
         self.next_acquisition += 1;
         AcquisitionId::new(self.next_acquisition)
     }
+}
+
+fn apply_geometry_update(
+    intent: &mut GeometryIntent,
+    kind: OperationKind,
+    update: GeometryUpdate,
+) -> Result<(), IntentError> {
+    let (x, y, absolute) = match update {
+        GeometryUpdate::AbsoluteDisplacement { x, y } => (x, y, true),
+        GeometryUpdate::Delta { x, y } => (x, y, false),
+    };
+    let assign = |slot: &mut i64, value: i64| -> Result<(), IntentError> {
+        if absolute {
+            *slot = value;
+        } else {
+            *slot = slot.checked_add(value).ok_or(IntentError::Overflow)?;
+        }
+        Ok(())
+    };
+    match kind {
+        OperationKind::Move => {
+            assign(&mut intent.delta_x, x)?;
+            assign(&mut intent.delta_y, y)?;
+        }
+        OperationKind::Resize(edges) => {
+            if let Some(edge) = edges.horizontal() {
+                match edge {
+                    HorizontalEdge::Left => {
+                        assign(&mut intent.delta_x, x)?;
+                        assign(
+                            &mut intent.delta_width,
+                            x.checked_neg().ok_or(IntentError::Overflow)?,
+                        )?;
+                    }
+                    HorizontalEdge::Right => assign(&mut intent.delta_width, x)?,
+                }
+            }
+            if let Some(edge) = edges.vertical() {
+                match edge {
+                    VerticalEdge::Top => {
+                        assign(&mut intent.delta_y, y)?;
+                        assign(
+                            &mut intent.delta_height,
+                            y.checked_neg().ok_or(IntentError::Overflow)?,
+                        )?;
+                    }
+                    VerticalEdge::Bottom => assign(&mut intent.delta_height, y)?,
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn constrain_operation_geometry(
+    kind: OperationKind,
+    unconstrained: LogicalRect,
+    geometry: &OperationGeometry,
+) -> Result<LogicalRect, IntentError> {
+    let mut constrained = geometry.constraints.constrain(unconstrained);
+    if let OperationKind::Resize(edges) = kind {
+        let anchor = geometry.intent.anchor;
+        if edges.horizontal() == Some(HorizontalEdge::Left) {
+            constrained.x = i32::try_from(
+                i64::from(anchor.x) + i64::from(anchor.width) - i64::from(constrained.width),
+            )
+            .map_err(|_| IntentError::Overflow)?;
+        }
+        if edges.vertical() == Some(VerticalEdge::Top) {
+            constrained.y = i32::try_from(
+                i64::from(anchor.y) + i64::from(anchor.height) - i64::from(constrained.height),
+            )
+            .map_err(|_| IntentError::Overflow)?;
+        }
+    }
+    Ok(constrained)
 }
 
 #[cfg(test)]
@@ -712,6 +1058,59 @@ mod tests {
             reducer.activate(operation).disposition,
             Disposition::Applied
         );
+    }
+
+    fn begin_geometry(
+        reducer: &mut WindowOperationReducer,
+        seat: u64,
+        window: u64,
+        kind: OperationKind,
+        optional_update_sources: Vec<Source>,
+    ) -> (OperationId, AcquisitionId) {
+        let (Some(operation), transition) = reducer.begin_with_geometry(
+            BeginRequest {
+                seat: SeatId::new(seat),
+                subject: mapping(window),
+                kind,
+                control: ControlMode::Enforced,
+                origin: binding(1),
+                optional_update_sources,
+            },
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: 10,
+                    y: 20,
+                    width: 90,
+                    height: 80,
+                },
+                constraints: GeometryConstraints {
+                    min_width: 40,
+                    min_height: 30,
+                    max_width: Some(100),
+                    max_height: Some(90),
+                },
+            },
+        ) else {
+            panic!("geometry begin rejected")
+        };
+        let [Effect::Acquire { request, .. }] = transition.effects.as_slice() else {
+            panic!("begin did not request acquisition")
+        };
+        (operation, *request)
+    }
+
+    fn proposed(transition: &Transition) -> (LogicalRect, LogicalRect) {
+        let [
+            Effect::GeometryProposed {
+                unconstrained,
+                constrained,
+                ..
+            },
+        ] = transition.effects.as_slice()
+        else {
+            panic!("expected geometry proposal: {transition:?}")
+        };
+        (*unconstrained, *constrained)
     }
 
     #[test]
@@ -994,5 +1393,143 @@ mod tests {
             reducer.compensation_decision(operation),
             Some(CompensationDecision::SkipAuthorityLost)
         );
+    }
+
+    #[test]
+    fn constraints_do_not_feed_back_into_accumulated_intent() {
+        let mut reducer = WindowOperationReducer::default();
+        let edges = ResizeEdges::new(Some(HorizontalEdge::Right), None).unwrap();
+        let (operation, acquisition) =
+            begin_geometry(&mut reducer, 1, 1, OperationKind::Resize(edges), vec![]);
+        activate(&mut reducer, operation, acquisition);
+
+        let (unconstrained, constrained) = proposed(&reducer.update_geometry(
+            operation,
+            source(1),
+            GeometryUpdate::Delta { x: 20, y: 0 },
+        ));
+        assert_eq!(unconstrained.width, 110);
+        assert_eq!(constrained.width, 100);
+
+        let (unconstrained, constrained) = proposed(&reducer.update_geometry(
+            operation,
+            source(1),
+            GeometryUpdate::Delta { x: -5, y: 0 },
+        ));
+        assert_eq!(unconstrained.width, 105);
+        assert_eq!(constrained.width, 100);
+    }
+
+    #[test]
+    fn handoff_rebases_intent_and_source_epochs() {
+        let mut reducer = WindowOperationReducer::default();
+        let (operation, acquisition) =
+            begin_geometry(&mut reducer, 1, 1, OperationKind::Move, vec![]);
+        activate(&mut reducer, operation, acquisition);
+        let _ =
+            reducer.update_geometry(operation, source(1), GeometryUpdate::Delta { x: 20, y: -5 });
+        let handoff = reducer.request_handoff(operation, binding(2), vec![]);
+        let [Effect::Acquire { request, .. }] = handoff.effects.as_slice() else {
+            panic!("handoff acquisition missing")
+        };
+        let acquired = reducer.handoff_acquired(operation, *request, ResourceLeaseId::new(22));
+        assert!(acquired.effects.contains(&Effect::GeometryRebased {
+            operation,
+            anchor_epoch: AnchorEpoch::new(1),
+            source_epoch: SourceEpoch::new(1),
+            source: source(2),
+            anchor: LogicalRect {
+                x: 30,
+                y: 15,
+                width: 90,
+                height: 80,
+            },
+        }));
+        let (_, constrained) = proposed(&reducer.update_geometry(
+            operation,
+            source(2),
+            GeometryUpdate::Delta { x: 3, y: 4 },
+        ));
+        assert_eq!(
+            constrained,
+            LogicalRect {
+                x: 33,
+                y: 19,
+                width: 90,
+                height: 80,
+            }
+        );
+        assert_eq!(
+            reducer.release(operation, binding(1)).disposition,
+            Disposition::ConsumedTail
+        );
+    }
+
+    #[test]
+    fn every_resize_edge_preserves_the_opposite_edge() {
+        let axes = [
+            (Some(HorizontalEdge::Left), None),
+            (Some(HorizontalEdge::Right), None),
+            (None, Some(VerticalEdge::Top)),
+            (None, Some(VerticalEdge::Bottom)),
+            (Some(HorizontalEdge::Left), Some(VerticalEdge::Top)),
+            (Some(HorizontalEdge::Left), Some(VerticalEdge::Bottom)),
+            (Some(HorizontalEdge::Right), Some(VerticalEdge::Top)),
+            (Some(HorizontalEdge::Right), Some(VerticalEdge::Bottom)),
+        ];
+        for (index, (horizontal, vertical)) in axes.into_iter().enumerate() {
+            let mut reducer = WindowOperationReducer::default();
+            let edges = ResizeEdges::new(horizontal, vertical).unwrap();
+            let (operation, acquisition) = begin_geometry(
+                &mut reducer,
+                1,
+                index as u64 + 1,
+                OperationKind::Resize(edges),
+                vec![],
+            );
+            activate(&mut reducer, operation, acquisition);
+            let (_, rect) = proposed(&reducer.update_geometry(
+                operation,
+                source(1),
+                GeometryUpdate::Delta { x: 7, y: 9 },
+            ));
+            match horizontal {
+                Some(HorizontalEdge::Left) => assert_eq!(rect.x + rect.width, 100),
+                Some(HorizontalEdge::Right) => assert_eq!(rect.x, 10),
+                None => assert_eq!((rect.x, rect.width), (10, 90)),
+            }
+            match vertical {
+                Some(VerticalEdge::Top) => assert_eq!(rect.y + rect.height, 100),
+                Some(VerticalEdge::Bottom) => assert_eq!(rect.y, 20),
+                None => assert_eq!((rect.y, rect.height), (20, 80)),
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_retention_keeps_late_acquisition_watermark() {
+        let mut reducer = WindowOperationReducer::with_limits(RetentionLimits {
+            terminal_records: 2,
+            invalid_acquisitions: 1,
+        });
+        let mut finished = Vec::new();
+        for id in 1..=3 {
+            let (operation, acquisition) = begin(&mut reducer, 1, id);
+            reducer.cancel(operation, CancellationReason::UserCancelled);
+            finished.push((operation, acquisition));
+        }
+        assert_eq!(reducer.retained_terminal_records(), 2);
+        assert_eq!(reducer.retained_invalid_acquisitions(), 1);
+        assert_eq!(reducer.terminal_outcome(finished[0].0), None);
+        assert_eq!(reducer.compensation_decision(finished[0].0), None);
+        assert_eq!(
+            reducer
+                .acquired(finished[0].0, finished[0].1, ResourceLeaseId::new(99))
+                .effects,
+            vec![Effect::ReleaseResource {
+                lease: ResourceLeaseId::new(99)
+            }]
+        );
+        assert_eq!(reducer.retired_acquisition_watermark(), finished[2].1);
     }
 }
