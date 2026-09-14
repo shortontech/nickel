@@ -1242,10 +1242,7 @@ impl NickelSession {
                     self.hotkeys.begin_pointer_chord();
                     self.internal_ui.focus_surface(surface);
                     self.reconcile_internal_application_focus();
-                    let Some(operation) = self.begin_internal_surface_move(surface, button, serial)
-                    else {
-                        return None;
-                    };
+                    let operation = self.begin_internal_surface_move(surface, button, serial)?;
                     let start_data = GrabStartData {
                         focus: None,
                         button,
