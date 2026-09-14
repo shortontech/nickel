@@ -8599,7 +8599,7 @@ impl NickelSession {
         } else {
             area.x + area.width - width
         };
-        let target =
+        let target: Rectangle<i32, Logical> =
             smithay::utils::Rectangle::new((x, area.y).into(), (width, area.height).into());
         let target_geometry = Geometry {
             x: target.loc.x,
@@ -8607,11 +8607,16 @@ impl NickelSession {
             width: target.size.w,
             height: target.size.h,
         };
-        let last_owned_revision = self.record_desired_geometry(id, target_geometry);
+        let Some(placement) = self.try_authorize_desired_geometry(id, target_geometry) else {
+            return;
+        };
+        let last_owned_revision = placement.revision;
         if window.x11_surface().is_some() {
             let _ = self.bind_x11_geometry_request(id, target_geometry, last_owned_revision);
         }
-        self.apply_compositor_moved_window_effect(window, target.loc, true);
+        if !self.apply_compositor_moved_window_effect(window, id, placement, true) {
+            return;
+        }
         self.shortcut_snap_restore.insert(
             id,
             RevisionedPlacementRestore {
@@ -10072,28 +10077,21 @@ impl NickelSession {
         window: Window,
         location: Point<i32, Logical>,
         activate: bool,
-    ) {
-        let window_id = window
-            .wl_surface()
-            .and_then(|surface| self.surface_windows.get(&surface.id()).copied())
-            .or_else(|| {
-                window
-                    .x11_surface()
-                    .and_then(|surface| self.x11_windows.get(&surface.window_id()).copied())
-            });
+    ) -> bool {
+        let Some(window_id) = self.window_geometry_authority_id(&window) else {
+            return false;
+        };
         let desired_size = window.geometry().size;
-        if let Some(id) = window_id {
-            self.record_desired_geometry(
-                id,
-                Geometry {
-                    x: location.x,
-                    y: location.y,
-                    width: desired_size.w.max(1),
-                    height: desired_size.h.max(1),
-                },
-            );
-        }
-        self.apply_compositor_moved_window_effect(window, location, activate);
+        let desired = Geometry {
+            x: location.x,
+            y: location.y,
+            width: desired_size.w.max(1),
+            height: desired_size.h.max(1),
+        };
+        let Some(placement) = self.try_authorize_desired_geometry(window_id, desired) else {
+            return false;
+        };
+        self.apply_compositor_moved_window_effect(window, window_id, placement, activate)
     }
 
     pub(crate) fn authorize_interactive_resize(
@@ -10124,7 +10122,7 @@ impl NickelSession {
             .interactive_resize_baselines
             .entry(id)
             .or_insert_with(|| authority.baseline());
-        let placement = authority.authorize_placement(desired, constraints);
+        let placement = authority.try_authorize_placement(desired, constraints)?;
         baseline.note_owned(
             nickel_core::geometry_authority::GeometryField::Placement,
             placement.revision,
@@ -10211,9 +10209,19 @@ impl NickelSession {
     fn apply_compositor_moved_window_effect(
         &mut self,
         window: Window,
-        location: Point<i32, Logical>,
+        id: WindowId,
+        placement: nickel_core::geometry_authority::AuthorizedPlacement,
         activate: bool,
-    ) {
+    ) -> bool {
+        if self.window_geometry_authority_id(&window) != Some(id)
+            || !self
+                .geometry_authorities
+                .get(&id)
+                .is_some_and(|authority| authority.permits_placement(placement))
+        {
+            return false;
+        }
+        let location = Point::from((placement.desired.x, placement.desired.y));
         if let Some(surface) = window.x11_surface()
             && self.x11_windows.contains_key(&surface.window_id())
         {
@@ -10232,6 +10240,27 @@ impl NickelSession {
         if let Some(root) = popup_root {
             self.reconstrain_reactive_popups(&root);
         }
+        true
+    }
+
+    fn try_authorize_desired_geometry(
+        &mut self,
+        id: WindowId,
+        desired: Geometry,
+    ) -> Option<nickel_core::geometry_authority::AuthorizedPlacement> {
+        let constraints = nickel_core::geometry_authority::GeometryConstraints {
+            min_width: 1,
+            min_height: 1,
+            max_width: None,
+            max_height: None,
+        };
+        let authority = self.geometry_authorities.entry(id).or_insert_with(|| {
+            nickel_core::geometry_authority::GeometryAuthority::new(
+                desired,
+                nickel_core::geometry_authority::Presentation::Normal,
+            )
+        });
+        authority.try_authorize_placement(desired, constraints)
     }
 
     fn record_desired_geometry(
@@ -10362,7 +10391,11 @@ impl NickelSession {
         let Some(authority) = self.geometry_authorities.get(&id) else {
             return;
         };
-        if authority.base_placement.value != desired || authority.constrained_proposal != desired {
+        let placement = nickel_core::geometry_authority::AuthorizedPlacement {
+            desired,
+            revision: authority.base_placement.revision,
+        };
+        if authority.base_placement.value != desired || !authority.permits_placement(placement) {
             return;
         }
         self.x11_next_native_request = self
@@ -10538,8 +10571,11 @@ impl NickelSession {
         let id = self.window_geometry_authority_id(window)?;
         let revision = {
             let authority = self.geometry_authorities.get(&id)?;
-            if authority.base_placement.value != desired
-                || authority.constrained_proposal != desired
+            let placement = nickel_core::geometry_authority::AuthorizedPlacement {
+                desired,
+                revision: authority.base_placement.revision,
+            };
+            if authority.base_placement.value != desired || !authority.permits_placement(placement)
             {
                 return None;
             }
@@ -13065,7 +13101,21 @@ impl NickelSession {
         }
     }
 
-    fn apply_keyboard_window_geometry(&mut self, window: &Window, geometry: Geometry) {
+    fn apply_keyboard_window_geometry(
+        &mut self,
+        window: &Window,
+        id: WindowId,
+        placement: nickel_core::geometry_authority::AuthorizedPlacement,
+    ) -> bool {
+        if self.window_geometry_authority_id(window) != Some(id)
+            || !self
+                .geometry_authorities
+                .get(&id)
+                .is_some_and(|authority| authority.permits_placement(placement))
+        {
+            return false;
+        }
+        let geometry = placement.desired;
         Self::configure_window(window, geometry);
         if let Some(surface) = window.x11_surface() {
             let _ = surface.configure(smithay::utils::Rectangle::new(
@@ -13075,6 +13125,7 @@ impl NickelSession {
         }
         self.space
             .map_element(window.clone(), (geometry.x, geometry.y), false);
+        true
     }
 
     fn window_geometry_authority_id(&self, window: &Window) -> Option<WindowId> {
@@ -13098,8 +13149,10 @@ impl NickelSession {
                 nickel_core::geometry_authority::Presentation::Normal,
             )
         });
-        authority.set_constrained_proposal(geometry);
-        self.apply_keyboard_window_geometry(window, geometry);
+        let Some(placement) = authority.try_authorize_constrained_proposal(geometry) else {
+            return;
+        };
+        let _ = self.apply_keyboard_window_geometry(window, id, placement);
     }
 
     pub(crate) fn fit_window_above_keyboard(&mut self, window: &Window) {

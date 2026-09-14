@@ -365,6 +365,38 @@ impl GeometryAuthority {
         }
     }
 
+    pub fn try_authorize_placement(
+        &mut self,
+        placement: LogicalRect,
+        constraints: GeometryConstraints,
+    ) -> Option<AuthorizedPlacement> {
+        if self.base_placement.owner != FieldOwner::Nickel
+            || !self.base_placement.control.permits_nickel_write()
+        {
+            return None;
+        }
+        Some(self.authorize_placement(placement, constraints))
+    }
+
+    /// Authorizes a temporary constrained effect without replacing the base
+    /// placement that will be restored when the constraint disappears.
+    pub fn try_authorize_constrained_proposal(
+        &mut self,
+        proposal: LogicalRect,
+    ) -> Option<AuthorizedPlacement> {
+        if self.base_placement.owner != FieldOwner::Nickel
+            || !self.base_placement.control.permits_nickel_write()
+        {
+            return None;
+        }
+        self.base_placement.revision = self.base_placement.revision.next();
+        self.constrained_proposal = proposal;
+        Some(AuthorizedPlacement {
+            desired: proposal,
+            revision: self.base_placement.revision,
+        })
+    }
+
     /// A native effect may consume only the latest capability, even when a
     /// superseding write requested an equal-valued rectangle.
     pub fn permits_placement(&self, authorized: AuthorizedPlacement) -> bool {
@@ -674,6 +706,35 @@ mod tests {
 
         authority.base_placement.owner = FieldOwner::External;
         assert!(!authority.permits_placement(second));
+    }
+
+    #[test]
+    fn external_and_unknown_owners_cannot_authorize_native_writes() {
+        for owner in [FieldOwner::External, FieldOwner::Unknown] {
+            let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+            authority.base_placement.owner = owner;
+            let revision = authority.base_placement.revision;
+
+            assert_eq!(
+                authority.try_authorize_placement(rect(110), constraints(200)),
+                None
+            );
+            assert_eq!(authority.try_authorize_constrained_proposal(rect(80)), None);
+            assert_eq!(authority.base_placement.revision, revision);
+            assert_eq!(authority.base_placement.value, rect(90));
+        }
+    }
+
+    #[test]
+    fn constrained_authorization_preserves_base_and_returns_consumable_permit() {
+        let mut authority = GeometryAuthority::new(rect(90), Presentation::Normal);
+        let permit = authority
+            .try_authorize_constrained_proposal(rect(80))
+            .unwrap();
+
+        assert_eq!(authority.base_placement.value, rect(90));
+        assert_eq!(permit.desired, rect(80));
+        assert!(authority.permits_placement(permit));
     }
 
     #[test]
