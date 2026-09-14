@@ -3306,48 +3306,27 @@ impl<Message: Clone> UiFrame<Message> {
                 }
             }
             UiEvent::ControllerContextMenu => {
-                if let Some(target) = state
-                    .navigation()
-                    .controller_selected()
-                    .or_else(|| state.focused())
-                    .cloned()
-                    && let Some(invalidation) = self.open_text_context(state, &target, None)
+                let target = self.effective_context_target(state, InputSource::Controller);
+                if let Some(target) = target.as_ref()
+                    && let Some(invalidation) = self
+                        .open_text_context(state, target, None)
+                        .or_else(|| self.open_read_only_text_context(state, target, None))
                 {
                     return EventOutcome {
                         invalidation,
                         ..outcome
                     };
                 }
-                if let Some(target) = state.selection_owner().cloned()
-                    && let Some(invalidation) =
-                        self.open_read_only_text_context(state, &target, None)
-                {
+                if let Some((_, overlay)) = target.as_ref().and_then(|id| {
+                    self.overlay_invokers
+                        .iter()
+                        .find(|(target, _)| target == id)
+                }) {
                     return EventOutcome {
-                        invalidation,
+                        invalidation: state.open_overlay(overlay.clone(), target.unwrap()),
                         ..outcome
                     };
                 }
-                if let Some((target, overlay)) = state
-                    .navigation()
-                    .controller_selected()
-                    .or_else(|| state.focused())
-                    .and_then(|id| {
-                        self.overlay_invokers
-                            .iter()
-                            .find(|(target, _)| target == id)
-                    })
-                    .cloned()
-                {
-                    return EventOutcome {
-                        invalidation: state.open_overlay(overlay, target),
-                        ..outcome
-                    };
-                }
-                let target = state
-                    .navigation()
-                    .controller_selected()
-                    .or_else(|| state.focused())
-                    .cloned();
                 if let Some(message) = target
                     .as_ref()
                     .and_then(|id| self.context_message_for_id(id))
@@ -3360,38 +3339,27 @@ impl<Message: Clone> UiFrame<Message> {
                     .map_or(Invalidation::None, |id| state.set_dropdown_open(id, true))
             }
             UiEvent::KeyboardContextMenu => {
-                if let Some(target) = state.focused().cloned()
-                    && let Some(invalidation) = self.open_text_context(state, &target, None)
+                let target = self.effective_context_target(state, InputSource::Keyboard);
+                if let Some(target) = target.as_ref()
+                    && let Some(invalidation) = self
+                        .open_text_context(state, target, None)
+                        .or_else(|| self.open_read_only_text_context(state, target, None))
                 {
                     return EventOutcome {
                         invalidation,
                         ..outcome
                     };
                 }
-                if let Some(target) = state.selection_owner().cloned()
-                    && let Some(invalidation) =
-                        self.open_read_only_text_context(state, &target, None)
-                {
+                if let Some((_, overlay)) = target.as_ref().and_then(|id| {
+                    self.overlay_invokers
+                        .iter()
+                        .find(|(target, _)| target == id)
+                }) {
                     return EventOutcome {
-                        invalidation,
+                        invalidation: state.open_overlay(overlay.clone(), target.unwrap()),
                         ..outcome
                     };
                 }
-                if let Some((target, overlay)) = state
-                    .focused()
-                    .and_then(|id| {
-                        self.overlay_invokers
-                            .iter()
-                            .find(|(target, _)| target == id)
-                    })
-                    .cloned()
-                {
-                    return EventOutcome {
-                        invalidation: state.open_overlay(overlay, target),
-                        ..outcome
-                    };
-                }
-                let target = state.focused().cloned();
                 if let Some(message) = target
                     .as_ref()
                     .and_then(|id| self.context_message_for_id(id))
@@ -4147,6 +4115,39 @@ impl<Message: Clone> UiFrame<Message> {
             .rev()
             .find(|region| &region.id == id)
             .map(|region| &region.message)
+    }
+
+    pub(crate) fn effective_context_target(
+        &self,
+        state: &UiStateStore,
+        source: InputSource,
+    ) -> Option<UiId> {
+        let preferred = match source {
+            InputSource::Controller => state
+                .navigation()
+                .controller_selected()
+                .or_else(|| state.focused()),
+            InputSource::Keyboard => state.focused(),
+            _ => None,
+        };
+        if let Some(target) = preferred
+            && self.text_inputs.iter().any(|input| &input.id == target)
+        {
+            return Some(target.clone());
+        }
+        if let Some(target) = state.selection_owner()
+            && self.selection_region(target).is_some()
+            && state.document_selection(target).is_some()
+        {
+            return Some(target.clone());
+        }
+        preferred
+            .filter(|target| {
+                self.overlay_invokers.iter().any(|(id, _)| id == *target)
+                    || self.context_message_for_id(target).is_some()
+                    || self.is_dropdown(target)
+            })
+            .cloned()
     }
 
     fn is_dropdown(&self, id: &UiId) -> bool {

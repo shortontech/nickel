@@ -2781,20 +2781,16 @@ impl<A: Application> UiHost<A> {
         };
         let context_target = match event {
             UiEvent::ControllerContextMenu => self
-                .state
-                .navigation()
-                .controller_selected()
-                .or_else(|| self.state.focused())
-                .or_else(|| self.state.selection_owner()),
+                .tree
+                .effective_context_target(&self.state, InputSource::Controller),
             UiEvent::KeyboardContextMenu => self
-                .state
-                .focused()
-                .or_else(|| self.state.selection_owner()),
-            UiEvent::AccessibilityContextMenu(target) => Some(target),
+                .tree
+                .effective_context_target(&self.state, InputSource::Keyboard),
+            UiEvent::AccessibilityContextMenu(target) => Some(target.clone()),
             _ => None,
         };
         if (outcome.invalidation != Invalidation::None || !outcome.messages.is_empty())
-            && let Some(target) = context_target
+            && let Some(target) = context_target.as_ref()
         {
             return self.arbitrate_activation_target(Some(target));
         }

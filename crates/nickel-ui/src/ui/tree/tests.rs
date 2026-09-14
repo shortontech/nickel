@@ -4215,6 +4215,56 @@ fn read_only_selection_uses_reduced_copy_and_select_all_menu() {
 }
 
 #[test]
+fn effective_context_target_matches_editable_then_read_only_fallback_order() {
+    fn changed(value: String) -> TestMessage {
+        TestMessage::Query(value)
+    }
+    let document = Arc::new(SelectionDocument::new([SelectionRun::inline(
+        "selection",
+        "selected",
+    )]));
+    let region_id = UiId::from("root/document");
+    let editor_id = UiId::from("root/editor");
+    let ordinary_id = UiId::from("root/ordinary");
+    let mut state = UiStateStore::default();
+    let children = vec![
+        AnyView::new(TextField::on_change("editable", changed).id("editor")),
+        AnyView::new(Button::new(TestMessage::Named("ordinary"), "Ordinary").id("ordinary")),
+        AnyView::new(
+            SelectionRegion::new(document.clone())
+                .id("document")
+                .child(Text::new("selected").selectable(true)),
+        ),
+    ];
+    let frame = UiFrame::<TestMessage>::layout_with_state(
+        Container::new().children(children),
+        Rect::new(0.0, 0.0, 240.0, 120.0),
+        &mut state,
+    );
+    *state.document_selection_mut(region_id.clone()) = document.select_all();
+    state.set_selection_owner(Some(region_id.clone()));
+
+    state.set_focus(Some(ordinary_id));
+    assert_eq!(
+        frame.effective_context_target(&state, InputSource::Keyboard),
+        Some(region_id.clone())
+    );
+
+    state.set_focus(Some(editor_id.clone()));
+    assert_eq!(
+        frame.effective_context_target(&state, InputSource::Keyboard),
+        Some(editor_id.clone())
+    );
+    state
+        .navigation_mut()
+        .set_controller_selected(Some(editor_id.clone()));
+    assert_eq!(
+        frame.effective_context_target(&state, InputSource::Controller),
+        Some(editor_id)
+    );
+}
+
+#[test]
 fn unselected_region_keeps_offscreen_document_lazy_until_copy() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let calls = Arc::new(AtomicUsize::new(0));
