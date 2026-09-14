@@ -1541,9 +1541,7 @@ impl NickelSession {
                                     button,
                                     location,
                                 };
-                                let Some(operation_edges) = operation_resize_edges(edges) else {
-                                    return None;
-                                };
+                                let operation_edges = operation_resize_edges(edges)?;
                                 let Some(operation) = self.begin_compositor_window_operation(
                                     &window,
                                     button,
@@ -1770,9 +1768,7 @@ impl NickelSession {
                         button,
                         location,
                     };
-                    let Some(operation_edges) = operation_resize_edges(edges) else {
-                        return None;
-                    };
+                    let operation_edges = operation_resize_edges(edges)?;
                     match self.begin_compositor_window_operation(
                         &window,
                         button,
