@@ -259,7 +259,7 @@ impl FileApp {
         host.application_mut().resolved_grid_columns =
             host.resolved_grid_columns().unwrap_or(1).max(1);
         let mut changed = false;
-        let mut disposition = EventDisposition::Unhandled;
+        let disposition = EventDisposition::Unhandled;
         match event.clone() {
             InputEvent::Key(key) => {
                 let app = host.application_mut();
@@ -296,46 +296,67 @@ impl FileApp {
                         ..AdapterOutcome::default()
                     };
                 }
-                match key {
+                let outcome = match key {
                     KeyCode::KeyP if app.control_down => {
                         app.update(FileMessage::ToggleCommandSurface);
+                        ShortcutOutcome::handled(true)
                     }
-                    KeyCode::KeyT if app.control_down => app.update(FileMessage::NewTab),
+                    KeyCode::KeyT if app.control_down => {
+                        app.update(FileMessage::NewTab);
+                        ShortcutOutcome::handled(true)
+                    }
                     KeyCode::KeyW if app.control_down => {
                         app.update(FileMessage::CloseTab(app.active_tab));
+                        ShortcutOutcome::handled(true)
                     }
                     KeyCode::KeyL if app.control_down => {
                         if !app.address_editing {
                             app.update(FileMessage::ToggleAddressEditing);
+                            ShortcutOutcome::handled(true)
+                        } else {
+                            ShortcutOutcome::handled(false)
                         }
                     }
                     KeyCode::KeyH if app.control_down => {
                         app.update(FileMessage::ToggleHiddenFiles);
+                        ShortcutOutcome::handled(true)
                     }
                     KeyCode::Equal if app.control_down => {
                         app.update(FileMessage::AdjustTileWidth(1));
+                        ShortcutOutcome::handled(true)
                     }
                     KeyCode::Minus if app.control_down => {
                         app.update(FileMessage::AdjustTileWidth(-1));
+                        ShortcutOutcome::handled(true)
                     }
-                    KeyCode::ArrowDown => app.select_relative(app.resolved_grid_columns() as isize),
+                    KeyCode::ArrowDown => {
+                        app.select_relative(app.resolved_grid_columns() as isize);
+                        ShortcutOutcome::handled(true)
+                    }
                     KeyCode::ArrowUp => {
-                        app.select_relative(-(app.resolved_grid_columns() as isize))
+                        app.select_relative(-(app.resolved_grid_columns() as isize));
+                        ShortcutOutcome::handled(true)
                     }
-                    KeyCode::ArrowRight => app.select_relative(
-                        if app.reading_direction == ReadingDirection::RightToLeft {
-                            -1
-                        } else {
-                            1
-                        },
-                    ),
-                    KeyCode::ArrowLeft => app.select_relative(
-                        if app.reading_direction == ReadingDirection::RightToLeft {
-                            1
-                        } else {
-                            -1
-                        },
-                    ),
+                    KeyCode::ArrowRight => {
+                        app.select_relative(
+                            if app.reading_direction == ReadingDirection::RightToLeft {
+                                -1
+                            } else {
+                                1
+                            },
+                        );
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::ArrowLeft => {
+                        app.select_relative(
+                            if app.reading_direction == ReadingDirection::RightToLeft {
+                                1
+                            } else {
+                                -1
+                            },
+                        );
+                        ShortcutOutcome::handled(true)
+                    }
                     KeyCode::Escape => {
                         if app.pending_transfer_conflict.is_some() {
                             app.update(FileMessage::TransferCancelConflicts);
@@ -350,46 +371,59 @@ impl FileApp {
                         } else {
                             app.clear_selection();
                         }
+                        ShortcutOutcome::handled(true)
                     }
                     KeyCode::Enter if app.rename_editor.is_some() => {
-                        app.update(FileMessage::CommitRename)
+                        app.update(FileMessage::CommitRename);
+                        ShortcutOutcome::handled(true)
                     }
-                    KeyCode::Enter if alt_down => app.update(FileMessage::ContextProperties),
-                    KeyCode::Enter if app.address_editing => app.submit_address(),
-                    KeyCode::Enter => app.activate_selected(),
-                    KeyCode::Space => app.toggle_active_selection(),
+                    KeyCode::Enter if alt_down => {
+                        app.update(FileMessage::ContextProperties);
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::Enter if app.address_editing => {
+                        app.submit_address();
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::Enter => {
+                        app.activate_selected();
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::Space => {
+                        app.toggle_active_selection();
+                        ShortcutOutcome::handled(true)
+                    }
                     KeyCode::KeyA if app.control_down => {
                         app.select_all();
+                        ShortcutOutcome::handled(true)
                     }
-                    KeyCode::KeyC if app.control_down => app.update(FileMessage::CopySelection),
-                    KeyCode::KeyX if app.control_down => app.update(FileMessage::CutSelection),
-                    KeyCode::KeyV if app.control_down => app.update(FileMessage::Paste),
-                    KeyCode::F2 => app.update(FileMessage::BeginRename),
+                    KeyCode::KeyC if app.control_down => {
+                        app.update(FileMessage::CopySelection);
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::KeyX if app.control_down => {
+                        app.update(FileMessage::CutSelection);
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::KeyV if app.control_down => {
+                        app.update(FileMessage::Paste);
+                        ShortcutOutcome::handled(true)
+                    }
+                    KeyCode::F2 => {
+                        app.update(FileMessage::BeginRename);
+                        ShortcutOutcome::handled(true)
+                    }
                     KeyCode::F5 => {
                         app.update(FileMessage::Refresh);
+                        ShortcutOutcome::handled(true)
                     }
-                    _ => {}
-                }
-                disposition = if matches!(
-                    key,
-                    KeyCode::ArrowDown
-                        | KeyCode::ArrowUp
-                        | KeyCode::ArrowRight
-                        | KeyCode::ArrowLeft
-                        | KeyCode::Escape
-                        | KeyCode::Enter
-                        | KeyCode::Space
-                ) || key == KeyCode::F2
-                    || (app.control_down
-                        && matches!(
-                            key,
-                            KeyCode::KeyA | KeyCode::KeyC | KeyCode::KeyX | KeyCode::KeyV
-                        )) {
-                    EventDisposition::Handled
-                } else {
-                    EventDisposition::Unhandled
+                    _ => ShortcutOutcome::from_changed(false),
                 };
-                changed = true;
+                return AdapterOutcome {
+                    changed: outcome.changed,
+                    disposition: outcome.disposition,
+                    ..AdapterOutcome::default()
+                };
             }
             InputEvent::Pointer(PointerEvent::Motion { position, .. }) => {
                 let cursor = Point {
@@ -682,8 +716,24 @@ mod tests {
         selection_command_modifier, update_drop_hover,
     };
     use crate::{FileApp, FileMessage};
-    use nickel_input::{KeyCode, Modifier, ModifierState};
+    use nickel_input::{
+        DeviceId, EventOrder, InputEvent, KeyCode, KeyEdge, KeyEvent, KeyLocation, LogicalKey,
+        Modifier, ModifierState, PhysicalKey,
+    };
     use nickel_ui::{Application, EventDisposition};
+
+    fn key_event(key: KeyCode, modifiers: ModifierState) -> InputEvent {
+        InputEvent::Key(KeyEvent {
+            device: DeviceId(1),
+            order: EventOrder(1),
+            physical: PhysicalKey::Code(key),
+            logical: LogicalKey::Character(String::new()),
+            location: KeyLocation::Standard,
+            edge: KeyEdge::Pressed,
+            repeat: false,
+            modifiers,
+        })
+    }
 
     #[test]
     fn conventional_alt_navigation_shortcuts_precede_item_direction() {
@@ -743,6 +793,33 @@ mod tests {
         let up = perform_navigation_shortcut(&mut app, NavigationShortcut::Up);
         assert!(up.changed);
         assert_eq!(up.disposition, EventDisposition::Handled);
+    }
+
+    #[test]
+    fn command_shortcut_disposition_comes_from_executed_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut host =
+            nickel_ui::UiHost::new(FileApp::new(directory.path().to_path_buf()), 860, 620);
+        let control = ModifierState::from_sides([Modifier::ControlLeft]);
+
+        let command =
+            FileApp::application_input(&mut host, &key_event(KeyCode::KeyP, control.clone()));
+        assert!(command.changed);
+        assert_eq!(command.disposition, EventDisposition::Handled);
+
+        let refresh = FileApp::application_input(
+            &mut host,
+            &key_event(KeyCode::F5, ModifierState::default()),
+        );
+        assert!(refresh.changed);
+        assert_eq!(refresh.disposition, EventDisposition::Handled);
+
+        let unmatched = FileApp::application_input(
+            &mut host,
+            &key_event(KeyCode::KeyB, ModifierState::default()),
+        );
+        assert!(!unmatched.changed);
+        assert_eq!(unmatched.disposition, EventDisposition::Unhandled);
     }
 
     #[test]
