@@ -5979,7 +5979,10 @@ impl NickelSession {
                 self.dispatch_brokered_controller(delivery);
             }
         }
-        self.controller_broker.set_neutral(neutral);
+        let transfer_grant = self.controller_broker.set_neutral(neutral);
+        if transfer_grant.is_some() {
+            self.controller_recovery = None;
+        }
         let recovery = self
             .controller_recovery
             .as_mut()

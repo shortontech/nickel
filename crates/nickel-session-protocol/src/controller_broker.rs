@@ -396,10 +396,25 @@ impl<T> ControllerBroker<T> {
         if self.exhausted {
             return None;
         }
+        let interrupted_transfer = self.transfer;
         let recoverable = (self.transfer.is_none() && self.poisoned_predecessor.is_none())
             .then_some(self.active)
             .flatten();
         self.install_reset(EventId(self.next_event));
+        if let Some(transfer) = interrupted_transfer {
+            if self.exhausted {
+                return None;
+            }
+            self.transfer = Some(transfer);
+            if let Some(predecessor) = self.hosts.get_mut(&transfer.from.host) {
+                predecessor.outbox.clear();
+                predecessor.outbox.push_back(BrokerMessage::Revoke {
+                    connection_generation: transfer.from.connection_generation,
+                    lease_epoch: transfer.from.epoch,
+                    cutoff: transfer.cutoff,
+                });
+            }
+        }
         recoverable
     }
 
@@ -876,6 +891,82 @@ mod tests {
                 .grant(recoverable.host, recoverable.connection_generation)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn overflow_during_transfer_preserves_cutoff_and_grants_destination_after_exact_ack() {
+        let mut broker = ControllerBroker::new(4);
+        let a = broker.attach(HostId(1));
+        let b = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), a).unwrap();
+        let TransferStatus::Pending {
+            requested_lease,
+            cutoff,
+        } = broker.begin_transfer(HostId(2), b, 10, 100)
+        else {
+            panic!("transfer must be pending");
+        };
+
+        assert!(broker.reset_ingress().is_none());
+        assert!(matches!(
+            broker.drain(HostId(1), a).as_slice(),
+            [BrokerMessage::Revoke {
+                connection_generation,
+                lease_epoch,
+                cutoff: observed_cutoff,
+            }] if *connection_generation == a
+                && *lease_epoch == old.epoch
+                && *observed_cutoff == cutoff
+        ));
+        assert!(matches!(
+            broker.drain(HostId(2), b).as_slice(),
+            [BrokerMessage::StreamReset { .. }]
+        ));
+        assert!(matches!(
+            broker.ingest(10),
+            IngressDisposition::RejectedTransfer { .. }
+                | IngressDisposition::RejectedResetBarrier { .. }
+        ));
+        assert!(broker.set_neutral(true).is_none());
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
+            TransferStatus::Granted(Lease {
+                host: HostId(2),
+                connection_generation: b,
+                epoch: requested_lease,
+            })
+        );
+    }
+
+    #[test]
+    fn overflow_transfer_rejects_late_predecessor_and_accepts_verified_termination() {
+        let mut broker = ControllerBroker::new(4);
+        let a = broker.attach(HostId(1));
+        let b = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), a).unwrap();
+        let TransferStatus::Pending { cutoff, .. } = broker.begin_transfer(HostId(2), b, 10, 100)
+        else {
+            panic!("transfer must be pending");
+        };
+        broker.reset_ingress();
+        broker.drain(HostId(1), a);
+
+        assert!(matches!(
+            broker.acknowledge_quiescence(HostId(1), a, old.epoch, EventId(cutoff.0 + 1)),
+            TransferStatus::Pending { cutoff: pending, .. } if pending == cutoff
+        ));
+        assert!(broker.active_lease().is_none());
+        assert!(matches!(
+            broker.acknowledge_verified_termination(HostId(1), a),
+            TransferStatus::Pending { .. }
+        ));
+        let granted = broker.set_neutral(true).unwrap();
+        assert_eq!(granted.host, HostId(2));
+        assert!(broker.drain(HostId(1), a).is_empty());
+        assert!(matches!(
+            broker.ingest(11),
+            IngressDisposition::Delivered { lease, .. } if lease.host == HostId(2)
+        ));
     }
 
     #[test]
