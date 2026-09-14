@@ -30,6 +30,10 @@ pub enum KeyboardFocusTarget {
     X11(X11Surface),
 }
 
+// Smithay's X11Surface identity equality is stable for the lifetime of the
+// handle even though the upstream type does not declare Eq.
+impl Eq for KeyboardFocusTarget {}
+
 #[derive(Clone, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum PointerFocusTarget {

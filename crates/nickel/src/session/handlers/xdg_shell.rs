@@ -528,10 +528,9 @@ impl XdgDialogHandler for NickelSession {
                 candidate.set_activated(candidate == &window);
             });
             self.surrender_internal_focus();
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
+            self.realize_seat_focus(
                 Some(KeyboardFocusTarget::Wayland(toplevel.wl_surface().clone())),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
+                nickel_core::focus::FocusScope::Ordinary,
             );
             self.raise_panels();
             self.request_output_redraw();
@@ -858,10 +857,9 @@ impl NickelSession {
                 candidate.set_activated(candidate == &window);
             });
             self.surrender_internal_focus();
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
+            self.realize_seat_focus(
                 Some(KeyboardFocusTarget::Wayland(surface.clone())),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
+                nickel_core::focus::FocusScope::Ordinary,
             );
         }
         self.raise_panels();
@@ -1152,10 +1150,9 @@ impl NickelSession {
                     .set_activated(candidate.wl_surface().as_deref() == Some(surface.wl_surface()));
             });
             self.surrender_internal_focus();
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
+            self.realize_seat_focus(
                 Some(KeyboardFocusTarget::Wayland(surface.wl_surface().clone())),
-                smithay::utils::SERIAL_COUNTER.next_serial(),
+                nickel_core::focus::FocusScope::Ordinary,
             );
             self.space.elements().for_each(|window| {
                 if let Some(toplevel) = window.toplevel() {

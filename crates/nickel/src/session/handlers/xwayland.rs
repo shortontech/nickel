@@ -389,10 +389,9 @@ impl NickelSession {
                 });
                 self.raise_x11_surface(&surface);
                 self.surrender_internal_focus();
-                self.seat.get_keyboard().unwrap().set_focus(
-                    self,
+                self.realize_seat_focus(
                     Some(KeyboardFocusTarget::X11(surface.clone())),
-                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                    nickel_core::focus::FocusScope::Ordinary,
                 );
                 self.workspaces.focused(&id);
             }
@@ -962,11 +961,7 @@ impl NickelSession {
                     .first()
                     .and_then(Window::wl_surface)
                     .map(|surface| KeyboardFocusTarget::Wayland(surface.into_owned()));
-                self.seat.get_keyboard().unwrap().set_focus(
-                    self,
-                    lock_focus,
-                    smithay::utils::SERIAL_COUNTER.next_serial(),
-                );
+                self.realize_seat_focus(lock_focus, nickel_core::focus::FocusScope::Lock);
             } else {
                 self.restore_focus_after_window_removal(true);
             }

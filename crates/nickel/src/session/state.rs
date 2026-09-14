@@ -2665,6 +2665,8 @@ pub struct NickelSession {
     launcher_output_name: Option<String>,
     last_interaction_output_name: Option<String>,
     launcher_focus: FocusTransactions<ObjectId>,
+    seat_focus: FocusTransactions<Option<crate::session::focus::KeyboardFocusTarget>>,
+    seat_focus_security_epoch: u64,
     launcher_restore_window: Option<WindowId>,
     launcher_subscribers: Vec<PathBuf>,
     controller_broker: ControllerBroker<ControllerEnvelopePayload>,
@@ -5580,11 +5582,7 @@ impl NickelSession {
             return;
         };
         self.internal_ui.raise(surface);
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
-            Option::<crate::session::focus::KeyboardFocusTarget>::None,
-            SERIAL_COUNTER.next_serial(),
-        );
+        self.realize_seat_focus(None, FocusScope::Ordinary);
         self.windows.raise(window);
         self.workspaces.focused(&window);
         self.notify_protocol_snapshot();
@@ -7408,6 +7406,8 @@ impl NickelSession {
             launcher_output_name: None,
             last_interaction_output_name: None,
             launcher_focus: FocusTransactions::default(),
+            seat_focus: FocusTransactions::default(),
+            seat_focus_security_epoch: 0,
             launcher_restore_window: None,
             launcher_subscribers: Vec::new(),
             controller_broker,
@@ -8201,10 +8201,7 @@ impl NickelSession {
         } else {
             self.cancel_remote_keyboard();
             self.windows.deactivate_all();
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(None, FocusScope::Ordinary);
         }
         self.sync_internal_window_decorations();
         self.schedule_internal_ui_frame();
@@ -9304,10 +9301,9 @@ impl NickelSession {
                 .deadline;
             self.schedule_launcher_focus_deadline(request.transaction, deadline);
             self.surrender_internal_focus();
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
+            self.realize_seat_focus(
                 Some(crate::session::focus::KeyboardFocusTarget::Wayland(surface)),
-                SERIAL_COUNTER.next_serial(),
+                FocusScope::Launcher,
             );
             self.space.elements().for_each(|window| {
                 if let Some(toplevel) = window.toplevel() {
@@ -9408,10 +9404,9 @@ impl NickelSession {
         }
         self.space.raise_element(&target, true);
         self.surrender_internal_focus();
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
+        self.realize_seat_focus(
             crate::session::focus::KeyboardFocusTarget::for_window(&target),
-            SERIAL_COUNTER.next_serial(),
+            FocusScope::Other(role as u64),
         );
         self.space.elements().for_each(|window| {
             if let Some(toplevel) = window.toplevel() {
@@ -9429,11 +9424,7 @@ impl NickelSession {
         if let Some(window) = self.shell_focus_restore_window.take() {
             self.activate_window(window);
         } else {
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
-                Option::<crate::session::focus::KeyboardFocusTarget>::None,
-                SERIAL_COUNTER.next_serial(),
-            );
+            self.realize_seat_focus(None, FocusScope::Ordinary);
         }
     }
 
@@ -10359,10 +10350,7 @@ impl NickelSession {
                 crate::session::focus::KeyboardFocusTarget::Wayland(surface.into_owned())
             });
             self.surrender_internal_focus();
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, focus, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(focus, FocusScope::Lock);
             let pointer = self.seat.get_pointer().unwrap();
             let location = pointer.current_location();
             pointer.motion(
@@ -10416,6 +10404,7 @@ impl NickelSession {
         if self.locked {
             return;
         }
+        self.seat_focus_security_epoch = self.seat_focus_security_epoch.wrapping_add(1).max(1);
         self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Lock);
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
@@ -10494,10 +10483,7 @@ impl NickelSession {
             self.focus_internal_surface(lock);
         } else {
             self.surrender_internal_focus();
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, focus, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(focus, FocusScope::Lock);
         }
         // A lock transition replaces the entire visible scene. Damage accumulated against the
         // previous scanout age is not reusable after that occlusion change, particularly when a
@@ -10547,6 +10533,7 @@ impl NickelSession {
         if !self.locked {
             return;
         }
+        self.seat_focus_security_epoch = self.seat_focus_security_epoch.wrapping_add(1).max(1);
         self.locked = false;
         self.hotkeys.reset_pressed_state();
         self.note_input_activity();
@@ -10558,10 +10545,7 @@ impl NickelSession {
         if let Some(window) = self.lock_restore_window.take() {
             self.activate_window(window);
         } else {
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(None, FocusScope::Ordinary);
         }
         self.notify_lock_state();
         // Exposing ordinary clients after removing the full-output lock scene requires a complete
@@ -10725,10 +10709,9 @@ impl NickelSession {
         }
         if focus {
             self.surrender_internal_focus();
-            self.seat.get_keyboard().unwrap().set_focus(
-                self,
+            self.realize_seat_focus(
                 crate::session::focus::KeyboardFocusTarget::for_window(&window),
-                SERIAL_COUNTER.next_serial(),
+                FocusScope::Ordinary,
             );
         }
         self.space.elements().for_each(|element| {
@@ -11061,10 +11044,9 @@ impl NickelSession {
             candidate.set_activated(candidate == &window);
         });
         self.surrender_internal_focus();
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
+        self.realize_seat_focus(
             crate::session::focus::KeyboardFocusTarget::for_window(&window),
-            SERIAL_COUNTER.next_serial(),
+            FocusScope::Ordinary,
         );
         if let Some(surface) = window.x11_surface()
             && let Err(error) = surface.reassert_keyboard_focus()
@@ -11082,16 +11064,64 @@ impl NickelSession {
     }
 
     /// Transfer keyboard ownership to one compositor-hosted focusable surface.
+    pub(crate) fn realize_seat_focus(
+        &mut self,
+        target: Option<crate::session::focus::KeyboardFocusTarget>,
+        scope: FocusScope,
+    ) -> bool {
+        use smithay::utils::IsAlive;
+
+        let now = self.start_time.elapsed();
+        let prior = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        let request = self.seat_focus.request_at(
+            target.clone(),
+            FocusTargetLifetime::EmbeddedInTarget,
+            Some(prior),
+            scope,
+            FocusSecurityEpoch(self.seat_focus_security_epoch),
+            now,
+            DEFAULT_FOCUS_REQUEST_TIMEOUT,
+        );
+        self.seat.get_keyboard().unwrap().set_focus(
+            self,
+            target.clone(),
+            SERIAL_COUNTER.next_serial(),
+        );
+        let observed = self
+            .seat
+            .get_keyboard()
+            .and_then(|keyboard| keyboard.current_focus());
+        let eligible = observed == target
+            && target.as_ref().is_none_or(IsAlive::alive)
+            && (scope == FocusScope::Lock || !self.locked);
+        self.seat_focus.acknowledge_if(
+            &request,
+            self.start_time.elapsed(),
+            eligible,
+            if self.locked && scope != FocusScope::Lock {
+                FocusRejectionReason::AuthorityLost
+            } else {
+                FocusRejectionReason::NativeDenied
+            },
+        )
+    }
+
     fn focus_internal_surface(&mut self, surface: nickel_ui::InternalSurfaceId) -> bool {
         if !self.internal_ui.is_visible(surface) {
             return false;
         }
         self.cancel_remote_keyboard();
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
-            Option::<crate::session::focus::KeyboardFocusTarget>::None,
-            SERIAL_COUNTER.next_serial(),
-        );
+        let scope = if self.controller_role_for_runtime(surface)
+            == Some(crate::winit_shell::SurfaceRole::Lock)
+        {
+            FocusScope::Lock
+        } else {
+            FocusScope::Ordinary
+        };
+        self.realize_seat_focus(None, scope);
         if !self.internal_ui.focus_surface(surface) {
             return false;
         }
@@ -11181,10 +11211,7 @@ impl NickelSession {
             self.activate_window(replacement);
         } else {
             self.windows.deactivate_all();
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(None, FocusScope::Ordinary);
         }
     }
 
@@ -11261,10 +11288,7 @@ impl NickelSession {
             self.activate_window(replacement);
         } else {
             self.windows.deactivate_all();
-            self.seat
-                .get_keyboard()
-                .unwrap()
-                .set_focus(self, None, SERIAL_COUNTER.next_serial());
+            self.realize_seat_focus(None, FocusScope::Ordinary);
         }
         self.raise_panels();
         self.notify_protocol_snapshot();
@@ -17812,6 +17836,11 @@ mod protocol_tests {
 
         assert!(session.focus_internal_surface(launcher));
         assert_eq!(session.native_controller_route().target, Some(launcher));
+        let seat_request = session.seat_focus.acknowledged().unwrap();
+        assert_eq!(
+            session.seat_focus.phase(seat_request),
+            Some(nickel_core::focus::FocusRequestPhase::Realized)
+        );
 
         session.internal_ui.set_visible(launcher, false);
         assert_eq!(session.native_controller_route().target, None);
