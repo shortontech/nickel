@@ -49,6 +49,15 @@ struct ConsumedTextTransaction {
 }
 
 impl FocusedInputDispatcher {
+    pub(crate) fn cancel_touch_ownership(&mut self) -> bool {
+        if self.touch_active() {
+            self.active_pointer = None;
+            true
+        } else {
+            false
+        }
+    }
+
     pub(crate) fn touch_active(&self) -> bool {
         matches!(
             self.active_pointer,

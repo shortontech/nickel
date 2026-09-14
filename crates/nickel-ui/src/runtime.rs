@@ -1364,6 +1364,10 @@ struct PendingLongPress {
     deadline: Instant,
     source: NormalizedSourceBinding,
     recipient: NormalizedRecipientBinding,
+    target: Option<UiId>,
+    frame_generation: Option<u64>,
+    transform_generation: Option<u64>,
+    host_connection_generation: u64,
 }
 
 const TOUCH_LONG_PRESS_DELAY: Duration = Duration::from_millis(500);
@@ -2587,7 +2591,9 @@ impl<A: Application> UiHost<A> {
             pending.source.seat == envelope.source.seat
                 && pending.source.backend_stream == envelope.source.backend_stream
                 && (pending.source.stream_generation != envelope.source.stream_generation
-                    || pending.recipient != envelope.recipient)
+                    || pending.recipient != envelope.recipient
+                    || pending.transform_generation != envelope.transform_generation
+                    || pending.host_connection_generation != envelope.host_connection_generation)
         }) {
             self.pending_long_press = None;
         }
@@ -2607,6 +2613,16 @@ impl<A: Application> UiHost<A> {
                     deadline: now + TOUCH_LONG_PRESS_DELAY,
                     source: envelope.source.clone(),
                     recipient: envelope.recipient,
+                    target: self
+                        .tree
+                        .id_at(crate::Point {
+                            x: position.x as f32,
+                            y: position.y as f32,
+                        })
+                        .cloned(),
+                    frame_generation: None,
+                    transform_generation: envelope.transform_generation,
+                    host_connection_generation: envelope.host_connection_generation,
                 });
             }
             nickel_input::InputEvent::Touch(nickel_input::TouchEvent::Moved {
@@ -2653,6 +2669,30 @@ impl<A: Application> UiHost<A> {
                 self.pending_long_press = None;
             }
             _ => {}
+        }
+    }
+
+    fn arbitrate_touch_ownership(&mut self) -> HostEventOutcome {
+        let pending = self.pending_long_press.take().is_some();
+        let active = self.input_dispatcher.cancel_touch_ownership();
+        if pending || active {
+            self.dispatch_ui_event(UiEvent::PointerCancelled)
+        } else {
+            HostEventOutcome::default()
+        }
+    }
+
+    fn finalize_pending_long_press_attachment(&mut self) {
+        let Some(pending) = self.pending_long_press.as_mut() else {
+            return;
+        };
+        if pending.frame_generation.is_some() {
+            return;
+        }
+        if self.tree.id_at(pending.origin) == pending.target.as_ref() {
+            pending.frame_generation = Some(self.frame_generation);
+        } else {
+            self.pending_long_press = None;
         }
     }
 
@@ -2782,12 +2822,28 @@ impl<A: Application> UiHost<A> {
                     _ => {}
                 }
             }
+            if matches!(
+                &event,
+                HostEvent::Controller(ControllerAction::Confirm)
+                    | HostEvent::Shortcut(_)
+                    | HostEvent::Semantic { .. }
+                    | HostEvent::Accessibility { .. }
+                    | HostEvent::ControllerSemantic { .. }
+            ) {
+                combined.merge(self.arbitrate_touch_ownership());
+            }
             let mut outcome = match event {
                 HostEvent::Ui(event) => self.dispatch_ui_event(event),
                 HostEvent::Controller(action) => self.dispatch_controller_action(action),
                 HostEvent::AdmittedController { action, binding } => {
                     let admitted =
                         controller_authority.is_some_and(|authority| authority.admits(binding));
+                    if admitted
+                        && binding.edge == nickel_input::KeyEdge::Pressed
+                        && action == Some(ControllerAction::Confirm)
+                    {
+                        combined.merge(self.arbitrate_touch_ownership());
+                    }
                     if let Some(blocked) = self.controller_overflow_fence
                         && admitted
                         && controller_authority.is_some_and(|authority| authority != blocked)
@@ -2907,6 +2963,15 @@ impl<A: Application> UiHost<A> {
                 HostEvent::NormalizedIngress(envelope) => {
                     if self.admits_normalized_ingress(&envelope, &normalized_authorities) {
                         self.update_admitted_long_press(&envelope, now);
+                        if matches!(
+                            envelope.input,
+                            nickel_input::InputEvent::Key(nickel_input::KeyEvent {
+                                edge: nickel_input::KeyEdge::Pressed,
+                                ..
+                            })
+                        ) {
+                            combined.merge(self.arbitrate_touch_ownership());
+                        }
                         self.dispatch_input(&envelope.input, envelope.clipboard_text.as_deref())
                     } else {
                         HostEventOutcome::default()
@@ -2942,15 +3007,6 @@ impl<A: Application> UiHost<A> {
             }
             combined.merge(outcome);
         }
-        if self
-            .pending_long_press
-            .as_ref()
-            .is_some_and(|pending| now >= pending.deadline)
-        {
-            let pending = self.pending_long_press.take().expect("due long press");
-            combined.merge(self.dispatch_ui_event(UiEvent::PointerCancelled));
-            combined.merge(self.dispatch_ui_event(UiEvent::TouchLongPress(pending.origin)));
-        }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
             let (paint_list_us, layout_us) = self.rebuild_timed();
@@ -2975,6 +3031,29 @@ impl<A: Application> UiHost<A> {
                 for message in focus.messages {
                     self.application.update(message);
                 }
+                let (paint_list_us, layout_us) = self.rebuild_timed();
+                combined.telemetry.paint_list_us = combined
+                    .telemetry
+                    .paint_list_us
+                    .saturating_add(paint_list_us);
+                combined.telemetry.layout_us =
+                    combined.telemetry.layout_us.saturating_add(layout_us);
+                combined.telemetry.rebuilt = true;
+            }
+        }
+        self.finalize_pending_long_press_attachment();
+        let due_long_press = self.pending_long_press.as_ref().is_some_and(|pending| {
+            now >= pending.deadline
+                && pending.frame_generation == Some(self.frame_generation)
+                && self.tree.id_at(pending.origin) == pending.target.as_ref()
+        });
+        if due_long_press {
+            let pending = self.pending_long_press.take().expect("due long press");
+            let mut long_press = self.dispatch_ui_event(UiEvent::PointerCancelled);
+            long_press.merge(self.dispatch_ui_event(UiEvent::TouchLongPress(pending.origin)));
+            let rebuild = long_press.changed;
+            combined.merge(long_press);
+            if rebuild {
                 let (paint_list_us, layout_us) = self.rebuild_timed();
                 combined.telemetry.paint_list_us = combined
                     .telemetry
@@ -3312,6 +3391,10 @@ impl<A: Application> UiHost<A> {
     }
 
     fn rebuild_timed(&mut self) -> (u64, u64) {
+        let pending_long_press_was_bound = self
+            .pending_long_press
+            .as_ref()
+            .is_some_and(|pending| pending.frame_generation.is_some());
         let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
         let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
         let paint_started = Instant::now();
@@ -3330,6 +3413,11 @@ impl<A: Application> UiHost<A> {
         self.tree.reconcile_transient_focus(&mut self.state);
         self.tree.finalize_transient_layers(&self.state);
         self.frame_generation = self.frame_generation.wrapping_add(1);
+        if pending_long_press_was_bound {
+            self.pending_long_press = None;
+        } else {
+            self.finalize_pending_long_press_attachment();
+        }
         (paint_list_us, elapsed_us(layout_started))
     }
 
@@ -6307,6 +6395,85 @@ mod tests {
         });
 
         assert!(host.pending_long_press.is_none());
+    }
+
+    #[test]
+    fn controller_confirm_arbitrates_touch_before_deadline_and_end() {
+        let origin = Instant::now();
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.step(HostBatch {
+            now: Some(origin),
+            events: vec![synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                None,
+            )],
+            ..HostBatch::default()
+        });
+        assert!(host.pending_long_press.is_some());
+        assert!(host.input_dispatcher.touch_active());
+
+        let confirm = host.step(HostBatch {
+            now: Some(origin + Duration::from_millis(100)),
+            events: vec![HostEvent::Controller(ControllerAction::Confirm)],
+            ..HostBatch::default()
+        });
+        assert_eq!(confirm.messages.len(), 1);
+        assert!(host.pending_long_press.is_none());
+        assert!(!host.input_dispatcher.touch_active());
+
+        let deadline = host.step(HostBatch {
+            now: Some(origin + super::TOUCH_LONG_PRESS_DELAY),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(deadline.messages.is_empty());
+        let ended = host.step(HostBatch {
+            events: vec![synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Ended {
+                    device: DeviceId(4),
+                    order: EventOrder(2),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                None,
+            )],
+            ..HostBatch::default()
+        });
+        assert!(ended.messages.is_empty());
+    }
+
+    #[test]
+    fn layout_generation_change_retires_long_press_target_attachment() {
+        let origin = Instant::now();
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.step(HostBatch {
+            now: Some(origin),
+            events: vec![synthetic_normalized(
+                InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                None,
+            )],
+            ..HostBatch::default()
+        });
+        assert!(host.pending_long_press.is_some());
+
+        host.resize(200, 48);
+        assert!(host.pending_long_press.is_none());
+        let deadline = host.step(HostBatch {
+            now: Some(origin + super::TOUCH_LONG_PRESS_DELAY),
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(deadline.messages.is_empty());
     }
 
     #[test]
