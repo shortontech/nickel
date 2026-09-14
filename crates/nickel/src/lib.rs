@@ -534,9 +534,14 @@ impl<A: Application> EmbeddedUiSurface<A> {
         })
     }
 
-    fn normalized_ingress(&mut self, event: HostEvent) -> HostEventOutcome {
+    fn normalized_ingress(
+        &mut self,
+        event: HostEvent,
+        authority: nickel_ui::NormalizedIngressAuthority,
+    ) -> HostEventOutcome {
         self.step(HostBatch {
             events: vec![event],
+            normalized_authorities: vec![authority],
             ..HostBatch::default()
         })
     }
@@ -1577,14 +1582,14 @@ fn handle_codex_event(
                 }
             } else {
                 let host = codex.host_mut(surface).expect("Codex host exists");
-                let ingress = crate::live_shell::internal_normalized_ingress(
+                let (ingress, authority) = crate::live_shell::internal_normalized_ingress(
                     event.clone(),
                     shell.clipboard_text(),
                     "codex",
                     host.inspection(),
                     None,
                 );
-                host.normalized_ingress(ingress)
+                host.normalized_ingress(ingress, authority)
             }
         }
         ShellEvent::FocusChanged { focused, .. } => codex

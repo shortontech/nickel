@@ -18,49 +18,64 @@ pub(crate) fn internal_normalized_ingress(
     owner: &'static str,
     recipient: nickel_ui::HostInspection,
     transform_generation: Option<u64>,
-) -> HostEvent {
+) -> (HostEvent, nickel_ui::NormalizedIngressAuthority) {
     let device = input.device();
     let device_generation = device.map_or(0, |device| device.0);
     let order = INTERNAL_INGRESS_ORDER.fetch_add(1, Ordering::Relaxed);
     let epoch = INTERNAL_INGRESS_EPOCH.get_or_init(Instant::now);
-    HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+    let source = nickel_ui::NormalizedSourceBinding {
+        seat: 0,
+        backend_stream: if device.is_some() {
+            format!("routed-native-input:{owner}")
+        } else {
+            format!("internal-lifecycle:{owner}")
+        },
+        stream_generation: 1,
+        device_generation,
+        identity_capability: if device.is_some() {
+            "normalized-device-generation".into()
+        } else {
+            "system-event-without-device".into()
+        },
+        reconnect_generation: device_generation,
+    };
+    let recipient = nickel_ui::NormalizedRecipientBinding {
+        lease: recipient.window_focused as u64,
+        lifetime: recipient.frame_generation,
+    };
+    let authority = nickel_ui::NormalizedIngressAuthority {
+        source: source.clone(),
+        recipient: recipient.clone(),
+        transfer_cutoff: None,
+        host_connection_generation: recipient.lifetime,
+        operation_epoch: None,
+        role: owner.into(),
+        transform_generation,
+        text_transaction: None,
+        composition_recipient_epoch: None,
+        coordinate_meaning: "host-logical".into(),
+    };
+    let event = HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
         input,
         clipboard_text,
-        source: nickel_ui::NormalizedSourceBinding {
-            seat: 0,
-            backend_stream: if device.is_some() {
-                format!("routed-native-input:{owner}")
-            } else {
-                format!("internal-lifecycle:{owner}")
-            },
-            stream_generation: 1,
-            device_generation,
-            identity_capability: if device.is_some() {
-                "normalized-device-generation".into()
-            } else {
-                "system-event-without-device".into()
-            },
-            reconnect_generation: device_generation,
-        },
+        source,
         admission: nickel_ui::NormalizedAdmissionBinding {
             order,
             monotonic_micros: epoch.elapsed().as_micros() as u64,
         },
-        recipient: nickel_ui::NormalizedRecipientBinding {
-            lease: recipient.window_focused as u64,
-            lifetime: recipient.frame_generation,
-        },
+        recipient,
         operation: None,
         transform_generation,
         text_transaction: None,
         transfer_cutoff: None,
         broker_event_id: None,
-        host_connection_generation: recipient.frame_generation,
+        host_connection_generation: recipient.lifetime,
         operation_epoch: None,
         role: owner.into(),
         coordinate_meaning: "host-logical".into(),
         composition_recipient_epoch: None,
-    })
+    });
+    (event, authority)
 }
 
 fn normalized_input(event: &HostEvent) -> Option<&nickel_input::InputEvent> {
@@ -1908,12 +1923,20 @@ impl LiveShell {
     }
 
     pub fn desktop_input(&mut self, event: nickel_input::InputEvent) -> bool {
-        let ingress =
+        let (ingress, authority) =
             internal_normalized_ingress(event, None, "desktop", self.desktop_host.inspect(), None);
-        self.desktop_host_event(ingress)
+        self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
     pub(crate) fn desktop_host_event(&mut self, ingress: HostEvent) -> bool {
+        self.desktop_host_event_authorized(ingress, None)
+    }
+
+    fn desktop_host_event_authorized(
+        &mut self,
+        ingress: HostEvent,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> bool {
         let event = normalized_input(&ingress)
             .expect("desktop host event must be normalized")
             .clone();
@@ -1929,6 +1952,7 @@ impl LiveShell {
             application.pointer_seen = false;
             let outcome = self.desktop_host.step(HostBatch {
                 events: vec![ingress],
+                normalized_authorities: authority.into_iter().collect(),
                 application_changed: had_hover,
                 ..Default::default()
             });
@@ -2064,6 +2088,7 @@ impl LiveShell {
         if overlay_owns_event {
             let outcome = self.desktop_host.step(HostBatch {
                 events: vec![ingress],
+                normalized_authorities: authority.into_iter().collect(),
                 application_changed: pointer_cancelled,
                 ..HostBatch::default()
             });
@@ -2361,12 +2386,9 @@ impl LiveShell {
         } else {
             self.launcher_host.inspect()
         };
-        self.launcher_host_event_with_clipboard_limit(
-            internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None),
-            width,
-            height,
-            None,
-        )
+        let (event, authority) =
+            internal_normalized_ingress(input, clipboard_text, "launcher", recipient, None);
+        self.launcher_host_event_with_authority(event, width, height, None, Some(authority))
     }
 
     pub(crate) fn launcher_host_event_with_clipboard_limit(
@@ -2376,11 +2398,23 @@ impl LiveShell {
         height: u32,
         limit: Option<usize>,
     ) -> nickel_ui::HostEventOutcome {
+        self.launcher_host_event_with_authority(event, width, height, limit, None)
+    }
+
+    fn launcher_host_event_with_authority(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+        limit: Option<usize>,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
         if self.run_visible {
             let outcome = self.run_host.step(HostBatch {
                 clipboard_text_limit: limit,
                 surface_size: Some((width, height)),
                 events: vec![event],
+                normalized_authorities: authority.into_iter().collect(),
                 ..HostBatch::default()
             });
             self.apply_run_effects();
@@ -2395,6 +2429,7 @@ impl LiveShell {
             clipboard_text_limit: limit,
             surface_size: Some((width, height)),
             events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
             ..HostBatch::default()
         });
         let actions = self.launcher_host.application_mut().take_effects();
@@ -2666,14 +2701,14 @@ impl LiveShell {
             return false;
         }
         self.sync_notification_host(width, height);
-        let ingress = internal_normalized_ingress(
+        let (ingress, authority) = internal_normalized_ingress(
             input,
             None,
             "notification",
             self.notification_host.inspect(),
             None,
         );
-        self.notification_host_event(ingress, width, height)
+        self.notification_host_event_authorized(ingress, width, height, Some(authority))
     }
 
     pub(crate) fn notification_host_event(
@@ -2682,12 +2717,23 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        self.notification_host_event_authorized(ingress, width, height, None)
+    }
+
+    fn notification_host_event_authorized(
+        &mut self,
+        ingress: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> bool {
         if self.notification.is_none() && !self.notification_history_visible {
             return false;
         }
         self.sync_notification_host(width, height);
         let outcome = self.notification_host.step(HostBatch {
             events: vec![ingress],
+            normalized_authorities: authority.into_iter().collect(),
             ..HostBatch::default()
         });
         outcome.changed | self.apply_notification_effects()
@@ -3617,17 +3663,26 @@ impl LiveShell {
         let Some(frame) = self.preview_frame.as_ref() else {
             return nickel_ui::HostEventOutcome::default();
         };
-        let ingress =
+        let (ingress, authority) =
             internal_normalized_ingress(input, None, "window-preview", frame.inspect(), None);
-        self.preview_host_event(ingress)
+        self.preview_host_event_authorized(ingress, Some(authority))
     }
 
     pub(crate) fn preview_host_event(&mut self, ingress: HostEvent) -> nickel_ui::HostEventOutcome {
+        self.preview_host_event_authorized(ingress, None)
+    }
+
+    fn preview_host_event_authorized(
+        &mut self,
+        ingress: HostEvent,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
         let Some(frame) = self.preview_frame.as_mut() else {
             return nickel_ui::HostEventOutcome::default();
         };
         let outcome = frame.step(HostBatch {
             events: vec![ingress],
+            normalized_authorities: authority.into_iter().collect(),
             ..HostBatch::default()
         });
         let actions = frame.take_actions();
@@ -3873,11 +3928,9 @@ impl LiveShell {
             .map(|host| host.inspect())
             .or_else(|| self.window_menu_host.as_ref().map(|host| host.inspect()))
             .unwrap_or_else(|| self.launcher_host.inspect());
-        self.window_menu_host_event(
-            internal_normalized_ingress(input, None, "window-menu", recipient, None),
-            width,
-            height,
-        )
+        let (event, authority) =
+            internal_normalized_ingress(input, None, "window-menu", recipient, None);
+        self.window_menu_host_event_authorized(event, width, height, Some(authority))
     }
 
     pub(crate) fn window_menu_host_event(
@@ -3885,6 +3938,16 @@ impl LiveShell {
         event: HostEvent,
         width: u32,
         height: u32,
+    ) -> bool {
+        self.window_menu_host_event_authorized(event, width, height, None)
+    }
+
+    fn window_menu_host_event_authorized(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
         if self.application_menu_target.is_some() {
             if self.application_menu_host.is_none() {
@@ -3896,6 +3959,7 @@ impl LiveShell {
             let outcome = host.step(HostBatch {
                 surface_size: Some((width, height)),
                 events: vec![event],
+                normalized_authorities: authority.into_iter().collect(),
                 ..HostBatch::default()
             });
             let actions = host.application_mut().take_effects();
@@ -3914,6 +3978,7 @@ impl LiveShell {
         let outcome = host.step(HostBatch {
             surface_size: Some((width, height)),
             events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
             ..HostBatch::default()
         });
         for failure in &outcome.failures {
@@ -5280,10 +5345,11 @@ impl LiveShell {
                 ..HostBatch::default()
             });
         }
-        let ingress =
+        let (ingress, authority) =
             internal_normalized_ingress(input, None, "lock", self.lock_host.inspect(), None);
         let outcome = self.lock_host.step(HostBatch {
             events: vec![ingress],
+            normalized_authorities: vec![authority],
             ..HostBatch::default()
         });
         let changed = outcome.changed;

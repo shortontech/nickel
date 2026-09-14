@@ -15,8 +15,9 @@ use nickel_input::{
     TouchEvent, TouchId,
 };
 use nickel_ui::{
-    HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding, NormalizedInputEnvelope,
-    NormalizedRecipientBinding, NormalizedSourceBinding,
+    HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding,
+    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedRecipientBinding,
+    NormalizedSourceBinding,
 };
 
 use super::{InternalSurfaceRole, InternalUiRuntime};
@@ -706,6 +707,7 @@ pub(super) struct DesktopInputState {
     order: u64,
     admission_order: u64,
     admission_epoch: Option<Instant>,
+    pub(crate) authorities: HashMap<u64, NormalizedIngressAuthority>,
     last_device: Option<DeviceId>,
     pressed_keys: BTreeSet<(DeviceId, u32)>,
     // One logical seat pointer owns a drag, even when several physical devices
@@ -714,6 +716,14 @@ pub(super) struct DesktopInputState {
 }
 
 impl InternalUiRuntime {
+    pub(crate) fn register_normalized_authority(
+        &mut self,
+        order: u64,
+        authority: NormalizedIngressAuthority,
+    ) {
+        self.desktop_input.authorities.insert(order, authority);
+    }
+
     fn desktop_normalized_ingress(
         &mut self,
         recipient: InternalSurfaceId,
@@ -725,29 +735,41 @@ impl InternalUiRuntime {
         let epoch = state.admission_epoch.get_or_insert_with(Instant::now);
         let generation = device.0;
         state.admission_order = state.admission_order.wrapping_add(1);
+        let order = state.admission_order;
+        let source_binding = NormalizedSourceBinding {
+            seat: 1,
+            backend_stream: format!("session:{source}"),
+            stream_generation: generation,
+            device_generation: generation,
+            identity_capability: "session-device-name".into(),
+            reconnect_generation: generation,
+        };
+        let recipient_binding = NormalizedRecipientBinding {
+            lease: recipient.snapshot_token(),
+            lifetime: recipient.snapshot_token(),
+        };
+        let authority = NormalizedIngressAuthority {
+            source: source_binding.clone(),
+            recipient: recipient_binding,
+            transfer_cutoff: None,
+            host_connection_generation: recipient.snapshot_token(),
+            operation_epoch: None,
+            transform_generation: None,
+            text_transaction: None,
+            composition_recipient_epoch: None,
+            role: "session-internal-surface".into(),
+            coordinate_meaning: "surface-logical".into(),
+        };
+        state.authorities.insert(order, authority);
         HostEvent::NormalizedIngress(NormalizedInputEnvelope {
             input,
             clipboard_text: None,
-            source: NormalizedSourceBinding {
-                // Nickel currently exposes one compositor seat. The backend
-                // stream name remains namespaced by the session adapter.
-                seat: 1,
-                backend_stream: format!("session:{source}"),
-                stream_generation: generation,
-                device_generation: generation,
-                identity_capability: "session-device-name".into(),
-                reconnect_generation: generation,
-            },
+            source: source_binding,
             admission: NormalizedAdmissionBinding {
-                order: state.admission_order,
+                order,
                 monotonic_micros: epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
             },
-            recipient: NormalizedRecipientBinding {
-                // InternalSurfaceId is generational: its token expires when
-                // the runtime slot is retired and cannot bind a replacement.
-                lease: recipient.snapshot_token(),
-                lifetime: recipient.snapshot_token(),
-            },
+            recipient: recipient_binding,
             // This adapter does not own window operations, output transform
             // revisions, or text transactions. Absence is authoritative.
             operation: None,

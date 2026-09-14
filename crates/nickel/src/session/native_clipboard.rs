@@ -249,21 +249,33 @@ impl super::state::NickelSession {
             lease: recipient_lease,
             lifetime: surface_lifetime,
         };
+        let source = nickel_ui::NormalizedSourceBinding {
+            seat: 1,
+            backend_stream: "session-native-clipboard".into(),
+            stream_generation: 1,
+            device_generation: event.device.0,
+            identity_capability: "session-device-generation".into(),
+            reconnect_generation: event.device.0,
+        };
+        let authority = nickel_ui::NormalizedIngressAuthority {
+            source: source.clone(),
+            recipient,
+            transfer_cutoff: None,
+            host_connection_generation: surface_lifetime,
+            operation_epoch: None,
+            transform_generation: None,
+            text_transaction,
+            composition_recipient_epoch: Some(recipient_lease),
+            role: "session-native-clipboard".into(),
+            coordinate_meaning: "not-applicable".into(),
+        };
         let elapsed = self.start_time.elapsed().as_micros() as u64;
         let ingress = |event: nickel_input::KeyEvent, clipboard_text| {
             let order = event.order.0;
-            let device = event.device.0;
             nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
                 input: nickel_input::InputEvent::Key(event),
                 clipboard_text,
-                source: nickel_ui::NormalizedSourceBinding {
-                    seat: 1,
-                    backend_stream: "session-native-clipboard".into(),
-                    stream_generation: 1,
-                    device_generation: device,
-                    identity_capability: "session-device-generation".into(),
-                    reconnect_generation: device,
-                },
+                source: source.clone(),
                 admission: nickel_ui::NormalizedAdmissionBinding {
                     order,
                     monotonic_micros: elapsed,
@@ -281,6 +293,8 @@ impl super::state::NickelSession {
                 composition_recipient_epoch: Some(recipient_lease),
             })
         };
+        self.internal_ui
+            .register_normalized_authority(event.order.0, authority);
         self.internal_ui.step(
             id,
             nickel_ui::HostBatch {

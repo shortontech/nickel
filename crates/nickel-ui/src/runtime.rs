@@ -2326,7 +2326,11 @@ impl<A: Application> UiHost<A> {
     pub fn step(&mut self, batch: HostBatch) -> HostEventOutcome {
         self.state.clipboard_text_limit = batch.clipboard_text_limit;
         let controller_authority = batch.controller_authority;
+        #[cfg(test)]
         let mut normalized_authorities = batch.normalized_authorities;
+        #[cfg(not(test))]
+        let normalized_authorities = batch.normalized_authorities;
+        #[cfg(test)]
         normalized_authorities.extend(batch.events.iter().filter_map(|event| {
             match event {
                 HostEvent::NormalizedIngress(envelope)
@@ -3156,6 +3160,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         clipboard_text: Option<String>,
     ) {
         let mut events = Vec::with_capacity(inputs.len());
+        let mut normalized_authorities = Vec::with_capacity(inputs.len());
         let mut adapter_changed = false;
         let mut adapter_exit = false;
         for input in inputs {
@@ -3212,37 +3217,52 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 });
                 #[cfg(not(any(unix, windows)))]
                 let recipient_role = "standalone-window";
+                let source = NormalizedSourceBinding {
+                    seat: 0,
+                    backend_stream: "winit".into(),
+                    stream_generation: self.native_host_generation,
+                    device_generation,
+                    identity_capability: "backend_generation".into(),
+                    reconnect_generation: device_generation,
+                };
+                let recipient = recipient.unwrap_or(NormalizedRecipientBinding {
+                    lease: 0,
+                    lifetime: 0,
+                });
+                let authority = NormalizedIngressAuthority {
+                    source: source.clone(),
+                    recipient,
+                    transfer_cutoff: None,
+                    host_connection_generation: recipient.lifetime,
+                    operation_epoch: None,
+                    transform_generation: Some(self.transform_generation),
+                    text_transaction: None,
+                    composition_recipient_epoch: Some(recipient.lifetime),
+                    role: recipient_role.into(),
+                    coordinate_meaning: "window-logical".into(),
+                };
+                normalized_authorities.push(authority.clone());
                 events.push(HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                     input,
                     clipboard_text: clipboard_text.clone(),
-                    source: NormalizedSourceBinding {
-                        seat: 0,
-                        backend_stream: "winit".into(),
-                        stream_generation: self.native_host_generation,
-                        device_generation,
-                        identity_capability: "backend_generation".into(),
-                        reconnect_generation: device_generation,
-                    },
+                    source,
                     admission: NormalizedAdmissionBinding {
                         order: self.normalized_admission_order,
                         monotonic_micros: Instant::now()
                             .saturating_duration_since(self.normalized_ingress_epoch)
                             .as_micros() as u64,
                     },
-                    recipient: recipient.unwrap_or(NormalizedRecipientBinding {
-                        lease: 0,
-                        lifetime: 0,
-                    }),
+                    recipient,
                     operation: None,
                     transform_generation: Some(self.transform_generation),
                     text_transaction: None,
                     transfer_cutoff: None,
                     broker_event_id: None,
-                    host_connection_generation: recipient.map_or(0, |binding| binding.lifetime),
+                    host_connection_generation: authority.host_connection_generation,
                     operation_epoch: None,
-                    role: recipient_role.into(),
+                    role: authority.role,
                     coordinate_meaning: "window-logical".into(),
-                    composition_recipient_epoch: recipient.map(|binding| binding.lifetime),
+                    composition_recipient_epoch: authority.composition_recipient_epoch,
                 }));
             }
         }
@@ -3253,13 +3273,6 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             return;
         }
         let Some(host) = &mut self.host else { return };
-        let normalized_authorities = events
-            .iter()
-            .filter_map(|event| match event {
-                HostEvent::NormalizedIngress(envelope) => Some(envelope.execution_authority()),
-                _ => None,
-            })
-            .collect();
         let outcome = host.step(HostBatch {
             events,
             normalized_authorities,

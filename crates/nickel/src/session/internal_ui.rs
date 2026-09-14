@@ -2167,19 +2167,33 @@ impl InternalUiRuntime {
 
     pub fn step(&mut self, id: InternalSurfaceId, mut batch: HostBatch) -> bool {
         batch.clipboard_text_limit = Some(self.clipboard_limit);
-        for event in &mut batch.events {
+        // Caller-provided claims are evidence, not authority. The live runtime
+        // registry below is populated when the owning input boundary admits an
+        // event and is the only source accepted here.
+        batch.normalized_authorities.clear();
+        let mut consumed_authorities = Vec::new();
+        batch.events.retain(|event| {
             if let HostEvent::NormalizedIngress(envelope) = event {
-                if envelope.recipient.lifetime != id.snapshot_token() {
-                    envelope.recipient = nickel_ui::NormalizedRecipientBinding {
-                        lease: id.snapshot_token(),
-                        lifetime: id.snapshot_token(),
-                    };
+                if envelope.recipient.lifetime != id.snapshot_token()
+                    || envelope.host_connection_generation != id.snapshot_token()
+                {
+                    return false;
                 }
-                envelope.host_connection_generation = id.snapshot_token();
-                batch
-                    .normalized_authorities
-                    .push(envelope.execution_authority());
+                if let Some(authority) = self
+                    .desktop_input
+                    .authorities
+                    .get(&envelope.admission.order)
+                {
+                    batch.normalized_authorities.push(authority.clone());
+                    consumed_authorities.push(envelope.admission.order);
+                } else {
+                    return false;
+                }
             }
+            true
+        });
+        for order in consumed_authorities {
+            self.desktop_input.authorities.remove(&order);
         }
         if batch.window_focused == Some(false) {
             self.clear_desktop_pressed_keys();

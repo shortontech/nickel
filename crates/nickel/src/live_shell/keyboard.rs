@@ -179,14 +179,14 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
-        let ingress = internal_normalized_ingress(
+        let (ingress, authority) = internal_normalized_ingress(
             input,
             None,
             "on-screen-keyboard",
             self.keyboard_host.inspect(),
             None,
         );
-        self.keyboard_host_event(ingress, width, height)
+        self.keyboard_host_event_authorized(ingress, width, height, Some(authority))
     }
 
     pub(crate) fn keyboard_host_event(
@@ -194,6 +194,16 @@ impl LiveShell {
         ingress: HostEvent,
         width: u32,
         height: u32,
+    ) -> bool {
+        self.keyboard_host_event_authorized(ingress, width, height, None)
+    }
+
+    fn keyboard_host_event_authorized(
+        &mut self,
+        ingress: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
     ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerEvent, TouchEvent};
         let input = normalized_input(&ingress)
@@ -334,6 +344,7 @@ impl LiveShell {
             HostBatch {
                 surface_size: Some((width, height)),
                 events: vec![ingress],
+                normalized_authorities: authority.into_iter().collect(),
                 ..HostBatch::default()
             },
             epoch,

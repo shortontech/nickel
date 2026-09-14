@@ -29,19 +29,22 @@ use crate::{
 /// surface lifetime and its [`SurfaceRole`].  The shared normalized envelope
 /// does not yet carry a role discriminator, so the role remains enforced by
 /// the typed routing branch below rather than being encoded into a numeric
-/// lease.  Source, admission, operation, transform, and text bindings remain
+/// lease. Source, admission, operation, transform, and text bindings remain
 /// owned by the producer and must pass through unchanged.
-fn bind_internal_ingress_recipient(event: &mut nickel_ui::HostEvent, recipient: InternalSurfaceId) {
+fn internal_ingress_matches_route(
+    event: &nickel_ui::HostEvent,
+    authorities: &[nickel_ui::NormalizedIngressAuthority],
+    lifetime: u64,
+) -> bool {
     let nickel_ui::HostEvent::NormalizedIngress(envelope) = event else {
-        return;
+        return true;
     };
-    let lifetime = recipient.snapshot_token();
-    envelope.recipient = nickel_ui::NormalizedRecipientBinding {
-        lease: lifetime,
-        lifetime,
-    };
+    envelope.recipient.lifetime == lifetime
+        && authorities.iter().any(|authority| {
+            authority.recipient == envelope.recipient
+                && authority.host_connection_generation == lifetime
+        })
 }
-
 /// Geometry of an output supplied by the compositor-native host.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct InternalOutput {
@@ -707,20 +710,12 @@ impl InternalShellCoordinator {
         let Some(entry) = self.entries.iter().find(|surface| surface.id == id) else {
             return Vec::new();
         };
-        // The caller-selected internal slot is the current recipient
-        // authority. A winit host or session adapter cannot know this identity
-        // before the coordinator resolves the role-specific route.
-        for event in &mut batch.events {
-            bind_internal_ingress_recipient(event, id);
-        }
-        batch
-            .normalized_authorities
-            .extend(batch.events.iter().filter_map(|event| match event {
-                nickel_ui::HostEvent::NormalizedIngress(envelope) => {
-                    Some(envelope.execution_authority())
-                }
-                _ => None,
-            }));
+        // The routed slot is independent authority. Never repair an envelope
+        // and then authorize the repaired value.
+        let lifetime = id.snapshot_token();
+        batch.events.retain(|event| {
+            internal_ingress_matches_route(event, &batch.normalized_authorities, lifetime)
+        });
         let visibility = self
             .entries
             .iter()
@@ -1173,76 +1168,64 @@ mod tests {
     use std::sync::atomic::{AtomicU8, Ordering};
 
     #[test]
-    fn internal_route_rebinds_only_recipient_authority() {
-        let mut coordinator = coordinator();
-        coordinator.set_outputs(&[InternalOutput {
-            x: 0,
-            y: 0,
-            name: "authority".into(),
-            width: 800,
-            height: 600,
-            scale: 1.0,
-        }]);
-        let recipient = coordinator
-            .surface(SurfaceRole::Desktop, Some("authority"))
-            .expect("desktop route")
-            .id;
-        let mut event =
-            nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
-                input: nickel_input::InputEvent::FocusLost {
-                    order: nickel_input::EventOrder(17),
-                },
-                clipboard_text: None,
-                source: nickel_ui::NormalizedSourceBinding {
-                    seat: 4,
-                    backend_stream: "nested-compositor".into(),
-                    stream_generation: 5,
-                    device_generation: 6,
-                    identity_capability: "native-device".into(),
-                    reconnect_generation: 7,
-                },
-                admission: nickel_ui::NormalizedAdmissionBinding {
-                    order: 8,
-                    monotonic_micros: 9,
-                },
-                recipient: nickel_ui::NormalizedRecipientBinding {
-                    lease: 10,
-                    lifetime: 11,
-                },
-                operation: Some(12),
-                transform_generation: Some(13),
-                text_transaction: Some(14),
-                transfer_cutoff: Some(20),
-                broker_event_id: Some(19),
-                host_connection_generation: 15,
-                operation_epoch: Some(16),
-                role: "desktop".into(),
-                coordinate_meaning: "surface-logical".into(),
-                composition_recipient_epoch: Some(18),
-            });
-        bind_internal_ingress_recipient(&mut event, recipient);
-
-        let nickel_ui::HostEvent::NormalizedIngress(bound) = event else {
-            panic!("normalized ingress preserved");
+    fn internal_route_rejects_mismatched_recipient_without_rebinding() {
+        let recipient = nickel_ui::NormalizedRecipientBinding {
+            lease: 41,
+            lifetime: 42,
         };
-        assert_eq!(
-            bound.recipient,
-            nickel_ui::NormalizedRecipientBinding {
-                lease: recipient.snapshot_token(),
-                lifetime: recipient.snapshot_token(),
-            }
-        );
-        assert_eq!(bound.source.seat, 4);
-        assert_eq!(bound.source.backend_stream, "nested-compositor");
-        assert_eq!(bound.source.stream_generation, 5);
-        assert_eq!(bound.source.device_generation, 6);
-        assert_eq!(bound.source.identity_capability, "native-device");
-        assert_eq!(bound.source.reconnect_generation, 7);
-        assert_eq!(bound.admission.order, 8);
-        assert_eq!(bound.admission.monotonic_micros, 9);
-        assert_eq!(bound.operation, Some(12));
-        assert_eq!(bound.transform_generation, Some(13));
-        assert_eq!(bound.text_transaction, Some(14));
+        let source = nickel_ui::NormalizedSourceBinding {
+            seat: 1,
+            backend_stream: "session:test".into(),
+            stream_generation: 2,
+            device_generation: 3,
+            identity_capability: "session-device-name".into(),
+            reconnect_generation: 3,
+        };
+        let authority = nickel_ui::NormalizedIngressAuthority {
+            source: source.clone(),
+            recipient,
+            transfer_cutoff: None,
+            host_connection_generation: 42,
+            operation_epoch: None,
+            transform_generation: None,
+            text_transaction: None,
+            composition_recipient_epoch: None,
+            role: "session-internal-surface".into(),
+            coordinate_meaning: "surface-logical".into(),
+        };
+        let event = nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
+            input: nickel_input::InputEvent::FocusLost {
+                order: nickel_input::EventOrder(1),
+            },
+            clipboard_text: None,
+            source,
+            admission: nickel_ui::NormalizedAdmissionBinding {
+                order: 1,
+                monotonic_micros: 1,
+            },
+            recipient,
+            operation: None,
+            transform_generation: None,
+            text_transaction: None,
+            transfer_cutoff: None,
+            broker_event_id: None,
+            host_connection_generation: 42,
+            operation_epoch: None,
+            role: "session-internal-surface".into(),
+            coordinate_meaning: "surface-logical".into(),
+            composition_recipient_epoch: None,
+        });
+
+        assert!(internal_ingress_matches_route(
+            &event,
+            &[authority.clone()],
+            42
+        ));
+        assert!(!internal_ingress_matches_route(&event, &[authority], 43));
+        let nickel_ui::HostEvent::NormalizedIngress(envelope) = event else {
+            unreachable!()
+        };
+        assert_eq!(envelope.recipient, recipient);
     }
 
     #[test]
