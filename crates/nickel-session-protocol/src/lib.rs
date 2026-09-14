@@ -597,7 +597,7 @@ pub enum ControllerFamilyMessage {
     Generic,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControllerEnvelopePayload {
     /// One connected controller lifetime; reconnect allocates a fresh value.
     pub device_generation: u64,
@@ -607,6 +607,21 @@ pub struct ControllerEnvelopePayload {
     pub family: ControllerFamilyMessage,
     /// Session route observed at the first authoritative admission boundary.
     pub routing_epoch: u64,
+    /// Authenticated source evidence. Raw identity is not copied to public diagnostics.
+    pub evidence: Option<ControllerSourceEvidencePayload>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerSourceEvidencePayload {
+    pub seat: u64,
+    pub source_namespace: String,
+    pub backend: String,
+    pub native: String,
+    pub fingerprint: Option<String>,
+    pub identity_capability: String,
+    pub physical: String,
+    pub backend_order: u64,
+    pub produced_unix_ms: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

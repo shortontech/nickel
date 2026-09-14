@@ -30,13 +30,33 @@ pub enum ControllerAction {
 ///
 /// `action` is absent for release/neutral bookkeeping which must cross the
 /// queue without executing another semantic action.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ControllerEnvelope {
     pub device: ControllerId,
     pub action: Option<ControllerAction>,
     pub edge: KeyEdge,
     pub repeat: bool,
     pub family: ControllerFamily,
+    pub evidence: ControllerSourceEvidence,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControllerSourceEvidence {
+    pub seat: u64,
+    pub source_namespace: String,
+    pub backend: String,
+    pub native: NativeCode,
+    pub fingerprint: Option<String>,
+    pub identity_capability: &'static str,
+    pub physical: ControllerPhysicalControl,
+    pub backend_order: u64,
+    pub produced_unix_ms: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ControllerPhysicalControl {
+    Button(ControllerButton),
+    Direction(AxisDirection),
 }
 
 /// Immutable execution identity assigned by the session broker and routing
@@ -172,6 +192,8 @@ pub struct ControllerInput {
     connected: bool,
     families: BTreeMap<ControllerId, ControllerFamily>,
     devices: NativeControllerGenerations,
+    identities: BTreeMap<ControllerId, ControllerIdentity>,
+    backend_order: u64,
     active_family: Option<ControllerFamily>,
     barrier_unix_ms: u64,
     last_poll_events: usize,
@@ -220,6 +242,8 @@ impl ControllerInput {
             connected,
             families,
             devices,
+            identities: BTreeMap::new(),
+            backend_order: 0,
             active_family: None,
             barrier_unix_ms: 0,
             last_poll_events: 0,
@@ -402,6 +426,8 @@ impl ControllerInput {
         self.barrier_unix_ms = fence.barrier_unix_ms;
         for event in events {
             let admitted = fence.admits(event.time);
+            let produced_at = event.time;
+            self.backend_order = self.backend_order.wrapping_add(1).max(1);
             let reported_name = gilrs.gamepad(event.id).name().to_owned();
 
             let native = usize::from(event.id) as u64;
@@ -420,11 +446,13 @@ impl ControllerInput {
                     id,
                     ControllerFamily::from_reported_identity(gamepad.name(), gamepad.vendor_id()),
                 );
-                ControllerIdentity {
+                let identity = ControllerIdentity {
                     backend: "gilrs".into(),
                     native: NativeCode::Numeric(usize::from(event.id) as u64),
                     fingerprint: Some(uuid_fingerprint(gamepad.uuid())),
-                }
+                };
+                self.identities.insert(id, identity.clone());
+                identity
             });
             let disconnected = matches!(event.event, gilrs::EventType::Disconnected).then_some(id);
             if let Some(event) = nickel_input::gilrs::event_for_reported_name_with_id(
@@ -443,10 +471,17 @@ impl ControllerInput {
                     self.normalizer.suppress_held();
                 }
                 for signal in signals.into_iter().filter(|_| admitted) {
-                    let family = signal_id(&signal)
+                    let signal_device = signal_id(&signal);
+                    let family = signal_device
                         .and_then(|id| self.families.get(&id).copied())
                         .unwrap_or(ControllerFamily::Generic);
-                    if let Some(envelope) = signal_envelope(signal, family) {
+                    if let Some(envelope) = signal_envelope(
+                        signal,
+                        family,
+                        signal_device.and_then(|id| self.identities.get(&id).cloned()),
+                        self.backend_order,
+                        produced_at,
+                    ) {
                         if envelope.action.is_some() {
                             self.active_family = Some(family);
                         }
@@ -457,6 +492,7 @@ impl ControllerInput {
             if let Some(id) = disconnected {
                 self.families.remove(&id);
                 self.devices.disconnect(native, id);
+                self.identities.remove(&id);
             }
         }
         self.connected = gilrs.gamepads().any(|(_, gamepad)| gamepad.is_connected());
@@ -465,10 +501,17 @@ impl ControllerInput {
             self.normalizer.suppress_held();
         }
         for signal in self.normalizer.tick(now_ms) {
-            let family = signal_id(&signal)
+            let signal_device = signal_id(&signal);
+            let family = signal_device
                 .and_then(|id| self.families.get(&id).copied())
                 .unwrap_or(ControllerFamily::Generic);
-            if let Some(envelope) = signal_envelope(signal, family) {
+            if let Some(envelope) = signal_envelope(
+                signal,
+                family,
+                signal_device.and_then(|id| self.identities.get(&id).cloned()),
+                self.backend_order,
+                SystemTime::now(),
+            ) {
                 if envelope.action.is_some() {
                     self.active_family = Some(family);
                 }
@@ -511,6 +554,9 @@ impl NativeControllerGenerations {
 fn signal_envelope(
     signal: ControllerSignal,
     family: ControllerFamily,
+    identity: Option<ControllerIdentity>,
+    backend_order: u64,
+    produced_at: SystemTime,
 ) -> Option<ControllerEnvelope> {
     let (device, edge, repeat) = match &signal {
         ControllerSignal::Button {
@@ -522,12 +568,44 @@ fn signal_envelope(
         _ => return None,
     };
     let action = signal_physical_action_for_family(&signal, family);
+    let physical = match &signal {
+        ControllerSignal::Button { button, .. } => {
+            ControllerPhysicalControl::Button(button.clone())
+        }
+        ControllerSignal::Direction { direction, .. } => {
+            ControllerPhysicalControl::Direction(*direction)
+        }
+        _ => return None,
+    };
+    let identity = identity.unwrap_or_else(|| ControllerIdentity {
+        backend: "unknown".into(),
+        native: NativeCode::Numeric(device.0),
+        fingerprint: None,
+    });
+    let identity_capability = if identity.fingerprint.is_some() {
+        "fingerprint"
+    } else {
+        "native"
+    };
     Some(ControllerEnvelope {
         device,
         action,
         edge,
         repeat,
         family,
+        evidence: ControllerSourceEvidence {
+            seat: 0,
+            source_namespace: "gilrs".into(),
+            backend: identity.backend,
+            native: identity.native,
+            fingerprint: identity.fingerprint,
+            identity_capability,
+            physical,
+            backend_order,
+            produced_unix_ms: produced_at
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |age| age.as_millis() as u64),
+        },
     })
 }
 
@@ -758,6 +836,9 @@ mod tests {
                 repeat: false,
             },
             ControllerFamily::PlayStation,
+            None,
+            1,
+            UNIX_EPOCH,
         )
         .expect("release bookkeeping crosses the admission queue");
         assert_eq!(released.device, device);
@@ -774,6 +855,9 @@ mod tests {
                 repeat: true,
             },
             ControllerFamily::Xbox,
+            None,
+            2,
+            UNIX_EPOCH,
         )
         .expect("repeat crosses the admission queue");
         assert_eq!(repeated.device, device);

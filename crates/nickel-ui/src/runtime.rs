@@ -5494,6 +5494,7 @@ mod tests {
                                         repeat: false,
                                         family: ControllerFamilyMessage::Xbox,
                                         routing_epoch: 8,
+                                        evidence: None,
                                     },
                                 }),
                                 BrokerMessage::Revoke {

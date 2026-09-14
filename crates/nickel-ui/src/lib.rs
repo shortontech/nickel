@@ -23,6 +23,7 @@ pub use controller::NativeControllerDevice;
 pub use controller::{
     ControllerAction, ControllerEnvelope, ControllerExecutionAuthority, ControllerExecutionBinding,
     ControllerFamily, ControllerFence, ControllerInput, ControllerObservation,
+    ControllerPhysicalControl, ControllerSourceEvidence,
 };
 pub use document_selection::{
     DocumentSelection, SelectionAffinity, SelectionDocument, SelectionEndpoint, SelectionRun,

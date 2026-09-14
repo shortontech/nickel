@@ -430,6 +430,7 @@ mod tests {
                                     repeat: false,
                                     family: crate::ControllerFamilyMessage::Xbox,
                                     routing_epoch: 11,
+                                    evidence: None,
                                 },
                             },
                         )],
@@ -475,6 +476,7 @@ mod tests {
                     repeat: false,
                     family: crate::ControllerFamilyMessage::Xbox,
                     routing_epoch: 11,
+                    evidence: None,
                 },
                 ..
             })]

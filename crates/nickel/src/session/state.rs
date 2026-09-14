@@ -1842,6 +1842,17 @@ fn controller_envelope_payload(
         repeat: event.repeat,
         family: controller_family_message(event.family),
         routing_epoch,
+        evidence: Some(nickel_session_protocol::ControllerSourceEvidencePayload {
+            seat: event.evidence.seat,
+            source_namespace: event.evidence.source_namespace,
+            backend: event.evidence.backend,
+            native: format!("{:?}", event.evidence.native),
+            fingerprint: event.evidence.fingerprint,
+            identity_capability: event.evidence.identity_capability.into(),
+            physical: format!("{:?}", event.evidence.physical),
+            backend_order: event.evidence.backend_order,
+            produced_unix_ms: event.evidence.produced_unix_ms,
+        }),
     }
 }
 
@@ -17857,11 +17868,24 @@ mod protocol_tests {
             edge: nickel_input::KeyEdge::Pressed,
             repeat: false,
             family: nickel_ui::ControllerFamily::Xbox,
+            evidence: nickel_ui::ControllerSourceEvidence {
+                seat: 0,
+                source_namespace: "test".into(),
+                backend: "test".into(),
+                native: nickel_input::NativeCode::Numeric(7),
+                fingerprint: None,
+                identity_capability: "native",
+                physical: nickel_ui::ControllerPhysicalControl::Button(
+                    nickel_input::controller::ControllerButton::Guide,
+                ),
+                backend_order: 1,
+                produced_unix_ms: 1,
+            },
         };
 
         session.handle_brokered_controller_batch(
             vec![
-                event,
+                event.clone(),
                 nickel_ui::ControllerEnvelope {
                     repeat: true,
                     ..event
