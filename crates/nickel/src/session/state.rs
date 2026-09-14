@@ -10649,14 +10649,13 @@ impl NickelSession {
         surface: &smithay::wayland::shell::xdg::ToplevelSurface,
     ) -> smithay::utils::Serial {
         let serial = surface.send_configure();
-        if let Some(window) = self.xdg_toplevel_window(surface.wl_surface()) {
-            if let Some(desired) = self
+        if let Some(window) = self.xdg_toplevel_window(surface.wl_surface())
+            && let Some(desired) = self
                 .window_geometry_authority_id(&window)
                 .and_then(|id| self.geometry_authorities.get(&id))
                 .map(|authority| authority.base_placement.value)
-            {
-                self.record_xdg_desired_geometry(&window, desired, serial);
-            }
+        {
+            self.record_xdg_desired_geometry(&window, desired, serial);
         }
         serial
     }
