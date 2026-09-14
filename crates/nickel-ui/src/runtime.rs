@@ -3781,8 +3781,8 @@ mod tests {
         GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
         NormalizedAdmissionBinding, NormalizedIngressAuthority, NormalizedInputEnvelope,
         NormalizedRecipientBinding, NormalizedSourceBinding, PresentScheduler, Shortcut,
-        ShortcutOutcome, UiHost, ViewContext,
-        local_controller_poll_lease, queue_continuous_input, wait_duration,
+        ShortcutOutcome, UiHost, ViewContext, local_controller_poll_lease, queue_continuous_input,
+        wait_duration,
     };
 
     #[test]

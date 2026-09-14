@@ -58,8 +58,8 @@ pub use runtime::{
     ControllerPollSchedule, DefaultHostAdapter, EffectEvidence, FileDragAction, FileDragEvent,
     FrameOverlay, GlobalAction, HostAdapter, HostBatch, HostChangeToken, HostEvent,
     HostEventOutcome, HostFailure, HostFailureStage, HostInspection, HostServices, HostTelemetry,
-    MessageEvidence, NormalizedAdmissionBinding, NormalizedInputEnvelope,
-    NormalizedIngressAuthority, NormalizedRecipientBinding, NormalizedSourceBinding, OutboundFileDrag,
+    MessageEvidence, NormalizedAdmissionBinding, NormalizedIngressAuthority,
+    NormalizedInputEnvelope, NormalizedRecipientBinding, NormalizedSourceBinding, OutboundFileDrag,
     OverlayDeclarationFailure, Popover, SemanticActionFailure, Shortcut, ShortcutOutcome, Tooltip,
     UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
 };
