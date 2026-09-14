@@ -30,7 +30,8 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact current-tip results below were recorded at `c271b4b`. Older focused evidence remains listed
+Exact current-tip results below were recorded at `43dd616`; the final X11 history-only correction
+at `a4bc570` then passed the strict workspace gates and its focused 14-test authority suite. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -57,7 +58,7 @@ authority rather than envelope self-certification.
 cargo test -p nickel --lib session:: -- --test-threads=1
 ```
 
-Pass: 456 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
+Pass: 457 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
 nonzero recipient leases, controller execution fencing, touch-generation cancellation, native
 keyboard/clipboard routing, screenshot Escape handling, focus lifecycle, XDG/XWayland operations,
 and geometry ownership. The ignored rows explicitly require live native facilities.
