@@ -163,11 +163,9 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
         now: Duration,
     ) -> bool {
         self.advance_to(now);
-        if !self
-            .current
-            .as_ref()
-            .is_some_and(|current| current.request == *request)
-        {
+        if !self.current.as_ref().is_some_and(|current| {
+            current.request == *request && current.phase == FocusRequestPhase::Pending
+        }) {
             return false;
         }
         self.finish_current(FocusRequestPhase::Rejected(reason));
@@ -183,6 +181,19 @@ impl<Surface: Clone + Eq> FocusTransactions<Surface> {
             self.finish_current(FocusRequestPhase::TimedOut);
         }
         timed_out
+    }
+
+    /// Advance one scheduled request without allowing a delayed timer for an
+    /// older request to expire newer intent.
+    pub fn advance_request_to(&mut self, request: FocusRequestId, now: Duration) -> bool {
+        if !self
+            .current
+            .as_ref()
+            .is_some_and(|current| current.request.transaction == request)
+        {
+            return false;
+        }
+        self.advance_to(now)
     }
 
     pub fn loses_current(&mut self, request: &FocusRequest<Surface>) -> bool {
@@ -325,6 +336,17 @@ mod tests {
             focus.phase(&superseded),
             Some(FocusRequestPhase::Superseded)
         );
+        assert_eq!(focus.phase(&current), Some(FocusRequestPhase::Pending));
+    }
+
+    #[test]
+    fn delayed_timer_for_superseded_request_cannot_expire_newer_intent() {
+        let mut focus = FocusTransactions::default();
+        let old = request_at(&mut focus, "a", 0);
+        let current = request_at(&mut focus, "b", 50);
+
+        assert!(!focus.advance_request_to(old.transaction, Duration::from_millis(200)));
+        assert_eq!(focus.phase(&old), Some(FocusRequestPhase::Superseded));
         assert_eq!(focus.phase(&current), Some(FocusRequestPhase::Pending));
     }
 }

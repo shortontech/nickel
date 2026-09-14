@@ -1757,8 +1757,8 @@ use nickel_core::{
         ActiveOutputContext, InvocationSource, resolve_active_output, resolve_new_window_output,
     },
     focus::{
-        DEFAULT_FOCUS_REQUEST_TIMEOUT, FocusScope, FocusSecurityEpoch, FocusTargetLifetime,
-        FocusTransactions,
+        DEFAULT_FOCUS_REQUEST_TIMEOUT, FocusRejectionReason, FocusRequestId, FocusScope,
+        FocusSecurityEpoch, FocusTargetLifetime, FocusTransactions,
     },
     hotkeys::{CompositorShortcutAdapter, HotkeyAction},
     idle::{IdleController, IdleEffect, IdlePolicy},
@@ -8027,6 +8027,17 @@ impl NickelSession {
                 .acknowledge_at(&request, self.start_time.elapsed());
             return;
         }
+        if focused.is_some()
+            && let Some(request) = self.launcher_focus.requested().cloned()
+            && self.launcher_focus.reject(
+                &request,
+                FocusRejectionReason::NativeDenied,
+                self.start_time.elapsed(),
+            )
+        {
+            self.withdraw_unresolved_launcher_focus();
+            return;
+        }
         let Some(acknowledged) = self.launcher_focus.acknowledged().cloned() else {
             return;
         };
@@ -8038,6 +8049,49 @@ impl NickelSession {
             if let Some(window) = self.launcher_restore_window.take() {
                 let _ = self.deferred_focus_restore.send(window);
             }
+            self.notify_launcher_visibility(false);
+        }
+    }
+
+    fn schedule_launcher_focus_deadline(&mut self, request_id: FocusRequestId, deadline: Duration) {
+        let delay = deadline.saturating_sub(self.start_time.elapsed());
+        if let Err(error) =
+            self.event_loop_handle
+                .insert_source(Timer::from_duration(delay), move |_, _, state| {
+                    state.expire_launcher_focus_request(request_id);
+                    TimeoutAction::Drop
+                })
+        {
+            tracing::warn!(
+                ?error,
+                ?request_id,
+                "could not schedule focus-request deadline"
+            );
+            self.expire_launcher_focus_request(request_id);
+        }
+    }
+
+    fn expire_launcher_focus_request(&mut self, request_id: FocusRequestId) -> bool {
+        if !self
+            .launcher_focus
+            .advance_request_to(request_id, self.start_time.elapsed())
+        {
+            return false;
+        }
+
+        // A timed-out request cannot authorize Launcher delivery or restore a
+        // remembered owner. Preserve whatever native recipient is currently
+        // observed by withdrawing only the unresolved Launcher surface.
+        self.withdraw_unresolved_launcher_focus();
+        true
+    }
+
+    fn withdraw_unresolved_launcher_focus(&mut self) {
+        self.launcher_restore_window = None;
+        if self.launcher_visibility.is_visible() {
+            self.launcher_visibility.set(false);
+            self.hotkeys.launcher_visibility_applied(false);
+            self.apply_launcher_visibility(false);
             self.notify_launcher_visibility(false);
         }
     }
@@ -8540,15 +8594,26 @@ impl NickelSession {
                 return;
             }
             let surface = window.toplevel().unwrap().wl_surface().clone();
-            let _request = self.launcher_focus.request_at(
+            let prior_eligible = self.launcher_restore_window.as_ref().and_then(|window| {
+                self.surface_windows
+                    .iter()
+                    .find_map(|(surface, candidate)| (candidate == window).then(|| surface.clone()))
+            });
+            let request = self.launcher_focus.request_at(
                 surface.id(),
                 FocusTargetLifetime::EmbeddedInTarget,
-                None,
+                prior_eligible,
                 FocusScope::Launcher,
                 FocusSecurityEpoch(0),
                 self.start_time.elapsed(),
                 DEFAULT_FOCUS_REQUEST_TIMEOUT,
             );
+            let deadline = self
+                .launcher_focus
+                .record(&request)
+                .expect("new focus request has a current lifecycle record")
+                .deadline;
+            self.schedule_launcher_focus_deadline(request.transaction, deadline);
             self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,
@@ -15755,6 +15820,79 @@ mod protocol_tests {
         let display = Display::new().unwrap();
         let session = super::NickelSession::new(&mut event_loop, display, true);
         (event_loop, session)
+    }
+
+    #[test]
+    fn launcher_focus_deadline_runs_on_session_executor_and_withdraws_without_restore() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        session.launcher_visibility.set(true);
+        session.launcher_restore_window = Some(super::WindowId(41));
+        let now = session.start_time.elapsed();
+        let request = session.launcher_focus.request_at(
+            ObjectId::null(),
+            nickel_core::focus::FocusTargetLifetime::EmbeddedInTarget,
+            None,
+            nickel_core::focus::FocusScope::Launcher,
+            nickel_core::focus::FocusSecurityEpoch(0),
+            now,
+            Duration::from_millis(1),
+        );
+        let deadline = session.launcher_focus.record(&request).unwrap().deadline;
+        session.schedule_launcher_focus_deadline(request.transaction, deadline);
+
+        event_loop
+            .dispatch(Duration::from_millis(25), &mut session)
+            .unwrap();
+
+        assert_eq!(
+            session.launcher_focus.phase(&request),
+            Some(nickel_core::focus::FocusRequestPhase::TimedOut)
+        );
+        assert!(!session.launcher_visibility.is_visible());
+        assert_eq!(session.launcher_restore_window, None);
+    }
+
+    #[test]
+    fn stale_session_deadline_cannot_withdraw_newer_launcher_focus_intent() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (mut event_loop, mut session) = preview_test_session();
+        session.launcher_visibility.set(true);
+        let now = session.start_time.elapsed();
+        let old = session.launcher_focus.request_at(
+            ObjectId::null(),
+            nickel_core::focus::FocusTargetLifetime::EmbeddedInTarget,
+            None,
+            nickel_core::focus::FocusScope::Launcher,
+            nickel_core::focus::FocusSecurityEpoch(0),
+            now,
+            Duration::from_millis(1),
+        );
+        let old_deadline = session.launcher_focus.record(&old).unwrap().deadline;
+        session.schedule_launcher_focus_deadline(old.transaction, old_deadline);
+        let current = session.launcher_focus.request_at(
+            ObjectId::null(),
+            nickel_core::focus::FocusTargetLifetime::EmbeddedInTarget,
+            None,
+            nickel_core::focus::FocusScope::Launcher,
+            nickel_core::focus::FocusSecurityEpoch(0),
+            now,
+            Duration::from_secs(1),
+        );
+
+        event_loop
+            .dispatch(Duration::from_millis(25), &mut session)
+            .unwrap();
+
+        assert!(session.launcher_visibility.is_visible());
+        assert_eq!(
+            session.launcher_focus.phase(&old),
+            Some(nickel_core::focus::FocusRequestPhase::Superseded)
+        );
+        assert_eq!(
+            session.launcher_focus.phase(&current),
+            Some(nickel_core::focus::FocusRequestPhase::Pending)
+        );
     }
 
     struct IdleInternalHost;
