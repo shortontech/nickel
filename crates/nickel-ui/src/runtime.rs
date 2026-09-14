@@ -1374,6 +1374,7 @@ struct PendingLongPress {
 enum TouchIntentArbitration {
     Preserve,
     CancelThenDispatch,
+    CancelGesture,
     RejectBusy,
 }
 
@@ -2685,7 +2686,7 @@ impl<A: Application> UiHost<A> {
         let active = self.input_dispatcher.cancel_touch_ownership();
         let tree_owned = self.state.pressed().is_some() || self.state.captured().is_some();
         if pending || active || tree_owned {
-            self.dispatch_ui_event(UiEvent::PointerCancelled)
+            self.dispatch_ui_event_unarbitrated(UiEvent::PointerCancelled)
         } else {
             HostEventOutcome::default()
         }
@@ -2738,6 +2739,9 @@ impl<A: Application> UiHost<A> {
         let Some(owner) = self.touch_owner_target() else {
             return TouchIntentArbitration::Preserve;
         };
+        if matches!(event, UiEvent::ControllerBack) {
+            return TouchIntentArbitration::CancelGesture;
+        }
         let relevant = matches!(
             event,
             UiEvent::FocusNext
@@ -2755,6 +2759,7 @@ impl<A: Application> UiHost<A> {
                 | UiEvent::ControllerPrevious
                 | UiEvent::ControllerAdjust(_)
                 | UiEvent::ControllerActivate
+                | UiEvent::ControllerContextMenu
                 | UiEvent::AccessibilityFocus(_)
                 | UiEvent::AccessibilityActivate(_)
         );
@@ -2779,6 +2784,7 @@ impl<A: Application> UiHost<A> {
                     UiEvent::KeyboardNavigateActivate
                         | UiEvent::ControllerAdjust(_)
                         | UiEvent::ControllerActivate
+                        | UiEvent::ControllerContextMenu
                         | UiEvent::AccessibilityActivate(_)
                 ))
         {
@@ -2910,21 +2916,41 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
+            let controller_fenced = if let HostEvent::AdmittedController { binding, .. } = &event {
+                let admitted =
+                    controller_authority.is_some_and(|authority| authority.admits(*binding));
+                if let Some(blocked) = self.controller_overflow_fence
+                    && admitted
+                    && controller_authority.is_some_and(|authority| authority != blocked)
+                {
+                    self.controller_overflow_fence = None;
+                    self.controller_press_authority = controller_authority;
+                    self.admitted_controller_presses.clear();
+                }
+                self.controller_overflow_fence.is_some()
+            } else {
+                false
+            };
             let admitted_controller_press = match &event {
                 HostEvent::AdmittedController {
                     action: Some(action),
                     binding,
-                } if binding.edge == nickel_input::KeyEdge::Pressed
+                } if !controller_fenced
+                    && binding.edge == nickel_input::KeyEdge::Pressed
                     && controller_authority.is_some_and(|authority| authority.admits(*binding)) =>
                 {
                     controller_ui_event(*action).map(|event| (*binding, event))
                 }
                 _ => None,
             };
-            let touch_arbitration = admitted_controller_press.as_ref().map_or_else(
-                || self.touch_arbitration_for_event(&event),
-                |(_, event)| self.touch_arbitration_for_ui_event(event),
-            );
+            let touch_arbitration = if controller_fenced {
+                TouchIntentArbitration::Preserve
+            } else {
+                admitted_controller_press.as_ref().map_or_else(
+                    || self.touch_arbitration_for_event(&event),
+                    |(_, event)| self.touch_arbitration_for_ui_event(event),
+                )
+            };
             let normalized_input = match &event {
                 HostEvent::Normalized { input, .. } => Some(input),
                 HostEvent::NormalizedIngress(envelope) => Some(&envelope.input),
@@ -2943,10 +2969,27 @@ impl<A: Application> UiHost<A> {
                     _ => {}
                 }
             }
-            if touch_arbitration == TouchIntentArbitration::CancelThenDispatch {
-                combined.merge(self.arbitrate_touch_ownership());
-            }
-            let mut outcome = if touch_arbitration == TouchIntentArbitration::RejectBusy {
+            let mut cancellation =
+                if touch_arbitration == TouchIntentArbitration::CancelThenDispatch {
+                    self.arbitrate_touch_ownership()
+                } else {
+                    HostEventOutcome::default()
+                };
+            let mut outcome = if controller_fenced {
+                let HostEvent::AdmittedController { binding, .. } = &event else {
+                    unreachable!();
+                };
+                let mut outcome = HostEventOutcome::default();
+                outcome
+                    .controller_executions
+                    .push(ControllerExecutionEvidence {
+                        binding: *binding,
+                        disposition: ControllerExecutionDisposition::RejectedResetFence,
+                        message_count: 0,
+                        effect_count: 0,
+                    });
+                outcome
+            } else if touch_arbitration == TouchIntentArbitration::RejectBusy {
                 let mut outcome = HostEventOutcome {
                     disposition: crate::EventDisposition::Rejected("input busy"),
                     ..HostEventOutcome::default()
@@ -2969,18 +3012,6 @@ impl<A: Application> UiHost<A> {
                     HostEvent::AdmittedController { action, binding } => {
                         let admitted =
                             controller_authority.is_some_and(|authority| authority.admits(binding));
-                        if let Some(blocked) = self.controller_overflow_fence
-                            && admitted
-                            && controller_authority.is_some_and(|authority| authority != blocked)
-                        {
-                            // A distinct authority can only arrive after the broker acknowledged the
-                            // reset, observed native neutral, and issued a replacement lease. Clear
-                            // the local press fence before dispatch so recovery does not consume the
-                            // first new gesture as though it were the missing old-stream release.
-                            self.controller_overflow_fence = None;
-                            self.controller_press_authority = controller_authority;
-                            self.admitted_controller_presses.clear();
-                        }
                         if self.controller_overflow_fence.is_some() {
                             let mut outcome = HostEventOutcome::default();
                             outcome
@@ -3033,9 +3064,13 @@ impl<A: Application> UiHost<A> {
                             };
                             let mut outcome =
                                 if paired && binding.edge == nickel_input::KeyEdge::Pressed {
-                                    self.dispatch_controller_action(
-                                        action.expect("paired press has action"),
-                                    )
+                                    if touch_arbitration == TouchIntentArbitration::CancelGesture {
+                                        self.arbitrate_touch_ownership()
+                                    } else {
+                                        self.dispatch_controller_action(
+                                            action.expect("paired press has action"),
+                                        )
+                                    }
                                 } else {
                                     HostEventOutcome::default()
                                 };
@@ -3123,7 +3158,8 @@ impl<A: Application> UiHost<A> {
                 outcome.clipboard_text = None;
                 self.state.clipboard_rejected = true;
             }
-            combined.merge(outcome);
+            cancellation.merge(outcome);
+            combined.merge(cancellation);
         }
         combined.telemetry.input_to_message_us = elapsed_us(step_started);
         if combined.changed {
@@ -3274,14 +3310,17 @@ impl<A: Application> UiHost<A> {
                 };
             }
             TouchIntentArbitration::CancelThenDispatch => {
-                let pending = self.pending_long_press.take().is_some();
-                let active = self.input_dispatcher.cancel_touch_ownership();
-                if pending || active {
-                    let _ = self.dispatch_ui_event(UiEvent::PointerCancelled);
-                }
+                let mut outcome = self.arbitrate_touch_ownership();
+                outcome.merge(self.dispatch_ui_event_unarbitrated(event));
+                return outcome;
             }
+            TouchIntentArbitration::CancelGesture => return self.arbitrate_touch_ownership(),
             TouchIntentArbitration::Preserve => {}
         }
+        self.dispatch_ui_event_unarbitrated(event)
+    }
+
+    fn dispatch_ui_event_unarbitrated(&mut self, event: UiEvent) -> HostEventOutcome {
         if let UiEvent::PointerMoved(point)
         | UiEvent::PointerPressed(point)
         | UiEvent::PointerReleased(point) = &event
@@ -6661,6 +6700,148 @@ mod tests {
     }
 
     #[test]
+    fn occupied_context_menu_is_busy_and_cancel_consumes_one_gesture() {
+        let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 41,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+        };
+        for (action, expected_press, expected_release) in [
+            (
+                ControllerAction::ContextMenu,
+                ControllerExecutionDisposition::RejectedBusy,
+                ControllerExecutionDisposition::RejectedUnpairedRelease,
+            ),
+            (
+                ControllerAction::Cancel,
+                ControllerExecutionDisposition::Executed,
+                ControllerExecutionDisposition::Executed,
+            ),
+        ] {
+            let mut host = UiHost::new(ControllerApplication, 160, 48);
+            host.handle_input(
+                &InputEvent::Touch(TouchEvent::Started {
+                    device: DeviceId(4),
+                    order: EventOrder(1),
+                    contact: TouchId(1),
+                    position: Point { x: 40.0, y: 20.0 },
+                }),
+                None,
+            );
+            let press = host.step(HostBatch {
+                window_focused: Some(true),
+                controller_authority: Some(authority),
+                events: vec![HostEvent::AdmittedController {
+                    action: Some(action),
+                    binding,
+                }],
+                ..HostBatch::default()
+            });
+            assert_eq!(press.messages.len(), 0);
+            assert_eq!(press.controller_executions[0].disposition, expected_press);
+            assert_eq!(
+                host.input_dispatcher.touch_active(),
+                action != ControllerAction::Cancel
+            );
+
+            let release = host.step(HostBatch {
+                controller_authority: Some(authority),
+                events: vec![HostEvent::AdmittedController {
+                    action: Some(action),
+                    binding: ControllerExecutionBinding {
+                        edge: KeyEdge::Released,
+                        ..binding
+                    },
+                }],
+                ..HostBatch::default()
+            });
+            assert_eq!(
+                release.controller_executions[0].disposition,
+                expected_release
+            );
+        }
+    }
+
+    #[test]
+    fn reset_fence_precedes_busy_and_replacement_rearms_arbitration() {
+        let blocked = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+        };
+        let replacement = ControllerExecutionAuthority {
+            lease_epoch: 8,
+            ..blocked
+        };
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: Point { x: 40.0, y: 20.0 },
+            }),
+            None,
+        );
+        host.controller_overflow_fence = Some(blocked);
+        let binding = |lease_epoch| ControllerExecutionBinding {
+            device_generation: 5,
+            edge: KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 41,
+            lease_epoch,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: None,
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let fenced = host.step(HostBatch {
+            controller_authority: Some(blocked),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: binding(7),
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            fenced.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedResetFence
+        );
+        let busy = host.step(HostBatch {
+            controller_authority: Some(replacement),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: binding(8),
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            busy.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedBusy
+        );
+        assert!(host.controller_overflow_fence.is_none());
+    }
+
+    #[test]
     fn admitted_same_owner_adjustment_is_busy_without_press_ledger_entry() {
         let mut host = UiHost::new(AdjustmentApplication { value: 0.5 }, 160, 48);
         let slider = host.semantic_nodes()[0].clone();
@@ -6922,6 +7103,29 @@ mod tests {
         );
         assert!(released.messages.is_empty());
         assert_eq!(host.application().invoked, ["B"]);
+    }
+
+    #[test]
+    fn cancellation_outcome_survives_merge_with_unhandled_followup() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.handle_input(
+            &InputEvent::Pointer(PointerEvent::Button {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                button: PointerButton::Primary,
+                edge: KeyEdge::Pressed,
+                position: Some(Point { x: 40.0, y: 20.0 }),
+            }),
+            None,
+        );
+        let mut outcome = host.arbitrate_touch_ownership();
+        outcome.merge(super::HostEventOutcome::default());
+
+        assert!(outcome.changed);
+        assert_ne!(outcome.invalidation, Invalidation::None);
+        assert_eq!(outcome.disposition, crate::EventDisposition::Handled);
+        assert!(host.state.pressed().is_none());
+        assert!(host.state.captured().is_none());
     }
 
     #[test]
