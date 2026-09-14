@@ -582,6 +582,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         event: &DownEvent,
     ) {
         let marker = self.frame_marker();
+        let focus = focus.filter(|(target, _)| target.alive());
         self.focus
             .entry(event.slot)
             .and_modify(|state| {
@@ -613,11 +614,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         };
         state.pending = marker;
         if let Some((focus, _)) = state.focus.take() {
-            focus.up(seat, data, event);
+            if focus.alive() {
+                focus.up(seat, data, event);
 
-            // Keep the focus around to be able to send a frame event after up, but move
-            // it out of the current focus to prevent sending other events.
-            state.frame_pending = Some(focus);
+                // Keep the focus around to be able to send a frame event after up, but move
+                // it out of the current focus to prevent sending other events.
+                state.frame_pending = Some(focus);
+            }
         }
     }
 
@@ -634,6 +637,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         };
         state.pending = marker;
         state.location = event.location;
+        if state
+            .focus
+            .as_ref()
+            .is_some_and(|(focus, _)| !focus.alive())
+        {
+            state.focus = None;
+        }
         if let Some((focus, loc)) = state.focus.as_ref() {
             let mut new_event = event.clone();
             new_event.location -= *loc;
@@ -654,13 +664,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
             state.current = Some(marker);
 
             // Send the frame event for any stored focus in the up handler
-            if let Some(focus) = state.frame_pending.take() {
+            if let Some(focus) = state.frame_pending.take().filter(IsAlive::alive) {
                 if focus.last_frame(seat, data) != Some(marker) {
                     focus.frame(seat, data, marker);
                 }
             }
 
-            if let Some((focus, _)) = state.focus.as_ref() {
+            if let Some((focus, _)) = state.focus.as_ref().filter(|(focus, _)| focus.alive()) {
                 if focus.last_frame(seat, data) != Some(marker) {
                     focus.frame(seat, data, marker);
                 }
@@ -683,7 +693,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         for state in self.focus.values_mut() {
             state.current = Some(marker);
 
-            if let Some((focus, _)) = state.focus.take() {
+            if let Some((focus, _)) = state.focus.take().filter(|(focus, _)| focus.alive()) {
                 if focus.last_frame(seat, data) != Some(marker) {
                     focus.cancel(seat, data, marker);
                 }
@@ -706,6 +716,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         };
 
         state.pending = marker;
+        if state
+            .focus
+            .as_ref()
+            .is_some_and(|(focus, _)| !focus.alive())
+        {
+            state.focus = None;
+        }
         if let Some((focus, _)) = state.focus.as_ref() {
             focus.shape(seat, data, event);
         }
@@ -718,6 +735,13 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
             return;
         };
         state.pending = marker;
+        if state
+            .focus
+            .as_ref()
+            .is_some_and(|(focus, _)| !focus.alive())
+        {
+            state.focus = None;
+        }
         if let Some((focus, _)) = state.focus.as_ref() {
             focus.orientation(seat, data, event);
         }
@@ -731,8 +755,12 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
         match grab {
             GrabStatus::Borrowed => panic!("Accessed a touch grab from within a touch grab access."),
             GrabStatus::Active(_, ref mut handler) => {
-                // If this grab is associated with a surface that is no longer alive, discard it
-                if let Some((ref focus, _)) = handler.start_data().focus {
+                // Custom grabs retain their initiating surface lifetime. The default down grab is
+                // contact-aware: its first surface dying must not revoke or redirect siblings.
+                let contact_aware = handler.is::<TouchDownGrab<D>>();
+                if let Some((ref focus, _)) = handler.start_data().focus
+                    && !contact_aware
+                {
                     if !focus.alive() {
                         handler.unset(data);
                         self.grab = GrabStatus::None;
@@ -774,7 +802,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
     use crate::{
         backend::input::{InputTime, KeyState, TouchSlot},
@@ -802,10 +830,21 @@ mod tests {
         Cancel,
     }
 
-    #[derive(Debug, Default)]
+    #[derive(Debug)]
     struct TargetState {
         events: Mutex<Vec<Recorded>>,
         last_frame: Mutex<Option<FrameMarker>>,
+        alive: AtomicBool,
+    }
+
+    impl Default for TargetState {
+        fn default() -> Self {
+            Self {
+                events: Mutex::new(Vec::new()),
+                last_frame: Mutex::new(None),
+                alive: AtomicBool::new(true),
+            }
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -819,7 +858,7 @@ mod tests {
 
     impl IsAlive for Target {
         fn alive(&self) -> bool {
-            true
+            self.0.alive.load(Ordering::Relaxed)
         }
     }
 
@@ -962,5 +1001,38 @@ mod tests {
 
         touch.down(&mut state, Some((shared.clone(), (0.0, 0.0).into())), &down(0, 5));
         assert_eq!(shared.0.events.lock().unwrap().last(), Some(&Recorded::Down(Some(0).into())));
+    }
+
+    #[test]
+    fn simultaneous_contacts_retain_their_own_targets_and_lifetimes() {
+        let mut seat_state = SeatState::<State>::new();
+        let mut seat = seat_state.new_seat("test");
+        let touch = seat.add_touch();
+        let mut state = State { seat_state };
+        let first = Target(Arc::default());
+        let second = Target(Arc::default());
+
+        touch.down(&mut state, Some((first.clone(), (0.0, 0.0).into())), &down(10, 1));
+        touch.down(&mut state, Some((second.clone(), (100.0, 100.0).into())), &down(20, 2));
+        touch.motion(&mut state, None, &motion(10));
+        touch.motion(&mut state, None, &motion(20));
+
+        assert_eq!(
+            first.0.events.lock().unwrap().as_slice(),
+            [Recorded::Down(Some(10).into()), Recorded::Motion(Some(10).into())]
+        );
+        assert_eq!(
+            second.0.events.lock().unwrap().as_slice(),
+            [Recorded::Down(Some(20).into()), Recorded::Motion(Some(20).into())]
+        );
+
+        first.0.alive.store(false, Ordering::Relaxed);
+        touch.motion(&mut state, None, &motion(10));
+        touch.motion(&mut state, None, &motion(20));
+        touch.up(&mut state, &up(10, 3));
+        touch.up(&mut state, &up(20, 4));
+
+        assert_eq!(first.0.events.lock().unwrap().last(), Some(&Recorded::Motion(Some(10).into())));
+        assert_eq!(second.0.events.lock().unwrap().last(), Some(&Recorded::Up(Some(20).into())));
     }
 }

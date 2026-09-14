@@ -1,4 +1,4 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
 use downcast_rs::{Downcast, impl_downcast};
 
@@ -206,13 +206,19 @@ pub struct TouchDownGrab<D: SeatHandler> {
     pub start_data: GrabStartData<D>,
     /// Currently active touch points
     pub touch_points: usize,
+    /// Exact contacts governed by this default grab. Counting alone cannot fence a duplicate or
+    /// stale terminal event, and does not express which per-contact target remains authoritative.
+    active_slots: HashSet<TouchSlot>,
 }
 
 impl<D: SeatHandler> TouchDownGrab<D> {
     pub(in crate::input) fn new(start_data: GrabStartData<D>) -> Self {
+        let mut active_slots = HashSet::new();
+        active_slots.insert(start_data.slot);
         Self {
             start_data,
             touch_points: 1,
+            active_slots,
         }
     }
 }
@@ -231,17 +237,21 @@ impl<D: SeatHandler + 'static> TouchGrab<D> for TouchDownGrab<D> {
         &mut self,
         data: &mut D,
         handle: &mut TouchInnerHandle<'_, D>,
-        _focus: Option<(<D as SeatHandler>::TouchFocus, Point<f64, Logical>)>,
+        focus: Option<(<D as SeatHandler>::TouchFocus, Point<f64, Logical>)>,
         event: &DownEvent,
     ) {
-        handle.down(data, self.start_data.focus.clone(), event);
-        self.touch_points += 1;
+        // Each contact owns the target resolved for its own down. The grab remains seat-wide only
+        // as a lifecycle fence; it must not project the first contact's focus onto later contacts.
+        handle.down(data, focus, event);
+        self.active_slots.insert(event.slot);
+        self.touch_points = self.active_slots.len();
     }
 
     fn up(&mut self, data: &mut D, handle: &mut TouchInnerHandle<'_, D>, event: &UpEvent) {
         handle.up(data, event);
-        self.touch_points = self.touch_points.saturating_sub(1);
-        if self.touch_points == 0 {
+        self.active_slots.remove(&event.slot);
+        self.touch_points = self.active_slots.len();
+        if self.active_slots.is_empty() {
             handle.unset_grab(self, data);
         }
     }
@@ -250,10 +260,10 @@ impl<D: SeatHandler + 'static> TouchGrab<D> for TouchDownGrab<D> {
         &mut self,
         data: &mut D,
         handle: &mut TouchInnerHandle<'_, D>,
-        _focus: Option<(<D as SeatHandler>::TouchFocus, Point<f64, Logical>)>,
+        focus: Option<(<D as SeatHandler>::TouchFocus, Point<f64, Logical>)>,
         event: &MotionEvent,
     ) {
-        handle.motion(data, self.start_data.focus.clone(), event)
+        handle.motion(data, focus, event)
     }
 
     fn frame(&mut self, data: &mut D, handle: &mut TouchInnerHandle<'_, D>) {
