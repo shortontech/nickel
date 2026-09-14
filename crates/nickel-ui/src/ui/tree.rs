@@ -252,6 +252,12 @@ pub enum SemanticActionError {
     ActionUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DefaultActivation {
+    Handled(Invalidation),
+    Continue,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffectiveHitRoute {
     pub target: UiId,
@@ -1888,6 +1894,21 @@ impl<Message: Clone> UiFrame<Message> {
         })
     }
 
+    fn begin_default_activation(
+        &self,
+        state: &mut UiStateStore,
+        target: &UiId,
+        outcome: &mut EventOutcome<Message>,
+    ) -> DefaultActivation {
+        if let Some(invalidation) = self.activate_text_command(state, target, outcome) {
+            return DefaultActivation::Handled(invalidation);
+        }
+        if let Some(invalidation) = self.open_primary_overlay(state, target) {
+            return DefaultActivation::Handled(invalidation);
+        }
+        DefaultActivation::Continue
+    }
+
     fn operate_navigation_scroll(
         &self,
         state: &mut UiStateStore,
@@ -2802,18 +2823,15 @@ impl<Message: Clone> UiFrame<Message> {
                 let activates = state
                     .captured()
                     .is_some_and(|captured| released == Some(captured));
-                let text_command = if activates {
-                    released
-                        .and_then(|target| self.activate_text_command(state, target, &mut outcome))
+                let default_activation = if activates {
+                    released.map_or(DefaultActivation::Continue, |target| {
+                        self.begin_default_activation(state, target, &mut outcome)
+                    })
                 } else {
-                    None
+                    DefaultActivation::Continue
                 };
-                let primary_overlay_invalidation = activates
-                    .then(|| released.and_then(|target| self.open_primary_overlay(state, target)))
-                    .flatten();
                 if activates
-                    && text_command.is_none()
-                    && primary_overlay_invalidation.is_none()
+                    && default_activation == DefaultActivation::Continue
                     && let Some(message) = self.message_at_owned(point)
                 {
                     outcome.messages.push(message);
@@ -2856,8 +2874,10 @@ impl<Message: Clone> UiFrame<Message> {
                     .merge(state.set_capture(None))
                     .merge(dropdown_invalidation)
                     .merge(option_invalidation)
-                    .merge(primary_overlay_invalidation.unwrap_or(Invalidation::None))
-                    .merge(text_command.unwrap_or(Invalidation::None));
+                    .merge(match default_activation {
+                        DefaultActivation::Handled(invalidation) => invalidation,
+                        DefaultActivation::Continue => Invalidation::None,
+                    });
                 if activates {
                     outcome.disposition = crate::EventDisposition::Handled;
                 }
@@ -3090,21 +3110,12 @@ impl<Message: Clone> UiFrame<Message> {
             }
             UiEvent::ActivateFocused | UiEvent::KeyboardActivate => {
                 if let Some(target) = state.focused().cloned()
-                    && let Some(invalidation) =
-                        self.activate_text_command(state, &target, &mut outcome)
+                    && let DefaultActivation::Handled(invalidation) =
+                        self.begin_default_activation(state, &target, &mut outcome)
                 {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
-                        disposition: crate::EventDisposition::Handled,
-                        ..outcome
-                    };
-                }
-                if let Some(target) = state.focused().cloned()
-                    && let Some(invalidation) = self.open_primary_overlay(state, &target)
-                {
-                    return EventOutcome {
-                        invalidation,
                         disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
@@ -3125,21 +3136,12 @@ impl<Message: Clone> UiFrame<Message> {
                     .or_else(|| state.focused())
                     .cloned();
                 if let Some(target) = selected.as_ref()
-                    && let Some(invalidation) =
-                        self.activate_text_command(state, target, &mut outcome)
+                    && let DefaultActivation::Handled(invalidation) =
+                        self.begin_default_activation(state, target, &mut outcome)
                 {
                     return EventOutcome {
                         invalidation: invalidation
                             .merge(state.dismiss_overlay(crate::DismissReason::Action)),
-                        disposition: crate::EventDisposition::Handled,
-                        ..outcome
-                    };
-                }
-                if let Some(target) = selected.as_ref()
-                    && let Some(invalidation) = self.open_primary_overlay(state, target)
-                {
-                    return EventOutcome {
-                        invalidation,
                         disposition: crate::EventDisposition::Handled,
                         ..outcome
                     };
