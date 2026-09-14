@@ -118,6 +118,7 @@ pub(crate) struct TouchSlotState<D: SeatHandler> {
     pub(crate) location: Point<f64, Logical>,
     pending: FrameMarker,
     current: Option<FrameMarker>,
+    terminal: bool,
 }
 
 impl<D: SeatHandler> fmt::Debug for TouchSlotState<D> {
@@ -128,6 +129,7 @@ impl<D: SeatHandler> fmt::Debug for TouchSlotState<D> {
             .field("location", &self.location)
             .field("pending", &self.pending)
             .field("current", &self.current)
+            .field("terminal", &self.terminal)
             .finish()
     }
 }
@@ -590,6 +592,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
                 state.frame_pending = None;
                 state.location = event.location;
                 state.focus.clone_from(&focus);
+                state.terminal = false;
             })
             .or_insert_with(|| TouchSlotState {
                 focus,
@@ -597,6 +600,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
                 location: event.location,
                 pending: marker,
                 current: None,
+                terminal: false,
             });
 
         let state = self.focus.get(&event.slot).unwrap();
@@ -613,6 +617,7 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
             return;
         };
         state.pending = marker;
+        state.terminal = true;
         if let Some((focus, _)) = state.focus.take() {
             if focus.alive() {
                 focus.up(seat, data, event);
@@ -657,7 +662,8 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
             return;
         };
 
-        for state in self.focus.values_mut() {
+        let mut completed = Vec::new();
+        for (slot, state) in self.focus.iter_mut() {
             if state.current.map(|c| c == state.pending).unwrap_or(false) {
                 continue;
             }
@@ -675,6 +681,12 @@ impl<D: SeatHandler + 'static> TouchInternal<D> {
                     focus.frame(seat, data, marker);
                 }
             }
+            if state.terminal {
+                completed.push(*slot);
+            }
+        }
+        for slot in completed {
+            self.focus.remove(&slot);
         }
 
         frame_marker::remove(marker.0);
@@ -1034,5 +1046,25 @@ mod tests {
 
         assert_eq!(first.0.events.lock().unwrap().last(), Some(&Recorded::Motion(Some(10).into())));
         assert_eq!(second.0.events.lock().unwrap().last(), Some(&Recorded::Up(Some(20).into())));
+    }
+
+    #[test]
+    fn terminal_frames_retire_slot_state_under_bounded_churn() {
+        let mut seat_state = SeatState::<State>::new();
+        let mut seat = seat_state.new_seat("test");
+        let touch = seat.add_touch();
+        let mut state = State { seat_state };
+        let target = Target(Arc::default());
+
+        for generation in 1..=1_024 {
+            touch.down(
+                &mut state,
+                Some((target.clone(), (0.0, 0.0).into())),
+                &down(0, generation),
+            );
+            touch.up(&mut state, &up(0, generation));
+            touch.frame(&mut state);
+            assert!(touch.inner.lock().unwrap().focus.is_empty());
+        }
     }
 }

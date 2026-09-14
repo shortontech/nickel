@@ -55,6 +55,8 @@ pub(super) struct ClientTouchSlots {
     contacts: std::collections::HashMap<ClientTouchContact, smithay::backend::input::TouchSlot>,
     next_generation: u64,
     next_slot: u32,
+    free_slots: Vec<u32>,
+    pending_recycle: Vec<u32>,
 }
 
 impl ClientTouchSlots {
@@ -96,11 +98,15 @@ impl ClientTouchSlots {
         if let Some(slot) = self.contacts.get(&key) {
             return *slot;
         }
-        let slot = Some(self.next_slot).into();
-        self.next_slot = self
-            .next_slot
-            .checked_add(1)
-            .expect("client touch slot exhausted");
+        let native_slot = self.free_slots.pop().unwrap_or_else(|| {
+            let slot = self.next_slot;
+            self.next_slot = self
+                .next_slot
+                .checked_add(1)
+                .expect("client touch slot exhausted");
+            slot
+        });
+        let slot = Some(native_slot).into();
         self.contacts.insert(key, slot);
         slot
     }
@@ -126,15 +132,34 @@ impl ClientTouchSlots {
         contact: smithay::backend::input::TouchSlot,
     ) -> Option<smithay::backend::input::TouchSlot> {
         let generation = *self.device_generations.get(device)?;
-        self.contacts.remove(&ClientTouchContact {
+        let slot = self.contacts.remove(&ClientTouchContact {
             device: device.to_owned(),
             generation,
             contact: contact.into(),
-        })
+        })?;
+        let native = i32::from(slot);
+        if native >= 0 {
+            // Smithay retains the target until the terminal frame. Do not make this identity
+            // available to a new contact before that frame closes the old lifetime.
+            self.pending_recycle.push(native as u32);
+        }
+        Some(slot)
+    }
+
+    fn finish_frame(&mut self) {
+        self.free_slots.append(&mut self.pending_recycle);
     }
 
     pub(super) fn cancel_all(&mut self) {
+        self.free_slots.extend(
+            self.contacts
+                .values()
+                .map(|slot| i32::from(*slot))
+                .filter(|slot| *slot >= 0)
+                .map(|slot| slot as u32),
+        );
         self.contacts.clear();
+        self.free_slots.append(&mut self.pending_recycle);
     }
 }
 
@@ -2136,7 +2161,10 @@ impl NickelSession {
                 self.client_touch_slots
                     .end(&event.device().id(), event.slot());
             }
-            InputEvent::TouchFrame { .. } => self.seat.get_touch().unwrap().frame(self),
+            InputEvent::TouchFrame { .. } => {
+                self.seat.get_touch().unwrap().frame(self);
+                self.client_touch_slots.finish_frame();
+            }
             InputEvent::TouchCancel { .. } => {
                 // Match the seat-wide Smithay cancellation below, and deliver
                 // normalized cancellations before another input batch can run.
@@ -2405,6 +2433,26 @@ mod tests {
         slots.cancel_all();
         assert_eq!(slots.get("touch-a", contact), None);
         assert_eq!(slots.end("touch-a", contact), None);
+    }
+
+    #[test]
+    fn client_touch_slots_recycle_only_after_terminal_release() {
+        let mut slots = super::ClientTouchSlots::default();
+        let contact = Some(1).into();
+
+        for _ in 0..4_096 {
+            let active = slots.begin("touch-a", contact);
+            assert_eq!(slots.begin("touch-a", contact), active);
+            assert_eq!(slots.end("touch-a", contact), Some(active));
+            assert!(slots.contacts.is_empty());
+            let before_frame = slots.begin("touch-b", contact);
+            assert_ne!(before_frame, active);
+            assert_eq!(slots.end("touch-b", contact), Some(before_frame));
+            slots.finish_frame();
+        }
+
+        assert_eq!(slots.next_slot, 2);
+        assert_eq!(slots.free_slots.len(), 2);
     }
 
     #[test]
