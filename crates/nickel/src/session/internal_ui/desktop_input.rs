@@ -5,13 +5,19 @@
 //! Relative motion deltas are not owned by this adapter. Button presses
 //! claim runtime focus on the desktop only; the keyboard overlay preserves its recipient.
 
-use std::collections::{BTreeSet, HashMap};
+use std::{
+    collections::{BTreeSet, HashMap},
+    time::Instant,
+};
 
 use nickel_input::{
     DeviceId, EventOrder, InputEvent, KeyEdge, ModifierState, PointerButton, PointerEvent,
     TouchEvent, TouchId,
 };
-use nickel_ui::{HostBatch, HostEvent, InternalSurfaceId};
+use nickel_ui::{
+    HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding, NormalizedInputEnvelope,
+    NormalizedRecipientBinding, NormalizedSourceBinding,
+};
 
 use super::{InternalSurfaceRole, InternalUiRuntime};
 
@@ -65,7 +71,7 @@ mod tests {
             .iter()
             .filter_map(|(_, batch, _)| match &batch.events[..] {
                 [
-                    HostEvent::Normalized {
+                    HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                         input:
                             InputEvent::Touch(TouchEvent::Started {
                                 device,
@@ -73,11 +79,19 @@ mod tests {
                                 position,
                                 ..
                             }),
+                        source,
+                        admission,
+                        recipient,
                         ..
-                    },
+                    }),
                 ] => {
                     assert_eq!(*contact, TouchId(0));
                     assert_eq!(position.x, 20.0);
+                    assert_eq!(source.seat, 1);
+                    assert_eq!(source.device_generation, device.0);
+                    assert!(admission.order > 0);
+                    assert_eq!(recipient.lease, id.snapshot_token());
+                    assert_eq!(recipient.lifetime, id.snapshot_token());
                     Some(*device)
                 }
                 _ => None,
@@ -88,18 +102,19 @@ mod tests {
         assert!(runtime.normalized_touch_input("touch-a", 0, (20.0, 30.0), Moved, true));
         assert!(runtime.normalized_touch_input("touch-a", 0, (0.0, 0.0), Ended, true));
         let batches = runtime.drain_routed_events();
-        assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
-            input: InputEvent::Touch(TouchEvent::Ended { position, .. }), ..
-        }] if position.x == 820.0 && position.y == 150.0));
+        assert!(
+            matches!(&batches[1].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input: InputEvent::Touch(TouchEvent::Ended { position, .. }), .. })] if position.x == 820.0 && position.y == 150.0)
+        );
         assert_eq!(runtime.desktop_input.touches.len(), 1);
         runtime.remove_desktop_pointer_device("touch-b");
         assert!(runtime.desktop_input.touches.is_empty());
         assert!(matches!(
             &runtime.drain_routed_events()[0].1.events[..],
-            [HostEvent::Normalized {
+            [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                 input: InputEvent::Touch(TouchEvent::Cancelled { .. }),
                 ..
-            }]
+            })]
         ));
     }
 
@@ -149,13 +164,13 @@ mod tests {
         runtime.remove(keyboard);
         assert!(matches!(
             &runtime.drain_routed_events()[0].1.events[..],
-            [HostEvent::Normalized {
+            [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                 input: InputEvent::Touch(TouchEvent::Cancelled {
                     contact: TouchId(3),
                     ..
                 }),
                 ..
-            }]
+            })]
         ));
         assert!(runtime.normalized_touch_input("touch", 3, (-780.0, -40.0), Moved, false));
         assert!(runtime.normalized_touch_input("touch", 3, (0.0, 0.0), Ended, false));
@@ -202,9 +217,10 @@ mod tests {
                 .iter()
                 .all(|(id, batch, _)| *id == keyboard && batch.window_focused.is_none())
         );
-        assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
-            input: InputEvent::Pointer(PointerEvent::Button { edge: KeyEdge::Released, position: Some(position), .. }), ..
-        }] if position.x == 1000.0));
+        assert!(
+            matches!(&batches[1].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input: InputEvent::Pointer(PointerEvent::Button { edge: KeyEdge::Released, position: Some(position), .. }), .. })] if position.x == 1000.0)
+        );
         assert!(runtime.desktop_input.capture.is_none());
         // Legacy touch still uses its adapter, but must never acquire text focus.
         assert!(runtime.touch(1, (30.0, 80.0), crate::session::TouchPhase::Started));
@@ -230,9 +246,10 @@ mod tests {
         let batches = runtime.drain_routed_events();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].0, id);
-        assert!(matches!(&batches[0].1.events[..], [HostEvent::Normalized {
-            input: InputEvent::Pointer(PointerEvent::Axis { delta, discrete: Some((0, 0)), .. }), ..
-        }] if delta.y == -0.5));
+        assert!(
+            matches!(&batches[0].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input: InputEvent::Pointer(PointerEvent::Axis { delta, discrete: Some((0, 0)), .. }), .. })] if delta.y == -0.5)
+        );
     }
 
     #[test]
@@ -271,7 +288,7 @@ mod tests {
         let events = runtime.drain_routed_events();
         assert_eq!(events.len(), 4);
         assert!(
-            matches!(&events[2].1.events[..], [HostEvent::Normalized { input: InputEvent::Key(key), .. }] if key.edge == KeyEdge::Released)
+            matches!(&events[2].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope { input: InputEvent::Key(key), .. })] if key.edge == KeyEdge::Released)
         );
         assert!(runtime.desktop_keyboard_interaction_active());
         runtime.clear_focus();
@@ -310,10 +327,9 @@ mod tests {
         let routed = runtime.drain_routed_events();
         assert!(matches!(
             &routed[0].1.events[..],
-            [HostEvent::Normalized {
+            [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                 input: InputEvent::Text(nickel_input::TextEvent::Commit { text, .. }),
-                ..
-            }] if text == "q"
+                .. })] if text == "q"
         ));
     }
 
@@ -390,11 +406,12 @@ mod tests {
             HostEvent::Ui(nickel_ui::UiEvent::PointerContext(point))
                 if *point == nickel_ui::Point { x: 20.0, y: 20.0 }
         )));
-        assert!(
-            !events
-                .iter()
-                .any(|event| matches!(event, HostEvent::Normalized { .. }))
-        );
+        assert!(!events.iter().any(|event| {
+            matches!(
+                event,
+                HostEvent::NormalizedIngress(NormalizedInputEnvelope { .. })
+            )
+        }));
         assert!(runtime.desktop_input.capture.is_none());
     }
 
@@ -443,13 +460,13 @@ mod tests {
         assert_eq!(batches[0].0, id);
         assert!(matches!(
             &batches[0].1.events[..],
-            [HostEvent::Normalized {
+            [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                 input: InputEvent::Pointer(PointerEvent::Leave {
                     order: EventOrder(2),
                     ..
                 }),
                 ..
-            }]
+            })]
         ));
         assert!(runtime.hovered.is_none());
     }
@@ -493,12 +510,14 @@ mod tests {
         assert_eq!(batches.remove(0).1.window_focused, Some(true));
         assert_eq!(runtime.focused(), Some(id));
         assert!(batches.iter().all(|(target, _, snapshot)| *target == id && snapshot.as_ref() == Some(&modifiers)));
-        assert!(matches!(&batches[0].1.events[..], [HostEvent::Normalized {
-            input: InputEvent::Pointer(PointerEvent::Button { button: PointerButton::Secondary, edge: KeyEdge::Pressed, position: Some(position), .. }), ..
-        }] if *position == nickel_input::Point { x: 20.0, y: 80.0 }));
-        assert!(matches!(&batches[1].1.events[..], [HostEvent::Normalized {
-            input: InputEvent::Pointer(PointerEvent::Motion { position, .. }), ..
-        }] if *position == nickel_input::Point { x: 1000.0, y: 420.0 }));
+        assert!(
+            matches!(&batches[0].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input: InputEvent::Pointer(PointerEvent::Button { button: PointerButton::Secondary, edge: KeyEdge::Pressed, position: Some(position), .. }), .. })] if *position == nickel_input::Point { x: 20.0, y: 80.0 })
+        );
+        assert!(
+            matches!(&batches[1].1.events[..], [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input: InputEvent::Pointer(PointerEvent::Motion { position, .. }), .. })] if *position == nickel_input::Point { x: 1000.0, y: 420.0 })
+        );
         assert!(runtime.desktop_input.capture.is_none());
         assert!(!runtime.desktop_pointer_input(
             "mouse",
@@ -602,15 +621,14 @@ mod tests {
             *target == overlay
                 && matches!(
                     &batch.events[..],
-                    [HostEvent::Normalized {
+                    [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                         input: InputEvent::Pointer(PointerEvent::Button {
                             button: PointerButton::Secondary,
                             edge: KeyEdge::Pressed,
                             position: Some(position),
                             ..
                         }),
-                        ..
-                    }] if *position == nickel_input::Point { x: 60.0, y: 60.0 }
+                        .. })] if *position == nickel_input::Point { x: 60.0, y: 60.0 }
                 )
         }));
     }
@@ -667,10 +685,10 @@ mod tests {
         let batches = runtime.drain_routed_events();
         assert!(matches!(
             &batches[0].1.events[..],
-            [HostEvent::Normalized {
+            [HostEvent::NormalizedIngress(NormalizedInputEnvelope {
                 input: InputEvent::DeviceRemoved { .. },
                 ..
-            }]
+            })]
         ));
     }
 }
@@ -685,6 +703,8 @@ pub(super) struct DesktopInputState {
     devices: HashMap<String, DeviceId>,
     next_device: u64,
     order: u64,
+    admission_order: u64,
+    admission_epoch: Option<Instant>,
     last_device: Option<DeviceId>,
     pressed_keys: BTreeSet<(DeviceId, u32)>,
     // One logical seat pointer owns a drag, even when several physical devices
@@ -693,6 +713,48 @@ pub(super) struct DesktopInputState {
 }
 
 impl InternalUiRuntime {
+    fn desktop_normalized_ingress(
+        &mut self,
+        recipient: InternalSurfaceId,
+        source: &str,
+        device: DeviceId,
+        input: InputEvent,
+    ) -> HostEvent {
+        let state = &mut self.desktop_input;
+        let epoch = state.admission_epoch.get_or_insert_with(Instant::now);
+        let generation = device.0;
+        state.admission_order = state.admission_order.wrapping_add(1);
+        HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+            input,
+            clipboard_text: None,
+            source: NormalizedSourceBinding {
+                // Nickel currently exposes one compositor seat. The backend
+                // stream name remains namespaced by the session adapter.
+                seat: 1,
+                backend_stream: format!("session:{source}"),
+                stream_generation: generation,
+                device_generation: generation,
+                identity_capability: "session-device-name".into(),
+                reconnect_generation: generation,
+            },
+            admission: NormalizedAdmissionBinding {
+                order: state.admission_order,
+                monotonic_micros: epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            },
+            recipient: NormalizedRecipientBinding {
+                // InternalSurfaceId is generational: its token expires when
+                // the runtime slot is retired and cannot bind a replacement.
+                lease: recipient.snapshot_token(),
+                lifetime: recipient.snapshot_token(),
+            },
+            // This adapter does not own window operations, output transform
+            // revisions, or text transactions. Absence is authoritative.
+            operation: None,
+            transform_generation: None,
+            text_transaction: None,
+        })
+    }
+
     pub(crate) fn desktop_keyboard_interaction_active(&self) -> bool {
         !self.desktop_input.pressed_keys.is_empty()
     }
@@ -736,12 +798,10 @@ impl InternalUiRuntime {
             state.pressed_keys.remove(&(device, raw));
             false
         };
-        let events = normalize(device, EventOrder(state.order), repeat)
+        let inputs = normalize(device, EventOrder(state.order), repeat);
+        let events = inputs
             .into_iter()
-            .map(|input| HostEvent::Normalized {
-                input,
-                clipboard_text: None,
-            })
+            .map(|input| self.desktop_normalized_ingress(id, source, device, input))
             .collect();
         self.step(
             id,
@@ -775,16 +835,20 @@ impl InternalUiRuntime {
             return false;
         };
         self.desktop_input.order = self.desktop_input.order.wrapping_add(1);
+        let order = self.desktop_input.order;
+        let event = self.desktop_normalized_ingress(
+            id,
+            "seat-pointer",
+            device,
+            InputEvent::Pointer(PointerEvent::Leave {
+                device,
+                order: EventOrder(order),
+            }),
+        );
         self.routed_events.push((
             id,
             HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: InputEvent::Pointer(PointerEvent::Leave {
-                        device,
-                        order: EventOrder(self.desktop_input.order),
-                    }),
-                    clipboard_text: None,
-                }],
+                events: vec![event],
                 ..Default::default()
             },
             None,
@@ -814,16 +878,20 @@ impl InternalUiRuntime {
             state.order = state.order.wrapping_add(1);
             // Cancellation is ordered with the last device event, even if other
             // devices still have held buttons whose releases must be swallowed.
+            let order = state.order;
+            let event = self.desktop_normalized_ingress(
+                target,
+                source,
+                device,
+                InputEvent::DeviceRemoved {
+                    device,
+                    order: EventOrder(order),
+                },
+            );
             self.routed_events.push((
                 target,
                 HostBatch {
-                    events: vec![HostEvent::Normalized {
-                        input: InputEvent::DeviceRemoved {
-                            device,
-                            order: EventOrder(state.order),
-                        },
-                        clipboard_text: None,
-                    }],
+                    events: vec![event],
                     ..Default::default()
                 },
                 None,
@@ -938,13 +1006,11 @@ impl InternalUiRuntime {
         if starting && role == InternalSurfaceRole::Desktop {
             self.focus_surface(id);
         }
+        let event = self.desktop_normalized_ingress(id, source, device, InputEvent::Touch(input));
         self.step(
             id,
             HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: InputEvent::Touch(input),
-                    clipboard_text: None,
-                }],
+                events: vec![event],
                 ..Default::default()
             },
         );
@@ -1004,17 +1070,27 @@ impl InternalUiRuntime {
 
     fn dispatch_touch_cancel(&mut self, id: InternalSurfaceId, device: DeviceId, contact: TouchId) {
         self.desktop_input.order = self.desktop_input.order.wrapping_add(1);
+        let order = self.desktop_input.order;
+        let source = self
+            .desktop_input
+            .devices
+            .iter()
+            .find_map(|(source, candidate)| (*candidate == device).then(|| source.clone()))
+            .unwrap_or_else(|| format!("device-{}", device.0));
+        let event = self.desktop_normalized_ingress(
+            id,
+            &source,
+            device,
+            InputEvent::Touch(TouchEvent::Cancelled {
+                device,
+                contact,
+                order: EventOrder(order),
+            }),
+        );
         self.step(
             id,
             HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: InputEvent::Touch(TouchEvent::Cancelled {
-                        device,
-                        contact,
-                        order: EventOrder(self.desktop_input.order),
-                    }),
-                    clipboard_text: None,
-                }],
+                events: vec![event],
                 ..Default::default()
             },
         );
@@ -1168,13 +1244,11 @@ impl InternalUiRuntime {
         }
         // Snapshot modifiers with the event: reading them later during queue drain
         // could apply a newer key state to an earlier Ctrl/Shift-click.
+        let event = self.desktop_normalized_ingress(id, source, device, InputEvent::Pointer(event));
         self.routed_events.push((
             id,
             HostBatch {
-                events: vec![HostEvent::Normalized {
-                    input: InputEvent::Pointer(event),
-                    clipboard_text: None,
-                }],
+                events: vec![event],
                 ..Default::default()
             },
             Some(modifiers),

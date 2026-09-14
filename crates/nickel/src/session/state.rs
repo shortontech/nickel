@@ -6242,12 +6242,14 @@ impl NickelSession {
                 && batch.events.iter().all(|event| {
                     matches!(
                         event,
-                        nickel_ui::HostEvent::Normalized {
-                            input: nickel_input::InputEvent::Pointer(
-                                nickel_input::PointerEvent::Motion { .. }
-                            ),
-                            ..
-                        }
+                        nickel_ui::HostEvent::NormalizedIngress(
+                            nickel_ui::NormalizedInputEnvelope {
+                                input: nickel_input::InputEvent::Pointer(
+                                    nickel_input::PointerEvent::Motion { .. }
+                                ),
+                                ..
+                            }
+                        )
                     )
                 })
         });
