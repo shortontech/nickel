@@ -18,7 +18,7 @@ It does not mean that the path has been exercised in an installed Linux or Windo
 | Win32 low-level pointer hook | `WindowDragCoordinator` plus `WindowOperationReducer` | window lifetime/generation, source generation, initiating button, operation/acquisition | only matching source/button completes; injected/unrelated events cannot update/complete; missing release/native takeover cancel | migrated, native untested |
 | Gilrs controller reader | `nickel_input::gilrs`, `ControllerNormalizer`, `ControllerInput` | controller lifetime, backend/native identity, fingerprint, family, edge, time | focus fence suppresses held input; disconnect/neutral reset; drain bounded to 256 events/poll | migrated |
 | Unix session controller worker | `ControllerBroker` through local transport | host connection, lease, stream generation and event ID | revoke cutoff, transfer deadline, overflow reset, neutral barrier | migrated |
-| Windows session controller worker | bounded named-pipe transport plus `ControllerBroker` | same broker envelope and authenticated connection | disconnect/replacement resets stream; stale generations/leases rejected | migrated, native untested |
+| Windows session controller worker | nonblocking `server_windows::WindowsPipeServer`, `client_windows::AsyncControllerConnection`, then `ControllerBroker` | correlated bounded frames plus broker host/connection/lease/stream/event identity | client/server partial-I/O adapters never block admission; disconnect/replacement resets stream; stale generations/leases rejected | migrated, native untested |
 | Authenticated semantic/test input | session protocol, `session::test_input`, production hit testing/reducers | authenticated scope and semantic target | explicit press/release/cancel and lease teardown; no alternate reducer | intentional test boundary |
 | Remote pointer/keyboard/controller | remote-control admission and session adapters | lease/capability, source generation and execution identity | timeout, focus, disconnect, emergency stop, lock and revocation fence/cancel | migrated |
 | On-screen keyboard / input-method protocol | `session::on_screen_keyboard` and focused Smithay keyboard source | focus-bound auxiliary keyboard source and frame order | source cancellation releases only its own keys; unsupported text fails before partial delivery | migrated boundary |
@@ -31,11 +31,11 @@ Native types are expected only in these adapters. Application hosts consume `Inp
 
 | Consumer | Routing authority | Cancellation behavior |
 | --- | --- | --- |
-| `FocusedInputDispatcher` / `UiHost` | active widget identity and semantic-tree hit testing | focus loss clears capture/preedit/held state; handled disposition prevents fallback activation |
+| `FocusedInputDispatcher` / `UiHost` | active widget identity, semantic-tree hit testing and a shared default-activation prefix for pointer, keyboard and controller activation | focus loss clears capture/preedit/held state; handled disposition prevents duplicate message/fallback activation |
 | Shell, launcher, lock, screenshot, overlays, notifications, task switcher | shell-surface identity and production geometry | overlay dismissal, focus transfer, lock and teardown cancel owned gestures |
 | Settings, File, Gaze, Shapes, embedded Codex | per-host active widget and semantic target | focus loss/device removal; stale widget identity is not retargeted |
 | Wayland/XWayland clients | mapped window, native lifetime and mapping generation | source/resource/seat loss, unmap/destroy, lock, suspend and supersession terminate |
-| Internal surfaces/titlebars | internal generation, hit-test kind/subject, initiating button | removal, grab loss, lock/suspend and matching release terminate |
+| Internal surfaces/titlebars | internal generation, hit-test kind/subject, initiating button; normalized keyboard and admitted controller events enter the same host identity boundary | removal, grab loss, lock/suspend and matching release terminate; stale controller binding is rejected before host effects |
 | Windows foreign windows | `HWND` mapping lifetime and initiating source/button | takeover, failed apply, missing release or source loss terminate; no exclusive-native claim |
 | Controller hosts | connection + lease + stream generation | revoke/reset invalidates queued and held/repeat state; execution identity fences effects |
 
@@ -52,9 +52,9 @@ applied input, consumed tails, unrelated input and rejected transitions.
 | XDG client resize | XDG handler -> operation/resize grab | `Cooperative`; configure acknowledgement protocol-owned | migrated |
 | Titlebar and Super+pointer move | `session::input` -> move grab | `Enforced` | migrated |
 | Internal compositor-surface move | input -> internal move grab | `Enforced`; surface generation bound | migrated |
-| XWayland move/resize | XWayland handler -> shared grabs | `Enforced`; X11 configure/compensation adapter-owned | migrated; native untested |
+| XWayland move/resize | XWayland handler -> shared grabs and per-mapping `Settlement` | `Enforced`; client request is independent, tokenless configure notification has `Unknown` causality, and equal unknown evidence remains pending until its 750-tick deadline becomes `Unconfirmed` | migrated; native untested |
 | Windows foreign move/resize | `WindowDragCoordinator` | `ExternallyContested`; accepted/rejected apply and observable uncertainty | migrated core; native untested |
-| Temporary/no-output placement, restore placement, presentation | `GeometryAuthority` revisioned desired fields | owner/control/topology/revision-tagged requests and observations | migrated |
+| Temporary/no-output placement, internal/maximize restore, presentation | `GeometryAuthority` revisioned desired fields | owner/control/topology/revision-tagged requests and observations; internal restore checks the captured revision before write | migrated |
 | Renderer/layout projections and configure emission | platform/session adapters consume authority | projections, not independent desired-state writers | retained boundary |
 
 No inventoried production move/resize path owns a second ad-hoc admission state machine. Native grab
@@ -67,6 +67,11 @@ destroy, supersession, native takeover, unknown authority, acquisition failure a
 activation. Handoff retires the old binding, so its later release/disconnect is consumed. Security
 teardown uses `cancel_all`; lock/suspend also cancel Smithay and internal-UI touches, controller
 repeats, remote pointer and remote keyboard. Window teardown cancels before identity reuse.
+
+Cancellation effects now retain their `CompensationDecision`. Adapters execute `Conditional`
+compensation only when the recorded field revision is still operation-owned; `SkipSuperseded`,
+`SkipTargetGone`, and `SkipAuthorityLost` do not restore. Move, resize, internal move, XDG and
+XWayland wrappers carry the decision rather than inferring unconditional rollback.
 
 The vendor touch boundary handles `down -> frame -> cancel`: cancellation walks targets Smithay
 retains even when compositor pending-slot accounting is empty. Contacts changed in the completed
