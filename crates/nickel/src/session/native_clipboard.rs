@@ -270,17 +270,18 @@ impl super::state::NickelSession {
             role: "session-native-clipboard".into(),
             coordinate_meaning: "not-applicable".into(),
         };
-        let elapsed = self.start_time.elapsed().as_micros() as u64;
-        let ingress = |event: nickel_input::KeyEvent, clipboard_text| {
-            let order = event.order.0;
+        let pressed_admission = self
+            .internal_ui
+            .register_normalized_authority(&source, authority.clone());
+        let released_admission = self
+            .internal_ui
+            .register_normalized_authority(&source, authority);
+        let ingress = |event: nickel_input::KeyEvent, clipboard_text, admission| {
             nickel_ui::HostEvent::NormalizedIngress(nickel_ui::NormalizedInputEnvelope {
                 input: nickel_input::InputEvent::Key(event),
                 clipboard_text,
                 source: source.clone(),
-                admission: nickel_ui::NormalizedAdmissionBinding {
-                    order,
-                    monotonic_micros: elapsed,
-                },
+                admission,
                 recipient,
                 operation: None,
                 transform_generation: None,
@@ -294,12 +295,13 @@ impl super::state::NickelSession {
                 composition_recipient_epoch: Some(recipient_lease),
             })
         };
-        self.internal_ui
-            .register_normalized_authority(event.order.0, authority);
         self.internal_ui.step(
             id,
             nickel_ui::HostBatch {
-                events: vec![ingress(event, clipboard), ingress(released, None)],
+                events: vec![
+                    ingress(event, clipboard, pressed_admission),
+                    ingress(released, None, released_admission),
+                ],
                 ..Default::default()
             },
         );

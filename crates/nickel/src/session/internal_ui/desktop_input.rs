@@ -335,6 +335,105 @@ mod tests {
     }
 
     #[test]
+    fn native_clipboard_edges_with_one_input_order_receive_distinct_admission_authority() {
+        let mut runtime = InternalUiRuntime::default();
+        let recipient_id = desktop(&mut runtime);
+        let recipient = runtime.normalized_recipient(recipient_id);
+        let source = NormalizedSourceBinding {
+            seat: 1,
+            backend_stream: "session-native-clipboard".into(),
+            stream_generation: 1,
+            device_generation: 9,
+            identity_capability: "session-device-generation".into(),
+            reconnect_generation: 9,
+        };
+        let authority = NormalizedIngressAuthority {
+            source: source.clone(),
+            recipient,
+            transfer_cutoff: None,
+            host_connection_generation: recipient.lifetime,
+            operation_epoch: None,
+            transform_generation: None,
+            text_transaction: Some(41),
+            composition_recipient_epoch: Some(recipient.lease),
+            role: "session-native-clipboard".into(),
+            coordinate_meaning: "not-applicable".into(),
+        };
+        let pressed_admission = runtime.register_normalized_authority(&source, authority.clone());
+        let released_admission = runtime.register_normalized_authority(&source, authority);
+        assert!(released_admission.order > pressed_admission.order);
+        let mut other_source = source.clone();
+        other_source.backend_stream = "session:physical-keyboard".into();
+        assert_ne!(
+            NormalizedAuthorityKey::new(&source, pressed_admission),
+            NormalizedAuthorityKey::new(&other_source, pressed_admission),
+        );
+
+        let event = |edge, admission| {
+            HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+                input: InputEvent::Key(nickel_input::KeyEvent {
+                    device: DeviceId(9),
+                    order: EventOrder(41),
+                    repeat: false,
+                    physical: nickel_input::PhysicalKey::Code(nickel_input::KeyCode::KeyV),
+                    logical: nickel_input::LogicalKey::Character("v".into()),
+                    location: nickel_input::KeyLocation::Standard,
+                    edge,
+                    modifiers: ModifierState::from_sides([nickel_input::Modifier::ControlLeft]),
+                }),
+                clipboard_text: (edge == KeyEdge::Pressed).then(|| "paste".into()),
+                source: source.clone(),
+                admission,
+                recipient,
+                operation: None,
+                transform_generation: None,
+                text_transaction: Some(41),
+                transfer_cutoff: None,
+                broker_event_id: None,
+                host_connection_generation: recipient.lifetime,
+                operation_epoch: None,
+                role: "session-native-clipboard".into(),
+                coordinate_meaning: "not-applicable".into(),
+                composition_recipient_epoch: Some(recipient.lease),
+            })
+        };
+        runtime.step(
+            recipient_id,
+            HostBatch {
+                events: vec![
+                    event(KeyEdge::Pressed, pressed_admission),
+                    event(KeyEdge::Released, released_admission),
+                ],
+                ..Default::default()
+            },
+        );
+
+        let routed = runtime.drain_routed_events();
+        assert_eq!(routed.len(), 1);
+        assert_eq!(routed[0].1.normalized_authorities.len(), 2);
+        assert!(runtime.desktop_input.authorities.is_empty());
+        assert!(matches!(
+            &routed[0].1.events[..],
+            [
+                HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+                    input: InputEvent::Key(nickel_input::KeyEvent {
+                        edge: KeyEdge::Pressed,
+                        ..
+                    }),
+                    ..
+                }),
+                HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+                    input: InputEvent::Key(nickel_input::KeyEvent {
+                        edge: KeyEdge::Released,
+                        ..
+                    }),
+                    ..
+                })
+            ]
+        ));
+    }
+
+    #[test]
     fn panel_pointer_events_reach_the_generic_ui_route() {
         let mut runtime = InternalUiRuntime::default();
         let panel = runtime.insert_scene(
@@ -706,7 +805,7 @@ pub(super) struct DesktopInputState {
     order: u64,
     admission_order: u64,
     admission_epoch: Option<Instant>,
-    pub(crate) authorities: HashMap<u64, NormalizedIngressAuthority>,
+    pub(crate) authorities: HashMap<NormalizedAuthorityKey, NormalizedIngressAuthority>,
     last_device: Option<DeviceId>,
     pressed_keys: BTreeSet<(DeviceId, u32)>,
     // One logical seat pointer owns a drag, even when several physical devices
@@ -714,13 +813,47 @@ pub(super) struct DesktopInputState {
     capture: Option<(InternalSurfaceId, BTreeSet<(DeviceId, PointerButton)>)>,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct NormalizedAuthorityKey {
+    seat: u64,
+    backend_stream: String,
+    stream_generation: u64,
+    reconnect_generation: u64,
+    admission_order: u64,
+}
+
+impl NormalizedAuthorityKey {
+    pub(crate) fn new(
+        source: &NormalizedSourceBinding,
+        admission: NormalizedAdmissionBinding,
+    ) -> Self {
+        Self {
+            seat: source.seat,
+            backend_stream: source.backend_stream.clone(),
+            stream_generation: source.stream_generation,
+            reconnect_generation: source.reconnect_generation,
+            admission_order: admission.order,
+        }
+    }
+}
+
 impl InternalUiRuntime {
     pub(crate) fn register_normalized_authority(
         &mut self,
-        order: u64,
+        source: &NormalizedSourceBinding,
         authority: NormalizedIngressAuthority,
-    ) {
-        self.desktop_input.authorities.insert(order, authority);
+    ) -> NormalizedAdmissionBinding {
+        let state = &mut self.desktop_input;
+        let epoch = state.admission_epoch.get_or_insert_with(Instant::now);
+        state.admission_order = state.admission_order.wrapping_add(1).max(1);
+        let admission = NormalizedAdmissionBinding {
+            order: state.admission_order,
+            monotonic_micros: epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+        };
+        state
+            .authorities
+            .insert(NormalizedAuthorityKey::new(source, admission), authority);
+        admission
     }
 
     fn desktop_normalized_ingress(
@@ -731,11 +864,7 @@ impl InternalUiRuntime {
         input: InputEvent,
     ) -> HostEvent {
         let recipient_binding = self.normalized_recipient(recipient);
-        let state = &mut self.desktop_input;
-        let epoch = state.admission_epoch.get_or_insert_with(Instant::now);
         let generation = device.0;
-        state.admission_order = state.admission_order.wrapping_add(1);
-        let order = state.admission_order;
         let source_binding = NormalizedSourceBinding {
             seat: 1,
             backend_stream: format!("session:{source}"),
@@ -756,15 +885,12 @@ impl InternalUiRuntime {
             role: "session-internal-surface".into(),
             coordinate_meaning: "surface-logical".into(),
         };
-        state.authorities.insert(order, authority);
+        let admission = self.register_normalized_authority(&source_binding, authority);
         HostEvent::NormalizedIngress(NormalizedInputEnvelope {
             input,
             clipboard_text: None,
             source: source_binding,
-            admission: NormalizedAdmissionBinding {
-                order,
-                monotonic_micros: epoch.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            },
+            admission,
             recipient: recipient_binding,
             // This adapter does not own window operations, output transform
             // revisions, or text transactions. Absence is authoritative.

@@ -2238,13 +2238,19 @@ impl InternalUiRuntime {
                 {
                     return false;
                 }
-                if let Some(authority) = self
-                    .desktop_input
-                    .authorities
-                    .get(&envelope.admission.order)
+                if let Some(authority) =
+                    self.desktop_input
+                        .authorities
+                        .get(&desktop_input::NormalizedAuthorityKey::new(
+                            &envelope.source,
+                            envelope.admission,
+                        ))
                 {
                     batch.normalized_authorities.push(authority.clone());
-                    consumed_authorities.push(envelope.admission.order);
+                    consumed_authorities.push(desktop_input::NormalizedAuthorityKey::new(
+                        &envelope.source,
+                        envelope.admission,
+                    ));
                 } else {
                     return false;
                 }
@@ -2340,11 +2346,12 @@ impl InternalUiRuntime {
                 {
                     continue;
                 }
-                if let Some(authority) = self
-                    .desktop_input
-                    .authorities
-                    .remove(&envelope.admission.order)
-                {
+                if let Some(authority) = self.desktop_input.authorities.remove(
+                    &desktop_input::NormalizedAuthorityKey::new(
+                        &envelope.source,
+                        envelope.admission,
+                    ),
+                ) {
                     batch.normalized_authorities.push(authority);
                 }
             }
