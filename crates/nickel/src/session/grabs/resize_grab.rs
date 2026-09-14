@@ -190,13 +190,13 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         let compensate = self
             .operation
             .requests_conditional_compensation(&data.window_operations);
-        let mut cleared_by_compensation = false;
+        let mut compensation_configure = None;
         if compensate {
             let constraints = operation_geometry_constraints(&self.window);
             if let Some(token) = data.compensate_interactive_resize(&self.window, constraints) {
-                cleared_by_compensation = data
+                compensation_configure = data
                     .apply_authorized_interactive_resize(&self.window, token, false)
-                    .is_some();
+                    .flatten();
             }
         }
         data.finish_interactive_resize(&self.window);
@@ -204,11 +204,14 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             xdg.with_pending_state(|state| {
                 state.states.unset(xdg_toplevel::State::Resizing);
             });
-            if !cleared_by_compensation {
-                xdg.send_pending_configure();
-            }
+            let terminal_configure =
+                compensation_configure.or_else(|| xdg.send_pending_configure());
             ResizeSurfaceState::with(xdg.wl_surface(), |state| {
-                state.clear();
+                *state = ResizeSurfaceState::WaitingForLastCommit {
+                    edges: self.edges,
+                    initial_rect: self.initial_rect,
+                    terminal_configures: terminal_configure.into_iter().collect(),
+                };
             });
         }
     }
@@ -261,9 +264,8 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         handle.button(data, event);
 
         // The button is a button code as defined in the
-        if !handle.current_pressed().contains(&self.start_data.button)
-            && self.operation.complete(&mut data.window_operations)
-        {
+        if !handle.current_pressed().contains(&self.start_data.button) {
+            let geometry_authorized = self.operation.complete(&mut data.window_operations);
             // The initiating button released; free the seat before settlement.
             let desired = crate::session::shell_layout::Geometry {
                 x: self.last_window_location.x,
@@ -271,14 +273,21 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                 width: self.last_window_size.w,
                 height: self.last_window_size.h,
             };
-            let token = self.last_authorization.or_else(|| {
-                data.authorize_interactive_resize(
-                    &self.window,
-                    desired,
-                    operation_geometry_constraints(&self.window),
-                )
-            });
-            if self.window.x11_surface().is_some() {
+            let token = geometry_authorized
+                .then(|| self.last_authorization)
+                .flatten()
+                .or_else(|| {
+                    geometry_authorized
+                        .then(|| {
+                            data.authorize_interactive_resize(
+                                &self.window,
+                                desired,
+                                operation_geometry_constraints(&self.window),
+                            )
+                        })
+                        .flatten()
+                });
+            if geometry_authorized && self.window.x11_surface().is_some() {
                 data.record_x11_interactive_final(&self.window, desired);
             }
             data.finish_interactive_resize(&self.window);
@@ -286,12 +295,18 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
             handle.unset_grab(self, data, event.serial, event.time, true);
 
             if let Some(xdg) = self.window.toplevel() {
-                let final_configure = token
+                let authorized_configure = token
                     .and_then(|token| {
                         data.apply_authorized_interactive_resize(&self.window, token, false)
                     })
                     .flatten();
-                if let Some(final_configure) = final_configure {
+                let final_configure = authorized_configure.or_else(|| {
+                    xdg.with_pending_state(|state| {
+                        state.states.unset(xdg_toplevel::State::Resizing);
+                    });
+                    xdg.send_pending_configure()
+                });
+                if let Some(final_configure) = authorized_configure {
                     data.record_xdg_desired_geometry(
                         &self.window,
                         crate::session::shell_layout::Geometry {
@@ -307,7 +322,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                     *state = ResizeSurfaceState::WaitingForLastCommit {
                         edges: self.edges,
                         initial_rect: self.initial_rect,
-                        final_configure,
+                        terminal_configures: final_configure.into_iter().collect(),
                     };
                 });
             }
@@ -319,7 +334,7 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
 ///
 /// It is stored inside of WlSurface,
 /// and can be accessed using [`ResizeSurfaceState::with`]
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
 enum ResizeSurfaceState {
     #[default]
     Idle,
@@ -333,7 +348,7 @@ enum ResizeSurfaceState {
         edges: ResizeEdge,
         /// The initial window size and location.
         initial_rect: Rectangle<i32, Logical>,
-        final_configure: Option<smithay::utils::Serial>,
+        terminal_configures: Vec<smithay::utils::Serial>,
     },
 }
 
@@ -358,27 +373,43 @@ impl ResizeSurfaceState {
         &mut self,
         last_acked: Option<smithay::utils::Serial>,
     ) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
-        match *self {
+        match self {
             Self::Resizing {
                 edges,
                 initial_rect,
-            } => Some((edges, initial_rect)),
+            } => Some((*edges, *initial_rect)),
             Self::WaitingForLastCommit {
                 edges,
                 initial_rect,
-                final_configure,
+                terminal_configures,
             } => {
-                if final_configure.is_none_or(|final_configure| {
-                    last_acked.is_some_and(|acked| acked.is_no_older_than(&final_configure))
-                }) {
+                if last_acked.is_some_and(|acked| terminal_configures.contains(&acked)) {
+                    let result = Some((*edges, *initial_rect));
                     *self = Self::Idle;
+                    return result;
                 }
-
-                Some((edges, initial_rect))
+                Some((*edges, *initial_rect))
             }
             Self::Idle => None,
         }
     }
+}
+
+pub(crate) fn record_terminal_configure(surface: &WlSurface, serial: smithay::utils::Serial) {
+    ResizeSurfaceState::with(surface, |state| {
+        if let ResizeSurfaceState::WaitingForLastCommit {
+            terminal_configures,
+            ..
+        } = state
+        {
+            if terminal_configures.len() == 16 {
+                terminal_configures.remove(0);
+            }
+            if !terminal_configures.contains(&serial) {
+                terminal_configures.push(serial);
+            }
+        }
+    });
 }
 
 /// Should be called on `WlSurface::commit`
@@ -546,7 +577,7 @@ mod tests {
         let mut state = ResizeSurfaceState::WaitingForLastCommit {
             edges: ResizeEdge::LEFT,
             initial_rect: initial_rect(),
-            final_configure: Some(12_u32.into()),
+            terminal_configures: vec![12_u32.into()],
         };
 
         assert!(state.commit(Some(11_u32.into())).is_some());
@@ -557,16 +588,20 @@ mod tests {
     }
 
     #[test]
-    fn final_or_newer_configure_ack_finishes_settlement() {
-        for acknowledged in [12_u32, 13_u32] {
+    fn only_exact_recorded_terminal_configure_finishes_settlement() {
+        for (acknowledged, recorded, retired) in [
+            (12_u32, vec![12_u32.into()], true),
+            (13_u32, vec![12_u32.into()], false),
+            (13_u32, vec![12_u32.into(), 13_u32.into()], true),
+        ] {
             let mut state = ResizeSurfaceState::WaitingForLastCommit {
                 edges: ResizeEdge::TOP_LEFT,
                 initial_rect: initial_rect(),
-                final_configure: Some(12_u32.into()),
+                terminal_configures: recorded,
             };
 
             assert!(state.commit(Some(acknowledged.into())).is_some());
-            assert_eq!(state, ResizeSurfaceState::Idle);
+            assert_eq!(state == ResizeSurfaceState::Idle, retired);
         }
     }
 
@@ -580,7 +615,7 @@ mod tests {
             ResizeSurfaceState::WaitingForLastCommit {
                 edges: ResizeEdge::TOP,
                 initial_rect: initial_rect(),
-                final_configure: Some(12_u32.into()),
+                terminal_configures: vec![12_u32.into()],
             },
         ];
         for state in &mut states {
