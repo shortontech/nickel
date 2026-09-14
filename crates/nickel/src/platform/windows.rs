@@ -1443,6 +1443,7 @@ struct WindowDrag {
     issued_settlements: VecDeque<Settlement>,
     unknown_since: Option<u64>,
     last_observed: LogicalRect,
+    last_tokenless_observation_at: u64,
 }
 
 struct RetainedNativeSettlement {
@@ -1473,6 +1474,7 @@ const MAX_TERMINAL_SETTLEMENT_OUTCOMES: usize = 64;
 const MAX_ACTIVE_WINDOW_SETTLEMENTS: usize = 16;
 const MAX_CONTESTED_DRAG_DURATION_MS: u64 = 300_000;
 const MAX_UNKNOWN_SUSPENSION_MS: u64 = 250;
+const MAX_ISSUED_OBSERVATION_DEFERRAL_MS: u64 = 64;
 
 const fn contested_drag_within_bound(initiated_at: u64, now: u64) -> bool {
     now.saturating_sub(initiated_at) < MAX_CONTESTED_DRAG_DURATION_MS
@@ -1482,8 +1484,11 @@ fn unknown_suspension_within_bound(unknown_since: Option<u64>, now: u64) -> bool
     unknown_since.is_none_or(|since| now.saturating_sub(since) < MAX_UNKNOWN_SUSPENSION_MS)
 }
 
-fn should_observe_tokenless_geometry(active: &WindowDrag) -> bool {
-    active.issued_settlements.is_empty() || active.unknown_since.is_some()
+fn should_observe_tokenless_geometry(active: &WindowDrag, now: u64) -> bool {
+    active.issued_settlements.is_empty()
+        || active.unknown_since.is_some()
+        || now.saturating_sub(active.last_tokenless_observation_at)
+            >= MAX_ISSUED_OBSERVATION_DEFERRAL_MS
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1836,6 +1841,7 @@ impl WindowDragCoordinator {
             issued_settlements: VecDeque::new(),
             unknown_since: None,
             last_observed: logical_rect(admission.rectangle),
+            last_tokenless_observation_at: admission.time,
         });
         true
     }
@@ -1865,7 +1871,8 @@ impl WindowDragCoordinator {
             self.finish_active(active, ActiveSettlementExit::Failed);
             return Err(());
         }
-        let observation = if should_observe_tokenless_geometry(&active) {
+        let observation = if should_observe_tokenless_geometry(&active, time) {
+            active.last_tokenless_observation_at = time;
             observe_window_drag(&mut active, time, false)
         } else {
             // Issuance is evidence that Nickel still owns this write turn, but
@@ -2580,8 +2587,11 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let observation = coordinator
         .active
         .as_mut()
-        .filter(|active| should_observe_tokenless_geometry(active))
-        .map(|active| observe_window_drag(active, now, false));
+        .filter(|active| should_observe_tokenless_geometry(active, now))
+        .map(|active| {
+            active.last_tokenless_observation_at = now;
+            observe_window_drag(active, now, false)
+        });
     match observation {
         Some(Err(reason)) => {
             coordinator.cancel(reason);
@@ -5091,6 +5101,7 @@ mod tests {
                 width: 300,
                 height: 200,
             },
+            last_tokenless_observation_at: 0,
         }
     }
 
@@ -5207,16 +5218,45 @@ mod tests {
     }
 
     #[test]
-    fn production_reconcile_skips_unauthenticated_geometry_during_issued_write() {
+    fn production_reconcile_defers_but_never_blinds_issued_writes() {
         let mut drag = drag_with_pending_settlement(70);
-        assert!(!should_observe_tokenless_geometry(&drag));
+        for tick in [8, 16, 24, 32, 40, 48, 56] {
+            assert!(!should_observe_tokenless_geometry(&drag, tick));
+        }
+        assert!(should_observe_tokenless_geometry(
+            &drag,
+            super::MAX_ISSUED_OBSERVATION_DEFERRAL_MS
+        ));
 
         drag.unknown_since = Some(50);
-        assert!(should_observe_tokenless_geometry(&drag));
+        assert!(should_observe_tokenless_geometry(&drag, 51));
 
         drag.issued_settlements.clear();
         drag.unknown_since = None;
-        assert!(should_observe_tokenless_geometry(&drag));
+        assert!(should_observe_tokenless_geometry(&drag, 52));
+    }
+
+    #[test]
+    fn continuous_issued_writes_cannot_hide_foreign_programmatic_geometry() {
+        let mut drag = drag_with_pending_settlement(71);
+        let foreign = LogicalRect {
+            x: drag.last_observed.x + 90,
+            ..drag.last_observed
+        };
+
+        assert!(!should_observe_tokenless_geometry(&drag, 63));
+        assert!(should_observe_tokenless_geometry(&drag, 64));
+        drag.last_tokenless_observation_at = 64;
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, foreign, 64, false),
+            Ok(false)
+        );
+        assert_eq!(drag.unknown_since, Some(64));
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
+        assert!(!unknown_suspension_within_bound(
+            drag.unknown_since,
+            64 + super::MAX_UNKNOWN_SUSPENSION_MS
+        ));
     }
 
     #[test]
