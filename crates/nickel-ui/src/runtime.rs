@@ -294,6 +294,7 @@ impl SessionControllerSource {
                             ControllerHostResponse::Messages {
                                 lease_epoch,
                                 messages,
+                                execution_oracle,
                             },
                         ) => {
                             let revocation = messages.iter().find_map(|message| match message {
@@ -327,19 +328,33 @@ impl SessionControllerSource {
                                 })
                             } else {
                                 lease = lease_epoch;
-                                if let Some(current_lease) = lease.filter(|current| {
+                                if let Some((current_lease, oracle)) = lease
+                                    .filter(|current| {
                                     role_lease
                                         == Some(ControllerRoleLease::session(
                                             connection_generation.0,
                                             current.0,
                                         ))
-                                }) {
+                                    })
+                                    .zip(execution_oracle)
+                                    .filter(|(current, oracle)| {
+                                        oracle.lease_epoch == *current
+                                            && oracle.connection_generation
+                                                == connection_generation
+                                    })
+                                {
                                     for message in messages {
                                         let BrokerMessage::Deliver(delivery) = message else {
                                             continue;
                                         };
                                         if delivery.connection_generation != connection_generation
                                             || delivery.lease_epoch != current_lease
+                                            || delivery.stream_generation
+                                                != oracle.stream_generation
+                                            || delivery.payload.routing_epoch
+                                                != oracle.routing_epoch
+                                            || delivery.payload.surface_generation
+                                                != oracle.surface_generation
                                             || delivery.event_id.0 <= last_event.0
                                         {
                                             continue;
@@ -374,14 +389,14 @@ impl SessionControllerSource {
                                             controller_family_from_message(delivery.payload.family),
                                             binding,
                                             ControllerExecutionAuthority {
-                                                routing_epoch: delivery.payload.routing_epoch,
-                                                lease_epoch: current_lease.0,
-                                                connection_generation: connection_generation.0,
-                                                stream_generation: delivery.stream_generation.0,
+                                                routing_epoch: oracle.routing_epoch,
+                                                lease_epoch: oracle.lease_epoch.0,
+                                                connection_generation: oracle
+                                                    .connection_generation
+                                                    .0,
+                                                stream_generation: oracle.stream_generation.0,
                                                 cutoff: None,
-                                                surface_generation: delivery
-                                                    .payload
-                                                    .surface_generation,
+                                                surface_generation: oracle.surface_generation,
                                             },
                                         ));
                                     }
@@ -3439,6 +3454,12 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 let Some(host) = self.host.as_mut() else {
                     break;
                 };
+                // The session oracle is independent of the delivery, while native focus is
+                // sampled again at the actual dispatch boundary. A queued action therefore
+                // cannot survive retirement between poll and execution.
+                if admission.is_some() && !host.inspect().window_focused {
+                    continue;
+                }
                 if host.set_controller_family(family) {
                     self.scheduler.invalidate();
                 }
@@ -5933,7 +5954,7 @@ mod tests {
         let (acknowledged, acknowledgement) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             let mut buffer = vec![0; nickel_session_protocol::MAX_FRAME_BYTES];
-            for step in 0..4 {
+            for step in 0..5 {
                 let (length, peer) = server.recv_from(&mut buffer).unwrap();
                 let envelope: ClientEnvelope =
                     nickel_session_protocol::decode(&buffer[..length]).unwrap();
@@ -5950,8 +5971,41 @@ mod tests {
                         }
                     }
                     (2, Request::ControllerHost(ControllerHostRequest::Poll { .. })) => {
+                        // The action was queued for generation 10, but the compositor has already
+                        // retired that surface and reports generation 11.
+                        ControllerHostResponse::Messages {
+                            lease_epoch: Some(LeaseEpoch(4)),
+                            execution_oracle: Some(
+                                nickel_session_protocol::ControllerExecutionOracle {
+                                    routing_epoch: 8,
+                                    lease_epoch: LeaseEpoch(4),
+                                    connection_generation: ConnectionGeneration(2),
+                                    stream_generation: StreamGeneration(1),
+                                    surface_generation: Some(11),
+                                },
+                            ),
+                            messages: vec![BrokerMessage::Deliver(Delivery {
+                                event_id: EventId(6),
+                                connection_generation: ConnectionGeneration(2),
+                                lease_epoch: LeaseEpoch(4),
+                                stream_generation: StreamGeneration(1),
+                                payload: ControllerEnvelopePayload {
+                                    device_generation: 3,
+                                    action: Some(ControllerActionMessage::Confirm),
+                                    edge: InputState::Pressed,
+                                    repeat: false,
+                                    family: ControllerFamilyMessage::Xbox,
+                                    routing_epoch: 8,
+                                    evidence: None,
+                                    surface_generation: Some(10),
+                                },
+                            })],
+                        }
+                    }
+                    (3, Request::ControllerHost(ControllerHostRequest::Poll { .. })) => {
                         ControllerHostResponse::Messages {
                             lease_epoch: None,
+                            execution_oracle: None,
                             messages: vec![
                                 BrokerMessage::Deliver(Delivery {
                                     event_id: EventId(7),
@@ -5978,7 +6032,7 @@ mod tests {
                         }
                     }
                     (
-                        3,
+                        4,
                         Request::ControllerHost(ControllerHostRequest::AcknowledgeQuiescence {
                             connection_generation: ConnectionGeneration(2),
                             lease_epoch: LeaseEpoch(4),
@@ -5997,7 +6051,7 @@ mod tests {
                         peer.as_pathname().unwrap(),
                     )
                     .unwrap();
-                if step == 3 {
+                if step == 4 {
                     acknowledged.send(()).unwrap();
                 }
             }

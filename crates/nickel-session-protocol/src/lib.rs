@@ -652,6 +652,18 @@ pub enum ControllerHostRequest {
     },
 }
 
+/// Session-owned execution fence sampled from the compositor route when a host polls.
+/// Delivery payloads are not authority: the consumer must compare them with this independently
+/// sampled value immediately before dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ControllerExecutionOracle {
+    pub routing_epoch: u64,
+    pub lease_epoch: controller_broker::LeaseEpoch,
+    pub connection_generation: controller_broker::ConnectionGeneration,
+    pub stream_generation: controller_broker::StreamGeneration,
+    pub surface_generation: Option<u64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ControllerHostResponse {
@@ -670,6 +682,8 @@ pub enum ControllerHostResponse {
     Messages {
         lease_epoch: Option<controller_broker::LeaseEpoch>,
         messages: Vec<controller_broker::BrokerMessage<ControllerEnvelopePayload>>,
+        #[serde(default)]
+        execution_oracle: Option<ControllerExecutionOracle>,
     },
     Detached,
 }

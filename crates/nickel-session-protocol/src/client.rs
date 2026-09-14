@@ -161,6 +161,7 @@ pub struct ControllerConnection {
 pub struct ControllerPoll {
     pub lease_epoch: Option<LeaseEpoch>,
     pub messages: Vec<BrokerMessage<crate::ControllerEnvelopePayload>>,
+    pub execution_oracle: Option<crate::ControllerExecutionOracle>,
 }
 
 impl ControllerConnection {
@@ -240,9 +241,11 @@ impl ControllerConnection {
             ControllerHostResponse::Messages {
                 lease_epoch,
                 messages,
+                execution_oracle,
             } => Ok(ControllerPoll {
                 lease_epoch,
                 messages,
+                execution_oracle,
             }),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -439,6 +442,13 @@ mod tests {
                         }),
                     ) => ControllerHostResponse::Messages {
                         lease_epoch: Some(LeaseEpoch(7)),
+                        execution_oracle: Some(crate::ControllerExecutionOracle {
+                            routing_epoch: 11,
+                            lease_epoch: LeaseEpoch(7),
+                            connection_generation: ConnectionGeneration(3),
+                            stream_generation: crate::controller_broker::StreamGeneration(8),
+                            surface_generation: Some(12),
+                        }),
                         messages: vec![BrokerMessage::Deliver(
                             crate::controller_broker::Delivery {
                                 event_id: EventId(19),

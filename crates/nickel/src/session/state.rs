@@ -1775,14 +1775,15 @@ use nickel_session_protocol::controller_broker::{
 };
 use nickel_session_protocol::{
     ClientEnvelope, Command as SessionCommand, ControllerActionMessage, ControllerEnvelopePayload,
-    ControllerFamilyMessage, ControllerHostRequest, ControllerHostResponse, ErrorCode,
-    Event as SessionEvent, Geometry as ProtocolGeometry, OutputSnapshot, OutputTransform,
-    PreviewFrame as ProtocolPreview, Query, Request, SecureStorageState as ProtocolSecureStorage,
-    ServerEnvelope, ServerMessage, ShellBehaviorSetting, ShellBehaviorSnapshot,
-    ShellBehaviorTransaction, ShellBehaviorValue, ShellPopoverAnchor, ShellRole,
-    ShellSurfaceIdentity, ShellSurfaceSnapshot, Snapshot as SessionSnapshot, TestOutput,
-    WindowAction as ProtocolWindowAction, WindowId as ProtocolWindowId, WindowSnapshot,
-    WorkspaceId as ProtocolWorkspaceId, WorkspaceSnapshot, WorkspaceState, decode, encode,
+    ControllerExecutionOracle, ControllerFamilyMessage, ControllerHostRequest,
+    ControllerHostResponse, ErrorCode, Event as SessionEvent, Geometry as ProtocolGeometry,
+    OutputSnapshot, OutputTransform, PreviewFrame as ProtocolPreview, Query, Request,
+    SecureStorageState as ProtocolSecureStorage, ServerEnvelope, ServerMessage,
+    ShellBehaviorSetting, ShellBehaviorSnapshot, ShellBehaviorTransaction, ShellBehaviorValue,
+    ShellPopoverAnchor, ShellRole, ShellSurfaceIdentity, ShellSurfaceSnapshot,
+    Snapshot as SessionSnapshot, TestOutput, WindowAction as ProtocolWindowAction,
+    WindowId as ProtocolWindowId, WindowSnapshot, WorkspaceId as ProtocolWorkspaceId,
+    WorkspaceSnapshot, WorkspaceState, decode, encode,
 };
 use smithay::{
     desktop::{PopupManager, Space, Window, WindowSurfaceType, find_popup_root_surface},
@@ -5791,12 +5792,6 @@ impl NickelSession {
     }
 
     fn begin_controller_security_takeover(&mut self) {
-        let Some(lease) = self.controller_broker.active_lease() else {
-            return;
-        };
-        if lease.host == ControllerHostId(0) {
-            return;
-        }
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         let _ = self.controller_broker.security_takeover(
             ControllerHostId(0),
@@ -6052,6 +6047,7 @@ impl NickelSession {
                     return ServerMessage::ControllerHost(ControllerHostResponse::Messages {
                         lease_epoch: None,
                         messages: Vec::new(),
+                        execution_oracle: None,
                     });
                 }
                 let lease_epoch = self
@@ -6061,9 +6057,24 @@ impl NickelSession {
                         lease.host == host && lease.connection_generation == connection_generation
                     })
                     .map(|lease| lease.epoch);
+                let execution_oracle = lease_epoch.and_then(|lease_epoch| {
+                    let lease_binding = self.controller_external_lease_binding?;
+                    let route = self.refresh_controller_route();
+                    (lease_binding.host == host
+                        && lease_binding.connection == connection_generation
+                        && route.1.external_surface == Some(lease_binding.surface))
+                    .then_some(ControllerExecutionOracle {
+                        routing_epoch: route.0,
+                        lease_epoch,
+                        connection_generation,
+                        stream_generation: self.controller_broker.stream_generation(),
+                        surface_generation: Some(lease_binding.surface.0),
+                    })
+                });
                 ControllerHostResponse::Messages {
                     lease_epoch,
                     messages: self.controller_broker.drain(host, connection_generation),
+                    execution_oracle,
                 }
             }
             ControllerHostRequest::Poll { .. } => ControllerHostResponse::LeaseFailed,

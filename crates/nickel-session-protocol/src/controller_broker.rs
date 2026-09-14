@@ -467,6 +467,10 @@ impl<T> ControllerBroker<T> {
         self.active
     }
 
+    pub fn stream_generation(&self) -> StreamGeneration {
+        self.stream_generation
+    }
+
     pub fn is_attached(&self, host: HostId, connection: ConnectionGeneration) -> bool {
         self.connection_matches(host, connection)
     }

@@ -203,6 +203,7 @@ pub struct ControllerConnection {
 pub struct ControllerPoll {
     pub lease_epoch: Option<LeaseEpoch>,
     pub messages: Vec<BrokerMessage<crate::ControllerEnvelopePayload>>,
+    pub execution_oracle: Option<crate::ControllerExecutionOracle>,
 }
 
 impl ControllerConnection {
@@ -254,9 +255,11 @@ impl ControllerConnection {
             ControllerHostResponse::Messages {
                 lease_epoch,
                 messages,
+                execution_oracle,
             } => Ok(ControllerPoll {
                 lease_epoch,
                 messages,
+                execution_oracle,
             }),
             _ => Err(invalid_data("invalid controller poll response")),
         }
