@@ -118,8 +118,13 @@ impl CompositorHandler for NickelSession {
         if let Some(toplevel) = initial_configure {
             self.send_tracked_xdg_initial_configure(&toplevel);
         }
-        if let Some((window, acked)) = resize_grab::handle_commit(&mut self.space, surface) {
-            self.observe_xdg_geometry_commit(&window, acked);
+        if let Some((window, acked, anchor)) = resize_grab::handle_commit(&mut self.space, surface)
+        {
+            if self.observe_xdg_geometry_commit(&window, acked)
+                && let Some(anchor) = anchor
+            {
+                self.space.map_element(window, anchor, false);
+            }
         }
         if let Some(sender) = &self.buffer_commit_tx {
             let _ = sender.send(SurfaceBufferCommit {

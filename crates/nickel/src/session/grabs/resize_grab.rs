@@ -392,28 +392,15 @@ pub(crate) fn current_resize_edges(surface: &WlSurface) -> Option<ResizeEdge> {
     })
 }
 
-pub(crate) fn record_terminal_configure(surface: &WlSurface, serial: smithay::utils::Serial) {
-    ResizeSurfaceState::with(surface, |state| {
-        if let ResizeSurfaceState::WaitingForLastCommit {
-            terminal_configures,
-            ..
-        } = state
-        {
-            if terminal_configures.len() == 16 {
-                terminal_configures.remove(0);
-            }
-            if !terminal_configures.contains(&serial) {
-                terminal_configures.push(serial);
-            }
-        }
-    });
-}
-
 /// Should be called on `WlSurface::commit`
 pub fn handle_commit(
     space: &mut Space<Window>,
     surface: &WlSurface,
-) -> Option<(Window, Option<smithay::utils::Serial>)> {
+) -> Option<(
+    Window,
+    Option<smithay::utils::Serial>,
+    Option<Point<i32, Logical>>,
+)> {
     let window = space
         .elements()
         .find(|window| {
@@ -463,12 +450,8 @@ pub fn handle_commit(
         window_loc.y = new_y;
     }
 
-    if new_loc.x.is_some() || new_loc.y.is_some() {
-        // If TOP or LEFT side of the window got resized, we have to move it
-        space.map_element(window.clone(), window_loc, false);
-    }
-
-    Some((window, last_acked))
+    let anchor = (new_loc.x.is_some() || new_loc.y.is_some()).then_some(window_loc);
+    Some((window, last_acked, anchor))
 }
 
 #[cfg(test)]

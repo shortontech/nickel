@@ -464,3 +464,36 @@ fn x11_request_eviction_and_teardown_retain_terminal_outcomes() {
     assert!(retention.contains("self.x11_geometry_outcomes.pop_front()"));
     assert!(retention.contains("push_back((id, outcome))"));
 }
+
+#[test]
+fn xdg_resize_anchor_is_authorized_before_mapping_and_expiry_cleans_up() {
+    let root = workspace_root();
+    let compositor =
+        fs::read_to_string(root.join("crates/nickel/src/session/handlers/compositor.rs")).unwrap();
+    let commit = compositor
+        .split("resize_grab::handle_commit")
+        .nth(1)
+        .unwrap();
+    assert!(
+        commit.find("observe_xdg_geometry_commit").unwrap() < commit.find("map_element").unwrap()
+    );
+
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let incorporation = state
+        .split("pub(crate) fn record_xdg_configure_incorporation")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn send_tracked_xdg_configure")
+        .next()
+        .unwrap();
+    assert!(!incorporation.contains("record_terminal_configure"));
+    let settlement = state
+        .split("pub(crate) fn record_xdg_desired_geometry")
+        .nth(1)
+        .unwrap()
+        .split("pub(crate) fn observe_xdg_geometry_commit")
+        .next()
+        .unwrap();
+    assert!(settlement.contains("SettlementStatus::Unconfirmed"));
+    assert!(settlement.contains("cancel_geometry_window_operation"));
+}

@@ -10954,12 +10954,21 @@ impl NickelSession {
         let timer = self.event_loop_handle.insert_source(
             smithay::reexports::calloop::timer::Timer::from_duration(Duration::from_millis(750)),
             move |_, _, state| {
+                let mut expired = false;
                 if let Some(record) = state.xdg_geometry_settlements.get_mut(&id)
                     && record.settlement.request.id == request_id
                 {
                     record
                         .settlement
                         .expire(record.settlement.limits.deadline_tick);
+                    expired = record.settlement.status
+                        == nickel_core::geometry_authority::SettlementStatus::Unconfirmed;
+                }
+                if expired {
+                    state.cancel_geometry_window_operation(
+                        id,
+                        nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+                    );
                 }
                 smithay::reexports::calloop::timer::TimeoutAction::Drop
             },
@@ -10976,19 +10985,19 @@ impl NickelSession {
         &mut self,
         window: &Window,
         acked: Option<smithay::utils::Serial>,
-    ) {
+    ) -> bool {
         use nickel_core::geometry_authority::{CoordinateUnits, GeometryMeaning, TaggedGeometry};
         let Some(id) = self.window_geometry_authority_id(window) else {
-            return;
+            return false;
         };
         let topology_version = self
             .geometry_authorities
             .get(&id)
             .map_or(1, |authority| authority.topology_version);
         let Some(record) = self.xdg_geometry_settlements.get(&id) else {
-            return;
+            return false;
         };
-        let Some(acked) = acked else { return };
+        let Some(acked) = acked else { return false };
         let request_id = record.settlement.request.id;
         let configures = record.configures.iter().copied().collect::<Vec<_>>();
         let current_revisions = self
@@ -11009,7 +11018,7 @@ impl NickelSession {
             topology_version,
         };
         let Some(current_revisions) = current_revisions else {
-            return;
+            return false;
         };
         let Some(causality) = crate::session::grabs::resize_grab::xdg_commit_causality(
             &configures,
@@ -11017,7 +11026,7 @@ impl NickelSession {
             request_id,
             current_revisions,
         ) else {
-            return;
+            return false;
         };
         if let Some(authority) = self.geometry_authorities.get_mut(&id) {
             authority.observe(fact, causality);
@@ -11027,6 +11036,10 @@ impl NickelSession {
         {
             record.settlement.observe(fact, causality);
         }
+        matches!(
+            causality,
+            nickel_core::geometry_authority::ObservationCausality::Correlated(_)
+        )
     }
 
     /// Retain the desired fields actually incorporated by a later configure.
@@ -11058,12 +11071,6 @@ impl NickelSession {
             crate::session::grabs::resize_grab::current_resize_edges(surface.wl_surface())
         });
         record.configures.push_back((serial, revisions, edges));
-        if let Some(surface) = window.toplevel() {
-            crate::session::grabs::resize_grab::record_terminal_configure(
-                surface.wl_surface(),
-                serial,
-            );
-        }
     }
 
     pub(crate) fn send_tracked_xdg_configure(
