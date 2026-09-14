@@ -104,24 +104,6 @@ enum SessionControllerPhase {
 
 #[cfg(any(unix, windows))]
 impl SessionControllerSource {
-    fn recipient_binding(&self) -> Option<NormalizedRecipientBinding> {
-        match self {
-            Self::Attached {
-                connection_generation,
-                lease: Some(lease),
-                ..
-            } => Some(NormalizedRecipientBinding {
-                lease: lease.0,
-                lifetime: connection_generation.0,
-            }),
-            _ => None,
-        }
-    }
-
-    fn is_absent(&self) -> bool {
-        matches!(self, Self::Absent)
-    }
-
     const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
     fn discover() -> (
@@ -629,6 +611,51 @@ fn native_pointer_source_binding(
     NormalizedSourceBinding {
         seat: 0,
         backend_stream: "winit-pointer-seat-0".into(),
+        stream_generation,
+        device_generation,
+        identity_capability: "backend_generation".into(),
+        reconnect_generation: device_generation,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeInputClass {
+    Pointer,
+    KeyboardText,
+    Touch,
+    Window,
+}
+
+fn native_input_class(input: &nickel_input::InputEvent) -> NativeInputClass {
+    match input {
+        nickel_input::InputEvent::Pointer(_) => NativeInputClass::Pointer,
+        nickel_input::InputEvent::Key(_) | nickel_input::InputEvent::Text(_) => {
+            NativeInputClass::KeyboardText
+        }
+        nickel_input::InputEvent::Touch(_) => NativeInputClass::Touch,
+        nickel_input::InputEvent::FocusGained { .. }
+        | nickel_input::InputEvent::FocusLost { .. }
+        | nickel_input::InputEvent::DeviceRemoved { .. } => NativeInputClass::Window,
+    }
+}
+
+fn native_input_source_binding(
+    class: NativeInputClass,
+    stream_generation: u64,
+    device_generation: u64,
+) -> NormalizedSourceBinding {
+    if class == NativeInputClass::Pointer {
+        return native_pointer_source_binding(stream_generation, device_generation);
+    }
+    let backend_stream = match class {
+        NativeInputClass::KeyboardText => "winit-keyboard-seat-0",
+        NativeInputClass::Touch => "winit-touch-seat-0",
+        NativeInputClass::Window => "winit-window-seat-0",
+        NativeInputClass::Pointer => unreachable!(),
+    };
+    NormalizedSourceBinding {
+        seat: 0,
+        backend_stream: backend_stream.into(),
         stream_generation,
         device_generation,
         identity_capability: "backend_generation".into(),
@@ -3168,6 +3195,8 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     standalone_recipient: NormalizedRecipientBinding,
     native_pointer_recipient: NormalizedRecipientBinding,
     native_pointer_stream_generation: u64,
+    native_touch_recipient: NormalizedRecipientBinding,
+    native_touch_stream_generation: u64,
     native_stream_reset_pending: bool,
 }
 
@@ -3284,6 +3313,11 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 lifetime: native_host_generation,
             },
             native_pointer_stream_generation: native_host_generation,
+            native_touch_recipient: NormalizedRecipientBinding {
+                lease: 0,
+                lifetime: native_host_generation,
+            },
+            native_touch_stream_generation: native_host_generation,
             native_stream_reset_pending: false,
         }
     }
@@ -3348,38 +3382,36 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                         .max(1);
                     grant_native_ingress(&mut self.standalone_recipient, generation);
                     grant_native_ingress(&mut self.native_pointer_recipient, generation);
+                    grant_native_ingress(&mut self.native_touch_recipient, generation);
                 }
                 self.normalized_admission_order =
                     self.normalized_admission_order.wrapping_add(1).max(1);
                 let device_generation = input.device().map_or(0, |device| device.0);
-                #[cfg(any(unix, windows))]
-                let recipient = self.session_controller.recipient_binding().or_else(|| {
-                    self.session_controller
-                        .is_absent()
-                        .then_some(self.standalone_recipient)
-                });
-                #[cfg(any(unix, windows))]
-                let recipient_role = if self.session_controller.is_absent() {
-                    "standalone-window"
-                } else {
-                    "session-attached-window"
+                let class = native_input_class(&input);
+                let (recipient, stream_generation, recipient_role) = match class {
+                    NativeInputClass::Pointer => (
+                        self.native_pointer_recipient,
+                        self.native_pointer_stream_generation,
+                        "native-pointer-seat-0",
+                    ),
+                    NativeInputClass::Touch => (
+                        self.native_touch_recipient,
+                        self.native_touch_stream_generation,
+                        "native-touch-seat-0",
+                    ),
+                    NativeInputClass::KeyboardText => (
+                        self.standalone_recipient,
+                        self.native_host_generation,
+                        "native-keyboard-seat-0",
+                    ),
+                    NativeInputClass::Window => (
+                        self.standalone_recipient,
+                        self.native_host_generation,
+                        "native-window-seat-0",
+                    ),
                 };
-                #[cfg(not(any(unix, windows)))]
-                let recipient = Some(self.standalone_recipient);
-                #[cfg(not(any(unix, windows)))]
-                let recipient_role = "standalone-window";
-                let source = NormalizedSourceBinding {
-                    seat: 0,
-                    backend_stream: "winit".into(),
-                    stream_generation: self.native_host_generation,
-                    device_generation,
-                    identity_capability: "backend_generation".into(),
-                    reconnect_generation: device_generation,
-                };
-                let recipient = recipient.unwrap_or(NormalizedRecipientBinding {
-                    lease: 0,
-                    lifetime: 0,
-                });
+                let source =
+                    native_input_source_binding(class, stream_generation, device_generation);
                 let authority = NormalizedIngressAuthority {
                     source: source.clone(),
                     recipient,
@@ -3419,6 +3451,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 {
                     self.standalone_recipient.lease = 0;
                     self.native_pointer_recipient.lease = 0;
+                    self.native_touch_recipient.lease = 0;
                 }
             }
         }
@@ -4086,9 +4119,9 @@ mod tests {
         HostFailure, HostFailureStage, MessageEvidence, NormalizedAdmissionBinding,
         NormalizedInputEnvelope, NormalizedRecipientBinding, NormalizedSourceBinding,
         PresentScheduler, Shortcut, ShortcutOutcome, UiHost, ViewContext,
-        grant_native_ingress_if_focused, local_controller_poll_lease,
-        native_pointer_source_binding, queue_continuous_input, revoke_native_ingress,
-        transform_is_current, wait_duration,
+        grant_native_ingress_if_focused, local_controller_poll_lease, native_input_class,
+        native_input_source_binding, native_pointer_source_binding, queue_continuous_input,
+        revoke_native_ingress, transform_is_current, wait_duration,
     };
 
     #[test]
@@ -4549,6 +4582,51 @@ mod tests {
 
         assert_eq!(pointer.backend_stream, "winit-pointer-seat-0");
         assert_ne!(pointer, controller);
+    }
+
+    #[test]
+    fn pointer_button_edges_share_motion_gesture_authority() {
+        let motion = InputEvent::Pointer(PointerEvent::Motion {
+            device: DeviceId(7),
+            order: EventOrder(1),
+            position: Point { x: 2.0, y: 3.0 },
+            delta: None,
+        });
+        let button = InputEvent::Pointer(PointerEvent::Button {
+            device: DeviceId(7),
+            order: EventOrder(2),
+            button: PointerButton::Primary,
+            edge: KeyEdge::Released,
+            position: Some(Point { x: 2.0, y: 3.0 }),
+        });
+
+        let motion_class = native_input_class(&motion);
+        let button_class = native_input_class(&button);
+        assert_eq!(motion_class, button_class);
+        assert_eq!(
+            native_input_source_binding(motion_class, 11, 7),
+            native_input_source_binding(button_class, 11, 7)
+        );
+    }
+
+    #[test]
+    fn keyboard_text_and_touch_use_focused_authority_classes() {
+        let text = InputEvent::Text(TextEvent::Commit {
+            device: DeviceId(3),
+            order: EventOrder(1),
+            text: "x".into(),
+        });
+        let touch = InputEvent::Touch(TouchEvent::Cancelled {
+            device: DeviceId(4),
+            order: EventOrder(2),
+            contact: TouchId(1),
+        });
+
+        let text_source = native_input_source_binding(native_input_class(&text), 8, 3);
+        let touch_source = native_input_source_binding(native_input_class(&touch), 8, 4);
+        assert_eq!(text_source.backend_stream, "winit-keyboard-seat-0");
+        assert_eq!(touch_source.backend_stream, "winit-touch-seat-0");
+        assert_ne!(text_source.backend_stream, touch_source.backend_stream);
     }
 
     #[test]
