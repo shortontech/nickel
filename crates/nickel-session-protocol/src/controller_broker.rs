@@ -186,12 +186,16 @@ impl<T> ControllerBroker<T> {
         let rearming_destination = self
             .transfer
             .is_some_and(|transfer| transfer.to == host && transfer.destination_rearm_required);
+        let acknowledged_predecessor = self
+            .transfer
+            .is_some_and(|transfer| transfer.from.host == host && transfer.quiescent);
         if replaced.is_some()
             && (self.active.is_some_and(|lease| lease.host == host)
                 || self
                     .transfer
                     .is_some_and(|transfer| transfer.from.host == host || transfer.to == host))
             && !rearming_destination
+            && !acknowledged_predecessor
         {
             self.poison_executor(EventId(self.next_event));
             self.install_reset(EventId(self.next_event));
@@ -359,25 +363,47 @@ impl<T> ControllerBroker<T> {
         now_ms: u64,
         timeout_ms: u64,
     ) -> TransferStatus {
-        if let Some(transfer) = self.transfer {
+        if let Some(mut transfer) = self.transfer {
             if transfer.to == internal && transfer.to_connection == connection {
                 return TransferStatus::Pending {
                     requested_lease: transfer.requested_lease,
                     cutoff: transfer.cutoff,
                 };
             }
-            if !transfer.quiescent {
-                self.poisoned_predecessor = Some(PoisonedPredecessor {
-                    lease: transfer.from,
-                    cutoff: transfer.cutoff,
-                });
+            if !self.connection_matches(internal, connection) || timeout_ms == 0 {
+                return TransferStatus::Failed;
             }
-            self.install_reset(transfer.cutoff);
-            return TransferStatus::Failed;
+            let abandoned_host = transfer.to;
+            let abandoned_connection = transfer.to_connection;
+            let Some(requested_lease) = self.allocate_lease_epoch() else {
+                self.fail_closed();
+                return TransferStatus::Failed;
+            };
+            if !self.reset_transfer_destination(
+                abandoned_host,
+                abandoned_connection,
+                transfer.cutoff,
+            ) {
+                return TransferStatus::Failed;
+            }
+            transfer.to = internal;
+            transfer.to_connection = connection;
+            transfer.requested_lease = requested_lease;
+            transfer.deadline_ms = now_ms.saturating_add(timeout_ms);
+            transfer.destination_rearm_required = false;
+            self.transfer = Some(transfer);
+            return self.try_finish_transfer();
         }
         if self.recovery_destination.is_some() {
-            self.install_reset(EventId(self.next_event));
+            let recovery = self.recovery_destination.expect("checked above");
             if !self.exhausted && self.connection_matches(internal, connection) {
+                if !self.reset_transfer_destination(
+                    recovery.host,
+                    recovery.abandoned_connection,
+                    EventId(self.next_event),
+                ) {
+                    return TransferStatus::Failed;
+                }
                 self.recovery_destination = Some(RecoveryDestination {
                     host: internal,
                     abandoned_connection: connection,
@@ -575,14 +601,19 @@ impl<T> ControllerBroker<T> {
                 cutoff: transfer.cutoff,
             };
         }
-        self.poisoned_predecessor = Some(PoisonedPredecessor {
-            lease: transfer.from,
-            cutoff: transfer.cutoff,
-        });
+        if !transfer.quiescent {
+            self.poisoned_predecessor = Some(PoisonedPredecessor {
+                lease: transfer.from,
+                cutoff: transfer.cutoff,
+            });
+        }
         self.recovery_destination = Some(RecoveryDestination {
             host: transfer.to,
             abandoned_connection: transfer.to_connection,
         });
+        if !self.reset_transfer_destination(transfer.to, transfer.to_connection, transfer.cutoff) {
+            return TransferStatus::Failed;
+        }
         self.transfer = None;
         self.active = None;
         self.reset_barrier = true;
@@ -746,6 +777,35 @@ impl<T> ControllerBroker<T> {
             }
             host.outbox.push_back(message);
         }
+    }
+
+    /// Retire one abandoned transfer destination without touching the predecessor's revoke.
+    /// The connection binding keeps a replacement generation from consuming the stale reset.
+    fn reset_transfer_destination(
+        &mut self,
+        host: HostId,
+        connection: ConnectionGeneration,
+        through: EventId,
+    ) -> bool {
+        let Some(stream_generation) = self.stream_generation.0.checked_add(1) else {
+            self.stream_generation = StreamGeneration(u64::MAX);
+            self.fail_closed();
+            return false;
+        };
+        self.stream_generation = StreamGeneration(stream_generation);
+        let generation = self.stream_generation;
+        if let Some(destination) = self
+            .hosts
+            .get_mut(&host)
+            .filter(|destination| destination.connection == connection)
+        {
+            destination.outbox.clear();
+            destination.outbox.push_back(BrokerMessage::StreamReset {
+                stream_generation: generation,
+                through,
+            });
+        }
+        true
     }
 
     fn install_reset(&mut self, through: EventId) {
@@ -1066,7 +1126,7 @@ mod tests {
     }
 
     #[test]
-    fn security_takeover_retires_pending_external_lease_and_late_ack() {
+    fn security_takeover_retargets_without_erasing_predecessor_cutoff() {
         let mut broker = ControllerBroker::new(4);
         let internal = broker.attach(HostId(0));
         let external = broker.attach(HostId(1));
@@ -1079,24 +1139,107 @@ mod tests {
             panic!("external transfer must be pending")
         };
 
-        assert_eq!(
+        assert!(matches!(
             broker.security_takeover(HostId(0), internal, 1, 10),
-            TransferStatus::Failed
-        );
+            TransferStatus::Pending {
+                requested_lease: replacement,
+                cutoff: observed,
+            } if replacement != requested_lease && observed == cutoff
+        ));
         assert_eq!(broker.active_lease(), None);
         assert!(matches!(
             broker.ingest("late"),
-            IngressDisposition::RejectedResetBarrier { .. }
+            IngressDisposition::RejectedTransfer { .. }
         ));
-        assert_eq!(
+        assert!(matches!(
+            broker.drain(HostId(1), external).as_slice(),
+            [BrokerMessage::StreamReset { through, .. }] if *through == cutoff
+        ));
+        assert!(matches!(
+            broker.drain(HostId(0), internal).as_slice(),
+            [BrokerMessage::Revoke {
+                connection_generation,
+                lease_epoch,
+                cutoff: observed,
+            }] if *connection_generation == internal
+                && *lease_epoch == old.epoch
+                && *observed == cutoff
+        ));
+        assert!(matches!(
             broker.acknowledge_quiescence(HostId(0), internal, old.epoch, cutoff),
-            TransferStatus::Failed
-        );
-        assert!(broker.active_lease().is_none());
-        broker.set_neutral(true);
-        let protected = broker.grant(HostId(0), internal).unwrap();
-        assert_ne!(protected.epoch, requested_lease);
+            TransferStatus::Granted(Lease {
+                host: HostId(0),
+                connection_generation,
+                ..
+            }) if connection_generation == internal
+        ));
+        assert_ne!(broker.active_lease().unwrap().epoch, requested_lease);
         assert!(broker.grant(HostId(1), external).is_none());
+    }
+
+    #[test]
+    fn acknowledged_predecessor_reconnect_and_expiry_preserve_recovery() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let predecessor = broker.attach(HostId(1));
+        let stale_destination = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), predecessor).unwrap();
+        broker.set_neutral(false);
+        let TransferStatus::Pending { cutoff, .. } =
+            broker.begin_transfer(HostId(2), stale_destination, 10, 5)
+        else {
+            panic!("transfer must start");
+        };
+        assert!(matches!(
+            broker.acknowledge_quiescence(HostId(1), predecessor, old.epoch, cutoff),
+            TransferStatus::Pending { .. }
+        ));
+
+        let replacement_predecessor = broker.attach(HostId(1));
+        assert_ne!(replacement_predecessor, predecessor);
+        assert_eq!(broker.expire_transfer(15), TransferStatus::Failed);
+        assert!(matches!(
+            broker.drain(HostId(2), stale_destination).as_slice(),
+            [BrokerMessage::StreamReset { through, .. }] if *through == cutoff
+        ));
+        broker.set_neutral(true);
+        let fresh_destination = broker.attach(HostId(2));
+        assert!(matches!(
+            broker.begin_transfer(HostId(2), fresh_destination, 20, 5),
+            TransferStatus::Granted(Lease {
+                host: HostId(2),
+                connection_generation,
+                ..
+            }) if connection_generation == fresh_destination
+        ));
+    }
+
+    #[test]
+    fn transfer_timeout_notifies_only_destination_and_retains_revoke_evidence() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let predecessor = broker.attach(HostId(1));
+        let destination = broker.attach(HostId(2));
+        let old = broker.grant(HostId(1), predecessor).unwrap();
+        let TransferStatus::Pending { cutoff, .. } =
+            broker.begin_transfer(HostId(2), destination, 0, 10)
+        else {
+            panic!("transfer must start");
+        };
+
+        assert_eq!(broker.expire_transfer(10), TransferStatus::Failed);
+        assert!(matches!(
+            broker.drain(HostId(2), destination).as_slice(),
+            [BrokerMessage::StreamReset { through, .. }] if *through == cutoff
+        ));
+        assert!(matches!(
+            broker.drain(HostId(1), predecessor).as_slice(),
+            [BrokerMessage::Revoke {
+                connection_generation,
+                lease_epoch,
+                cutoff: observed,
+            }] if *connection_generation == predecessor
+                && *lease_epoch == old.epoch
+                && *observed == cutoff
+        ));
     }
 
     #[test]
