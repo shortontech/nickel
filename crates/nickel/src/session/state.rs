@@ -5015,32 +5015,45 @@ impl NickelSession {
                                         width: width as i32,
                                         height: height as i32,
                                     };
-                                    self.configure_window(&window, geometry);
-                                    if let Some(surface) = window.x11_surface() {
-                                        surface
-                                            .configure(Rectangle::new(
-                                                (x, y).into(),
-                                                (width as i32, height as i32).into(),
-                                            ))
-                                            .map_err(|error| {
-                                                format!("window configuration failed: {error}")
-                                            })?;
+                                    let placement = self
+                                        .try_authorize_desired_geometry(id, geometry)
+                                        .ok_or("window geometry authority denied bounds")?;
+                                    let hidden = self.minimized_windows.contains_key(&id)
+                                        || self.workspace_hidden_windows.contains_key(&id);
+                                    if hidden {
+                                        if !self.placement_is_authorized(id, placement) {
+                                            return Err("window geometry authority was superseded".into());
+                                        }
+                                        self.configure_window(&window, placement.desired);
+                                        if let Some(surface) = window.x11_surface() {
+                                            self.bind_x11_geometry_request(
+                                                id,
+                                                placement.desired,
+                                                placement.revision,
+                                            )
+                                            .ok_or("window geometry request was superseded")?;
+                                            surface
+                                                .configure(Rectangle::new(
+                                                    (placement.desired.x, placement.desired.y).into(),
+                                                    (placement.desired.width, placement.desired.height).into(),
+                                                ))
+                                                .map_err(|error| format!("window configuration failed: {error}"))?;
+                                        }
+                                    } else if !self.apply_authorized_complete_window_geometry(
+                                        window.clone(),
+                                        id,
+                                        placement,
+                                        false,
+                                    ) {
+                                        return Err("window geometry effect was denied".into());
                                     }
-                                    if let Some((_, location)) = self.minimized_windows.get_mut(&id)
-                                    {
+                                    if let Some((_, location)) = self.minimized_windows.get_mut(&id) {
                                         *location = (x, y).into();
                                     } else if let Some((_, location)) =
                                         self.workspace_hidden_windows.get_mut(&id)
                                     {
                                         *location = (x, y).into();
-                                    } else {
-                                        self.map_compositor_moved_window(
-                                            window,
-                                            (x, y).into(),
-                                            false,
-                                        );
                                     }
-                                    self.record_desired_geometry(id, geometry);
                                     self.notify_protocol_snapshot();
                                     self.display_handle.flush_clients().map_err(|error| {
                                         format!("window configuration flush failed: {error}")
@@ -10475,14 +10488,22 @@ impl NickelSession {
         let desired = placement.desired;
         if let Some(surface) = window.x11_surface()
             && self.x11_windows.contains_key(&surface.window_id())
-            && surface
+        {
+            if self
+                .bind_x11_geometry_request(id, desired, placement.revision)
+                .is_none()
+            {
+                return false;
+            }
+            if surface
                 .configure(Rectangle::new(
                     (desired.x, desired.y).into(),
                     (desired.width, desired.height).into(),
                 ))
                 .is_err()
-        {
-            return false;
+            {
+                return false;
+            }
         }
         let xdg_surface = window.toplevel().cloned();
         if let Some(surface) = xdg_surface.as_ref() {

@@ -405,3 +405,22 @@ fn x11_notify_correlation_and_drag_deadline_are_bounded() {
     assert!(binding.contains("now.saturating_add(10_000)"));
     assert!(binding.contains("settlement.request.placement = desired"));
 }
+
+#[test]
+fn remote_set_bounds_authorizes_exact_geometry_before_effects() {
+    let root = workspace_root();
+    let state = fs::read_to_string(root.join("crates/nickel/src/session/state.rs")).unwrap();
+    let action = state
+        .split("WindowAction::SetBounds {")
+        .nth(2)
+        .unwrap()
+        .split("WindowAction::Activate")
+        .next()
+        .unwrap();
+    let authorize = action.find("try_authorize_desired_geometry").unwrap();
+    let xdg = action.find("self.configure_window").unwrap();
+    let x11 = action.find(".configure(Rectangle::new").unwrap();
+    assert!(authorize < xdg && authorize < x11);
+    assert!(action.contains("apply_authorized_complete_window_geometry"));
+    assert!(!action.contains("record_desired_geometry(id, geometry)"));
+}
