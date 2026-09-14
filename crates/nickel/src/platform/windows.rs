@@ -1533,6 +1533,25 @@ struct WindowDragAdmission {
 }
 
 impl WindowDragCoordinator {
+    fn expire_unknown_suspension(&mut self, now: u64) -> bool {
+        let expired = self
+            .active
+            .as_ref()
+            .is_some_and(|active| !unknown_suspension_within_bound(active.unknown_since, now));
+        if !expired {
+            return false;
+        }
+        let active = self
+            .active
+            .take()
+            .expect("expired suspension has an active drag");
+        let _ = self
+            .reducer
+            .cancel(active.operation, CancellationReason::AuthorityUnknown);
+        self.finish_active(active, ActiveSettlementExit::Unconfirmed);
+        true
+    }
+
     fn record_terminal_active_settlements(&mut self, active: &mut WindowDrag) {
         let mut pending = VecDeque::with_capacity(active.issued_settlements.len());
         while let Some(settlement) = active.issued_settlements.pop_front() {
@@ -1798,10 +1817,8 @@ impl WindowDragCoordinator {
             return Err(());
         }
         if !unknown_suspension_within_bound(active.unknown_since, time) {
-            let _ = self
-                .reducer
-                .cancel(active.operation, CancellationReason::AuthorityUnknown);
-            self.finish_active(active, ActiveSettlementExit::Unconfirmed);
+            self.active = Some(active);
+            self.expire_unknown_suspension(time);
             return Err(());
         }
         if !self.lifetime_is_current(active.lifetime)
@@ -2465,10 +2482,14 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let Ok(mut coordinator) = WINDOW_DRAG.lock() else {
         return;
     };
+    let now = unsafe { GetTickCount64() };
+    if coordinator.expire_unknown_suspension(now) {
+        return;
+    }
     let observation = coordinator
         .active
         .as_mut()
-        .map(|active| observe_window_drag(active, unsafe { GetTickCount64() }, false));
+        .map(|active| observe_window_drag(active, now, false));
     match observation {
         Some(Err(reason)) => {
             coordinator.cancel(reason);
@@ -2477,7 +2498,7 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
         Some(Ok(false)) => return,
         _ => {}
     }
-    coordinator.observe_retained_settlement(unsafe { GetTickCount64() });
+    coordinator.observe_retained_settlement(now);
     let Some(active) = coordinator.active.as_ref() else {
         return;
     };
@@ -2591,6 +2612,9 @@ fn classify_window_drag_observation(
         // Win32 provides no request token in geometry observations. Once such an observation is
         // actually received, stop writing until authority is explicitly restored or the bounded
         // suspension terminates. Equality and arrival order are not treated as correlation.
+        operation
+            .authority
+            .observe(fact, ObservationCausality::Unknown);
         operation.unknown_since.get_or_insert(now);
         return Ok(false);
     }
@@ -5048,6 +5072,7 @@ mod tests {
             classify_window_drag_observation(&mut drag, observed, 249, false),
             Ok(false)
         );
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
         assert!(!drag.issued_settlements.is_empty());
         assert_eq!(
             classify_window_drag_observation(&mut drag, observed, 250, false),
@@ -5087,6 +5112,27 @@ mod tests {
             Some(20),
             20 + super::MAX_UNKNOWN_SUSPENSION_MS
         ));
+    }
+
+    #[test]
+    fn reconcile_timer_expires_unknown_drag_without_another_pointer_update() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut drag = drag_with_pending_settlement(62);
+        drag.unknown_since = Some(10);
+        let lifetime = drag.lifetime;
+        coordinator.active = Some(drag);
+
+        assert!(!coordinator.expire_unknown_suspension(10 + super::MAX_UNKNOWN_SUSPENSION_MS - 1));
+        assert!(coordinator.expire_unknown_suspension(10 + super::MAX_UNKNOWN_SUSPENSION_MS));
+
+        assert!(coordinator.active.is_none());
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key: (lifetime, NativeRequestId(62)),
+                status: SettlementStatus::Unconfirmed,
+            })
+        );
     }
 
     #[test]
