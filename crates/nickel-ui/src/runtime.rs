@@ -2956,6 +2956,24 @@ mod tests {
     }
 
     #[derive(Default)]
+    struct CrossInputApplication {
+        invoked: Vec<&'static str>,
+    }
+
+    impl Application for CrossInputApplication {
+        type Message = &'static str;
+
+        fn update(&mut self, message: Self::Message) {
+            self.invoked.push(message);
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Container::new()
+                .children([Button::new("A", "A").id("a"), Button::new("B", "B").id("b")])
+        }
+    }
+
+    #[derive(Default)]
     struct ResponsiveApplication;
 
     impl Application for ResponsiveApplication {
@@ -3739,6 +3757,35 @@ mod tests {
         let activation = controller.handle_controller_action(ControllerAction::Confirm);
         assert_eq!(activation.messages.len(), 1);
         assert_eq!(activation.messages[0].type_name, "()");
+    }
+
+    #[test]
+    fn pointer_retargets_the_current_widget_after_controller_navigation() {
+        let mut host = UiHost::new(CrossInputApplication::default(), 320, 200);
+        host.handle_event(UiEvent::ControllerDown);
+        let a = host
+            .inspect()
+            .controller_target
+            .expect("controller selects A");
+        assert!(a.as_str().ends_with("/a"));
+
+        let b = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.id.as_str().ends_with("/b"))
+            .expect("B is in the production semantic tree");
+        let point = crate::Point {
+            x: b.bounds.origin.x + b.bounds.size.width / 2.0,
+            y: b.bounds.origin.y + b.bounds.size.height / 2.0,
+        };
+        host.handle_event(UiEvent::PointerPressed(point));
+        host.handle_event(UiEvent::PointerReleased(point));
+
+        let inspection = host.inspect();
+        assert_eq!(inspection.keyboard_focus.as_ref(), Some(&b.id));
+        assert_eq!(inspection.controller_target.as_ref(), Some(&b.id));
+        host.handle_event(UiEvent::ControllerActivate);
+        assert_eq!(host.application().invoked, vec!["B", "B"]);
     }
 
     #[test]

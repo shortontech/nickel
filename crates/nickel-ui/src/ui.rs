@@ -308,6 +308,17 @@ pub struct EventOutcome<Message> {
     pub messages: Vec<Message>,
     pub clipboard_text: Option<String>,
     pub invalidation: Invalidation,
+    pub disposition: EventDisposition,
+}
+
+/// Whether a semantic transition consumed the admitted input. Consumption is
+/// deliberately independent of visual or application-state changes.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum EventDisposition {
+    Handled,
+    #[default]
+    Unhandled,
+    Rejected(&'static str),
 }
 
 impl<Message> Default for EventOutcome<Message> {
@@ -316,6 +327,7 @@ impl<Message> Default for EventOutcome<Message> {
             messages: Vec::new(),
             clipboard_text: None,
             invalidation: Invalidation::None,
+            disposition: EventDisposition::Unhandled,
         }
     }
 }

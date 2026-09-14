@@ -443,6 +443,15 @@ impl UiStateStore {
         replace_if_changed(&mut self.navigation.focused, id, Invalidation::Paint)
     }
 
+    pub(crate) fn set_pointer_focus(&mut self, id: Option<UiId>) -> Invalidation {
+        let reconcile_controller = self.navigation.controller_selected.is_some();
+        let mut invalidation = self.set_focus(id.clone());
+        if reconcile_controller {
+            invalidation = invalidation.merge(self.navigation.set_controller_selected(id));
+        }
+        invalidation
+    }
+
     pub fn focus_generation(&self) -> u64 {
         self.focus_generation
     }
@@ -480,6 +489,12 @@ impl UiStateStore {
 
     pub fn focused(&self) -> Option<&UiId> {
         self.navigation.focused.as_ref()
+    }
+
+    /// The authoritative widget target. Keyboard and active controller
+    /// projections are reconciled to this target by production transitions.
+    pub fn current_target(&self) -> Option<&UiId> {
+        self.focused()
     }
 
     pub fn hovered(&self) -> Option<&UiId> {

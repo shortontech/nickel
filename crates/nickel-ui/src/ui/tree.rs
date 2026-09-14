@@ -1877,6 +1877,7 @@ impl<Message: Clone> UiFrame<Message> {
             messages,
             clipboard_text: None,
             invalidation,
+            disposition: crate::EventDisposition::Handled,
         })
     }
 
@@ -1962,6 +1963,7 @@ impl<Message: Clone> UiFrame<Message> {
             messages: vec![message],
             clipboard_text: None,
             invalidation: Invalidation::None,
+            disposition: crate::EventDisposition::Handled,
         })
     }
 
@@ -2595,6 +2597,7 @@ impl<Message: Clone> UiFrame<Message> {
                         messages: outcome.messages,
                         clipboard_text: outcome.clipboard_text,
                         invalidation: invalidation.merge(autoscroll).merge(Invalidation::Paint),
+                        disposition: crate::EventDisposition::Handled,
                     };
                 }
                 if let Some(id) = state.captured().cloned()
@@ -2682,7 +2685,7 @@ impl<Message: Clone> UiFrame<Message> {
                         };
                         state.set_scrollbar_grab_offset(grab_offset);
                         state
-                            .set_focus(Some(scroll.id.clone()))
+                            .set_pointer_focus(Some(scroll.id.clone()))
                             .merge(state.set_pressed(Some(id.clone())))
                             .merge(state.set_capture(Some(id)))
                             .merge(Invalidation::Paint)
@@ -2738,12 +2741,13 @@ impl<Message: Clone> UiFrame<Message> {
                             .merge(state.set_pressed(Some(region_id.clone())))
                             .merge(state.set_capture(Some(region_id)))
                             .merge(Invalidation::Paint),
+                        disposition: crate::EventDisposition::Handled,
                     };
                 }
                 let id = self.id_at(point).cloned();
                 let mut invalidation = state
                     .clear_document_selection()
-                    .merge(state.set_focus(id.clone()))
+                    .merge(state.set_pointer_focus(id.clone()))
                     .merge(state.set_pressed(id.clone()))
                     .merge(state.set_capture(id.clone()));
                 if let Some(id) = id.as_ref()
@@ -2783,18 +2787,17 @@ impl<Message: Clone> UiFrame<Message> {
                 let activates = state
                     .captured()
                     .is_some_and(|captured| released == Some(captured));
-                let text_command_invalidation = if activates {
+                let text_command = if activates {
                     released
                         .and_then(|target| self.activate_text_command(state, target, &mut outcome))
-                        .unwrap_or(Invalidation::None)
                 } else {
-                    Invalidation::None
+                    None
                 };
                 let primary_overlay_invalidation = activates
                     .then(|| released.and_then(|target| self.open_primary_overlay(state, target)))
                     .flatten();
                 if activates
-                    && text_command_invalidation == Invalidation::None
+                    && text_command.is_none()
                     && primary_overlay_invalidation.is_none()
                     && let Some(message) = self.message_at_owned(point)
                 {
@@ -2839,7 +2842,10 @@ impl<Message: Clone> UiFrame<Message> {
                     .merge(dropdown_invalidation)
                     .merge(option_invalidation)
                     .merge(primary_overlay_invalidation.unwrap_or(Invalidation::None))
-                    .merge(text_command_invalidation);
+                    .merge(text_command.unwrap_or(Invalidation::None));
+                if activates {
+                    outcome.disposition = crate::EventDisposition::Handled;
+                }
                 if overlay_action {
                     invalidation.merge(state.dismiss_overlay(crate::DismissReason::Action))
                 } else {
@@ -3145,6 +3151,7 @@ impl<Message: Clone> UiFrame<Message> {
                             messages: outcome.messages,
                             invalidation,
                             clipboard_text: None,
+                            disposition: crate::EventDisposition::Handled,
                         };
                     }
                     // A scroll owner can also be a navigation waypoint. Confirm
@@ -3161,6 +3168,7 @@ impl<Message: Clone> UiFrame<Message> {
                             messages: outcome.messages,
                             invalidation: state.navigation_mut().set_controller_editing(true),
                             clipboard_text: None,
+                            disposition: crate::EventDisposition::Handled,
                         };
                     }
                     if node.navigation_scope.is_some() {
@@ -3177,6 +3185,7 @@ impl<Message: Clone> UiFrame<Message> {
                             messages: outcome.messages,
                             invalidation: invalidation.merge(dropdown_invalidation),
                             clipboard_text: None,
+                            disposition: crate::EventDisposition::Handled,
                         };
                     }
                 }

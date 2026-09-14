@@ -4475,6 +4475,7 @@ fn horizontal_overflow_policy_scrolls_and_clips_on_its_own_axis() {
             messages: Vec::new(),
             clipboard_text: None,
             invalidation: Invalidation::Layout,
+            ..EventOutcome::default()
         }
     );
     let scrolled = build(&mut state);
