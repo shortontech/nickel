@@ -2655,6 +2655,7 @@ pub struct NickelSession {
     controller_role_lease: Option<ControllerRoleLease>,
     controller_role_security_epoch: u64,
     controller_external_lease_binding: Option<ExternalControllerLeaseBinding>,
+    controller_ingress_recovery: Option<(ControllerHostId, ControllerConnectionGeneration)>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
     /// Local AT-SPI adapters for trusted indicators. These are keyed by the
@@ -5804,6 +5805,7 @@ impl NickelSession {
     }
 
     fn begin_controller_security_takeover(&mut self) {
+        self.controller_ingress_recovery = None;
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         let _ = self.controller_broker.security_takeover(
             ControllerHostId(0),
@@ -5901,10 +5903,16 @@ impl NickelSession {
             }
         }
         self.controller_broker.set_neutral(neutral);
+        if neutral && let Some((host, connection)) = self.controller_ingress_recovery.take() {
+            let _ = self.controller_broker.grant(host, connection);
+        }
     }
 
     pub(crate) fn handle_controller_ingress_overflow(&mut self) {
-        self.controller_broker.reset_ingress();
+        self.controller_ingress_recovery = self
+            .controller_broker
+            .reset_ingress()
+            .map(|lease| (lease.host, lease.connection_generation));
         tracing::error!(
             "native controller ingress overflow installed controller stream reset barrier"
         );
@@ -7577,6 +7585,7 @@ impl NickelSession {
             controller_role_lease: None,
             controller_role_security_epoch: 0,
             controller_external_lease_binding: None,
+            controller_ingress_recovery: None,
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
             remote_indicator_accessibility_wake,

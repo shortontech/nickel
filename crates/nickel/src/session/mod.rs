@@ -36,7 +36,7 @@ use std::{
     process::Command,
     sync::{
         Arc,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -60,24 +60,34 @@ pub use state::NickelSession;
 struct NativeControllerBatch {
     events: Vec<nickel_ui::ControllerEnvelope>,
     neutral: bool,
+    ingress_generation: u64,
 }
 
 const NATIVE_CONTROLLER_INGRESS_CAPACITY: usize = 8;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeControllerPublish {
+    Sent,
+    Overflow,
+    Disconnected,
+}
+
 fn publish_native_controller_batch(
     sender: &smithay::reexports::calloop::channel::SyncSender<NativeControllerBatch>,
-    overflowed: &AtomicBool,
+    ingress_generation: &AtomicU64,
     batch: NativeControllerBatch,
-) -> bool {
+) -> NativeControllerPublish {
     use std::sync::mpsc::TrySendError;
 
     match sender.try_send(batch) {
-        Ok(()) => true,
+        Ok(()) => NativeControllerPublish::Sent,
         Err(TrySendError::Full(_)) => {
-            overflowed.store(true, Ordering::Release);
-            true
+            let _ = ingress_generation.fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                value.checked_add(1)
+            });
+            NativeControllerPublish::Overflow
         }
-        Err(TrySendError::Disconnected(_)) => false,
+        Err(TrySendError::Disconnected(_)) => NativeControllerPublish::Disconnected,
     }
 }
 
@@ -89,6 +99,18 @@ fn should_publish_native_controller_batch(
     let transitioned = neutral != *last_neutral;
     *last_neutral = neutral;
     !events.is_empty() || transitioned
+}
+
+fn admit_native_controller_generation(
+    batch_generation: u64,
+    published_generation: u64,
+    accepted_generation: &mut u64,
+) -> (bool, bool) {
+    let overflowed = published_generation > *accepted_generation;
+    if overflowed {
+        *accepted_generation = published_generation;
+    }
+    (overflowed, batch_generation >= *accepted_generation)
 }
 
 pub fn run() -> Result<(), Box<dyn std::error::Error>> {
@@ -207,18 +229,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let controller_overflowed = Arc::new(AtomicBool::new(false));
+    let controller_ingress_generation = Arc::new(AtomicU64::new(1));
     let (controller_changed, controller_events) =
         smithay::reexports::calloop::channel::sync_channel::<NativeControllerBatch>(
             NATIVE_CONTROLLER_INGRESS_CAPACITY,
         );
-    let event_loop_controller_overflowed = Arc::clone(&controller_overflowed);
+    let event_loop_controller_generation = Arc::clone(&controller_ingress_generation);
+    let mut accepted_controller_generation = 1;
     event_loop
         .handle()
         .insert_source(controller_events, move |event, _, state| {
             if let smithay::reexports::calloop::channel::Event::Msg(batch) = event {
-                if event_loop_controller_overflowed.swap(false, Ordering::AcqRel) {
+                let current_generation = event_loop_controller_generation.load(Ordering::Acquire);
+                let (overflowed, admitted) = admit_native_controller_generation(
+                    batch.ingress_generation,
+                    current_generation,
+                    &mut accepted_controller_generation,
+                );
+                if overflowed {
                     state.handle_controller_ingress_overflow();
+                }
+                if !admitted {
+                    return;
                 }
                 state.handle_brokered_controller_batch(batch.events, batch.neutral);
             }
@@ -228,18 +260,28 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         .spawn(move || {
             let mut controller = nickel_ui::ControllerInput::new();
             let mut last_neutral = true;
+            let mut force_observation = false;
             loop {
                 let events = controller.wait_global_envelopes(Duration::from_secs(1));
                 let neutral = !controller.held_input();
-                if !should_publish_native_controller_batch(&events, neutral, &mut last_neutral) {
+                if !force_observation
+                    && !should_publish_native_controller_batch(&events, neutral, &mut last_neutral)
+                {
                     continue;
                 }
-                if !publish_native_controller_batch(
+                let ingress_generation = controller_ingress_generation.load(Ordering::Acquire);
+                match publish_native_controller_batch(
                     &controller_changed,
-                    &controller_overflowed,
-                    NativeControllerBatch { events, neutral },
+                    &controller_ingress_generation,
+                    NativeControllerBatch {
+                        events,
+                        neutral,
+                        ingress_generation,
+                    },
                 ) {
-                    return;
+                    NativeControllerPublish::Sent => force_observation = false,
+                    NativeControllerPublish::Overflow => force_observation = true,
+                    NativeControllerPublish::Disconnected => return,
                 }
             }
         })?;
@@ -407,7 +449,7 @@ mod tests {
     use std::{
         sync::{
             Arc,
-            atomic::{AtomicBool, Ordering},
+            atomic::{AtomicBool, AtomicU64, Ordering},
             mpsc,
         },
         thread,
@@ -415,7 +457,8 @@ mod tests {
     };
 
     use super::{
-        NativeControllerBatch, TEST_CONTROL_ENVIRONMENT, USER_SESSION_ENVIRONMENT,
+        NativeControllerBatch, NativeControllerPublish, TEST_CONTROL_ENVIRONMENT,
+        USER_SESSION_ENVIRONMENT, admit_native_controller_generation,
         publish_native_controller_batch, secure_storage_required, secure_storage_startup_timed_out,
         should_publish_native_controller_batch, test_control_allowed,
         wait_for_secure_storage_start,
@@ -424,26 +467,53 @@ mod tests {
     #[test]
     fn native_controller_ingress_is_bounded_and_latches_overflow() {
         let (sender, receiver) = smithay::reexports::calloop::channel::sync_channel(1);
-        let overflowed = AtomicBool::new(false);
-        assert!(publish_native_controller_batch(
-            &sender,
-            &overflowed,
-            NativeControllerBatch {
-                events: Vec::new(),
-                neutral: false,
-            },
-        ));
-        assert!(publish_native_controller_batch(
-            &sender,
-            &overflowed,
-            NativeControllerBatch {
-                events: Vec::new(),
-                neutral: true,
-            },
-        ));
-        assert!(overflowed.load(Ordering::Acquire));
+        let generation = AtomicU64::new(1);
+        assert_eq!(
+            publish_native_controller_batch(
+                &sender,
+                &generation,
+                NativeControllerBatch {
+                    events: Vec::new(),
+                    neutral: false,
+                    ingress_generation: 1,
+                },
+            ),
+            NativeControllerPublish::Sent
+        );
+        assert_eq!(
+            publish_native_controller_batch(
+                &sender,
+                &generation,
+                NativeControllerBatch {
+                    events: Vec::new(),
+                    neutral: true,
+                    ingress_generation: 1,
+                },
+            ),
+            NativeControllerPublish::Overflow
+        );
+        assert_eq!(generation.load(Ordering::Acquire), 2);
         assert!(receiver.try_recv().is_ok());
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn stale_pre_overflow_neutral_is_discarded_before_fresh_generation_recovers() {
+        let mut accepted = 1;
+        assert_eq!(
+            admit_native_controller_generation(1, 2, &mut accepted),
+            (true, false)
+        );
+        // Another retained neutral observation from the old queue cannot clear the barrier.
+        assert_eq!(
+            admit_native_controller_generation(1, 2, &mut accepted),
+            (false, false)
+        );
+        // Only an observation published after overflow enters the state machine.
+        assert_eq!(
+            admit_native_controller_generation(2, 2, &mut accepted),
+            (false, true)
+        );
     }
 
     #[test]

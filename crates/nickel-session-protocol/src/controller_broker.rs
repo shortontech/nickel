@@ -392,10 +392,15 @@ impl<T> ControllerBroker<T> {
     /// Retire all delivery after an upstream bounded ingress overflow. The dropped native batch
     /// may contain release edges, so authority cannot survive and delivery stays behind the reset
     /// barrier until native neutral is observed and a lease is granted again.
-    pub fn reset_ingress(&mut self) {
-        if !self.exhausted {
-            self.install_reset(EventId(self.next_event));
+    pub fn reset_ingress(&mut self) -> Option<Lease> {
+        if self.exhausted {
+            return None;
         }
+        let recoverable = (self.transfer.is_none() && self.poisoned_predecessor.is_none())
+            .then_some(self.active)
+            .flatten();
+        self.install_reset(EventId(self.next_event));
+        recoverable
     }
 
     pub fn expire_transfer(&mut self, now_ms: u64) -> TransferStatus {
@@ -849,7 +854,7 @@ mod tests {
         broker.grant(HostId(1), connection).unwrap();
         broker.ingest(1);
 
-        broker.reset_ingress();
+        let recoverable = broker.reset_ingress();
 
         assert!(broker.active_lease().is_none());
         assert!(matches!(
@@ -865,7 +870,12 @@ mod tests {
         ));
         assert!(broker.grant(HostId(1), connection).is_none());
         broker.set_neutral(true);
-        assert!(broker.grant(HostId(1), connection).is_some());
+        let recoverable = recoverable.unwrap();
+        assert!(
+            broker
+                .grant(recoverable.host, recoverable.connection_generation)
+                .is_some()
+        );
     }
 
     #[test]
