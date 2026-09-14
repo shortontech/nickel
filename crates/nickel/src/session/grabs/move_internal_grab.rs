@@ -1,5 +1,5 @@
 use crate::session::{
-    NickelSession, focus::PointerFocusTarget, grabs::move_grab::WindowMoveOperation,
+    NickelSession, focus::PointerFocusTarget, grabs::move_grab::WindowPointerOperation,
 };
 use nickel_core::window_operation::CancellationReason;
 use nickel_core::window_operation::WindowId as OperationWindowId;
@@ -13,7 +13,7 @@ pub struct MoveInternalSurfaceGrab {
     pub start_data: GrabStartData<NickelSession>,
     pub surface: InternalSurfaceId,
     pub initial_location: Point<i32, Logical>,
-    pub operation: WindowMoveOperation,
+    pub operation: WindowPointerOperation,
 }
 
 pub(crate) fn operation_window(surface: InternalSurfaceId) -> OperationWindowId {

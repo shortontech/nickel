@@ -13713,7 +13713,7 @@ mod protocol_tests {
             1.0,
         );
         let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
-        let operation = crate::session::grabs::move_grab::WindowMoveOperation::begin(
+        let operation = crate::session::grabs::move_grab::WindowPointerOperation::begin(
             &mut session.window_operations,
             nickel_core::window_operation::BeginRequest {
                 seat: nickel_core::window_operation::SeatId::new(1),

@@ -32,7 +32,7 @@ use smithay::{
 use crate::session::{
     grabs::{
         MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
-        move_grab::WindowMoveOperation, move_internal_grab::operation_window,
+        move_grab::WindowPointerOperation, move_internal_grab::operation_window,
     },
     state::NickelSession,
     window_frame::{self, FramePart},
@@ -262,7 +262,7 @@ impl NickelSession {
         window: &smithay::desktop::Window,
         button: u32,
         serial: smithay::utils::Serial,
-    ) -> Result<Option<WindowMoveOperation>, ()> {
+    ) -> Result<Option<WindowPointerOperation>, ()> {
         if window.toplevel().is_none() {
             return Ok(None);
         }
@@ -272,7 +272,7 @@ impl NickelSession {
             .ok_or(())?;
         let registry_id = self.surface_windows.get(&surface.id()).copied().ok_or(())?;
         let origin = Self::compositor_pointer_binding(button, serial).ok_or(())?;
-        WindowMoveOperation::begin(
+        WindowPointerOperation::begin(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
@@ -296,9 +296,9 @@ impl NickelSession {
         surface: nickel_ui::InternalSurfaceId,
         button: u32,
         serial: smithay::utils::Serial,
-    ) -> Option<WindowMoveOperation> {
+    ) -> Option<WindowPointerOperation> {
         let identity = surface.snapshot_token();
-        WindowMoveOperation::begin(
+        WindowPointerOperation::begin(
             &mut self.window_operations,
             BeginRequest {
                 seat: SeatId::new(1),
