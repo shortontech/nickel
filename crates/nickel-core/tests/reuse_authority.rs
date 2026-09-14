@@ -360,7 +360,7 @@ fn interactive_x11_effects_bind_bounded_requests_before_native_writes() {
         .split("pub(crate) fn x11_has_pending_issued_request")
         .next()
         .unwrap();
-    assert!(binding.contains("settlement.request.placement = desired"));
+    assert!(binding.contains("x11_issued_geometry_requests.entry(id)"));
 }
 
 #[test]
@@ -394,7 +394,8 @@ fn x11_notify_stays_unknown_and_drag_deadline_is_bounded() {
     assert!(causality.contains("ObservationCausality::Unknown"));
     assert!(!causality.contains("settlement.request.placement == observed"));
     assert!(!causality.contains("ObservationCausality::Correlated"));
-    assert!(causality.find("settlement.observe").unwrap() < causality.find("return;").unwrap());
+    assert!(causality.contains("authority.observe("));
+    assert!(causality.contains("ledger.back_mut()"));
 
     let binding = state
         .split("fn bind_x11_geometry_request")
@@ -403,9 +404,9 @@ fn x11_notify_stays_unknown_and_drag_deadline_is_bounded() {
         .split("pub(crate) fn x11_has_pending_issued_request")
         .next()
         .unwrap();
-    assert!(binding.contains("now.saturating_add(750).min(overall)"));
     assert!(binding.contains("now.saturating_add(10_000)"));
-    assert!(binding.contains("settlement.request.placement = desired"));
+    assert!(binding.contains("ledger.push_back(settlement)"));
+    assert!(!binding.contains("settlement.request.placement = desired"));
 }
 
 #[test]
