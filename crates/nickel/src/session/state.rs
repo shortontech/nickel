@@ -10499,6 +10499,12 @@ impl NickelSession {
             record.configures.pop_front();
         }
         record.configures.push_back((serial, revisions));
+        if let Some(surface) = window.toplevel() {
+            crate::session::grabs::resize_grab::record_terminal_configure(
+                surface.wl_surface(),
+                serial,
+            );
+        }
     }
 
     pub(crate) fn record_x11_client_desired_geometry(
