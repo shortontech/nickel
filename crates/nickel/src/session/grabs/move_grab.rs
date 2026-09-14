@@ -158,6 +158,20 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
                 .is_none_or(|operation| operation.complete(&mut data.window_operations))
         {
             // The initiating button released and the shared reducer committed.
+            if self.window.x11_surface().is_some()
+                && let Some(location) = data.space.element_location(&self.window)
+            {
+                let size = self.window.geometry().size;
+                data.record_x11_interactive_final(
+                    &self.window,
+                    crate::session::shell_layout::Geometry {
+                        x: location.x,
+                        y: location.y,
+                        width: size.w.max(1),
+                        height: size.h.max(1),
+                    },
+                );
+            }
             handle.unset_grab(self, data, event.serial, event.time, true);
         }
     }

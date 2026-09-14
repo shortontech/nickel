@@ -63,6 +63,16 @@ const XWAYLAND_RESTART_DELAY: Duration = Duration::from_secs(1);
 const DEFAULT_X11_WIDTH: i32 = 800;
 const DEFAULT_X11_HEIGHT: i32 = 600;
 
+fn x11_client_request_causality() -> nickel_core::geometry_authority::ObservationCausality {
+    nickel_core::geometry_authority::ObservationCausality::Independent
+}
+
+fn x11_configure_notify_causality() -> nickel_core::geometry_authority::ObservationCausality {
+    // X11 configure notifications contain no Nickel request token. Geometry
+    // equality and arrival order are deliberately not accepted as evidence.
+    nickel_core::geometry_authority::ObservationCausality::Unknown
+}
+
 fn admit_managed_x11_window(
     windows: &mut crate::session::window_registry::WindowRegistry,
 ) -> Option<WindowId> {
@@ -488,8 +498,24 @@ impl XwmHandler for NickelSession {
             result = ?geometry,
             "diagnostic: X11 configure accepted"
         );
+        let registry_id = self.x11_window_id(&window);
+        let settlement_request = registry_id.map(|id| {
+            let desired = shell_layout::Geometry {
+                x: geometry.loc.x,
+                y: geometry.loc.y,
+                width: geometry.size.w,
+                height: geometry.size.h,
+            };
+            self.record_x11_client_desired_geometry(id, desired, x11_client_request_causality())
+        });
         if let Err(error) = window.configure(geometry) {
             tracing::warn!(?error, window = window.window_id(), "X11 configure failed");
+            if let (Some(id), Some(request)) = (registry_id, settlement_request)
+                && let Some(settlement) = self.x11_geometry_settlements.get_mut(&id)
+                && settlement.request.id == request
+            {
+                settlement.fail();
+            }
         }
         if let Some(mapped) = self.x11_window(&window) {
             self.space.map_element(mapped, geometry.loc, false);
@@ -507,6 +533,18 @@ impl XwmHandler for NickelSession {
         if let Some(mapped) = self.x11_window(&window) {
             self.space.map_element(mapped, geometry.loc, false);
             self.request_output_redraw();
+        }
+        if let Some(id) = self.x11_window_id(&window) {
+            self.observe_x11_geometry(
+                id,
+                shell_layout::Geometry {
+                    x: geometry.loc.x,
+                    y: geometry.loc.y,
+                    width: geometry.size.w,
+                    height: geometry.size.h,
+                },
+                x11_configure_notify_causality(),
+            );
         }
     }
 
@@ -898,6 +936,7 @@ impl NickelSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nickel_core::geometry_authority::ObservationCausality;
     use smithay::reexports::{
         calloop::EventLoop,
         wayland_server::{Display, protocol::wl_surface::WlSurface},
@@ -912,6 +951,67 @@ mod tests {
         thread,
         time::Duration,
     };
+
+    #[test]
+    fn client_request_is_independent_but_notification_without_token_is_unknown() {
+        assert_eq!(
+            x11_client_request_causality(),
+            ObservationCausality::Independent
+        );
+        assert_eq!(
+            x11_configure_notify_causality(),
+            ObservationCausality::Unknown
+        );
+    }
+
+    #[test]
+    fn equal_unknown_notification_stays_pending_until_absolute_deadline() {
+        use nickel_core::{
+            geometry::LogicalRect,
+            geometry_authority::{
+                CoordinateUnits, DesiredRevisions, GeometryMeaning, GeometryRevision,
+                NativeRequest, NativeRequestId, Settlement, SettlementLimits, SettlementStatus,
+                TaggedGeometry,
+            },
+        };
+        let placement = LogicalRect {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        let revisions = DesiredRevisions {
+            placement: GeometryRevision::INITIAL,
+            presentation: GeometryRevision::INITIAL,
+            restore_placement: GeometryRevision::INITIAL,
+        };
+        let mut settlement = Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(7),
+                mapping_generation: 4,
+                desired: revisions,
+                placement,
+            },
+            SettlementLimits {
+                deadline_tick: 750,
+                max_corrections: 1,
+            },
+        );
+        settlement.observe(
+            TaggedGeometry {
+                rect: placement,
+                meaning: GeometryMeaning::CanonicalManagedBounds,
+                units: CoordinateUnits::CanonicalLogical,
+                topology_version: 1,
+            },
+            x11_configure_notify_causality(),
+        );
+
+        assert_eq!(settlement.status, SettlementStatus::Pending);
+        settlement.expire(750);
+        assert_eq!(settlement.status, SettlementStatus::Unconfirmed);
+        assert_eq!(settlement.limits.max_corrections, 1);
+    }
 
     struct FocusClient {
         compositor: Option<wl_compositor::WlCompositor>,

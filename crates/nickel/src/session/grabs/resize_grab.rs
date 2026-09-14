@@ -273,6 +273,24 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                 .is_none_or(|operation| operation.complete(&mut data.window_operations))
         {
             // The initiating button released; free the seat before settlement.
+            if self.window.x11_surface().is_some() {
+                let mut location = self.initial_rect.loc;
+                if self.edges.contains(ResizeEdge::LEFT) {
+                    location.x += self.initial_rect.size.w - self.last_window_size.w;
+                }
+                if self.edges.contains(ResizeEdge::TOP) {
+                    location.y += self.initial_rect.size.h - self.last_window_size.h;
+                }
+                data.record_x11_interactive_final(
+                    &self.window,
+                    crate::session::shell_layout::Geometry {
+                        x: location.x,
+                        y: location.y,
+                        width: self.last_window_size.w,
+                        height: self.last_window_size.h,
+                    },
+                );
+            }
             self.terminal = true;
             handle.unset_grab(self, data, event.serial, event.time, true);
 
