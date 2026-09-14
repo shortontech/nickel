@@ -389,6 +389,15 @@ impl<T> ControllerBroker<T> {
         None
     }
 
+    /// Retire all delivery after an upstream bounded ingress overflow. The dropped native batch
+    /// may contain release edges, so authority cannot survive and delivery stays behind the reset
+    /// barrier until native neutral is observed and a lease is granted again.
+    pub fn reset_ingress(&mut self) {
+        if !self.exhausted {
+            self.install_reset(EventId(self.next_event));
+        }
+    }
+
     pub fn expire_transfer(&mut self, now_ms: u64) -> TransferStatus {
         let Some(transfer) = self.transfer else {
             return TransferStatus::Failed;
@@ -830,6 +839,32 @@ mod tests {
         ));
         assert!(broker.grant(HostId(1), connection).is_none());
         assert!(broker.set_neutral(true).is_none());
+        assert!(broker.grant(HostId(1), connection).is_some());
+    }
+
+    #[test]
+    fn upstream_ingress_overflow_retires_authority_until_neutral_and_regrant() {
+        let mut broker = ControllerBroker::new(4);
+        let connection = broker.attach(HostId(1));
+        broker.grant(HostId(1), connection).unwrap();
+        broker.ingest(1);
+
+        broker.reset_ingress();
+
+        assert!(broker.active_lease().is_none());
+        assert!(matches!(
+            broker.drain(HostId(1), connection).as_slice(),
+            [BrokerMessage::StreamReset {
+                through: EventId(1),
+                ..
+            }]
+        ));
+        assert!(matches!(
+            broker.ingest(2),
+            IngressDisposition::RejectedResetBarrier { .. }
+        ));
+        assert!(broker.grant(HostId(1), connection).is_none());
+        broker.set_neutral(true);
         assert!(broker.grant(HostId(1), connection).is_some());
     }
 

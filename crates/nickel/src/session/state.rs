@@ -5894,6 +5894,13 @@ impl NickelSession {
         self.controller_broker.set_neutral(neutral);
     }
 
+    pub(crate) fn handle_controller_ingress_overflow(&mut self) {
+        self.controller_broker.reset_ingress();
+        tracing::error!(
+            "native controller ingress overflow installed controller stream reset barrier"
+        );
+    }
+
     fn dispatch_brokered_controller(
         &mut self,
         delivery: nickel_session_protocol::controller_broker::Delivery<ControllerEnvelopePayload>,
