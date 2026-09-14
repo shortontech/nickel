@@ -2,9 +2,60 @@ use std::{
     any::Any,
     error::Error,
     num::NonZeroU32,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
+
+static NEXT_LOCAL_CONTROLLER_LEASE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControllerDiscoveryMode {
+    Standalone,
+    Session,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ControllerRole {
+    Local,
+    Session,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ControllerRoleLease {
+    role: ControllerRole,
+    owner_generation: u64,
+    generation: u64,
+}
+
+impl ControllerRoleLease {
+    fn local() -> Self {
+        Self {
+            role: ControllerRole::Local,
+            owner_generation: 0,
+            generation: NEXT_LOCAL_CONTROLLER_LEASE.fetch_add(1, Ordering::Relaxed),
+        }
+    }
+
+    const fn session(owner_generation: u64, generation: u64) -> Self {
+        Self {
+            role: ControllerRole::Session,
+            owner_generation,
+            generation,
+        }
+    }
+}
+
+fn local_controller_poll_lease(
+    mode: ControllerDiscoveryMode,
+    lease: Option<ControllerRoleLease>,
+) -> Option<ControllerRoleLease> {
+    lease.filter(|lease| {
+        mode == ControllerDiscoveryMode::Standalone && lease.role == ControllerRole::Local
+    })
+}
 
 use winit::{
     application::ApplicationHandler,
@@ -34,6 +85,7 @@ enum SessionControllerSource {
         connection: nickel_session_protocol::client::AsyncControllerConnection,
         connection_generation: nickel_session_protocol::controller_broker::ConnectionGeneration,
         lease: Option<nickel_session_protocol::controller_broker::LeaseEpoch>,
+        role_lease: Option<ControllerRoleLease>,
         last_event: nickel_session_protocol::controller_broker::EventId,
         phase: SessionControllerPhase,
     },
@@ -53,15 +105,32 @@ enum SessionControllerPhase {
 impl SessionControllerSource {
     const RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
-    fn discover() -> (Option<ControllerInput>, Self) {
+    fn discover() -> (
+        ControllerDiscoveryMode,
+        Option<ControllerInput>,
+        Option<ControllerRoleLease>,
+        Self,
+    ) {
         use nickel_session_protocol::client::AsyncControllerConnection;
 
         match AsyncControllerConnection::begin_from_environment(Duration::from_millis(100)) {
-            Ok(None) => (Some(ControllerInput::new()), Self::Absent),
-            Ok(Some(connection)) => (None, Self::Connecting { connection }),
+            Ok(None) => (
+                ControllerDiscoveryMode::Standalone,
+                Some(ControllerInput::new()),
+                Some(ControllerRoleLease::local()),
+                Self::Absent,
+            ),
+            Ok(Some(connection)) => (
+                ControllerDiscoveryMode::Session,
+                None,
+                None,
+                Self::Connecting { connection },
+            ),
             Err(error) => {
                 tracing::warn!(%error, "advertised session controller connection failed closed");
                 (
+                    ControllerDiscoveryMode::Session,
+                    None,
                     None,
                     Self::Retrying {
                         next_attempt: Instant::now() + Self::RETRY_INTERVAL,
@@ -123,6 +192,7 @@ impl SessionControllerSource {
                                 connection,
                                 connection_generation,
                                 lease: None,
+                                role_lease: None,
                                 last_event: nickel_session_protocol::controller_broker::EventId(0),
                                 phase: SessionControllerPhase::Lease,
                             },
@@ -140,6 +210,7 @@ impl SessionControllerSource {
                 mut connection,
                 connection_generation,
                 mut lease,
+                mut role_lease,
                 mut last_event,
                 phase,
             } => match connection.receive() {
@@ -148,6 +219,7 @@ impl SessionControllerSource {
                         connection,
                         connection_generation,
                         lease,
+                        role_lease,
                         last_event,
                         phase,
                     },
@@ -165,6 +237,10 @@ impl SessionControllerSource {
                             ControllerHostResponse::LeaseGranted { lease_epoch },
                         ) => {
                             lease = Some(lease_epoch);
+                            role_lease = Some(ControllerRoleLease::session(
+                                connection_generation.0,
+                                lease_epoch.0,
+                            ));
                             Some(ControllerHostRequest::Poll {
                                 connection_generation,
                             })
@@ -206,6 +282,7 @@ impl SessionControllerSource {
                             });
                             if reset || revocation.is_some() {
                                 lease = None;
+                                role_lease = None;
                                 if reset {
                                     *self = Self::retrying();
                                     return Vec::new();
@@ -219,7 +296,13 @@ impl SessionControllerSource {
                                 })
                             } else {
                                 lease = lease_epoch;
-                                if let Some(current_lease) = lease {
+                                if let Some(current_lease) = lease.filter(|current| {
+                                    role_lease
+                                        == Some(ControllerRoleLease::session(
+                                            connection_generation.0,
+                                            current.0,
+                                        ))
+                                }) {
                                     for message in messages {
                                         let BrokerMessage::Deliver(delivery) = message else {
                                             continue;
@@ -295,6 +378,7 @@ impl SessionControllerSource {
                                     connection,
                                     connection_generation,
                                     lease,
+                                    role_lease,
                                     last_event,
                                     phase: next_phase,
                                 },
@@ -2763,6 +2847,8 @@ struct ApplicationRuntime<A: Application, H: HostAdapter<A>> {
     input: nickel_input::winit::Adapter,
     clipboard: Option<arboard::Clipboard>,
     controller: Option<ControllerInput>,
+    controller_discovery: ControllerDiscoveryMode,
+    local_controller_lease: Option<ControllerRoleLease>,
     #[cfg(any(unix, windows))]
     session_controller: SessionControllerSource,
     controller_schedule: ControllerPollSchedule,
@@ -2781,9 +2867,14 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
         let now = Instant::now();
         let next_adapter_poll = adapter.poll_interval().map(|interval| now + interval);
         #[cfg(any(unix, windows))]
-        let (controller, session_controller) = SessionControllerSource::discover();
+        let (controller_discovery, controller, local_controller_lease, session_controller) =
+            SessionControllerSource::discover();
         #[cfg(not(any(unix, windows)))]
         let controller = Some(ControllerInput::new());
+        #[cfg(not(any(unix, windows)))]
+        let controller_discovery = ControllerDiscoveryMode::Standalone;
+        #[cfg(not(any(unix, windows)))]
+        let local_controller_lease = Some(ControllerRoleLease::local());
         Self {
             host: None,
             application: Some(application),
@@ -2795,6 +2886,8 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
             input: nickel_input::winit::Adapter::default(),
             clipboard: arboard::Clipboard::new().ok(),
             controller,
+            controller_discovery,
+            local_controller_lease,
             #[cfg(any(unix, windows))]
             session_controller,
             controller_schedule: ControllerPollSchedule::new(now),
@@ -3018,12 +3111,17 @@ impl<A: Application, H: HostAdapter<A>> ApplicationRuntime<A, H> {
                 .host
                 .as_ref()
                 .is_some_and(|host| host.inspect().window_focused);
-            let (actions, controller_connected) = if let Some(controller) = &mut self.controller {
+            let (actions, controller_connected) = if local_controller_poll_lease(
+                self.controller_discovery,
+                self.local_controller_lease,
+            )
+            .is_some()
+            {
+                let Some(controller) = &mut self.controller else {
+                    return;
+                };
                 let actions: Vec<_> = controller
-                    .poll_with_fence(now, focused, || {
-                        self.adapter
-                            .controller_fence(HostServices { window: &window })
-                    })
+                    .poll(now, focused)
                     .into_iter()
                     .map(|action| {
                         (
@@ -3396,11 +3494,36 @@ mod tests {
     #[cfg(unix)]
     use super::SessionControllerSource;
     use super::{
-        Application, Completion, CompletionFailure, CompletionFailureKind, ControllerPollSchedule,
-        EffectEvidence, FrameOverlay, GlobalAction, HostBatch, HostEvent, HostFailure,
-        HostFailureStage, MessageEvidence, PresentScheduler, Shortcut, UiHost, ViewContext,
+        Application, Completion, CompletionFailure, CompletionFailureKind, ControllerDiscoveryMode,
+        ControllerPollSchedule, ControllerRole, ControllerRoleLease, EffectEvidence, FrameOverlay,
+        GlobalAction, HostBatch, HostEvent, HostFailure, HostFailureStage, MessageEvidence,
+        PresentScheduler, Shortcut, UiHost, ViewContext, local_controller_poll_lease,
         queue_continuous_input, wait_duration,
     };
+
+    #[test]
+    fn controller_poll_ownership_is_explicit_and_role_scoped() {
+        let local = ControllerRoleLease::local();
+        let next_local = ControllerRoleLease::local();
+        let session = ControllerRoleLease::session(3, 7);
+
+        assert_eq!(local.role, ControllerRole::Local);
+        assert_ne!(local.generation, next_local.generation);
+        assert_eq!(
+            local_controller_poll_lease(ControllerDiscoveryMode::Standalone, Some(local)),
+            Some(local)
+        );
+        assert_eq!(
+            local_controller_poll_lease(ControllerDiscoveryMode::Session, Some(local)),
+            None,
+            "a session-attached runtime cannot retain an independent local poller"
+        );
+        assert_eq!(
+            local_controller_poll_lease(ControllerDiscoveryMode::Standalone, Some(session)),
+            None,
+            "a session role lease cannot authorize the standalone device reader"
+        );
+    }
     use crate::{
         ActionKind, Button, Container, ControllerAction, ControllerExecutionAuthority,
         ControllerExecutionBinding, ControllerExecutionDisposition, ControllerExecutionEvidence,
