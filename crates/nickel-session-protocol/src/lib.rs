@@ -1,6 +1,10 @@
 #[cfg(unix)]
 pub mod client;
+#[cfg(windows)]
+#[path = "client_windows.rs"]
+pub mod client;
 pub mod controller_broker;
+mod local_transport;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 

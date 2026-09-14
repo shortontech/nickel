@@ -41,19 +41,19 @@ pub struct ControllerPoll {
 
 impl ControllerConnection {
     pub fn connect_from_environment(timeout: Duration) -> io::Result<Option<Self>> {
-        let Some(server) = std::env::var_os("NICKEL_SESSION_CONTROL") else {
+        let Some(advertisement) = crate::local_transport::advertisement_from_environment()? else {
             return Ok(None);
         };
-        let token = std::env::var("NICKEL_SESSION_TOKEN").map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "session capability unavailable",
-            )
-        })?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
             io::Error::new(io::ErrorKind::NotFound, "session runtime unavailable")
         })?;
-        Self::connect_at(Path::new(&server), Path::new(&runtime), token, timeout).map(Some)
+        Self::connect_at(
+            Path::new(&advertisement.endpoint),
+            Path::new(&runtime),
+            advertisement.capability,
+            timeout,
+        )
+        .map(Some)
     }
 
     fn connect_at(
@@ -184,21 +184,15 @@ pub fn request_from_environment(
     request: Request,
     timeout: Duration,
 ) -> io::Result<Option<ServerMessage>> {
-    let Some(server) = std::env::var_os("NICKEL_SESSION_CONTROL") else {
+    let Some(advertisement) = crate::local_transport::advertisement_from_environment()? else {
         return Ok(None);
     };
-    let token = std::env::var("NICKEL_SESSION_TOKEN").map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "session capability unavailable",
-        )
-    })?;
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "session runtime unavailable"))?;
     request_at(
-        Path::new(&server),
+        Path::new(&advertisement.endpoint),
         Path::new(&runtime),
-        token,
+        advertisement.capability,
         request,
         timeout,
     )
