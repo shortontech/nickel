@@ -1544,15 +1544,11 @@ impl WindowDragCoordinator {
                 .retained_order
                 .pop_front()
                 .expect("a full retained-settlement map has an order entry");
-            let mut displaced = self
+            let displaced = self
                 .retained_settlements
                 .remove(&evicted)
                 .expect("a retained-settlement order entry has a settlement");
-            displaced.settlement.fail();
-            let terminal = self.record_terminal_settlement(evicted, displaced.settlement.status);
-            if self.current_lifetimes.get(&evicted.0.fingerprint.window) == Some(&evicted.0) {
-                self.current_lifetimes.remove(&evicted.0.fingerprint.window);
-            }
+            let terminal = self.fail_retained(evicted, displaced);
             tracing::warn!(
                 ?evicted,
                 "evicted oldest pending native settlement at capacity"
@@ -1569,6 +1565,34 @@ impl WindowDragCoordinator {
     fn take_retained(&mut self, key: RetainedSettlementKey) -> Option<RetainedNativeSettlement> {
         self.retained_order.retain(|candidate| *candidate != key);
         self.retained_settlements.remove(&key)
+    }
+
+    fn finish_retained(
+        &mut self,
+        key: RetainedSettlementKey,
+        mut retained: RetainedNativeSettlement,
+    ) -> TerminalSettlementOutcome {
+        debug_assert_ne!(retained.settlement.status, SettlementStatus::Pending);
+        retained.authority.base_placement.control = ControlMode::Delegated;
+        let outcome = self.record_terminal_settlement(key, retained.settlement.status);
+        if self
+            .current_lifetimes
+            .get(&retained.lifetime.fingerprint.window)
+            == Some(&retained.lifetime)
+        {
+            self.current_lifetimes
+                .remove(&retained.lifetime.fingerprint.window);
+        }
+        outcome
+    }
+
+    fn fail_retained(
+        &mut self,
+        key: RetainedSettlementKey,
+        mut retained: RetainedNativeSettlement,
+    ) -> TerminalSettlementOutcome {
+        retained.settlement.fail();
+        self.finish_retained(key, retained)
     }
 
     fn admit(&mut self, admission: WindowDragAdmission) -> bool {
@@ -1780,29 +1804,13 @@ impl WindowDragCoordinator {
                 || native_window_fingerprint(retained.lifetime.fingerprint.window)
                     != Some(retained.lifetime.fingerprint)
             {
-                retained.authority.base_placement.control = ControlMode::Delegated;
-                if self
-                    .current_lifetimes
-                    .get(&retained.lifetime.fingerprint.window)
-                    == Some(&retained.lifetime)
-                {
-                    self.current_lifetimes
-                        .remove(&retained.lifetime.fingerprint.window);
-                }
+                self.fail_retained(key, retained);
                 continue;
             }
             let mut rectangle = RECT::default();
             let window = HWND(retained.lifetime.fingerprint.window as *mut c_void);
             if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
-                retained.authority.base_placement.control = ControlMode::Delegated;
-                if self
-                    .current_lifetimes
-                    .get(&retained.lifetime.fingerprint.window)
-                    == Some(&retained.lifetime)
-                {
-                    self.current_lifetimes
-                        .remove(&retained.lifetime.fingerprint.window);
-                }
+                self.fail_retained(key, retained);
                 continue;
             }
             let observed = logical_rect(rectangle);
@@ -1819,15 +1827,7 @@ impl WindowDragCoordinator {
                 retained
                     .authority
                     .observe(fact, ObservationCausality::Unknown);
-                retained.authority.base_placement.control = ControlMode::Delegated;
-                if self
-                    .current_lifetimes
-                    .get(&retained.lifetime.fingerprint.window)
-                    == Some(&retained.lifetime)
-                {
-                    self.current_lifetimes
-                        .remove(&retained.lifetime.fingerprint.window);
-                }
+                self.finish_retained(key, retained);
             }
         }
     }
@@ -1859,10 +1859,7 @@ impl WindowDragCoordinator {
                 retained
                     .authority
                     .observe(fact, ObservationCausality::Independent);
-                retained.authority.base_placement.control = ControlMode::Delegated;
-                if self.current_lifetimes.get(&window) == Some(&retained.lifetime) {
-                    self.current_lifetimes.remove(&window);
-                }
+                self.finish_retained(key, retained);
             }
         } else if self
             .retained_settlements
@@ -1889,8 +1886,8 @@ impl WindowDragCoordinator {
             .filter(|(lifetime, _)| lifetime.fingerprint.window == window)
             .collect::<Vec<_>>();
         for key in keys {
-            if let Some(mut retained) = self.take_retained(key) {
-                retained.authority.base_placement.control = ControlMode::Delegated;
+            if let Some(retained) = self.take_retained(key) {
+                self.fail_retained(key, retained);
             }
         }
     }
@@ -5037,6 +5034,123 @@ mod tests {
         );
         coordinator.native_move_size(drag.window, true, 40);
         assert!(coordinator.retained_settlements.is_empty());
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key: (drag.lifetime, NativeRequestId(10)),
+                status: SettlementStatus::Superseded,
+            })
+        );
+    }
+
+    #[test]
+    fn failed_observation_and_timeout_removals_record_terminal_requests() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let drag = contested_drag();
+        let desired = drag.authority.revisions();
+        let failed_key = (drag.lifetime, NativeRequestId(20));
+        let failed = RetainedNativeSettlement {
+            lifetime: drag.lifetime,
+            authority: drag.authority.clone(),
+            settlement: Settlement::new(
+                NativeRequest {
+                    id: failed_key.1,
+                    mapping_generation: 1,
+                    desired: drag.authority.revisions(),
+                    placement: drag.last_observed,
+                },
+                SettlementLimits {
+                    deadline_tick: 50,
+                    max_corrections: 0,
+                },
+            ),
+            last_observed: drag.last_observed,
+        };
+        coordinator.fail_retained(failed_key, failed);
+
+        let timeout_key = (drag.lifetime, NativeRequestId(21));
+        let mut timed_out = RetainedNativeSettlement {
+            lifetime: drag.lifetime,
+            authority: drag.authority,
+            settlement: Settlement::new(
+                NativeRequest {
+                    id: timeout_key.1,
+                    mapping_generation: 1,
+                    desired,
+                    placement: drag.last_observed,
+                },
+                SettlementLimits {
+                    deadline_tick: 50,
+                    max_corrections: 0,
+                },
+            ),
+            last_observed: drag.last_observed,
+        };
+        timed_out.settlement.expire(50);
+        coordinator.finish_retained(timeout_key, timed_out);
+
+        assert_eq!(
+            coordinator
+                .terminal_settlement_outcomes
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![
+                TerminalSettlementOutcome {
+                    key: failed_key,
+                    status: SettlementStatus::Failed,
+                },
+                TerminalSettlementOutcome {
+                    key: timeout_key,
+                    status: SettlementStatus::Unconfirmed,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn destroying_window_records_each_retained_request_as_failed() {
+        let mut coordinator = WindowDragCoordinator::default();
+        let mut drag = contested_drag();
+        let key = (drag.lifetime, NativeRequestId(30));
+        let settlement = Settlement::new(
+            NativeRequest {
+                id: key.1,
+                mapping_generation: 1,
+                desired: drag.authority.revisions(),
+                placement: drag.last_observed,
+            },
+            SettlementLimits {
+                deadline_tick: 260,
+                max_corrections: 0,
+            },
+        );
+        coordinator
+            .current_lifetimes
+            .insert(drag.window, drag.lifetime);
+        coordinator.retain_settlement(
+            key,
+            RetainedNativeSettlement {
+                lifetime: drag.lifetime,
+                authority: std::mem::replace(
+                    &mut drag.authority,
+                    contested_authority(RECT::default()),
+                ),
+                settlement,
+                last_observed: drag.last_observed,
+            },
+        );
+
+        coordinator.window_destroyed(drag.window);
+
+        assert!(coordinator.retained_settlements.is_empty());
+        assert_eq!(
+            coordinator.terminal_settlement_outcomes.back(),
+            Some(&TerminalSettlementOutcome {
+                key,
+                status: SettlementStatus::Failed,
+            })
+        );
     }
 
     #[test]
