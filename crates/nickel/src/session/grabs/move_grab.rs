@@ -17,16 +17,17 @@ pub struct MoveSurfaceGrab {
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
     pub restored_from_maximized: bool,
-    /// Present for the migrated XDG path. XWayland retains its existing
-    /// lifecycle until its distinct admission contract is migrated.
-    pub operation: Option<WindowMoveOperation>,
+    /// Present for client-requested XDG/XWayland operations. Compositor-
+    /// initiated frame and modifier moves are migrated separately.
+    pub operation: Option<WindowPointerOperation>,
 }
 
 /// Native-pointer adapter for the shared operation lifecycle.
 ///
-/// XDG serial/focus validation happens before construction. Smithay's pointer
-/// grab is the synchronously acquired resource represented by `lease`.
-pub struct WindowMoveOperation {
+/// Protocol-specific serial/button and focus validation happens before
+/// construction. Smithay's pointer grab is the synchronously acquired resource
+/// represented by `lease`.
+pub struct WindowPointerOperation {
     id: OperationId,
     completion: CompletionBinding,
 }
@@ -35,7 +36,7 @@ fn crossed_maximized_restore_threshold(delta: Point<f64, Logical>) -> bool {
     delta.x.abs() >= 1.0 || delta.y.abs() >= 1.0
 }
 
-impl WindowMoveOperation {
+impl WindowPointerOperation {
     pub fn begin(reducer: &mut WindowOperationReducer, request: BeginRequest) -> Option<Self> {
         let completion = request.origin;
         let (operation, transition) = reducer.begin(request);
@@ -61,7 +62,7 @@ impl WindowMoveOperation {
         })
     }
 
-    fn admits_motion(&self, reducer: &mut WindowOperationReducer) -> bool {
+    pub(crate) fn admits_motion(&self, reducer: &mut WindowOperationReducer) -> bool {
         let transition = reducer.update(self.id, self.completion.source);
         transition.disposition == Disposition::Applied
             && transition.effects.contains(&Effect::ApplyUpdate {
@@ -70,7 +71,7 @@ impl WindowMoveOperation {
             })
     }
 
-    fn complete(&self, reducer: &mut WindowOperationReducer) -> bool {
+    pub(crate) fn complete(&self, reducer: &mut WindowOperationReducer) -> bool {
         // A higher-priority teardown may already have revoked shared
         // authority. The physical release must still dismantle Smithay's grab.
         if reducer.operation(self.id).is_none() {
@@ -83,7 +84,7 @@ impl WindowMoveOperation {
                 .contains(&Effect::SubmitFinalDesiredState { operation: self.id })
     }
 
-    fn cancel(&self, reducer: &mut WindowOperationReducer) {
+    pub(crate) fn cancel(&self, reducer: &mut WindowOperationReducer) {
         if reducer.operation(self.id).is_some() {
             let _ = reducer.cancel(self.id, CancellationReason::RequiredResourceLost);
         }
@@ -195,7 +196,7 @@ mod tests {
     #[test]
     fn production_adapter_drives_shared_begin_update_and_completion() {
         let mut reducer = WindowOperationReducer::default();
-        let operation = WindowMoveOperation::begin(&mut reducer, request(0x110)).unwrap();
+        let operation = WindowPointerOperation::begin(&mut reducer, request(0x110)).unwrap();
 
         assert_eq!(
             reducer.operation(operation.id()).unwrap().phase,
@@ -209,9 +210,9 @@ mod tests {
     #[test]
     fn production_adapter_rejects_competing_move_before_native_grab_install() {
         let mut reducer = WindowOperationReducer::default();
-        let first = WindowMoveOperation::begin(&mut reducer, request(0x110)).unwrap();
+        let first = WindowPointerOperation::begin(&mut reducer, request(0x110)).unwrap();
 
-        assert!(WindowMoveOperation::begin(&mut reducer, request(0x111)).is_none());
+        assert!(WindowPointerOperation::begin(&mut reducer, request(0x111)).is_none());
         assert_eq!(
             reducer.operation(first.id()).unwrap().phase,
             OperationPhase::Active
@@ -221,7 +222,7 @@ mod tests {
     #[test]
     fn unexpected_native_unset_cancels_shared_operation_once() {
         let mut reducer = WindowOperationReducer::default();
-        let operation = WindowMoveOperation::begin(&mut reducer, request(0x110)).unwrap();
+        let operation = WindowPointerOperation::begin(&mut reducer, request(0x110)).unwrap();
 
         operation.cancel(&mut reducer);
         operation.cancel(&mut reducer);

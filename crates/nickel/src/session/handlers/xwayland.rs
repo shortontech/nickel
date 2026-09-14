@@ -1,5 +1,10 @@
 use std::{collections::HashMap, hash::Hash, os::fd::OwnedFd, process::Stdio, time::Duration};
 
+use nickel_core::window_operation::{
+    BeginRequest, CompletionBinding, CompletionGesture, MappingGeneration, NativeLifetimeId,
+    OperationKind, SeatId, Source, SourceGeneration, SourceId, WindowId as OperationWindowId,
+    WindowMapping,
+};
 use smithay::{
     desktop::Window,
     reexports::{
@@ -30,7 +35,10 @@ use smithay::{
 use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
-    grabs::{MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
+    grabs::{
+        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab, move_grab::WindowPointerOperation,
+        resize_grab::operation_resize_edges,
+    },
     handlers::{SelectionOwner, bounded_selection_mime_types},
     shell_layout,
     window_registry::{WindowAdmission, WindowId, WindowMetadataSource},
@@ -352,6 +360,22 @@ impl NickelSession {
 
     fn remove_x11_window(&mut self, surface: &X11Surface) {
         self.forget_x11_geometry(surface);
+        if let Some(registry_id) = self.x11_window_id(surface) {
+            let window = OperationWindowId::new(registry_id.0);
+            if let Some(operation) = self.window_operations.operation_for_window(window) {
+                let _ = self.window_operations.cancel(
+                    operation,
+                    nickel_core::window_operation::CancellationReason::TargetDestroyed,
+                );
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.unset_grab(
+                        self,
+                        smithay::utils::SERIAL_COUNTER.next_serial(),
+                        smithay::backend::input::InputTime::now(),
+                    );
+                }
+            }
+        }
         if let Some(window) = self.x11_window(surface) {
             self.space.unmap_elem(&window);
         }
@@ -567,16 +591,51 @@ impl XwmHandler for NickelSession {
         let Some(initial_window_location) = self.space.element_location(&mapped) else {
             return;
         };
+        let native_edges = ResizeEdge::from(resize_edge);
+        let Some(operation_edges) = operation_resize_edges(native_edges) else {
+            return;
+        };
+        let Some(registry_id) = self.x11_window_id(&window) else {
+            return;
+        };
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let Ok(completion_button) = u16::try_from(start_data.button) else {
+            return;
+        };
+        let Some(operation) = WindowPointerOperation::begin(
+            &mut self.window_operations,
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject: WindowMapping {
+                    window: OperationWindowId::new(registry_id.0),
+                    native_lifetime: NativeLifetimeId::new(u64::from(window.window_id())),
+                    generation: MappingGeneration::new(registry_id.0),
+                },
+                kind: OperationKind::Resize(operation_edges),
+                control: nickel_core::geometry_authority::ControlMode::Enforced,
+                origin: CompletionBinding {
+                    source: Source {
+                        id: SourceId::new(1),
+                        generation: SourceGeneration::new(u64::from(u32::from(serial))),
+                    },
+                    gesture: CompletionGesture::Button(completion_button),
+                },
+                optional_update_sources: Vec::new(),
+            },
+        ) else {
+            return;
+        };
         let initial_rect = Rectangle::new(initial_window_location, mapped.geometry().size);
         pointer.set_grab(
             self,
-            ResizeSurfaceGrab::start(
+            ResizeSurfaceGrab::start_with_operation(
                 start_data,
                 mapped,
-                ResizeEdge::from(resize_edge),
+                native_edges,
                 initial_rect,
+                Some(operation),
             ),
-            smithay::utils::SERIAL_COUNTER.next_serial(),
+            serial,
             smithay::input::pointer::Focus::Clear,
         );
     }
@@ -629,6 +688,36 @@ impl XwmHandler for NickelSession {
             ?initial_window_location,
             "diagnostic: X11 move accepted"
         );
+        let Some(registry_id) = self.x11_window_id(&window) else {
+            return;
+        };
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let Ok(completion_button) = u16::try_from(start_data.button) else {
+            return;
+        };
+        let Some(operation) = WindowPointerOperation::begin(
+            &mut self.window_operations,
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject: WindowMapping {
+                    window: OperationWindowId::new(registry_id.0),
+                    native_lifetime: NativeLifetimeId::new(u64::from(window.window_id())),
+                    generation: MappingGeneration::new(registry_id.0),
+                },
+                kind: OperationKind::Move,
+                control: nickel_core::geometry_authority::ControlMode::Enforced,
+                origin: CompletionBinding {
+                    source: Source {
+                        id: SourceId::new(1),
+                        generation: SourceGeneration::new(u64::from(u32::from(serial))),
+                    },
+                    gesture: CompletionGesture::Button(completion_button),
+                },
+                optional_update_sources: Vec::new(),
+            },
+        ) else {
+            return;
+        };
         pointer.set_grab(
             self,
             MoveSurfaceGrab {
@@ -636,9 +725,9 @@ impl XwmHandler for NickelSession {
                 window: mapped,
                 initial_window_location,
                 restored_from_maximized: false,
-                operation: None,
+                operation: Some(operation),
             },
-            smithay::utils::SERIAL_COUNTER.next_serial(),
+            serial,
             smithay::input::pointer::Focus::Clear,
         );
     }

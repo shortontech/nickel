@@ -36,7 +36,10 @@ use smithay::{
 use crate::session::{
     NickelSession,
     focus::KeyboardFocusTarget,
-    grabs::{MoveSurfaceGrab, ResizeSurfaceGrab, move_grab::WindowMoveOperation},
+    grabs::{
+        MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab, move_grab::WindowPointerOperation,
+        resize_grab::operation_resize_edges,
+    },
     shell_layout,
     window_registry::{WindowAdmission, WindowId, WindowMetadataSource, WindowRegistry},
 };
@@ -231,7 +234,7 @@ impl XdgShellHandler for NickelSession {
         let surface_id = surface.wl_surface().id();
         let window_id = self.surface_windows.get(&surface_id).copied();
         if let Some(window_id) = window_id {
-            self.cancel_xdg_move_for_mapping(window_id, true);
+            self.cancel_xdg_operation_for_mapping(window_id, true);
         }
         if let Some(window) = self.xdg_toplevel_windows.get(&surface_id).cloned() {
             self.space.unmap_elem(&window);
@@ -354,7 +357,7 @@ impl XdgShellHandler for NickelSession {
             // checked XDG serial/focus above is both its gesture generation and
             // native admission evidence; the registry id is allocated anew for
             // each mapped window lifetime.
-            let operation = WindowMoveOperation::begin(
+            let operation = WindowPointerOperation::begin(
                 &mut self.window_operations,
                 BeginRequest {
                     seat: SeatId::new(1),
@@ -428,6 +431,41 @@ impl XdgShellHandler for NickelSession {
                 return;
             };
             let initial_window_size = window.geometry().size;
+            let native_edges = ResizeEdge::from(edges);
+            let Some(operation_edges) = operation_resize_edges(native_edges) else {
+                return;
+            };
+            let Some(registry_id) = self.surface_windows.get(&wl_surface.id()).copied() else {
+                return;
+            };
+            let Ok(button) = u16::try_from(start_data.button) else {
+                return;
+            };
+            let Some(operation) = WindowPointerOperation::begin(
+                &mut self.window_operations,
+                BeginRequest {
+                    seat: SeatId::new(1),
+                    subject: WindowMapping {
+                        window: OperationWindowId::new(registry_id.0),
+                        native_lifetime: NativeLifetimeId::new(u64::from(
+                            wl_surface.id().protocol_id(),
+                        )),
+                        generation: MappingGeneration::new(registry_id.0),
+                    },
+                    kind: OperationKind::Resize(operation_edges),
+                    control: nickel_core::geometry_authority::ControlMode::Cooperative,
+                    origin: CompletionBinding {
+                        source: Source {
+                            id: SourceId::new(1),
+                            generation: SourceGeneration::new(u64::from(u32::from(serial))),
+                        },
+                        gesture: CompletionGesture::Button(button),
+                    },
+                    optional_update_sources: Vec::new(),
+                },
+            ) else {
+                return;
+            };
 
             surface.with_pending_state(|state| {
                 state.states.set(xdg_toplevel::State::Resizing);
@@ -435,11 +473,12 @@ impl XdgShellHandler for NickelSession {
 
             surface.send_pending_configure();
 
-            let grab = ResizeSurfaceGrab::start(
+            let grab = ResizeSurfaceGrab::start_with_operation(
                 start_data,
                 window,
-                edges.into(),
+                native_edges,
                 Rectangle::new(initial_window_location, initial_window_size),
+                Some(operation),
             );
 
             pointer.set_grab(self, grab, serial, Focus::Clear);
@@ -856,7 +895,7 @@ impl NickelSession {
             });
         let registry_id = self.surface_windows.get(&surface_id).copied();
         if let Some(registry_id) = registry_id {
-            self.cancel_xdg_move_for_mapping(registry_id, false);
+            self.cancel_xdg_operation_for_mapping(registry_id, false);
         }
         self.space.unmap_elem(&window);
         window.set_activated(false);
@@ -868,7 +907,7 @@ impl NickelSession {
         Some(window)
     }
 
-    fn cancel_xdg_move_for_mapping(&mut self, registry_id: WindowId, destroyed: bool) {
+    fn cancel_xdg_operation_for_mapping(&mut self, registry_id: WindowId, destroyed: bool) {
         let window = OperationWindowId::new(registry_id.0);
         let Some(operation) = self.window_operations.operation_for_window(window) else {
             return;

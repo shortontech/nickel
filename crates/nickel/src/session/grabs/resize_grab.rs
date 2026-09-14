@@ -1,4 +1,7 @@
-use crate::session::{NickelSession, focus::PointerFocusTarget};
+use crate::session::{
+    NickelSession, focus::PointerFocusTarget, grabs::move_grab::WindowPointerOperation,
+};
+use nickel_core::window_operation::{HorizontalEdge, ResizeEdges, VerticalEdge};
 use smithay::{
     desktop::{Space, Window},
     input::pointer::{
@@ -10,7 +13,10 @@ use smithay::{
         wayland_server::protocol::wl_surface::WlSurface,
     },
     utils::{Logical, Point, Rectangle, Size},
-    wayland::{compositor, shell::xdg::SurfaceCachedState},
+    wayland::{
+        compositor,
+        shell::xdg::{SurfaceCachedState, ToplevelCachedState},
+    },
 };
 use std::cell::RefCell;
 
@@ -61,6 +67,8 @@ pub struct ResizeSurfaceGrab {
 
     initial_rect: Rectangle<i32, Logical>,
     last_window_size: Size<i32, Logical>,
+    operation: Option<WindowPointerOperation>,
+    terminal: bool,
 }
 
 impl ResizeSurfaceGrab {
@@ -69,6 +77,16 @@ impl ResizeSurfaceGrab {
         window: Window,
         edges: ResizeEdge,
         initial_window_rect: Rectangle<i32, Logical>,
+    ) -> Self {
+        Self::start_with_operation(start_data, window, edges, initial_window_rect, None)
+    }
+
+    pub fn start_with_operation(
+        start_data: PointerGrabStartData<NickelSession>,
+        window: Window,
+        edges: ResizeEdge,
+        initial_window_rect: Rectangle<i32, Logical>,
+        operation: Option<WindowPointerOperation>,
     ) -> Self {
         let initial_rect = initial_window_rect;
 
@@ -87,14 +105,61 @@ impl ResizeSurfaceGrab {
             edges,
             initial_rect,
             last_window_size: initial_rect.size,
+            operation,
+            terminal: false,
         }
     }
+}
+
+pub fn operation_resize_edges(edges: ResizeEdge) -> Option<ResizeEdges> {
+    let horizontal = if edges.contains(ResizeEdge::LEFT) {
+        Some(HorizontalEdge::Left)
+    } else if edges.contains(ResizeEdge::RIGHT) {
+        Some(HorizontalEdge::Right)
+    } else {
+        None
+    };
+    let vertical = if edges.contains(ResizeEdge::TOP) {
+        Some(VerticalEdge::Top)
+    } else if edges.contains(ResizeEdge::BOTTOM) {
+        Some(VerticalEdge::Bottom)
+    } else {
+        None
+    };
+    ResizeEdges::new(horizontal, vertical).ok()
 }
 
 impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
     forward_pointer_grab_events!();
 
-    fn unset(&mut self, _data: &mut NickelSession) {}
+    fn unset(&mut self, data: &mut NickelSession) {
+        if self.terminal {
+            return;
+        }
+        if let Some(operation) = &self.operation {
+            operation.cancel(&mut data.window_operations);
+        }
+        if let Some(x11) = self.window.x11_surface() {
+            if let Err(error) = x11.configure(self.initial_rect) {
+                tracing::warn!(?error, "X11 cancelled resize compensation failed");
+            }
+            data.space
+                .map_element(self.window.clone(), self.initial_rect.loc, false);
+        } else if let Some(xdg) = self.window.toplevel() {
+            xdg.with_pending_state(|state| {
+                state.states.unset(xdg_toplevel::State::Resizing);
+                state.size = Some(self.initial_rect.size);
+            });
+            let final_configure = xdg.send_pending_configure();
+            ResizeSurfaceState::with(xdg.wl_surface(), |state| {
+                *state = ResizeSurfaceState::WaitingForLastCommit {
+                    edges: self.edges,
+                    initial_rect: self.initial_rect,
+                    final_configure,
+                };
+            });
+        }
+    }
 
     fn motion(
         &mut self,
@@ -105,6 +170,14 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
     ) {
         // While the grab is active, no client has pointer focus
         handle.motion(data, None, event);
+
+        if self
+            .operation
+            .as_ref()
+            .is_some_and(|operation| !operation.admits_motion(&mut data.window_operations))
+        {
+            return;
+        }
 
         let mut delta = event.location - self.start_data.location;
 
@@ -193,8 +266,14 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         handle.button(data, event);
 
         // The button is a button code as defined in the
-        if !handle.current_pressed().contains(&self.start_data.button) {
-            // No more buttons are pressed, release the grab.
+        if !handle.current_pressed().contains(&self.start_data.button)
+            && self
+                .operation
+                .as_ref()
+                .is_none_or(|operation| operation.complete(&mut data.window_operations))
+        {
+            // The initiating button released; free the seat before settlement.
+            self.terminal = true;
             handle.unset_grab(self, data, event.serial, event.time, true);
 
             if let Some(xdg) = self.window.toplevel() {
@@ -202,11 +281,12 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
                     state.states.unset(xdg_toplevel::State::Resizing);
                     state.size = Some(self.last_window_size);
                 });
-                xdg.send_pending_configure();
+                let final_configure = xdg.send_pending_configure();
                 ResizeSurfaceState::with(xdg.wl_surface(), |state| {
                     *state = ResizeSurfaceState::WaitingForLastCommit {
                         edges: self.edges,
                         initial_rect: self.initial_rect,
+                        final_configure,
                     };
                 });
             }
@@ -232,6 +312,7 @@ enum ResizeSurfaceState {
         edges: ResizeEdge,
         /// The initial window size and location.
         initial_rect: Rectangle<i32, Logical>,
+        final_configure: Option<smithay::utils::Serial>,
     },
 }
 
@@ -248,7 +329,10 @@ impl ResizeSurfaceState {
         })
     }
 
-    fn commit(&mut self) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
+    fn commit(
+        &mut self,
+        last_acked: Option<smithay::utils::Serial>,
+    ) -> Option<(ResizeEdge, Rectangle<i32, Logical>)> {
         match *self {
             Self::Resizing {
                 edges,
@@ -257,9 +341,13 @@ impl ResizeSurfaceState {
             Self::WaitingForLastCommit {
                 edges,
                 initial_rect,
+                final_configure,
             } => {
-                // The resize is done, let's go back to idle
-                *self = Self::Idle;
+                if final_configure.is_none_or(|final_configure| {
+                    last_acked.is_some_and(|acked| acked.is_no_older_than(&final_configure))
+                }) {
+                    *self = Self::Idle;
+                }
 
                 Some((edges, initial_rect))
             }
@@ -282,9 +370,18 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
     let mut window_loc = space.element_location(&window)?;
     let geometry = window.geometry();
 
+    let last_acked = compositor::with_states(surface, |states| {
+        states
+            .cached_state
+            .get::<ToplevelCachedState>()
+            .current()
+            .last_acked
+            .as_ref()
+            .map(|configure| configure.serial)
+    });
     let new_loc: Point<Option<i32>, Logical> = ResizeSurfaceState::with(surface, |state| {
         state
-            .commit()
+            .commit(last_acked)
             .and_then(|(edges, initial_rect)| {
                 // If the window is being resized by top or left, its location must be adjusted
                 // accordingly.
@@ -316,4 +413,59 @@ pub fn handle_commit(space: &mut Space<Window>, surface: &WlSurface) -> Option<(
     }
 
     Some(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initial_rect() -> Rectangle<i32, Logical> {
+        Rectangle::new((10, 20).into(), (300, 200).into())
+    }
+
+    #[test]
+    fn every_native_resize_edge_maps_to_a_valid_shared_kind() {
+        for edges in [
+            ResizeEdge::TOP,
+            ResizeEdge::BOTTOM,
+            ResizeEdge::LEFT,
+            ResizeEdge::RIGHT,
+            ResizeEdge::TOP_LEFT,
+            ResizeEdge::TOP_RIGHT,
+            ResizeEdge::BOTTOM_LEFT,
+            ResizeEdge::BOTTOM_RIGHT,
+        ] {
+            assert!(operation_resize_edges(edges).is_some());
+        }
+        assert!(operation_resize_edges(ResizeEdge::empty()).is_none());
+    }
+
+    #[test]
+    fn commit_before_final_configure_ack_does_not_finish_settlement() {
+        let mut state = ResizeSurfaceState::WaitingForLastCommit {
+            edges: ResizeEdge::LEFT,
+            initial_rect: initial_rect(),
+            final_configure: Some(12_u32.into()),
+        };
+
+        assert!(state.commit(Some(11_u32.into())).is_some());
+        assert!(matches!(
+            state,
+            ResizeSurfaceState::WaitingForLastCommit { .. }
+        ));
+    }
+
+    #[test]
+    fn final_or_newer_configure_ack_finishes_settlement() {
+        for acknowledged in [12_u32, 13_u32] {
+            let mut state = ResizeSurfaceState::WaitingForLastCommit {
+                edges: ResizeEdge::TOP_LEFT,
+                initial_rect: initial_rect(),
+                final_configure: Some(12_u32.into()),
+            };
+
+            assert!(state.commit(Some(acknowledged.into())).is_some());
+            assert_eq!(state, ResizeSurfaceState::Idle);
+        }
+    }
 }
