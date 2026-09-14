@@ -8630,7 +8630,7 @@ impl NickelSession {
         if window.x11_surface().is_some() {
             let _ = self.bind_x11_geometry_request(id, target_geometry, last_owned_revision);
         }
-        if !self.apply_compositor_moved_window_effect(window, id, placement, true) {
+        if !self.apply_authorized_complete_window_geometry(window, id, placement, true) {
             return;
         }
         self.shortcut_snap_restore.insert(
@@ -8640,13 +8640,6 @@ impl NickelSession {
                 last_owned_revision,
             },
         );
-        if let Some(surface) = self
-            .window_for_registry_id(id)
-            .and_then(|window| window.toplevel().cloned())
-        {
-            surface.with_pending_state(|state| state.size = Some((width, area.height).into()));
-            self.send_tracked_xdg_configure(&surface);
-        }
         self.notify_protocol_snapshot();
     }
 
@@ -8660,7 +8653,7 @@ impl NickelSession {
         else {
             return;
         };
-        if let Some(restore) = self.shortcut_snap_restore.remove(&snapshot.id) {
+        if let Some(restore) = self.shortcut_snap_restore.get(&snapshot.id).copied() {
             if !self
                 .geometry_authorities
                 .get(&snapshot.id)
@@ -8671,20 +8664,31 @@ impl NickelSession {
             let Some(window) = self.window_for_registry_id(snapshot.id) else {
                 return;
             };
-            let location = self
+            let restore_geometry = Geometry {
+                x: restore.geometry.loc.x,
+                y: restore.geometry.loc.y,
+                width: restore.geometry.size.w,
+                height: restore.geometry.size.h,
+            };
+            let desired = self
                 .output_geometry_for_window(&window)
                 .map(|output| {
-                    clamp_window_location(
-                        restore.geometry.loc,
-                        restore.geometry.size,
+                    clamped_restore_geometry(
+                        restore_geometry,
                         self.work_area_for_output(output),
+                        self.is_server_decorated(&window),
                     )
                 })
-                .unwrap_or(restore.geometry.loc);
-            self.map_compositor_moved_window(window.clone(), location, true);
-            if let Some(surface) = window.toplevel() {
-                surface.with_pending_state(|state| state.size = Some(restore.geometry.size));
-                self.send_tracked_xdg_configure(&surface);
+                .unwrap_or(restore_geometry);
+            let Some(placement) = self.try_authorize_desired_geometry(snapshot.id, desired) else {
+                return;
+            };
+            if window.x11_surface().is_some() {
+                let _ = self.bind_x11_geometry_request(snapshot.id, desired, placement.revision);
+            }
+            if self.apply_authorized_complete_window_geometry(window, snapshot.id, placement, true)
+            {
+                self.shortcut_snap_restore.remove(&snapshot.id);
             }
         } else if self
             .protocol_windows()
@@ -10255,6 +10259,43 @@ impl NickelSession {
         if let Some(root) = popup_root {
             self.reconstrain_reactive_popups(&root);
         }
+        true
+    }
+
+    fn apply_authorized_complete_window_geometry(
+        &mut self,
+        window: Window,
+        id: WindowId,
+        placement: nickel_core::geometry_authority::AuthorizedPlacement,
+        activate: bool,
+    ) -> bool {
+        if self.window_geometry_authority_id(&window) != Some(id)
+            || !self
+                .geometry_authorities
+                .get(&id)
+                .is_some_and(|authority| authority.permits_placement(placement))
+        {
+            return false;
+        }
+        let desired = placement.desired;
+        if let Some(surface) = window.x11_surface()
+            && self.x11_windows.contains_key(&surface.window_id())
+            && surface
+                .configure(Rectangle::new(
+                    (desired.x, desired.y).into(),
+                    (desired.width, desired.height).into(),
+                ))
+                .is_err()
+        {
+            return false;
+        }
+        if let Some(surface) = window.toplevel() {
+            surface.with_pending_state(|state| {
+                state.size = Some((desired.width, desired.height).into());
+            });
+            surface.send_pending_configure();
+        }
+        self.map_buffered_window(window, (desired.x, desired.y), activate);
         true
     }
 
@@ -13689,6 +13730,26 @@ fn clamp_decorated_content_to_work_area(content: Geometry, work_area: Geometry) 
     }
 }
 
+fn clamped_restore_geometry(
+    restore: Geometry,
+    work_area: Geometry,
+    server_decorated: bool,
+) -> Geometry {
+    if server_decorated {
+        return clamp_decorated_content_to_work_area(restore, work_area);
+    }
+    let location = clamp_window_location(
+        (restore.x, restore.y).into(),
+        (restore.width, restore.height).into(),
+        work_area,
+    );
+    Geometry {
+        x: location.x,
+        y: location.y,
+        ..restore
+    }
+}
+
 fn restored_drag_content_geometry(
     current_content: Geometry,
     restore_content: Geometry,
@@ -13795,8 +13856,8 @@ mod protocol_tests {
         PendingLaunchObservation, PendingLaunchWindowDisposition, RegisteredShellRole,
         ShellRegistrationRejection, admitted_preview_ids, advance_preview_content_generation,
         apply_shell_behavior_value, bounded_preview_ids, clamp_decorated_content_to_work_area,
-        clamp_window_location, command_requires_shell_identity, drag_icon_location,
-        external_controller_surface_changed, identification_expiry_is_current,
+        clamp_window_location, clamped_restore_geometry, command_requires_shell_identity,
+        drag_icon_location, external_controller_surface_changed, identification_expiry_is_current,
         internal_restore_is_current, maximized_content_geometry, output_contains_logical_point,
         output_index_for_shell_surface, output_rescue_revision_is_current,
         pending_launch_window_disposition, placement_restore_is_current,
@@ -20441,6 +20502,27 @@ mod protocol_tests {
             clamp_window_location((-20, -30).into(), (300, 200).into(), work_area),
             (100, 40).into()
         );
+    }
+
+    #[test]
+    fn snap_restore_clamps_complete_rect_without_reusing_snapped_size() {
+        let restore = Geometry {
+            x: 850,
+            y: 500,
+            width: 300,
+            height: 200,
+        };
+        let work_area = Geometry {
+            x: 100,
+            y: 40,
+            width: 800,
+            height: 500,
+        };
+
+        let desired = clamped_restore_geometry(restore, work_area, false);
+
+        assert_eq!((desired.x, desired.y), (600, 340));
+        assert_eq!((desired.width, desired.height), (300, 200));
     }
 
     #[test]

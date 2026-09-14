@@ -1567,6 +1567,7 @@ impl NickelSession {
                             self.workspaces.focused(&id);
                         }
                         self.surrender_internal_focus();
+                        self.send_tracked_xdg_configures_for_all_windows();
                         self.realize_seat_focus_with_serial(
                             crate::session::focus::KeyboardFocusTarget::for_window(&window),
                             nickel_core::focus::FocusScope::Ordinary,
@@ -1577,7 +1578,6 @@ impl NickelSession {
                         {
                             tracing::warn!(?error, "failed to reassert X11 keyboard focus");
                         }
-                        self.send_tracked_xdg_configures_for_all_windows();
                         self.notify_protocol_snapshot();
                         match part {
                             FramePart::Close => {
