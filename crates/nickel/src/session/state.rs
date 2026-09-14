@@ -2582,6 +2582,56 @@ struct ExternalControllerLeaseBinding {
     surface: WindowId,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ControllerRecoveryIntent {
+    eligible_owner: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    require_fresh_generation: bool,
+    require_neutral: bool,
+}
+
+impl ControllerRecoveryIntent {
+    fn merge_overflow(
+        &mut self,
+        recoverable: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    ) {
+        if self.eligible_owner.is_none() {
+            self.eligible_owner = recoverable;
+        }
+        self.require_fresh_generation = true;
+        self.require_neutral = true;
+    }
+
+    fn merge_orderly_relinquish(
+        &mut self,
+        relinquishing: (ControllerHostId, ControllerConnectionGeneration),
+        internal: ControllerConnectionGeneration,
+    ) -> bool {
+        if relinquishing.0 == ControllerHostId(0)
+            || self
+                .eligible_owner
+                .is_some_and(|owner| owner != relinquishing)
+        {
+            return false;
+        }
+        self.eligible_owner = Some((ControllerHostId(0), internal));
+        self.require_neutral = true;
+        true
+    }
+
+    fn observe_fresh_batch(
+        &mut self,
+        neutral: bool,
+    ) -> Option<(ControllerHostId, ControllerConnectionGeneration)> {
+        self.require_fresh_generation = false;
+        if neutral {
+            self.require_neutral = false;
+        }
+        (!self.require_fresh_generation && !self.require_neutral)
+            .then_some(self.eligible_owner)
+            .flatten()
+    }
+}
+
 fn external_controller_surface_changed(
     binding: ExternalControllerLeaseBinding,
     active: Option<(ControllerHostId, ControllerConnectionGeneration)>,
@@ -2681,7 +2731,7 @@ pub struct NickelSession {
     controller_role_lease: Option<ControllerRoleLease>,
     controller_role_security_epoch: u64,
     controller_external_lease_binding: Option<ExternalControllerLeaseBinding>,
-    controller_ingress_recovery: Option<(ControllerHostId, ControllerConnectionGeneration)>,
+    controller_recovery: Option<ControllerRecoveryIntent>,
     controller_neutral_probe_requested: Arc<AtomicBool>,
     /// Compositor-owned overlays shown above ordinary clients while remote authority exists.
     pub(crate) remote_indicator_surfaces: HashMap<String, nickel_ui::InternalSurfaceId>,
@@ -5832,7 +5882,7 @@ impl NickelSession {
     }
 
     fn begin_controller_security_takeover(&mut self) {
-        self.controller_ingress_recovery = None;
+        self.controller_recovery = None;
         let now_ms = self.start_time.elapsed().as_millis() as u64;
         let _ = self.controller_broker.security_takeover(
             ControllerHostId(0),
@@ -5930,23 +5980,31 @@ impl NickelSession {
             }
         }
         self.controller_broker.set_neutral(neutral);
-        if neutral && let Some((host, connection)) = self.controller_ingress_recovery.take() {
+        let recovery = self
+            .controller_recovery
+            .as_mut()
+            .and_then(|intent| intent.observe_fresh_batch(neutral));
+        if let Some((host, connection)) = recovery {
+            self.controller_recovery = None;
             let _ = self.controller_broker.grant(host, connection);
         }
     }
 
     pub(crate) fn handle_controller_ingress_overflow(&mut self) {
-        self.controller_ingress_recovery = self
+        let recoverable = self
             .controller_broker
             .reset_ingress()
             .map(|lease| (lease.host, lease.connection_generation));
+        self.controller_recovery
+            .get_or_insert_with(ControllerRecoveryIntent::default)
+            .merge_overflow(recoverable);
         tracing::error!(
             "native controller ingress overflow installed controller stream reset barrier"
         );
     }
 
     pub(crate) fn handle_controller_ingress_exhaustion(&mut self) {
-        self.controller_ingress_recovery = None;
+        self.controller_recovery = None;
         self.controller_broker.exhaust();
         tracing::error!(
             "native controller ingress generation exhausted; input remains fail closed"
@@ -6189,10 +6247,27 @@ impl NickelSession {
                 let _ = self
                     .controller_broker
                     .relinquish(host, connection_generation);
-                if let Some(successor) = orderly_successor {
-                    self.controller_ingress_recovery = Some(successor);
-                    self.controller_neutral_probe_requested
-                        .store(true, Ordering::Release);
+                let pending_owner = self
+                    .controller_recovery
+                    .and_then(|intent| intent.eligible_owner);
+                let orderly_eligible = orderly_successor.is_some()
+                    || pending_owner.is_some_and(|owner| {
+                        owner == (host, connection_generation) && host != ControllerHostId(0)
+                    });
+                if orderly_eligible {
+                    let intent = self
+                        .controller_recovery
+                        .get_or_insert_with(ControllerRecoveryIntent::default);
+                    if intent.eligible_owner.is_none() {
+                        intent.eligible_owner = Some((host, connection_generation));
+                    }
+                    if intent.merge_orderly_relinquish(
+                        (host, connection_generation),
+                        self.controller_internal_connection,
+                    ) {
+                        self.controller_neutral_probe_requested
+                            .store(true, Ordering::Release);
+                    }
                 }
                 ControllerHostResponse::Detached
             }
@@ -7637,7 +7712,7 @@ impl NickelSession {
             controller_role_lease: None,
             controller_role_security_epoch: 0,
             controller_external_lease_binding: None,
-            controller_ingress_recovery: None,
+            controller_recovery: None,
             controller_neutral_probe_requested: Arc::new(AtomicBool::new(false)),
             remote_indicator_surfaces: HashMap::new(),
             remote_indicator_accessibility: HashMap::new(),
@@ -14119,6 +14194,36 @@ mod protocol_tests {
                 internal,
             ),
             None
+        );
+    }
+
+    #[test]
+    fn relinquish_then_overflow_preserves_internal_recovery_intent() {
+        let external = (ControllerHostId(44), ControllerConnectionGeneration(7));
+        let internal = ControllerConnectionGeneration(2);
+        let mut intent = super::ControllerRecoveryIntent {
+            eligible_owner: Some(external),
+            ..Default::default()
+        };
+        assert!(intent.merge_orderly_relinquish(external, internal));
+        intent.merge_overflow(None);
+        assert_eq!(
+            intent.observe_fresh_batch(true),
+            Some((ControllerHostId(0), internal))
+        );
+    }
+
+    #[test]
+    fn overflow_then_relinquish_preserves_generation_fence_and_internal_successor() {
+        let external = (ControllerHostId(44), ControllerConnectionGeneration(7));
+        let internal = ControllerConnectionGeneration(2);
+        let mut intent = super::ControllerRecoveryIntent::default();
+        intent.merge_overflow(Some(external));
+        assert!(intent.merge_orderly_relinquish(external, internal));
+        assert!(intent.require_fresh_generation);
+        assert_eq!(
+            intent.observe_fresh_batch(true),
+            Some((ControllerHostId(0), internal))
         );
     }
     use crate::session::output_retirement::{
