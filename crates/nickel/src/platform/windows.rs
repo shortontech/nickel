@@ -41,6 +41,7 @@ use windows::{
             TH32CS_SNAPPROCESS,
         },
         System::LibraryLoader::GetModuleHandleW,
+        System::SystemInformation::GetTickCount,
         System::Threading::{
             AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
             PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
@@ -97,14 +98,19 @@ use windows::{
 };
 
 use nickel_core::{
-    geometry_authority::ControlMode,
+    geometry::LogicalRect,
+    geometry_authority::{
+        ControlMode, CoordinateUnits, GeometryAuthority, GeometryConstraints, GeometryMeaning,
+        NativeRequest, NativeRequestId, ObservationCausality, Presentation, Settlement,
+        SettlementLimits, SettlementStatus, TaggedGeometry,
+    },
     hotkeys::{HotkeyAction, KeyCode, KeyEdge},
     window_operation::{
         BeginRequest, CancellationReason, CompletionBinding, CompletionGesture, Disposition,
-        Effect as WindowOperationEffect, FailureReason, HorizontalEdge, MappingGeneration,
-        NativeLifetimeId, OperationId, OperationKind, ResizeEdges, ResourceLeaseId, SeatId, Source,
-        SourceGeneration, SourceId, VerticalEdge, WindowId as OperationWindowId, WindowMapping,
-        WindowOperationReducer,
+        Effect as WindowOperationEffect, FailureReason, GeometrySeed, GeometryUpdate,
+        HorizontalEdge, MappingGeneration, NativeLifetimeId, OperationId, OperationKind,
+        ResizeEdges, ResourceLeaseId, SeatId, Source, SourceGeneration, SourceId, VerticalEdge,
+        WindowId as OperationWindowId, WindowMapping, WindowOperationReducer,
     },
 };
 use nickel_input::{
@@ -1316,17 +1322,19 @@ static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
 const PANEL_APPBAR_CALLBACK: u32 = 0x8000 + 17;
 const ABN_FULLSCREENAPP_CODE: usize = 2;
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct WindowDrag {
     operation: OperationId,
     completion: CompletionBinding,
     window: isize,
     start: POINT,
-    rectangle: RECT,
     resize_edge: Option<u32>,
     initiated_at: u32,
     last_update: u32,
     last_apply: NativeApplyState,
+    authority: GeometryAuthority,
+    settlement: Option<Settlement>,
+    last_observed: LogicalRect,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1341,6 +1349,7 @@ struct WindowDragCoordinator {
     reducer: WindowOperationReducer,
     active: Option<WindowDrag>,
     next_mapping_generation: u64,
+    next_native_request: u64,
     last_terminal_apply: Option<NativeApplyState>,
 }
 
@@ -1374,18 +1383,35 @@ impl WindowDragCoordinator {
         };
         self.next_mapping_generation = self.next_mapping_generation.saturating_add(1);
         let mapping_generation = self.next_mapping_generation;
-        let (Some(operation), begin) = self.reducer.begin(BeginRequest {
-            seat: SeatId::new(1),
-            subject: WindowMapping {
-                window: OperationWindowId::new(admission.window as usize as u64),
-                native_lifetime: NativeLifetimeId::new(mapping_generation),
-                generation: MappingGeneration::new(mapping_generation),
+        let rectangle = admission.rectangle;
+        let (Some(operation), begin) = self.reducer.begin_with_geometry(
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject: WindowMapping {
+                    window: OperationWindowId::new(admission.window as usize as u64),
+                    native_lifetime: NativeLifetimeId::new(mapping_generation),
+                    generation: MappingGeneration::new(mapping_generation),
+                },
+                kind,
+                control: ControlMode::ExternallyContested,
+                origin: completion,
+                optional_update_sources: Vec::new(),
             },
-            kind,
-            control: ControlMode::ExternallyContested,
-            origin: completion,
-            optional_update_sources: Vec::new(),
-        }) else {
+            GeometrySeed {
+                anchor: LogicalRect {
+                    x: rectangle.left,
+                    y: rectangle.top,
+                    width: rectangle.right - rectangle.left,
+                    height: rectangle.bottom - rectangle.top,
+                },
+                constraints: GeometryConstraints {
+                    min_width: 120,
+                    min_height: 80,
+                    max_width: None,
+                    max_height: None,
+                },
+            },
+        ) else {
             return false;
         };
         let [WindowOperationEffect::Acquire { request, .. }] = begin.effects.as_slice() else {
@@ -1410,28 +1436,56 @@ impl WindowDragCoordinator {
             completion,
             window: admission.window,
             start: admission.start,
-            rectangle: admission.rectangle,
             resize_edge: admission.resize_edge,
             initiated_at: admission.time,
             last_update: admission.time,
             last_apply: NativeApplyState::NotSubmitted,
+            authority: contested_authority(admission.rectangle),
+            settlement: None,
+            last_observed: logical_rect(admission.rectangle),
         });
         true
     }
 
     fn update(&mut self, pointer: POINT, time: u32) -> Result<(), ()> {
-        let Some(mut active) = self.active else {
+        let Some(mut active) = self.active.take() else {
             return Err(());
         };
-        if self
-            .reducer
-            .update(active.operation, active.completion.source)
-            .disposition
-            != Disposition::Applied
-        {
-            return Err(());
+        match observe_window_drag(&mut active, time, false) {
+            Err(reason) => {
+                let _ = self.reducer.cancel(active.operation, reason);
+                self.last_terminal_apply = Some(active.last_apply);
+                return Err(());
+            }
+            Ok(false) => {
+                self.active = Some(active);
+                return Ok(());
+            }
+            Ok(true) => {}
         }
-        active.last_apply = update_window_drag(active, pointer);
+        let transition = self.reducer.update_geometry(
+            active.operation,
+            active.completion.source,
+            GeometryUpdate::AbsoluteDisplacement {
+                x: i64::from(pointer.x) - i64::from(active.start.x),
+                y: i64::from(pointer.y) - i64::from(active.start.y),
+            },
+        );
+        let Some(rectangle) = transition.effects.iter().find_map(|effect| match effect {
+            WindowOperationEffect::GeometryProposed { constrained, .. } => Some(*constrained),
+            _ => None,
+        }) else {
+            self.active = Some(active);
+            return Err(());
+        };
+        self.next_native_request = self.next_native_request.saturating_add(1);
+        active.last_apply = apply_window_drag(
+            &mut active,
+            rectangle,
+            self.next_native_request,
+            self.next_mapping_generation,
+            time,
+        );
         active.last_update = time;
         self.active = Some(active);
         if active.last_apply == NativeApplyState::Rejected {
@@ -1446,12 +1500,20 @@ impl WindowDragCoordinator {
     }
 
     fn release(&mut self, binding: CompletionBinding) {
-        let Some(active) = self.active else {
+        let Some(mut active) = self.active.take() else {
             return;
         };
+        let last_update = active.last_update;
+        if let Err(reason) = observe_window_drag(&mut active, last_update, true) {
+            let _ = self.reducer.cancel(active.operation, reason);
+            self.last_terminal_apply = Some(active.last_apply);
+            return;
+        }
         if self.reducer.release(active.operation, binding).disposition == Disposition::Applied {
             self.last_terminal_apply = Some(active.last_apply);
             self.active = None;
+        } else {
+            self.active = Some(active);
         }
     }
 
@@ -1873,7 +1935,19 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let Ok(mut coordinator) = WINDOW_DRAG.lock() else {
         return;
     };
-    let Some(active) = coordinator.active else {
+    let observation = coordinator
+        .active
+        .as_mut()
+        .map(|active| observe_window_drag(active, unsafe { GetTickCount() }, false));
+    match observation {
+        Some(Err(reason)) => {
+            coordinator.cancel(reason);
+            return;
+        }
+        Some(Ok(false)) => return,
+        _ => {}
+    }
+    let Some(active) = coordinator.active.as_ref() else {
         return;
     };
     let held = match active.completion.gesture {
@@ -1886,54 +1960,43 @@ fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     }
 }
 
-fn update_window_drag(operation: WindowDrag, pointer: POINT) -> NativeApplyState {
-    let delta_x = pointer.x - operation.start.x;
-    let delta_y = pointer.y - operation.start.y;
-    let mut rectangle = operation.rectangle;
-    if let Some(edge) = operation.resize_edge {
-        if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
-            rectangle.left += delta_x;
-        }
-        if matches!(edge, HTRIGHT | HTTOPRIGHT | HTBOTTOMRIGHT) {
-            rectangle.right += delta_x;
-        }
-        if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
-            rectangle.top += delta_y;
-        }
-        if matches!(edge, HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT) {
-            rectangle.bottom += delta_y;
-        }
-        if rectangle.right - rectangle.left < 120 {
-            if matches!(edge, HTLEFT | HTTOPLEFT | HTBOTTOMLEFT) {
-                rectangle.left = rectangle.right - 120;
-            } else {
-                rectangle.right = rectangle.left + 120;
-            }
-        }
-        if rectangle.bottom - rectangle.top < 80 {
-            if matches!(edge, HTTOP | HTTOPLEFT | HTTOPRIGHT) {
-                rectangle.top = rectangle.bottom - 80;
-            } else {
-                rectangle.bottom = rectangle.top + 80;
-            }
-        }
-    } else {
-        let width = rectangle.right - rectangle.left;
-        let height = rectangle.bottom - rectangle.top;
-        rectangle.left += delta_x;
-        rectangle.top += delta_y;
-        rectangle.right = rectangle.left + width;
-        rectangle.bottom = rectangle.top + height;
-    }
+fn apply_window_drag(
+    operation: &mut WindowDrag,
+    rectangle: LogicalRect,
+    request_id: u64,
+    mapping_generation: u64,
+    now: u32,
+) -> NativeApplyState {
+    let authorized = operation.authority.authorize_placement(
+        rectangle,
+        GeometryConstraints {
+            min_width: 120,
+            min_height: 80,
+            max_width: None,
+            max_height: None,
+        },
+    );
+    operation.settlement = Some(Settlement::new(
+        NativeRequest {
+            id: NativeRequestId(request_id),
+            mapping_generation,
+            desired: operation.authority.revisions(),
+            placement: authorized.desired,
+        },
+        SettlementLimits {
+            deadline_tick: u64::from(now).saturating_add(250),
+            max_corrections: 0,
+        },
+    ));
     let window = HWND(operation.window as *mut c_void);
     let accepted = unsafe {
         SetWindowPos(
             window,
             None,
-            rectangle.left,
-            rectangle.top,
-            rectangle.right - rectangle.left,
-            rectangle.bottom - rectangle.top,
+            rectangle.x,
+            rectangle.y,
+            rectangle.width,
+            rectangle.height,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         )
         .is_ok()
@@ -1944,6 +2007,83 @@ fn update_window_drag(operation: WindowDrag, pointer: POINT) -> NativeApplyState
     } else {
         NativeApplyState::Rejected
     }
+}
+
+fn logical_rect(rectangle: RECT) -> LogicalRect {
+    LogicalRect {
+        x: rectangle.left,
+        y: rectangle.top,
+        width: (rectangle.right - rectangle.left).max(1),
+        height: (rectangle.bottom - rectangle.top).max(1),
+    }
+}
+
+fn native_geometry(rect: LogicalRect) -> TaggedGeometry {
+    TaggedGeometry {
+        rect,
+        meaning: GeometryMeaning::Win32OuterBounds,
+        units: CoordinateUnits::NativePhysical,
+        topology_version: 1,
+    }
+}
+
+fn contested_authority(rectangle: RECT) -> GeometryAuthority {
+    let mut authority = GeometryAuthority::new(logical_rect(rectangle), Presentation::Normal);
+    authority.base_placement.control = ControlMode::ExternallyContested;
+    authority
+}
+
+fn classify_window_drag_observation(
+    operation: &mut WindowDrag,
+    observed: LogicalRect,
+    now: u32,
+    final_observation: bool,
+) -> Result<bool, CancellationReason> {
+    let fact = native_geometry(observed);
+    if let Some(settlement) = operation.settlement.as_mut() {
+        if observed == settlement.request.placement {
+            let request = settlement.request.id;
+            settlement.observe(fact, ObservationCausality::Correlated(request));
+            operation
+                .authority
+                .observe(fact, ObservationCausality::Correlated(request));
+            operation.last_observed = observed;
+            operation.settlement = None;
+            return Ok(true);
+        }
+        settlement.observe(fact, ObservationCausality::Unknown);
+        settlement.expire(u64::from(now));
+        if final_observation || settlement.status == SettlementStatus::Unconfirmed {
+            operation
+                .authority
+                .observe(fact, ObservationCausality::Unknown);
+            operation.authority.base_placement.control = ControlMode::Delegated;
+            return Err(CancellationReason::AuthorityUnknown);
+        }
+        return Ok(false);
+    }
+    if observed != operation.last_observed {
+        operation
+            .authority
+            .observe(fact, ObservationCausality::Independent);
+        operation.authority.base_placement.control = ControlMode::Delegated;
+        return Err(CancellationReason::NativeTakeover);
+    }
+    Ok(true)
+}
+
+fn observe_window_drag(
+    operation: &mut WindowDrag,
+    now: u32,
+    final_observation: bool,
+) -> Result<bool, CancellationReason> {
+    let mut rectangle = RECT::default();
+    let window = HWND(operation.window as *mut c_void);
+    if unsafe { GetWindowRect(window, &mut rectangle) }.is_err() {
+        operation.authority.base_placement.control = ControlMode::Delegated;
+        return Err(CancellationReason::AuthorityUnknown);
+    }
+    classify_window_drag_observation(operation, logical_rect(rectangle), now, final_observation)
 }
 
 fn resize_hit_test(window: HWND, pointer: POINT) -> u32 {
@@ -4220,15 +4360,103 @@ pub(crate) fn verify_trusted_control_window(
 mod tests {
     use std::collections::HashSet;
 
-    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Foundation::{POINT, RECT};
+
+    use nickel_core::{
+        geometry::LogicalRect,
+        geometry_authority::{
+            ControlMode, FieldOwner, NativeRequest, NativeRequestId, Settlement, SettlementLimits,
+        },
+        window_operation::{CancellationReason, CompletionBinding, CompletionGesture, OperationId},
+    };
 
     use super::{
-        DwmPreviewState, NativePreviewDiagnostics, TrayNotifyIconData, application_icon,
-        clamp_preview_x, contain_rect, executable_icon, is_nickel_host_terminal,
+        DwmPreviewState, NativeApplyState, NativePreviewDiagnostics, TrayNotifyIconData,
+        WindowDrag, application_icon, clamp_preview_x, classify_window_drag_observation,
+        contain_rect, contested_authority, executable_icon, is_nickel_host_terminal,
         is_shell_infrastructure, native_hotkey_requests, parse_windows_command,
         project_native_preview_diagnostics, project_windows_shortcuts, rectangle_covers,
         restore_legacy_icon_alpha, should_restore_on_activation, windows_pid_descends_from,
     };
+
+    fn contested_drag() -> WindowDrag {
+        let rectangle = RECT {
+            left: 10,
+            top: 20,
+            right: 310,
+            bottom: 220,
+        };
+        WindowDrag {
+            operation: OperationId::new(1),
+            completion: CompletionBinding {
+                source: super::windows_pointer_source(),
+                gesture: CompletionGesture::Button(1),
+            },
+            window: 1,
+            start: POINT::default(),
+            resize_edge: None,
+            initiated_at: 0,
+            last_update: 0,
+            last_apply: NativeApplyState::NotSubmitted,
+            authority: contested_authority(rectangle),
+            settlement: None,
+            last_observed: LogicalRect {
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 200,
+            },
+        }
+    }
+
+    #[test]
+    fn independent_native_geometry_revokes_before_another_write() {
+        let mut drag = contested_drag();
+        let observed = LogicalRect {
+            x: 40,
+            ..drag.last_observed
+        };
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 10, false),
+            Err(CancellationReason::NativeTakeover)
+        );
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::External);
+        assert_eq!(
+            drag.authority.base_placement.control,
+            ControlMode::Delegated
+        );
+    }
+
+    #[test]
+    fn unmatched_native_request_expires_to_unknown_authority() {
+        let mut drag = contested_drag();
+        let observed = drag.last_observed;
+        drag.settlement = Some(Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(7),
+                mapping_generation: 1,
+                desired: drag.authority.revisions(),
+                placement: LogicalRect { x: 50, ..observed },
+            },
+            SettlementLimits {
+                deadline_tick: 250,
+                max_corrections: 0,
+            },
+        ));
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 249, false),
+            Ok(false)
+        );
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 250, false),
+            Err(CancellationReason::AuthorityUnknown)
+        );
+        assert_eq!(drag.authority.base_placement.owner, FieldOwner::Unknown);
+        assert_eq!(
+            drag.authority.base_placement.control,
+            ControlMode::Delegated
+        );
+    }
 
     #[test]
     fn shortcut_diagnostic_projects_only_confirmed_fixed_registration_metadata() {
