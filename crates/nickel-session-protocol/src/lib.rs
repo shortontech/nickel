@@ -5,6 +5,8 @@ pub mod client;
 pub mod client;
 pub mod controller_broker;
 mod local_transport;
+#[cfg(windows)]
+pub mod server_windows;
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
