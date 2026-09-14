@@ -393,6 +393,7 @@ impl XdgShellHandler for NickelSession {
                 start_data,
                 window,
                 initial_window_location,
+                last_window_location: initial_window_location,
                 restored_from_maximized: false,
                 operation: Some(operation),
             };

@@ -296,6 +296,7 @@ pub struct WindowOperationReducer {
     windows: HashMap<WindowId, OperationId>,
     invalid_acquisitions: HashSet<AcquisitionId>,
     terminal: HashMap<OperationId, TerminalOutcome>,
+    compensation: HashMap<OperationId, CompensationDecision>,
 }
 
 impl WindowOperationReducer {
@@ -307,6 +308,11 @@ impl WindowOperationReducer {
     #[must_use]
     pub fn terminal_outcome(&self, id: OperationId) -> Option<TerminalOutcome> {
         self.terminal.get(&id).copied()
+    }
+
+    #[must_use]
+    pub fn compensation_decision(&self, id: OperationId) -> Option<CompensationDecision> {
+        self.compensation.get(&id).copied()
     }
 
     /// Returns the current interactive writer for a stable window identity.
@@ -610,9 +616,11 @@ impl WindowOperationReducer {
                 effects.push(Effect::SubmitFinalDesiredState { operation });
             }
             TerminalOutcome::Cancelled(_) | TerminalOutcome::Failed(_) => {
+                let decision = compensation.unwrap_or(CompensationDecision::Conditional);
+                self.compensation.insert(operation, decision);
                 effects.push(Effect::RequestCompensation {
                     operation,
-                    decision: compensation.unwrap_or(CompensationDecision::Conditional),
+                    decision,
                 });
             }
         }
@@ -982,5 +990,9 @@ mod tests {
             operation,
             decision: CompensationDecision::SkipAuthorityLost,
         }));
+        assert_eq!(
+            reducer.compensation_decision(operation),
+            Some(CompensationDecision::SkipAuthorityLost)
+        );
     }
 }

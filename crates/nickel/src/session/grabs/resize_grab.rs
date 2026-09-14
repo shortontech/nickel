@@ -139,7 +139,22 @@ impl PointerGrab<NickelSession> for ResizeSurfaceGrab {
         if let Some(operation) = &self.operation {
             operation.cancel(&mut data.window_operations);
         }
+        let compensate = self.operation.as_ref().is_none_or(|operation| {
+            operation.requests_conditional_compensation(&data.window_operations)
+        });
+        if !compensate {
+            return;
+        }
         if let Some(x11) = self.window.x11_surface() {
+            let current = Rectangle::new(
+                data.space
+                    .element_location(&self.window)
+                    .unwrap_or(self.initial_rect.loc),
+                self.last_window_size,
+            );
+            if current != self.window.geometry() {
+                return;
+            }
             if let Err(error) = x11.configure(self.initial_rect) {
                 tracing::warn!(?error, "X11 cancelled resize compensation failed");
             }

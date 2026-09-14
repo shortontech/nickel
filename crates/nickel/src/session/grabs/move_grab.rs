@@ -16,6 +16,7 @@ pub struct MoveSurfaceGrab {
     pub start_data: PointerGrabStartData<NickelSession>,
     pub window: Window,
     pub initial_window_location: Point<i32, Logical>,
+    pub last_window_location: Point<i32, Logical>,
     pub restored_from_maximized: bool,
     /// Present for client-requested XDG/XWayland operations. Compositor-
     /// initiated frame and modifier moves are migrated separately.
@@ -98,6 +99,14 @@ impl WindowPointerOperation {
         }
     }
 
+    pub(crate) fn requests_conditional_compensation(
+        &self,
+        reducer: &WindowOperationReducer,
+    ) -> bool {
+        reducer.compensation_decision(self.id)
+            == Some(nickel_core::window_operation::CompensationDecision::Conditional)
+    }
+
     #[cfg(test)]
     fn id(&self) -> OperationId {
         self.id
@@ -138,7 +147,8 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
 
         let delta = event.location - self.start_data.location;
         let new_location = self.initial_window_location.to_f64() + delta;
-        data.map_compositor_moved_window(self.window.clone(), new_location.to_i32_round(), true);
+        self.last_window_location = new_location.to_i32_round();
+        data.map_compositor_moved_window(self.window.clone(), self.last_window_location, true);
     }
 
     fn button(
@@ -181,6 +191,15 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         // Normal completion has already removed the operation.
         if let Some(operation) = &self.operation {
             operation.cancel(&mut data.window_operations);
+            if operation.requests_conditional_compensation(&data.window_operations)
+                && data.space.element_location(&self.window) == Some(self.last_window_location)
+            {
+                data.map_compositor_moved_window(
+                    self.window.clone(),
+                    self.initial_window_location,
+                    true,
+                );
+            }
         }
     }
 }

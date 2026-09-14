@@ -1225,6 +1225,8 @@ impl NickelSession {
                                     surface,
                                     initial_location: (placement.geometry.0, placement.geometry.1)
                                         .into(),
+                                    last_location: (placement.geometry.0, placement.geometry.1)
+                                        .into(),
                                     operation,
                                 },
                                 serial,
@@ -1285,6 +1287,7 @@ impl NickelSession {
                             start_data,
                             surface,
                             initial_location: (placement.geometry.0, placement.geometry.1).into(),
+                            last_location: (placement.geometry.0, placement.geometry.1).into(),
                             operation,
                         },
                         serial,
@@ -1524,6 +1527,7 @@ impl NickelSession {
                                             start_data,
                                             window,
                                             initial_window_location,
+                                            last_window_location: initial_window_location,
                                             restored_from_maximized: false,
                                             operation,
                                         },
@@ -1737,6 +1741,7 @@ impl NickelSession {
                                 start_data,
                                 window,
                                 initial_window_location,
+                                last_window_location: initial_window_location,
                                 restored_from_maximized: false,
                                 operation,
                             },

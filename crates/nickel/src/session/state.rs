@@ -6406,6 +6406,23 @@ impl NickelSession {
         removed
     }
 
+    pub(crate) fn compensate_internal_move(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        initial: smithay::utils::Point<i32, smithay::utils::Logical>,
+        last_owned: smithay::utils::Point<i32, smithay::utils::Logical>,
+    ) -> bool {
+        let Some(mut placement) = self.internal_ui.placement(surface).cloned() else {
+            return false;
+        };
+        if (placement.geometry.0, placement.geometry.1) != (last_owned.x, last_owned.y) {
+            return false;
+        }
+        placement.geometry.0 = initial.x;
+        placement.geometry.1 = initial.y;
+        self.internal_ui.relocate(surface, placement)
+    }
+
     pub fn step_internal_surface(
         &mut self,
         id: nickel_ui::InternalSurfaceId,
@@ -13977,6 +13994,83 @@ mod protocol_tests {
             ))
         );
         assert!(operation.complete(&mut session.window_operations));
+    }
+
+    #[test]
+    fn internal_move_compensation_restores_only_the_last_owned_placement() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("compensation target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (10, 20, 300, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let mut moved = session.internal_ui.placement(surface).unwrap().clone();
+        moved.geometry.0 = 80;
+        moved.geometry.1 = 90;
+        assert!(session.internal_ui.relocate(surface, moved));
+        assert!(session.compensate_internal_move(surface, (10, 20).into(), (80, 90).into()));
+        assert_eq!(
+            session.internal_ui.placement(surface).unwrap().geometry.0,
+            10
+        );
+
+        let mut superseding = session.internal_ui.placement(surface).unwrap().clone();
+        superseding.geometry.0 = 120;
+        assert!(session.internal_ui.relocate(surface, superseding));
+        assert!(!session.compensate_internal_move(surface, (10, 20).into(), (80, 90).into()));
+        assert_eq!(
+            session.internal_ui.placement(surface).unwrap().geometry.0,
+            120
+        );
+    }
+
+    #[test]
+    fn lock_cancellation_releases_window_admission_without_waiting_for_settlement() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let request = nickel_core::window_operation::BeginRequest {
+            seat: nickel_core::window_operation::SeatId::new(1),
+            subject: nickel_core::window_operation::WindowMapping {
+                window: nickel_core::window_operation::WindowId::new(900),
+                native_lifetime: nickel_core::window_operation::NativeLifetimeId::new(1),
+                generation: nickel_core::window_operation::MappingGeneration::new(1),
+            },
+            kind: nickel_core::window_operation::OperationKind::Move,
+            control: nickel_core::geometry_authority::ControlMode::Enforced,
+            origin: nickel_core::window_operation::CompletionBinding {
+                source: nickel_core::window_operation::Source {
+                    id: nickel_core::window_operation::SourceId::new(1),
+                    generation: nickel_core::window_operation::SourceGeneration::new(1),
+                },
+                gesture: nickel_core::window_operation::CompletionGesture::Button(1),
+            },
+            optional_update_sources: Vec::new(),
+        };
+        let (operation, _) = session.window_operations.begin(request.clone());
+        let operation = operation.unwrap();
+
+        assert!(
+            session.cancel_window_interactions(
+                nickel_core::window_operation::CancellationReason::Lock
+            )
+        );
+        assert!(session.window_operations.operation(operation).is_none());
+        assert!(session.window_operations.begin(request).0.is_some());
     }
 
     #[test]
