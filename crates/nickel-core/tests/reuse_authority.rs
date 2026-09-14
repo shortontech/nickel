@@ -272,3 +272,22 @@ fn independent_x11_configure_revokes_an_active_operation_before_native_apply() {
         .expect("accepted geometry must reach XWayland");
     assert!(cancel < observe && observe < apply);
 }
+
+#[test]
+fn unknown_x11_notify_terminates_interaction_before_reconciliation() {
+    let root = workspace_root();
+    let x11 =
+        fs::read_to_string(root.join("crates/nickel/src/session/handlers/xwayland.rs")).unwrap();
+    let notify = x11
+        .split("fn configure_notify(")
+        .nth(1)
+        .unwrap()
+        .split("fn property_notify")
+        .next()
+        .unwrap();
+    let cancel = notify.find("CancellationReason::AuthorityUnknown").unwrap();
+    let cleanup = notify.find("pointer.unset_grab").unwrap();
+    let observe = notify.find("observe_x11_geometry").unwrap();
+    assert!(cancel < cleanup && cleanup < observe);
+    assert!(notify.contains("x11_configure_notify_causality()"));
+}

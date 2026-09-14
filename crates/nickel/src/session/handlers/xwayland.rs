@@ -575,11 +575,28 @@ impl XwmHandler for NickelSession {
         geometry: Rectangle<i32, Logical>,
         _above: Option<X11Window>,
     ) {
+        let registry_id = self.x11_window_id(&window);
+        if let Some(id) = registry_id {
+            let subject = OperationWindowId::new(id.0);
+            if let Some(operation) = self.window_operations.operation_for_window(subject) {
+                let _ = self.window_operations.cancel(
+                    operation,
+                    nickel_core::window_operation::CancellationReason::AuthorityUnknown,
+                );
+                if let Some(pointer) = self.seat.get_pointer() {
+                    pointer.unset_grab(
+                        self,
+                        smithay::utils::SERIAL_COUNTER.next_serial(),
+                        smithay::backend::input::InputTime::now(),
+                    );
+                }
+            }
+        }
         if let Some(mapped) = self.x11_window(&window) {
             self.space.map_element(mapped, geometry.loc, false);
             self.request_output_redraw();
         }
-        if let Some(id) = self.x11_window_id(&window) {
+        if let Some(id) = registry_id {
             self.observe_x11_geometry(
                 id,
                 shell_layout::Geometry {

@@ -588,6 +588,13 @@ impl Settlement {
         }
     }
 
+    /// Records that a newer desired request replaced this request.
+    pub fn supersede(&mut self) {
+        if self.status == SettlementStatus::Pending {
+            self.status = SettlementStatus::Superseded;
+        }
+    }
+
     pub fn expire(&mut self, now_tick: u64) {
         if self.status == SettlementStatus::Pending && now_tick >= self.limits.deadline_tick {
             self.status = SettlementStatus::Unconfirmed;

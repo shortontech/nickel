@@ -2604,6 +2604,23 @@ struct XdgConfigureSettlement {
         Option<crate::session::grabs::resize_grab::ResizeEdge>,
     )>,
     settlement: nickel_core::geometry_authority::Settlement,
+    outcomes: std::collections::VecDeque<nickel_core::geometry_authority::Settlement>,
+}
+
+const MAX_RETAINED_XDG_SETTLEMENT_OUTCOMES: usize = 16;
+
+fn retain_superseded_xdg_settlement(
+    previous: Option<XdgConfigureSettlement>,
+) -> std::collections::VecDeque<nickel_core::geometry_authority::Settlement> {
+    let Some(mut previous) = previous else {
+        return std::collections::VecDeque::new();
+    };
+    previous.settlement.supersede();
+    if previous.outcomes.len() == MAX_RETAINED_XDG_SETTLEMENT_OUTCOMES {
+        previous.outcomes.pop_front();
+    }
+    previous.outcomes.push_back(previous.settlement);
+    previous.outcomes
 }
 
 fn xdg_configure_extends_existing_request(
@@ -10517,10 +10534,12 @@ impl NickelSession {
             .elapsed()
             .as_millis()
             .min(u128::from(u64::MAX)) as u64;
+        let outcomes = retain_superseded_xdg_settlement(self.xdg_geometry_settlements.remove(&id));
         self.xdg_geometry_settlements.insert(
             id,
             XdgConfigureSettlement {
                 configures: std::collections::VecDeque::new(),
+                outcomes,
                 settlement: Settlement::new(
                     NativeRequest {
                         id: request_id,
@@ -13929,8 +13948,8 @@ mod protocol_tests {
         placement_restore_is_current, prepare_shell_behavior_update,
         preview_mapping_has_exact_size, protocol_preview_from_cached,
         record_preview_capture_attempt, restored_drag_content_geometry,
-        retain_live_idle_inhibitors, retire_displaced_window, retire_pointer_surface,
-        retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
+        retain_live_idle_inhibitors, retain_superseded_xdg_settlement, retire_displaced_window,
+        retire_pointer_surface, retire_shell_surface, reuse_preview_pixels, shell_behavior_value,
         shell_registration_is_active, shell_registration_rejection,
         shell_registration_role_changed, shell_role_accepts_ordinary_focus,
         test_control_may_invoke, xdg_configure_extends_existing_request,
@@ -13952,6 +13971,7 @@ mod protocol_tests {
         let revisions = authority.revisions();
         let record = XdgConfigureSettlement {
             configures: std::collections::VecDeque::new(),
+            outcomes: std::collections::VecDeque::new(),
             settlement: Settlement::new(
                 NativeRequest {
                     id: NativeRequestId(1),
@@ -13984,6 +14004,13 @@ mod protocol_tests {
             authority.revisions(),
             newer
         ));
+
+        let outcomes = retain_superseded_xdg_settlement(Some(record));
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].status,
+            nickel_core::geometry_authority::SettlementStatus::Superseded
+        );
     }
 
     #[test]
