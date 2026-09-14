@@ -21,4 +21,5 @@ pub mod terminal_settings;
 pub mod theme;
 pub mod wallpaper_settings;
 pub mod window_input;
+pub mod window_operation;
 pub mod workspaces;
