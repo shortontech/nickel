@@ -1128,6 +1128,8 @@ fn run_super_key_hook(
 ) {
     SHORTCUT_SENDER.set(sender).ok();
     let native_move_size_hook = NativeMoveSizeHook::install();
+    NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE
+        .store(native_move_size_hook.is_some(), Ordering::Release);
     if native_move_size_hook.is_none() {
         tracing::warn!("native move/size ownership observation is unavailable");
     }
@@ -1326,6 +1328,8 @@ static RESTORE_LAUNCHER_FOCUS: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 static WINDOW_DRAG: LazyLock<Mutex<WindowDragCoordinator>> =
     LazyLock::new(|| Mutex::new(WindowDragCoordinator::default()));
+static NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 struct NativeMoveSizeHook(HWINEVENTHOOK);
 
@@ -1348,6 +1352,7 @@ impl NativeMoveSizeHook {
 
 impl Drop for NativeMoveSizeHook {
     fn drop(&mut self) {
+        NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.store(false, Ordering::Release);
         unsafe {
             let _ = UnhookWinEvent(self.0);
         }
@@ -1428,7 +1433,7 @@ struct WindowDragAdmission {
 
 impl WindowDragCoordinator {
     fn admit(&mut self, admission: WindowDragAdmission) -> bool {
-        if self.active.is_some() {
+        if self.active.is_some() || self.retained_settlement.is_some() {
             return false;
         }
         if let Some(last_apply) = self.last_terminal_apply {
@@ -1603,16 +1608,6 @@ impl WindowDragCoordinator {
         }
         let observed = logical_rect(rectangle);
         let fact = native_geometry(observed);
-        if observed == retained.settlement.request.placement {
-            let request = retained.settlement.request.id;
-            retained
-                .settlement
-                .observe(fact, ObservationCausality::Correlated(request));
-            retained
-                .authority
-                .observe(fact, ObservationCausality::Correlated(request));
-            return;
-        }
         retained
             .settlement
             .observe(fact, ObservationCausality::Unknown);
@@ -1929,6 +1924,12 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if event.injected {
         return HookDisposition::Forward;
     }
+    if !permits_contested_workflow(NATIVE_MOVE_SIZE_OBSERVATION_AVAILABLE.load(Ordering::Acquire)) {
+        if let Ok(mut coordinator) = WINDOW_DRAG.lock() {
+            coordinator.cancel(CancellationReason::AuthorityUnknown);
+        }
+        return HookDisposition::Forward;
+    }
     let point = POINT {
         x: event.x,
         y: event.y,
@@ -2067,6 +2068,10 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     HookDisposition::Suppress
 }
 
+const fn permits_contested_workflow(native_ownership_observation: bool) -> bool {
+    native_ownership_observation
+}
+
 fn handle_native_pointer_reconcile(primary_held: bool, secondary_held: bool) {
     let Ok(mut coordinator) = WINDOW_DRAG.lock() else {
         return;
@@ -2178,16 +2183,6 @@ fn classify_window_drag_observation(
 ) -> Result<bool, CancellationReason> {
     let fact = native_geometry(observed);
     if let Some(settlement) = operation.settlement.as_mut() {
-        if observed == settlement.request.placement {
-            let request = settlement.request.id;
-            settlement.observe(fact, ObservationCausality::Correlated(request));
-            operation
-                .authority
-                .observe(fact, ObservationCausality::Correlated(request));
-            operation.last_observed = observed;
-            operation.settlement = None;
-            return Ok(true);
-        }
         settlement.observe(fact, ObservationCausality::Unknown);
         settlement.expire(now);
         if final_observation || settlement.status == SettlementStatus::Unconfirmed {
@@ -4512,9 +4507,9 @@ mod tests {
         WindowDrag, WindowDragAdmission, WindowDragCoordinator, application_icon, clamp_preview_x,
         classify_window_drag_observation, contain_rect, contested_authority, executable_icon,
         is_nickel_host_terminal, is_shell_infrastructure, native_hotkey_requests,
-        parse_windows_command, project_native_preview_diagnostics, project_windows_shortcuts,
-        rectangle_covers, restore_legacy_icon_alpha, should_restore_on_activation,
-        windows_pid_descends_from,
+        parse_windows_command, permits_contested_workflow, project_native_preview_diagnostics,
+        project_windows_shortcuts, rectangle_covers, restore_legacy_icon_alpha,
+        should_restore_on_activation, windows_pid_descends_from,
     };
 
     fn contested_drag() -> WindowDrag {
@@ -4594,6 +4589,39 @@ mod tests {
             drag.authority.base_placement.control,
             ControlMode::Delegated
         );
+    }
+
+    #[test]
+    fn equal_async_bounds_do_not_invent_request_causality() {
+        let mut drag = contested_drag();
+        let observed = drag.last_observed;
+        drag.settlement = Some(Settlement::new(
+            NativeRequest {
+                id: NativeRequestId(8),
+                mapping_generation: 1,
+                desired: drag.authority.revisions(),
+                placement: observed,
+            },
+            SettlementLimits {
+                deadline_tick: 250,
+                max_corrections: 0,
+            },
+        ));
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 249, false),
+            Ok(false)
+        );
+        assert!(drag.settlement.is_some());
+        assert_eq!(
+            classify_window_drag_observation(&mut drag, observed, 250, false),
+            Err(CancellationReason::AuthorityUnknown)
+        );
+    }
+
+    #[test]
+    fn contested_workflow_fails_closed_without_native_ownership_hook() {
+        assert!(!permits_contested_workflow(false));
+        assert!(permits_contested_workflow(true));
     }
 
     #[test]
