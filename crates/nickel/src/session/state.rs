@@ -11084,6 +11084,15 @@ impl NickelSession {
         target: Option<crate::session::focus::KeyboardFocusTarget>,
         scope: FocusScope,
     ) -> bool {
+        self.realize_seat_focus_with_serial(target, scope, SERIAL_COUNTER.next_serial())
+    }
+
+    pub(crate) fn realize_seat_focus_with_serial(
+        &mut self,
+        target: Option<crate::session::focus::KeyboardFocusTarget>,
+        scope: FocusScope,
+        serial: smithay::utils::Serial,
+    ) -> bool {
         use smithay::utils::IsAlive;
 
         let now = self.start_time.elapsed();
@@ -11100,11 +11109,10 @@ impl NickelSession {
             now,
             DEFAULT_FOCUS_REQUEST_TIMEOUT,
         );
-        self.seat.get_keyboard().unwrap().set_focus(
-            self,
-            target.clone(),
-            SERIAL_COUNTER.next_serial(),
-        );
+        self.seat
+            .get_keyboard()
+            .unwrap()
+            .set_focus(self, target.clone(), serial);
         let observed = self
             .seat
             .get_keyboard()

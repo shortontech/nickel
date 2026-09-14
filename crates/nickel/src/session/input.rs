@@ -1542,9 +1542,9 @@ impl NickelSession {
                             self.workspaces.focused(&id);
                         }
                         self.surrender_internal_focus();
-                        keyboard.set_focus(
-                            self,
+                        self.realize_seat_focus_with_serial(
                             crate::session::focus::KeyboardFocusTarget::for_window(&window),
+                            nickel_core::focus::FocusScope::Ordinary,
                             serial,
                         );
                         if let Some(surface) = window.x11_surface()
@@ -1794,9 +1794,9 @@ impl NickelSession {
                                     candidate.set_activated(candidate == &window);
                                 });
                                 self.surrender_internal_focus();
-                                keyboard.set_focus(
-                                    self,
+                                self.realize_seat_focus_with_serial(
                                     crate::session::focus::KeyboardFocusTarget::for_window(&window),
+                                    nickel_core::focus::FocusScope::Ordinary,
                                     serial,
                                 );
                                 if let Some(surface) = window.x11_surface()
@@ -1818,9 +1818,9 @@ impl NickelSession {
                                 toplevel.send_pending_configure();
                             }
                         });
-                        keyboard.set_focus(
-                            self,
-                            Option::<crate::session::focus::KeyboardFocusTarget>::None,
+                        self.realize_seat_focus_with_serial(
+                            None,
+                            nickel_core::focus::FocusScope::Ordinary,
                             serial,
                         );
                     }
