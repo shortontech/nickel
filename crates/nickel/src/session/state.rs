@@ -10145,6 +10145,18 @@ impl NickelSession {
         id: WindowId,
         desired: Geometry,
     ) -> nickel_core::geometry_authority::GeometryRevision {
+        self.authorize_desired_geometry(id, desired).map_or_else(
+            || self.geometry_authorities[&id].revisions().placement,
+            |authorized| authorized.revision,
+        )
+    }
+
+    fn authorize_desired_geometry(
+        &mut self,
+        id: WindowId,
+        desired: Geometry,
+    ) -> Option<nickel_core::geometry_authority::AuthorizedPlacement> {
+        use nickel_core::geometry_authority::FieldOwner;
         let constraints = nickel_core::geometry_authority::GeometryConstraints {
             min_width: 1,
             min_height: 1,
@@ -10157,7 +10169,20 @@ impl NickelSession {
                 nickel_core::geometry_authority::Presentation::Normal,
             )
         });
-        authority.authorize_placement(desired, constraints).revision
+        if authority.base_placement.owner != FieldOwner::Nickel {
+            return None;
+        }
+        Some(authority.authorize_placement(desired, constraints))
+    }
+
+    fn placement_is_authorized(
+        &self,
+        id: WindowId,
+        placement: nickel_core::geometry_authority::AuthorizedPlacement,
+    ) -> bool {
+        self.geometry_authorities
+            .get(&id)
+            .is_some_and(|authority| authority.permits_placement(placement))
     }
 
     pub(crate) fn record_x11_desired_geometry(
@@ -10459,15 +10484,16 @@ impl NickelSession {
         id: WindowId,
         presentation: nickel_core::geometry_authority::Presentation,
         desired: Geometry,
-    ) {
-        let revision = self.record_desired_geometry(id, desired);
+    ) -> Option<nickel_core::geometry_authority::AuthorizedPlacement> {
+        let placement = self.authorize_desired_geometry(id, desired)?;
         if let Some(authority) = self.geometry_authorities.get_mut(&id)
             && authority.presentation.value != presentation
         {
             authority.set_presentation(presentation);
         }
         self.presentation_restore_revisions
-            .insert((id, presentation), revision);
+            .insert((id, presentation), placement.revision);
+        Some(placement)
     }
 
     fn record_normal_presentation(&mut self, id: WindowId) {
@@ -11060,6 +11086,15 @@ impl NickelSession {
             self.on_screen_keyboard.dock_top,
             self.on_screen_keyboard.height,
         );
+        let Some(id) = self.window_geometry_authority_id(window) else {
+            return;
+        };
+        let Some(placement) = self.authorize_desired_geometry(id, target) else {
+            return;
+        };
+        if !self.placement_is_authorized(id, placement) {
+            return;
+        }
         Self::configure_window(window, target);
         let location = Self::shell_surface_location(window, target);
         self.map_buffered_window(window.clone(), location, false);
@@ -12355,17 +12390,25 @@ impl NickelSession {
             (geometry.x, geometry.y).into(),
             (geometry.width, geometry.height).into(),
         );
-        if let Some(id) = self.x11_windows.get(&surface.window_id()).copied() {
-            self.record_presentation_geometry(
-                id,
-                nickel_core::geometry_authority::Presentation::Maximized,
-                Geometry {
-                    x: geometry.loc.x,
-                    y: geometry.loc.y,
-                    width: geometry.size.w,
-                    height: geometry.size.h,
-                },
-            );
+        let authorized = self
+            .x11_windows
+            .get(&surface.window_id())
+            .copied()
+            .and_then(|id| {
+                self.record_presentation_geometry(
+                    id,
+                    nickel_core::geometry_authority::Presentation::Maximized,
+                    Geometry {
+                        x: geometry.loc.x,
+                        y: geometry.loc.y,
+                        width: geometry.size.w,
+                        height: geometry.size.h,
+                    },
+                )
+                .map(|placement| (id, placement))
+            });
+        if !authorized.is_some_and(|(id, placement)| self.placement_is_authorized(id, placement)) {
+            return;
         }
         let _ = surface.configure(geometry);
         self.map_buffered_window(window.clone(), geometry.loc, true);
@@ -12500,12 +12543,18 @@ impl NickelSession {
                     .surface_windows
                     .get(&surface.wl_surface().id())
                     .copied();
-                if let Some(id) = id {
+                let authorized = id.and_then(|id| {
                     self.record_presentation_geometry(
                         id,
                         nickel_core::geometry_authority::Presentation::Fullscreen,
                         output,
-                    );
+                    )
+                    .map(|placement| (id, placement))
+                });
+                if !authorized
+                    .is_some_and(|(id, placement)| self.placement_is_authorized(id, placement))
+                {
+                    continue;
                 }
                 Self::configure_window(&window, output);
                 window.override_z_index(45);
@@ -12518,12 +12567,18 @@ impl NickelSession {
                     (output.x, output.y).into(),
                     (output.width, output.height).into(),
                 );
-                if let Some(id) = id {
+                let authorized = id.and_then(|id| {
                     self.record_presentation_geometry(
                         id,
                         nickel_core::geometry_authority::Presentation::Fullscreen,
                         output,
-                    );
+                    )
+                    .map(|placement| (id, placement))
+                });
+                if !authorized
+                    .is_some_and(|(id, placement)| self.placement_is_authorized(id, placement))
+                {
+                    continue;
                 }
                 let _ = surface.configure(geometry);
                 window.override_z_index(45);
@@ -14674,6 +14729,35 @@ mod protocol_tests {
             session.internal_ui.placement(surface).unwrap().geometry.0,
             80
         );
+    }
+
+    #[test]
+    fn desired_geometry_record_does_not_reclaim_external_or_unknown_owner() {
+        use crate::session::window_registry::WindowId;
+        use nickel_core::geometry_authority::FieldOwner;
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let original = Geometry {
+            x: 10,
+            y: 20,
+            width: 300,
+            height: 200,
+        };
+        for (raw_id, owner) in [(9_901, FieldOwner::External), (9_902, FieldOwner::Unknown)] {
+            let id = WindowId(raw_id);
+            session.record_desired_geometry(id, original);
+            let authority = session.geometry_authorities.get_mut(&id).unwrap();
+            authority.base_placement.owner = owner;
+            let revision = authority.revisions().placement;
+
+            let observed = session.record_desired_geometry(id, Geometry { x: 40, ..original });
+            let authority = &session.geometry_authorities[&id];
+            assert_eq!(observed, revision);
+            assert_eq!(authority.base_placement.revision, revision);
+            assert_eq!(authority.base_placement.value, original);
+            assert_eq!(authority.base_placement.owner, owner);
+        }
     }
 
     #[test]
