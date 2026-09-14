@@ -3632,36 +3632,52 @@ impl<A: Application> UiHost<A> {
             .pending_long_press
             .as_ref()
             .is_some_and(|pending| pending.frame_generation.is_some());
-        let mut context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+        let context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
+        let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
         let paint_started = Instant::now();
-        let mut overlays = self.application.frame_overlays(context.clone());
-        let cancellation = if blocking_overlay_is_open(&overlays, self.state.open_overlay_id())
+        let view = self.application.view(context.clone());
+        let overlays = self.application.frame_overlays(context);
+        let open_overlay = self.state.open_overlay_id().cloned();
+        let blocking_overlay = blocking_overlay_is_open(&overlays, open_overlay.as_ref());
+        let paint_list_us = elapsed_us(paint_started);
+        let layout_started = Instant::now();
+
+        // Resolve overlays against a clone first. Gesture ownership is not
+        // disturbed unless the effective blocking layer, including its anchor
+        // and content, has successfully staged for publication.
+        let mut staged_state = self.state.clone();
+        let mut staged_tree =
+            UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut staged_state));
+        overlay_interaction.restore_before_overlay(&mut staged_state);
+        let overlay_failures = apply_frame_overlays(&mut staged_tree, &mut staged_state, overlays);
+        overlay_interaction.restore(&mut staged_state, &staged_tree);
+        staged_tree.reconcile_transient_focus(&mut staged_state);
+        staged_tree.finalize_transient_layers(&staged_state);
+        let blocking_overlay_valid = blocking_overlay
+            && open_overlay.as_ref().is_some_and(|open| {
+                !overlay_failures
+                    .iter()
+                    .any(|failure| &failure.overlay == open)
+            });
+
+        let cancellation = if blocking_overlay_valid
             && self.pointer_interaction_active()
-            && self.state.open_overlay_id().is_none_or(|overlay| {
+            && open_overlay.as_ref().is_none_or(|overlay| {
                 self.touch_owner_target()
                     .is_none_or(|owner| !self.tree.is_descendant_or_self(overlay.as_ui_id(), owner))
             }) {
             let cancellation = self.arbitrate_touch_ownership();
-            context = ViewContext::from_host(self.bounds, &self.state, Some(&self.tree));
-            overlays = self.application.frame_overlays(context.clone());
+            staged_state.set_pressed(None);
+            staged_state.set_capture(None);
+            staged_tree.apply_interaction_state(&staged_state);
             cancellation
         } else {
             HostEventOutcome::default()
         };
-        let overlay_interaction = OverlayInteractionSnapshot::capture(&self.state, &self.tree);
-        let view = self.application.view(context);
-        let paint_list_us = elapsed_us(paint_started);
-        let layout_started = Instant::now();
-        self.tree = UiFrame::resolve(view, FrameRequest::new(self.bounds, &mut self.state));
+        self.state = staged_state;
+        self.tree = staged_tree;
         self.tree_remote_access_protected = self.application.remote_access_protected();
-        // Base resolution cannot retain transient descendants because their
-        // topology is declared next. Restore interaction ownership before
-        // overlay emission so paint and semantics observe the same state.
-        overlay_interaction.restore_before_overlay(&mut self.state);
-        self.overlay_failures = apply_frame_overlays(&mut self.tree, &mut self.state, overlays);
-        overlay_interaction.restore(&mut self.state, &self.tree);
-        self.tree.reconcile_transient_focus(&mut self.state);
-        self.tree.finalize_transient_layers(&self.state);
+        self.overlay_failures = overlay_failures;
         self.frame_generation = self.frame_generation.wrapping_add(1);
         if pending_long_press_was_bound {
             self.pending_long_press = None;
@@ -4916,6 +4932,7 @@ mod tests {
 
     struct ModalGestureApplication {
         declare_dialog: bool,
+        valid_anchor: bool,
         invoked: usize,
     }
 
@@ -4936,7 +4953,11 @@ mod tests {
                     FrameOverlay::surface(
                         crate::TransientSurface::dialog(
                             "modal",
-                            crate::OverlayAnchor::Node(UiId::from("anchor")),
+                            crate::OverlayAnchor::Node(UiId::from(if self.valid_anchor {
+                                "anchor"
+                            } else {
+                                "missing"
+                            })),
                             crate::Size::new(120.0, 80.0),
                             crate::OverlayStyle {
                                 background: 0x111111,
@@ -5997,6 +6018,7 @@ mod tests {
         let mut host = UiHost::new(
             ModalGestureApplication {
                 declare_dialog: true,
+                valid_anchor: true,
                 invoked: 0,
             },
             320,
@@ -6029,10 +6051,55 @@ mod tests {
     }
 
     #[test]
+    fn invalid_programmatic_modal_preserves_pointer_capture() {
+        let mut host = UiHost::new(
+            ModalGestureApplication {
+                declare_dialog: true,
+                valid_anchor: false,
+                invoked: 0,
+            },
+            320,
+            200,
+        );
+        let anchor = host
+            .query_unique(&crate::SemanticSelector::RoleAndName {
+                role: SemanticRole::Button,
+                name: "Anchor".into(),
+            })
+            .unwrap();
+        let point = crate::Point {
+            x: anchor.bounds.origin.x + anchor.bounds.size.width / 2.0,
+            y: anchor.bounds.origin.y + anchor.bounds.size.height / 2.0,
+        };
+        host.handle_event(UiEvent::PointerPressed(point));
+        assert_eq!(host.state.captured(), Some(&anchor.id));
+
+        let failed = host.open_transient(OverlayId::new("modal"), anchor.id.clone());
+        assert_eq!(failed.disposition, crate::EventDisposition::Unhandled);
+        assert_eq!(host.state.captured(), Some(&anchor.id));
+        assert_eq!(host.state.pressed(), Some(&anchor.id));
+        assert_eq!(host.inspect().open_overlay, Some(OverlayId::new("modal")));
+        assert!(
+            host.query(&crate::SemanticSelector::Role(SemanticRole::Dialog))
+                .is_empty()
+        );
+        assert_eq!(host.inspect().overlay_failures.len(), 1);
+        assert_eq!(
+            host.inspect().overlay_failures[0].error,
+            SemanticActionError::MissingTarget
+        );
+
+        let release = host.handle_event(UiEvent::PointerReleased(point));
+        assert_eq!(release.messages.len(), 1);
+        assert_eq!(host.application().invoked, 1);
+    }
+
+    #[test]
     fn blocking_frame_overlay_topology_cancels_active_touch() {
         let mut host = UiHost::new(
             ModalGestureApplication {
                 declare_dialog: false,
+                valid_anchor: true,
                 invoked: 0,
             },
             320,
