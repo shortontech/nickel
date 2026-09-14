@@ -1937,6 +1937,11 @@ fn handle_shell_input(
                 }
             }
         }
+        InputEvent::FocusLost { .. } if role == SurfaceRole::ControlCenter => {
+            if state.dismiss_ephemeral_on_focus_loss(role) {
+                sync_visibility(shell, state);
+            }
+        }
         InputEvent::FocusGained { .. }
         | InputEvent::FocusLost { .. }
         | InputEvent::DeviceRemoved { .. }
@@ -2657,6 +2662,17 @@ pub fn run() -> Result<(), String> {
                 shell.stop_text_input(surface);
                 if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::Launcher) {
                     platform::launcher_visibility_applied(false);
+                    sync_visibility(&mut shell, &state);
+                }
+            }
+            Some(ShellEvent::FocusChanged {
+                surface,
+                focused: false,
+            }) if shell
+                .surface(surface)
+                .is_some_and(|entry| entry.role() == SurfaceRole::ControlCenter) =>
+            {
+                if state.dismiss_ephemeral_on_focus_loss(SurfaceRole::ControlCenter) {
                     sync_visibility(&mut shell, &state);
                 }
             }

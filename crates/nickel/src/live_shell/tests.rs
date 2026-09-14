@@ -89,6 +89,36 @@ fn launcher_focus_loss_dismisses_the_ephemeral_surface() {
     assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::Launcher));
 }
 
+#[test]
+fn control_center_focus_loss_dismisses_the_ephemeral_surface() {
+    let mut shell = LiveShell::new().expect("live shell");
+    shell.apply_control_visibility(true);
+
+    assert!(shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::ControlCenter));
+    assert!(!shell.dismiss_ephemeral_on_focus_loss(crate::winit_shell::SurfaceRole::ControlCenter));
+}
+
+#[test]
+fn rejected_launcher_focus_request_does_not_project_internal_focus() {
+    struct RejectingHost;
+
+    impl crate::session_host::SessionHost for RejectingHost {
+        fn dispatch(
+            &self,
+            _: crate::platform::ShellCommand,
+        ) -> Result<(), crate::platform::SessionRequestError> {
+            Err(crate::platform::SessionRequestError::Send)
+        }
+    }
+
+    let mut shell = LiveShell::new_with_session_host(Arc::new(RejectingHost)).expect("live shell");
+
+    assert!(!shell.request_launcher_toggle());
+    assert!(!shell.surface_visible(crate::winit_shell::SurfaceRole::Launcher));
+    assert!(shell.launcher_host.inspect().keyboard_focus.is_none());
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn pending_remote_lease_becomes_persistent_shell_notification() {

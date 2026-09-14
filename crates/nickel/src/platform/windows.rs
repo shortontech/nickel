@@ -4035,6 +4035,7 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                 return false;
             }
             let hwnd = HWND(launcher as *mut c_void);
+            let focus_deadline = Instant::now() + Duration::from_millis(75);
             // SAFETY: The handle belongs to Nickel's live launcher window.
             unsafe {
                 let foreground_thread = GetWindowThreadProcessId(foreground, None);
@@ -4044,10 +4045,26 @@ pub fn send_shell_command(command: ShellCommand) -> bool {
                     && AttachThreadInput(current_thread, foreground_thread, true).as_bool();
                 let _ = ShowWindow(hwnd, SW_SHOW);
                 let _ = BringWindowToTop(hwnd);
-                let _ = SetForegroundWindow(hwnd);
+                let focus_requested = SetForegroundWindow(hwnd).as_bool();
                 let _ = SetFocus(Some(hwnd));
                 if attached {
                     let _ = AttachThreadInput(current_thread, foreground_thread, false);
+                }
+                // SetForegroundWindow reports request admission, not durable foreground
+                // ownership. Reconcile the request against the native fact for a bounded
+                // interval before allowing LiveShell to project launcher keyboard focus.
+                // Roll back the native visibility when Windows rejects or displaces the
+                // request so the visible and internally focused launcher cannot diverge.
+                while GetForegroundWindow() != hwnd && Instant::now() < focus_deadline {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                if GetForegroundWindow() != hwnd {
+                    let _ = ShowWindow(hwnd, SW_HIDE);
+                    tracing::warn!(
+                        focus_requested,
+                        "Windows did not grant launcher foreground focus before the deadline"
+                    );
+                    return false;
                 }
             }
             return true;
