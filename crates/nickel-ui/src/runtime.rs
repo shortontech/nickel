@@ -1297,29 +1297,6 @@ pub struct NormalizedRecipientBinding {
     pub lifetime: u64,
 }
 
-/// Owner-side snapshot used to revalidate normalized input at the final UI
-/// execution boundary. Optional bindings are compared exactly: an operation,
-/// transform, or text transaction cannot be added, removed, or replaced after
-/// the owner admits the batch.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct NormalizedIngressAuthority {
-    pub recipient: NormalizedRecipientBinding,
-    pub operation: Option<u64>,
-    pub transform_generation: Option<u64>,
-    pub text_transaction: Option<u64>,
-}
-
-impl NormalizedIngressAuthority {
-    pub fn admits(self, envelope: &NormalizedInputEnvelope) -> bool {
-        self.recipient.lease != 0
-            && self.recipient.lifetime != 0
-            && envelope.recipient == self.recipient
-            && envelope.operation == self.operation
-            && envelope.transform_generation == self.transform_generation
-            && envelope.text_transaction == self.text_transaction
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GlobalAction {
     ToggleLauncher,
@@ -3846,10 +3823,7 @@ mod tests {
                 reconnect_generation: device_generation,
             },
             admission: NormalizedAdmissionBinding {
-                order: SYNTHETIC_INGRESS_ORDER.fetch_add(
-                    1,
-                    std::sync::atomic::Ordering::Relaxed,
-                ),
+                order: SYNTHETIC_INGRESS_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 monotonic_micros: 0,
             },
             recipient: NormalizedRecipientBinding {
@@ -3902,7 +3876,9 @@ mod tests {
     #[test]
     fn normalized_execution_rejects_replay_and_spoofed_recipient() {
         let HostEvent::NormalizedIngress(mut envelope) = synthetic_normalized(
-            InputEvent::FocusGained { order: EventOrder(1) },
+            InputEvent::FocusGained {
+                order: EventOrder(1),
+            },
             None,
         ) else {
             unreachable!()

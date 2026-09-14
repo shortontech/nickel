@@ -17,8 +17,7 @@ use nickel_ui::{
 };
 use serde::{Deserialize, Serialize};
 
-static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(1);
+static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostEvent {
     let device_generation = input.device().map_or(0, |device| device.0);

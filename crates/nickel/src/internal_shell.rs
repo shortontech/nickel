@@ -713,14 +713,14 @@ impl InternalShellCoordinator {
         for event in &mut batch.events {
             bind_internal_ingress_recipient(event, id);
         }
-        batch.normalized_authorities.extend(batch.events.iter().filter_map(|event| {
-            match event {
+        batch
+            .normalized_authorities
+            .extend(batch.events.iter().filter_map(|event| match event {
                 nickel_ui::HostEvent::NormalizedIngress(envelope) => {
                     Some(envelope.execution_authority())
                 }
                 _ => None,
-            }
-        }));
+            }));
         let visibility = self
             .entries
             .iter()

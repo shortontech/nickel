@@ -10,8 +10,8 @@ use std::{
 
 use nickel_ui::{
     Application, DamageRegion, GradientAxis, HostBatch, HostEvent, InternalSurfaceId,
-    InternalSurfaceSet, LinearGradient, NormalizedIngressAuthority, NormalizedRecipientBinding,
-    Point as UiPoint, SoftwareRenderer, Text, UiEvent, View, ViewContext,
+    InternalSurfaceSet, LinearGradient, Point as UiPoint, SoftwareRenderer, Text, UiEvent, View,
+    ViewContext,
     backend::{FrameRenderer, PaintCommand, RenderFrame},
 };
 
