@@ -316,6 +316,17 @@ impl WindowOperationReducer {
         self.windows.get(&window).copied()
     }
 
+    /// Terminates every live interaction at a seat-wide security/lifecycle boundary.
+    /// Admission is released synchronously; settlement effects remain in the transitions.
+    pub fn cancel_all(&mut self, reason: CancellationReason) -> Vec<Transition> {
+        let mut operations = self.operations.keys().copied().collect::<Vec<_>>();
+        operations.sort_unstable();
+        operations
+            .into_iter()
+            .map(|operation| self.cancel(operation, reason))
+            .collect()
+    }
+
     pub fn begin(&mut self, request: BeginRequest) -> (Option<OperationId>, Transition) {
         if let Some(&by) = self.seats.get(&request.seat) {
             return (
@@ -829,6 +840,30 @@ mod tests {
             }]
         );
         assert!(reducer.operation(operation).is_none());
+    }
+
+    #[test]
+    fn seat_wide_security_cancel_releases_every_admission_before_settlement() {
+        let mut reducer = WindowOperationReducer::default();
+        let (first, first_acquisition) = begin(&mut reducer, 2, 20);
+        let (second, second_acquisition) = begin(&mut reducer, 1, 10);
+        activate(&mut reducer, first, first_acquisition);
+        activate(&mut reducer, second, second_acquisition);
+
+        let transitions = reducer.cancel_all(CancellationReason::Suspend);
+
+        assert_eq!(transitions.len(), 2);
+        assert_eq!(
+            reducer.terminal_outcome(first),
+            Some(TerminalOutcome::Cancelled(CancellationReason::Suspend))
+        );
+        assert_eq!(
+            reducer.terminal_outcome(second),
+            Some(TerminalOutcome::Cancelled(CancellationReason::Suspend))
+        );
+        assert!(reducer.operation(first).is_none());
+        assert!(reducer.operation(second).is_none());
+        assert!(begin(&mut reducer, 1, 30).0 > second);
     }
 
     #[test]

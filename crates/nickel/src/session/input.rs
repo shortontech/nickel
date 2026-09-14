@@ -759,6 +759,17 @@ impl NickelSession {
                                 session.lock_session();
                                 return FilterResult::Intercept(None);
                             }
+                            if !session.locked
+                                && state == KeyState::Pressed
+                                && sym == Keysym::new(keysyms::KEY_Escape)
+                                && session.cancel_window_interactions(
+                                    nickel_core::window_operation::CancellationReason::UserCancelled,
+                                )
+                            {
+                                // Window interaction is the first generic-cancel owner. Consume
+                                // this edge so an editor, popup, or modal cannot unwind as well.
+                                return FilterResult::Intercept(None);
+                            }
                             if session.locked {
                                 if outcome.suppress {
                                     return FilterResult::Intercept(None);

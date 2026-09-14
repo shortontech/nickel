@@ -1896,6 +1896,11 @@ impl NickelSession {
             self.launcher_output_name =
                 self.resolve_interaction_output(InvocationSource::RecentInteraction);
         }
+        if self.space.outputs().next().is_none() {
+            self.cancel_window_interactions(
+                nickel_core::window_operation::CancellationReason::SeatLost,
+            );
+        }
     }
 
     pub(super) fn protocol_outputs(&self) -> Vec<OutputSnapshot> {

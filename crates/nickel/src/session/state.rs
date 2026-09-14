@@ -9806,6 +9806,7 @@ impl NickelSession {
         if self.locked {
             return;
         }
+        self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Lock);
         self.cancel_remote_pointer();
         self.cancel_remote_keyboard();
         self.locked = true;
@@ -9849,10 +9850,10 @@ impl NickelSession {
             },
         );
         pointer.frame(self);
-        if !self.active_touch_slots.is_empty() {
-            self.active_touch_slots.clear();
-            self.seat.get_touch().unwrap().cancel(self);
-        }
+        // Native target state is authoritative. A completed touch frame can retain a target even
+        // when compositor-side slot accounting is already empty, so cancellation is unconditional.
+        self.active_touch_slots.clear();
+        self.seat.get_touch().unwrap().cancel(self);
         let preferred_lock_output = self.preferred_interaction_output_name();
         let internal_lock = self.internal_shell.as_ref().and_then(|shell| {
             let locks = || {
@@ -9892,6 +9893,29 @@ impl NickelSession {
         #[cfg(feature = "backend-udev")]
         self.invalidate_native_outputs();
         self.request_output_redraw();
+    }
+
+    pub(crate) fn cancel_window_interactions(
+        &mut self,
+        reason: nickel_core::window_operation::CancellationReason,
+    ) -> bool {
+        let cancelled = !self.window_operations.cancel_all(reason).is_empty();
+        if cancelled && let Some(pointer) = self.seat.get_pointer() {
+            pointer.unset_grab(
+                self,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                smithay::backend::input::InputTime::now(),
+            );
+        }
+        cancelled
+    }
+
+    pub(crate) fn suspend_input_authority(&mut self) {
+        self.cancel_window_interactions(nickel_core::window_operation::CancellationReason::Suspend);
+        self.active_touch_slots.clear();
+        self.seat.get_touch().unwrap().cancel(self);
+        self.internal_ui.cancel_touches();
+        self.cancel_consumer_control_repeats();
     }
 
     fn unlock_session(&mut self) {
