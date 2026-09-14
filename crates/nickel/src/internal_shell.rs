@@ -821,9 +821,12 @@ impl InternalShellCoordinator {
                 continue;
             }
             if entry.role == SurfaceRole::Screenshot {
-                changed |= self
-                    .shell
-                    .screenshot_host_event(event, entry.size.0, entry.size.1);
+                changed |= self.shell.screenshot_host_event_authorized(
+                    event,
+                    entry.size.0,
+                    entry.size.1,
+                    normalized_authority,
+                );
                 continue;
             }
             if matches!(

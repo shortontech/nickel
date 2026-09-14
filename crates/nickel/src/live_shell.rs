@@ -4668,10 +4668,22 @@ impl LiveShell {
         width: u32,
         height: u32,
     ) -> bool {
+        self.screenshot_host_event_authorized(event, width, height, None)
+    }
+
+    pub(crate) fn screenshot_host_event_authorized(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> bool {
         if !self.screenshot.visible() {
             return false;
         }
-        let changed = self.screenshot.host_event(event, width, height);
+        let changed = self
+            .screenshot
+            .host_event_authorized(event, width, height, authority);
         if !self.screenshot.visible() {
             self.set_screenshot_focus(false);
         }

@@ -472,7 +472,13 @@ impl ScreenshotTool {
 
     /// Native hosts use normalized input; region selection shares the existing
     /// pointer reducers while keyboard and toolbar actions stay on the UI host.
-    pub fn host_event(&mut self, event: HostEvent, width: u32, height: u32) -> bool {
+    pub fn host_event_authorized(
+        &mut self,
+        event: HostEvent,
+        width: u32,
+        height: u32,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerButton, PointerEvent};
         match event {
             HostEvent::Ui(UiEvent::PointerMoved(point)) => {
@@ -517,6 +523,7 @@ impl ScreenshotTool {
                 self.resize(width, height, None);
                 let outcome = self.host.step(HostBatch {
                     events: vec![event],
+                    normalized_authorities: authority.into_iter().collect(),
                     ..HostBatch::default()
                 });
                 outcome.changed | self.apply_effects()
