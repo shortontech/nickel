@@ -996,38 +996,41 @@ const STANDALONE_AGGREGATE_DEVICE: nickel_input::DeviceId = nickel_input::Device
 
 #[derive(Clone, Default)]
 struct OverlayInteractionSnapshot {
-    focused: Option<UiId>,
+    target: Option<UiId>,
+    controller_projection_active: bool,
     hovered: Option<UiId>,
     pressed: Option<UiId>,
     captured: Option<UiId>,
-    controller_selected: Option<UiId>,
 }
 
 impl OverlayInteractionSnapshot {
     fn capture<Message: Clone>(state: &UiStateStore, tree: &UiFrame<Message>) -> Self {
         let owned = |id: Option<&UiId>| id.filter(|id| tree.contains_target(id)).cloned();
-        let controller_selected = if let Some(overlay) = state.open_overlay_id() {
+        let target = if let Some(overlay) = state.open_overlay_id() {
             state
-                .navigation()
-                .controller_selected()
+                .current_target()
                 .filter(|id| tree.is_descendant_or_self(overlay.as_ui_id(), id))
                 .cloned()
         } else {
-            owned(state.navigation().controller_selected())
+            owned(state.current_target())
         };
         Self {
-            focused: owned(state.focused()),
+            target,
+            controller_projection_active: state.navigation().controller_projection_active(),
             hovered: owned(state.hovered()),
             pressed: owned(state.pressed()),
             captured: owned(state.captured()),
-            controller_selected,
         }
     }
 
     fn restore<Message: Clone>(self, state: &mut UiStateStore, tree: &UiFrame<Message>) {
         let valid = |id: Option<UiId>| id.filter(|id| tree.contains_target(id));
-        if self.focused.is_some() {
-            state.set_focus(valid(self.focused));
+        if state
+            .current_target()
+            .is_none_or(|target| !tree.contains_target(target))
+            && self.target.is_some()
+        {
+            state.set_focus(valid(self.target));
         }
         if self.hovered.is_some() {
             state.set_hovered(valid(self.hovered));
@@ -1038,15 +1041,13 @@ impl OverlayInteractionSnapshot {
         if self.captured.is_some() {
             state.set_capture(valid(self.captured));
         }
-        if self.controller_selected.is_some() {
-            state
-                .navigation_mut()
-                .set_controller_selected(valid(self.controller_selected));
-        }
+        state
+            .navigation_mut()
+            .set_controller_projection_active(self.controller_projection_active);
     }
 
     fn restore_before_overlay(&self, state: &mut UiStateStore) {
-        if let Some(focused) = &self.focused {
+        if let Some(focused) = &self.target {
             state.set_focus(Some(focused.clone()));
         }
         if let Some(hovered) = &self.hovered {
@@ -1058,11 +1059,9 @@ impl OverlayInteractionSnapshot {
         if let Some(captured) = &self.captured {
             state.set_capture(Some(captured.clone()));
         }
-        if let Some(selected) = &self.controller_selected {
-            state
-                .navigation_mut()
-                .set_controller_selected(Some(selected.clone()));
-        }
+        state
+            .navigation_mut()
+            .set_controller_projection_active(self.controller_projection_active);
     }
 }
 
@@ -4567,11 +4566,11 @@ mod tests {
 
         let target = host.semantic_nodes()[0].id.clone();
         let generation = host.inspect().frame_generation;
-        assert!(host.request_focus(target.clone()).changed);
+        assert!(!host.request_focus(target.clone()).changed);
         let inspection = host.inspect();
         assert_eq!(inspection.keyboard_focus, Some(target));
         assert_eq!(inspection.modality, crate::InputModality::Controller);
-        assert_eq!(inspection.frame_generation, generation + 1);
+        assert_eq!(inspection.frame_generation, generation);
     }
 
     #[test]

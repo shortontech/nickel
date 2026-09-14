@@ -129,20 +129,42 @@ struct PointerModalityState {
 
 #[derive(Clone, Debug, Default)]
 pub struct NavigationState {
-    focused: Option<UiId>,
-    controller_selected: Option<UiId>,
+    current_target: Option<UiId>,
+    controller_projection_active: bool,
     controller_pane: Option<UiId>,
     controller_scope: Option<UiId>,
-    controller_editing: bool,
+    target_mode: WidgetTargetMode,
     controller_retained_focus: HashMap<UiId, UiId>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum WidgetTargetMode {
+    #[default]
+    Navigation,
+    TextEditing,
+    ValueAdjustment,
 }
 
 impl NavigationState {
     pub fn focused(&self) -> Option<&UiId> {
-        self.focused.as_ref()
+        self.current_target.as_ref()
     }
     pub fn controller_selected(&self) -> Option<&UiId> {
-        self.controller_selected.as_ref()
+        self.controller_projection_active
+            .then_some(self.current_target.as_ref())
+            .flatten()
+    }
+    pub(crate) fn controller_projection_active(&self) -> bool {
+        self.controller_projection_active
+    }
+    pub(crate) fn set_controller_projection_active(&mut self, active: bool) -> Invalidation {
+        if self.controller_projection_active == active || (active && self.current_target.is_none())
+        {
+            Invalidation::None
+        } else {
+            self.controller_projection_active = active;
+            Invalidation::Paint
+        }
     }
     pub fn controller_pane(&self) -> Option<&UiId> {
         self.controller_pane.as_ref()
@@ -151,7 +173,10 @@ impl NavigationState {
         self.controller_scope.as_ref()
     }
     pub fn controller_editing(&self) -> bool {
-        self.controller_editing
+        self.target_mode == WidgetTargetMode::ValueAdjustment
+    }
+    pub fn target_mode(&self) -> WidgetTargetMode {
+        self.target_mode
     }
     pub fn retained_controller_focus(&self, scope: &UiId) -> Option<&UiId> {
         self.controller_retained_focus.get(scope)
@@ -163,7 +188,19 @@ impl NavigationState {
         self.controller_retained_focus.remove(scope);
     }
     pub(crate) fn set_controller_selected(&mut self, id: Option<UiId>) -> Invalidation {
-        replace_if_changed(&mut self.controller_selected, id, Invalidation::Paint)
+        let changed = self.controller_projection_active != id.is_some()
+            || id
+                .as_ref()
+                .is_some_and(|id| self.current_target.as_ref() != Some(id));
+        self.controller_projection_active = id.is_some();
+        if let Some(id) = id {
+            self.current_target = Some(id);
+        }
+        if changed {
+            Invalidation::Paint
+        } else {
+            Invalidation::None
+        }
     }
     pub(crate) fn set_controller_pane(&mut self, id: Option<UiId>) -> Invalidation {
         replace_if_changed(&mut self.controller_pane, id, Invalidation::Paint)
@@ -172,10 +209,15 @@ impl NavigationState {
         replace_if_changed(&mut self.controller_scope, id, Invalidation::Paint)
     }
     pub(crate) fn set_controller_editing(&mut self, editing: bool) -> Invalidation {
-        if self.controller_editing == editing {
+        let mode = if editing {
+            WidgetTargetMode::ValueAdjustment
+        } else {
+            WidgetTargetMode::Navigation
+        };
+        if self.target_mode == mode {
             Invalidation::None
         } else {
-            self.controller_editing = editing;
+            self.target_mode = mode;
             Invalidation::Paint
         }
     }
@@ -314,7 +356,11 @@ impl UiStateStore {
     }
 
     pub(crate) fn open_overlay(&mut self, id: OverlayId, invocation_target: UiId) -> Invalidation {
-        let focus_return = self.navigation.focused.clone().or(Some(invocation_target));
+        let focus_return = self
+            .navigation
+            .current_target
+            .clone()
+            .or(Some(invocation_target));
         if self
             .overlays
             .stack
@@ -397,7 +443,6 @@ impl UiStateStore {
             &mut self.pointer.hovered,
             &mut self.pointer.pressed,
             &mut self.pointer.captured,
-            &mut self.navigation.controller_selected,
             &mut self.navigation.controller_pane,
             &mut self.navigation.controller_scope,
             &mut self.text.selection_owner,
@@ -406,11 +451,12 @@ impl UiStateStore {
                 *owner = None;
             }
         }
-        if self.focused().is_some_and(|id| !live.contains(id)) {
+        if self.current_target().is_some_and(|id| !live.contains(id)) {
             self.set_focus(None);
         }
-        if self.navigation.controller_selected.is_none() {
-            self.navigation.controller_editing = false;
+        if self.navigation.current_target.is_none() {
+            self.navigation.controller_projection_active = false;
+            self.navigation.target_mode = WidgetTargetMode::Navigation;
         }
         self.navigation
             .controller_retained_focus
@@ -437,19 +483,17 @@ impl UiStateStore {
 
     pub(crate) fn set_focus(&mut self, id: Option<UiId>) -> Invalidation {
         self.text.caret_visible = true;
-        if self.navigation.focused != id {
+        if self.navigation.current_target != id {
             self.focus_generation = self.focus_generation.wrapping_add(1);
         }
-        replace_if_changed(&mut self.navigation.focused, id, Invalidation::Paint)
+        if id.is_none() {
+            self.navigation.controller_projection_active = false;
+        }
+        replace_if_changed(&mut self.navigation.current_target, id, Invalidation::Paint)
     }
 
     pub(crate) fn set_pointer_focus(&mut self, id: Option<UiId>) -> Invalidation {
-        let reconcile_controller = self.navigation.controller_selected.is_some();
-        let mut invalidation = self.set_focus(id.clone());
-        if reconcile_controller {
-            invalidation = invalidation.merge(self.navigation.set_controller_selected(id));
-        }
-        invalidation
+        self.set_focus(id)
     }
 
     pub fn focus_generation(&self) -> u64 {
@@ -488,7 +532,7 @@ impl UiStateStore {
     }
 
     pub fn focused(&self) -> Option<&UiId> {
-        self.navigation.focused.as_ref()
+        self.navigation.current_target.as_ref()
     }
 
     /// The authoritative widget target. Keyboard and active controller
@@ -532,9 +576,9 @@ impl UiStateStore {
         let controller_changed = if focused {
             false
         } else {
-            self.navigation.controller_selected.take().is_some()
+            std::mem::take(&mut self.navigation.controller_projection_active)
                 | self.navigation.controller_scope.take().is_some()
-                | std::mem::take(&mut self.navigation.controller_editing)
+                | (std::mem::take(&mut self.navigation.target_mode) != WidgetTargetMode::Navigation)
         };
         if changed || controller_changed {
             Invalidation::Paint
@@ -607,7 +651,7 @@ impl UiStateStore {
     }
 
     pub fn toggle_caret(&mut self) -> Invalidation {
-        if self.navigation.focused.is_none() {
+        if self.navigation.current_target.is_none() {
             return Invalidation::None;
         }
         self.text.caret_visible = !self.text.caret_visible;
@@ -670,7 +714,7 @@ impl UiStateStore {
     }
 
     pub fn device_removed(&mut self) -> Invalidation {
-        let changed = self.navigation.controller_selected.take().is_some();
+        let changed = std::mem::take(&mut self.navigation.controller_projection_active);
         self.focus_lost().merge(if changed {
             Invalidation::Paint
         } else {
@@ -684,10 +728,11 @@ impl UiStateStore {
         self.pointer.hovered = None;
         self.pointer.pressed = None;
         self.pointer.captured = None;
-        self.navigation.controller_selected = None;
+        self.navigation.current_target = None;
+        self.navigation.controller_projection_active = false;
         self.navigation.controller_pane = None;
         self.navigation.controller_scope = None;
-        self.navigation.controller_editing = false;
+        self.navigation.target_mode = WidgetTargetMode::Navigation;
         self.pointer.input_modality = InputModality::default();
         self.navigation.controller_retained_focus.clear();
         self.text.caret_visible = true;
@@ -708,7 +753,6 @@ impl UiStateStore {
             &mut self.pointer.hovered,
             &mut self.pointer.pressed,
             &mut self.pointer.captured,
-            &mut self.navigation.controller_selected,
             &mut self.navigation.controller_pane,
             &mut self.navigation.controller_scope,
             &mut self.text.selection_owner,
@@ -716,6 +760,15 @@ impl UiStateStore {
             if owner.as_ref().is_some_and(|id| !entries.contains_key(id)) {
                 *owner = None;
             }
+        }
+        if self
+            .current_target()
+            .is_some_and(|id| !entries.contains_key(id))
+        {
+            self.set_focus(None);
+        }
+        if self.navigation.current_target.is_none() {
+            self.navigation.controller_projection_active = false;
         }
         self.text
             .document_selections
@@ -748,6 +801,21 @@ fn replace_if_changed(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn controller_projection_never_retains_a_second_widget_target() {
+        let mut store = UiStateStore::default();
+        let a = UiId::from("a");
+        let b = UiId::from("b");
+        store.navigation_mut().set_controller_selected(Some(a));
+        store.set_pointer_focus(Some(b.clone()));
+        assert_eq!(store.current_target(), Some(&b));
+        assert_eq!(store.navigation().controller_selected(), Some(&b));
+
+        store.navigation_mut().set_controller_selected(None);
+        assert_eq!(store.current_target(), Some(&b));
+        assert!(store.navigation().controller_selected().is_none());
+    }
 
     #[test]
     fn focus_generation_tracks_transfer_return_and_topology_retirement() {

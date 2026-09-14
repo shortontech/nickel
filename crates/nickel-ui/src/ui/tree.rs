@@ -2525,15 +2525,6 @@ impl<Message: Clone> UiFrame<Message> {
                 | UiEvent::DeviceRemoved
                 | UiEvent::PointerCancelled
         );
-        let keyboard_tree_navigation = matches!(
-            event,
-            UiEvent::KeyboardNavigateUp
-                | UiEvent::KeyboardNavigateDown
-                | UiEvent::KeyboardNavigateLeft
-                | UiEvent::KeyboardNavigateRight
-                | UiEvent::KeyboardNavigateBack
-                | UiEvent::KeyboardNavigateActivate
-        );
         if matches!(
             event,
             UiEvent::ControllerUp
@@ -3617,9 +3608,6 @@ impl<Message: Clone> UiFrame<Message> {
                 state.device_removed()
             }
         };
-        if keyboard_tree_navigation {
-            outcome.invalidation = outcome.invalidation.merge(state.set_focus(None));
-        }
         if intrinsically_handled {
             outcome.disposition = crate::EventDisposition::Handled;
         }
@@ -4129,7 +4117,6 @@ impl<Message: Clone> UiFrame<Message> {
             let invalidation = state
                 .navigation_mut()
                 .set_controller_scope(Some(selected.clone()))
-                .merge(state.navigation_mut().set_controller_selected(None))
                 .merge(state.set_dropdown_open(selected, true))
                 .merge(first_option.map_or(Invalidation::None, |option| {
                     self.select_controller_id(state, option)
@@ -4140,7 +4127,6 @@ impl<Message: Clone> UiFrame<Message> {
         state
             .navigation_mut()
             .set_controller_scope(Some(selected.clone()));
-        state.navigation_mut().set_controller_selected(None);
         Some(self.select_scope_entry(state, &selected))
     }
 

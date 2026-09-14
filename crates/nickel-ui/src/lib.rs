@@ -60,7 +60,10 @@ pub use runtime::{
     MessageEvidence, OutboundFileDrag, OverlayDeclarationFailure, Popover, SemanticActionFailure,
     Shortcut, Tooltip, UiHost, UiHostViewport, ViewContext, run, run_with_adapter,
 };
-pub use state::{InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore};
+pub use state::{
+    InputModality, Invalidation, NavigationState, TransientState, UiId, UiStateStore,
+    WidgetTargetMode,
+};
 pub use text_context_menu::{
     TextCommandEffect, TextContextAction, TextContextPolicy, TextEditCommand, execute_text_command,
     text_context_actions, text_context_menu,
