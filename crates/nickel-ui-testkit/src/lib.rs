@@ -10,36 +10,50 @@ use nickel_input::{DeviceId, EventOrder, InputEvent, TouchEvent, TouchId};
 use nickel_ui::{
     AccessibilityNode, ActionKind, Application, Completion, ControllerAction, ControllerFamily,
     HostBatch, HostEvent, HostEventOutcome, HostInspection, InputModality,
-    NormalizedAdmissionBinding, NormalizedInputEnvelope, NormalizedRecipientBinding,
-    NormalizedSourceBinding, Point, SemanticAction, SemanticNodeSnapshot, SemanticQueryError,
-    SemanticRole, SemanticSelector as ProductionSelector, SemanticValueInput,
-    SemanticValueSnapshot, SoftwareRenderer, UiEvent, UiHost, UiId,
+    NormalizedAdmissionBinding, NormalizedIngressAuthority, NormalizedInputEnvelope,
+    NormalizedRecipientBinding, NormalizedSourceBinding, Point, SemanticAction,
+    SemanticNodeSnapshot, SemanticQueryError, SemanticRole, SemanticSelector as ProductionSelector,
+    SemanticValueInput, SemanticValueSnapshot, SoftwareRenderer, UiEvent, UiHost, UiId,
 };
 use serde::{Deserialize, Serialize};
 
 static SYNTHETIC_INGRESS_ORDER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostEvent {
+fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> HostBatch {
     let device_generation = input.device().map_or(0, |device| device.0);
-    HostEvent::NormalizedIngress(NormalizedInputEnvelope {
+    let source = NormalizedSourceBinding {
+        seat: 0,
+        backend_stream: "nickel-ui-testkit".into(),
+        stream_generation: 1,
+        device_generation,
+        identity_capability: "synthetic-fixture".into(),
+        reconnect_generation: device_generation,
+    };
+    let recipient = NormalizedRecipientBinding {
+        lease: 1,
+        lifetime: 1,
+    };
+    let authority = NormalizedIngressAuthority {
+        source: source.clone(),
+        recipient,
+        transfer_cutoff: None,
+        host_connection_generation: 1,
+        operation_epoch: None,
+        transform_generation: None,
+        text_transaction: None,
+        composition_recipient_epoch: None,
+        role: "synthetic-test".into(),
+        coordinate_meaning: "host-logical".into(),
+    };
+    let envelope = NormalizedInputEnvelope {
         input,
         clipboard_text,
-        source: NormalizedSourceBinding {
-            seat: 0,
-            backend_stream: "nickel-ui-testkit".into(),
-            stream_generation: 1,
-            device_generation,
-            identity_capability: "synthetic-fixture".into(),
-            reconnect_generation: device_generation,
-        },
+        source,
         admission: NormalizedAdmissionBinding {
             order: SYNTHETIC_INGRESS_ORDER.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             monotonic_micros: 0,
         },
-        recipient: NormalizedRecipientBinding {
-            lease: 1,
-            lifetime: 1,
-        },
+        recipient,
         operation: None,
         transform_generation: None,
         text_transaction: None,
@@ -50,7 +64,12 @@ fn synthetic_normalized(input: InputEvent, clipboard_text: Option<String>) -> Ho
         role: "synthetic-test".into(),
         coordinate_meaning: "host-logical".into(),
         composition_recipient_epoch: None,
-    })
+    };
+    HostBatch {
+        normalized_authorities: vec![authority],
+        events: vec![HostEvent::NormalizedIngress(envelope)],
+        ..HostBatch::default()
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2754,10 +2773,8 @@ impl<A: Application> Scenario<A> {
     }
 
     fn normalized_touch(&mut self, event: TouchEvent) -> HostEventOutcome {
-        self.host.step(HostBatch {
-            events: vec![synthetic_normalized(InputEvent::Touch(event), None)],
-            ..HostBatch::default()
-        })
+        self.host
+            .step(synthetic_normalized(InputEvent::Touch(event), None))
     }
 
     fn state_snapshot(&self) -> ScenarioStateSnapshot {
