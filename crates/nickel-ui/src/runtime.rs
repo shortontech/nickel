@@ -2527,6 +2527,13 @@ impl<A: Application> UiHost<A> {
     /// current input modality. Adapters use this after an application update
     /// resolves a new semantic descendant.
     pub fn request_focus(&mut self, target: UiId) -> HostEventOutcome {
+        let mut arbitration = if self.arbitrate_activation_target(Some(&target))
+            == TouchIntentArbitration::CancelThenDispatch
+        {
+            self.arbitrate_touch_ownership()
+        } else {
+            HostEventOutcome::default()
+        };
         let transition = self
             .tree
             .transition(
@@ -2540,23 +2547,24 @@ impl<A: Application> UiHost<A> {
         for message in transition.messages {
             self.application.update(message);
         }
-        let mut outcome = HostEventOutcome {
+        let outcome = HostEventOutcome {
             changed,
             clipboard_text: transition.clipboard_text,
             ..HostEventOutcome::default()
         };
-        if changed {
+        arbitration.merge(outcome);
+        if arbitration.changed {
             self.rebuild();
         }
-        outcome.effects = self.application.take_effect_evidence();
-        outcome.pointer_icon = self.pointer_icon;
-        outcome.text_input_active = self.input_context().text_focused;
-        outcome.accessibility_generation = self.frame_generation;
-        outcome.change_token = HostChangeToken {
+        arbitration.effects = self.application.take_effect_evidence();
+        arbitration.pointer_icon = self.pointer_icon;
+        arbitration.text_input_active = self.input_context().text_focused;
+        arbitration.accessibility_generation = self.frame_generation;
+        arbitration.change_token = HostChangeToken {
             frame_generation: self.frame_generation,
             semantic_generation: self.frame_generation,
         };
-        outcome
+        arbitration
     }
 
     /// Whether controller activation currently addresses an editable text field.
@@ -2739,7 +2747,10 @@ impl<A: Application> UiHost<A> {
         let Some(owner) = self.touch_owner_target() else {
             return TouchIntentArbitration::Preserve;
         };
-        if matches!(event, UiEvent::ControllerBack) {
+        if matches!(
+            event,
+            UiEvent::ControllerBack | UiEvent::KeyboardNavigateBack
+        ) {
             return TouchIntentArbitration::CancelGesture;
         }
         if matches!(event, UiEvent::PointerContext(_)) {
@@ -2753,6 +2764,10 @@ impl<A: Application> UiHost<A> {
                 | UiEvent::KeyboardNavigateDown
                 | UiEvent::KeyboardNavigateLeft
                 | UiEvent::KeyboardNavigateRight
+                | UiEvent::KeyboardNavigatePageUp
+                | UiEvent::KeyboardNavigatePageDown
+                | UiEvent::KeyboardNavigateStart
+                | UiEvent::KeyboardNavigateEnd
                 | UiEvent::KeyboardNavigateActivate
                 | UiEvent::ControllerUp
                 | UiEvent::ControllerDown
@@ -2760,10 +2775,14 @@ impl<A: Application> UiHost<A> {
                 | UiEvent::ControllerRight
                 | UiEvent::ControllerNext
                 | UiEvent::ControllerPrevious
+                | UiEvent::ControllerPreviousPane
+                | UiEvent::ControllerNextPane
                 | UiEvent::ControllerAdjust(_)
                 | UiEvent::ControllerActivate
                 | UiEvent::ControllerContextMenu
                 | UiEvent::KeyboardContextMenu
+                | UiEvent::ActivateFocused
+                | UiEvent::KeyboardActivate
                 | UiEvent::AccessibilityFocus(_)
                 | UiEvent::AccessibilityActivate(_)
                 | UiEvent::AccessibilityContextMenu(_)
@@ -2801,7 +2820,9 @@ impl<A: Application> UiHost<A> {
             && (!outcome.messages.is_empty()
                 || matches!(
                     event,
-                    UiEvent::KeyboardNavigateActivate
+                    UiEvent::ActivateFocused
+                        | UiEvent::KeyboardActivate
+                        | UiEvent::KeyboardNavigateActivate
                         | UiEvent::ControllerAdjust(_)
                         | UiEvent::ControllerActivate
                         | UiEvent::ControllerContextMenu
@@ -3191,6 +3212,11 @@ impl<A: Application> UiHost<A> {
         if let Some(requested) = self.application.take_focus_request()
             && let Some(target) = self.tree.resolve_stable_target(&requested)
         {
+            if self.arbitrate_activation_target(Some(&target))
+                == TouchIntentArbitration::CancelThenDispatch
+            {
+                combined.merge(self.arbitrate_touch_ownership());
+            }
             let focus = self
                 .tree
                 .transition(
@@ -4838,6 +4864,25 @@ mod tests {
         fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
             Container::new()
                 .children([Button::new("A", "A").id("a"), Button::new("B", "B").id("b")])
+        }
+    }
+
+    #[derive(Default)]
+    struct FocusRequestApplication {
+        requested: Option<UiId>,
+    }
+
+    impl Application for FocusRequestApplication {
+        type Message = ();
+
+        fn update(&mut self, (): Self::Message) {}
+
+        fn take_focus_request(&mut self) -> Option<UiId> {
+            self.requested.take()
+        }
+
+        fn view(&self, _context: ViewContext) -> impl crate::View<Self::Message> {
+            Container::new().children([Button::new((), "A").id("a"), Button::new((), "B").id("b")])
         }
     }
 
@@ -7091,6 +7136,241 @@ mod tests {
         assert!(!accessibility.input_dispatcher.touch_active());
         assert!(accessibility.pending_long_press.is_none());
         assert_eq!(accessibility.state.focused(), Some(&second_id));
+    }
+
+    #[test]
+    fn keyboard_activation_arbitrates_against_the_focused_target() {
+        let mut host = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let nodes = host.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let first_id = first.id.clone();
+        let second_id = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap()
+            .id
+            .clone();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+
+        host.state.set_focus(Some(first_id));
+        let busy = host.handle_event(UiEvent::KeyboardActivate);
+        assert_eq!(
+            busy.disposition,
+            crate::EventDisposition::Rejected("input busy")
+        );
+        assert!(host.input_dispatcher.touch_active());
+        assert!(host.application().invoked.is_empty());
+
+        host.state.set_focus(Some(second_id));
+        let activated = host.handle_event(UiEvent::KeyboardActivate);
+        assert_eq!(activated.messages.len(), 1);
+        assert_eq!(host.application().invoked, ["B"]);
+        assert!(!host.input_dispatcher.touch_active());
+
+        let released = host.handle_input(
+            &InputEvent::Touch(TouchEvent::Ended {
+                device: DeviceId(4),
+                order: EventOrder(2),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        assert!(released.messages.is_empty());
+    }
+
+    #[test]
+    fn keyboard_boundary_and_cancel_routes_arbitrate_touch() {
+        let mut host = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let first = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        host.state.set_focus(Some(first.id));
+
+        host.handle_event(UiEvent::KeyboardNavigateEnd);
+        assert!(!host.input_dispatcher.touch_active());
+
+        let mut page = UiHost::new(CrossInputApplication::default(), 200, 48);
+        let first = page
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        page.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(6),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        page.state.set_focus(Some(first.id.clone()));
+        page.state
+            .navigation_mut()
+            .set_controller_selected(Some(first.id));
+        page.handle_event(UiEvent::KeyboardNavigatePageDown);
+        assert!(!page.input_dispatcher.touch_active());
+
+        let mut cancel = UiHost::new(ControllerApplication, 160, 48);
+        cancel.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(5),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: Point { x: 40.0, y: 20.0 },
+            }),
+            None,
+        );
+        let cancelled = cancel.handle_event(UiEvent::KeyboardNavigateBack);
+        assert!(cancelled.changed);
+        assert!(!cancel.input_dispatcher.touch_active());
+        assert!(cancel.pending_long_press.is_none());
+    }
+
+    #[test]
+    fn pane_navigation_cancels_touch_before_changing_target() {
+        struct TwoPaneApplication;
+        impl Application for TwoPaneApplication {
+            type Message = ();
+            fn update(&mut self, (): Self::Message) {}
+            fn view(&self, _: ViewContext) -> impl crate::View<Self::Message> {
+                Container::new().children([
+                    Container::new()
+                        .id("left")
+                        .navigation_scope(NavigationScope::pane(true))
+                        .child(Button::new((), "A").id("a")),
+                    Container::new()
+                        .id("right")
+                        .navigation_scope(NavigationScope::pane(false))
+                        .child(Button::new((), "B").id("b")),
+                ])
+            }
+        }
+
+        let mut host = UiHost::new(TwoPaneApplication, 200, 80);
+        let first = host
+            .semantic_nodes()
+            .into_iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        host.state.set_focus(Some(first.id));
+
+        host.handle_event(UiEvent::ControllerNextPane);
+        assert!(!host.input_dispatcher.touch_active());
+        assert!(host.pending_long_press.is_none());
+    }
+
+    #[test]
+    fn direct_and_application_focus_requests_arbitrate_touch() {
+        let mut direct = UiHost::new(FocusRequestApplication::default(), 200, 48);
+        let nodes = direct.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second_id = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap()
+            .id
+            .clone();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        direct.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        direct.request_focus(second_id.clone());
+        assert!(!direct.input_dispatcher.touch_active());
+        assert_eq!(direct.state.focused(), Some(&second_id));
+
+        let mut requested = UiHost::new(FocusRequestApplication::default(), 200, 48);
+        let nodes = requested.semantic_nodes();
+        let first = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("A"))
+            .unwrap();
+        let second_id = nodes
+            .iter()
+            .find(|node| node.name.as_deref() == Some("B"))
+            .unwrap()
+            .id
+            .clone();
+        let point = Point {
+            x: f64::from(first.bounds.origin.x + first.bounds.size.width / 2.0),
+            y: f64::from(first.bounds.origin.y + first.bounds.size.height / 2.0),
+        };
+        requested.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(5),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: point,
+            }),
+            None,
+        );
+        requested.application_mut().requested = Some(UiId::from("b"));
+        requested.step(HostBatch {
+            events: vec![HostEvent::Poll],
+            ..HostBatch::default()
+        });
+        assert!(!requested.input_dispatcher.touch_active());
+        assert_eq!(requested.state.focused(), Some(&second_id));
     }
 
     #[test]
