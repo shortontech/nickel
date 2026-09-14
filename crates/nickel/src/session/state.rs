@@ -8067,7 +8067,16 @@ impl NickelSession {
                 ?request_id,
                 "could not schedule focus-request deadline"
             );
-            self.expire_launcher_focus_request(request_id);
+            if let Some(request) = self.launcher_focus.requested().cloned()
+                && request.transaction == request_id
+                && self.launcher_focus.reject(
+                    &request,
+                    FocusRejectionReason::AuthorityLost,
+                    self.start_time.elapsed(),
+                )
+            {
+                self.withdraw_unresolved_launcher_focus();
+            }
         }
     }
 
