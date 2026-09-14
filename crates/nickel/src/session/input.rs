@@ -4,6 +4,14 @@ use nickel_core::window_input::{
     PointerPosition, WindowGeometry, WindowPointerEffect, WindowSurface, hit_test,
     reduce_pointer_press,
 };
+use nickel_core::{
+    geometry_authority::ControlMode,
+    window_operation::{
+        BeginRequest, CompletionBinding, CompletionGesture, MappingGeneration, NativeLifetimeId,
+        OperationKind, SeatId, Source, SourceGeneration, SourceId, WindowId as OperationWindowId,
+        WindowMapping,
+    },
+};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
@@ -22,7 +30,10 @@ use smithay::{
 };
 
 use crate::session::{
-    grabs::{MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab},
+    grabs::{
+        MoveInternalSurfaceGrab, MoveSurfaceGrab, ResizeEdge, ResizeSurfaceGrab,
+        move_grab::WindowMoveOperation, move_internal_grab::operation_window,
+    },
     state::NickelSession,
     window_frame::{self, FramePart},
 };
@@ -231,6 +242,81 @@ pub(super) fn internal_virtual_key(
 }
 
 impl NickelSession {
+    fn compositor_pointer_binding(
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) -> Option<CompletionBinding> {
+        Some(CompletionBinding {
+            source: Source {
+                id: SourceId::new(1),
+                generation: SourceGeneration::new(u64::from(u32::from(serial))),
+            },
+            gesture: CompletionGesture::Button(u16::try_from(button).ok()?),
+        })
+    }
+
+    /// `Ok(None)` is the deliberately unmigrated XWayland path. `Err(())`
+    /// means an XDG move lost shared admission and must not install a grab.
+    fn begin_compositor_window_move(
+        &mut self,
+        window: &smithay::desktop::Window,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) -> Result<Option<WindowMoveOperation>, ()> {
+        if window.toplevel().is_none() {
+            return Ok(None);
+        }
+        let surface = window
+            .wl_surface()
+            .map(std::borrow::Cow::into_owned)
+            .ok_or(())?;
+        let registry_id = self.surface_windows.get(&surface.id()).copied().ok_or(())?;
+        let origin = Self::compositor_pointer_binding(button, serial).ok_or(())?;
+        WindowMoveOperation::begin(
+            &mut self.window_operations,
+            BeginRequest {
+                seat: SeatId::new(1),
+                subject: WindowMapping {
+                    window: OperationWindowId::new(registry_id.0),
+                    native_lifetime: NativeLifetimeId::new(u64::from(surface.id().protocol_id())),
+                    generation: MappingGeneration::new(registry_id.0),
+                },
+                kind: OperationKind::Move,
+                control: ControlMode::Enforced,
+                origin,
+                optional_update_sources: Vec::new(),
+            },
+        )
+        .map(Some)
+        .ok_or(())
+    }
+
+    fn begin_internal_surface_move(
+        &mut self,
+        surface: nickel_ui::InternalSurfaceId,
+        button: u32,
+        serial: smithay::utils::Serial,
+    ) -> Option<WindowMoveOperation> {
+        let identity = surface.snapshot_token();
+        WindowMoveOperation::begin(
+            &mut self.window_operations,
+            BeginRequest {
+                seat: SeatId::new(1),
+                // Internal compositor surfaces use a disjoint subject namespace
+                // from mapped client-window registry ids.
+                subject: WindowMapping {
+                    window: operation_window(surface),
+                    native_lifetime: NativeLifetimeId::new(identity),
+                    generation: MappingGeneration::new(identity),
+                },
+                kind: OperationKind::Move,
+                control: ControlMode::Enforced,
+                origin: Self::compositor_pointer_binding(button, serial)?,
+                optional_update_sources: Vec::new(),
+            },
+        )
+    }
+
     fn route_internal_pointer_motion(
         &mut self,
         position: smithay::utils::Point<f64, Logical>,
@@ -1114,6 +1200,8 @@ impl NickelSession {
                         }
                         FramePart::Titlebar => {
                             let placement = self.internal_ui.placement(surface).cloned()?;
+                            let operation =
+                                self.begin_internal_surface_move(surface, button, serial)?;
                             let start_data = GrabStartData {
                                 focus: None,
                                 button,
@@ -1126,6 +1214,7 @@ impl NickelSession {
                                     surface,
                                     initial_location: (placement.geometry.0, placement.geometry.1)
                                         .into(),
+                                    operation,
                                 },
                                 serial,
                                 Focus::Clear,
@@ -1170,6 +1259,10 @@ impl NickelSession {
                     self.hotkeys.begin_pointer_chord();
                     self.internal_ui.focus_surface(surface);
                     self.reconcile_internal_application_focus();
+                    let Some(operation) = self.begin_internal_surface_move(surface, button, serial)
+                    else {
+                        return None;
+                    };
                     let start_data = GrabStartData {
                         focus: None,
                         button,
@@ -1181,6 +1274,7 @@ impl NickelSession {
                             start_data,
                             surface,
                             initial_location: (placement.geometry.0, placement.geometry.1).into(),
+                            operation,
                         },
                         serial,
                         Focus::Clear,
@@ -1402,6 +1496,17 @@ impl NickelSession {
                                         button,
                                         location,
                                     };
+                                    let operation = match self
+                                        .begin_compositor_window_move(&window, button, serial)
+                                    {
+                                        Ok(operation) => operation,
+                                        Err(()) => {
+                                            tracing::info!(
+                                                "server-titlebar move rejected by shared operation admission"
+                                            );
+                                            return None;
+                                        }
+                                    };
                                     pointer.set_grab(
                                         self,
                                         MoveSurfaceGrab {
@@ -1409,7 +1514,7 @@ impl NickelSession {
                                             window,
                                             initial_window_location,
                                             restored_from_maximized: false,
-                                            operation: None,
+                                            operation,
                                         },
                                         serial,
                                         Focus::Clear,
@@ -1614,18 +1719,23 @@ impl NickelSession {
                         button,
                         location,
                     };
-                    pointer.set_grab(
-                        self,
-                        MoveSurfaceGrab {
-                            start_data,
-                            window,
-                            initial_window_location,
-                            restored_from_maximized: false,
-                            operation: None,
-                        },
-                        serial,
-                        Focus::Clear,
-                    );
+                    match self.begin_compositor_window_move(&window, button, serial) {
+                        Ok(operation) => pointer.set_grab(
+                            self,
+                            MoveSurfaceGrab {
+                                start_data,
+                                window,
+                                initial_window_location,
+                                restored_from_maximized: false,
+                                operation,
+                            },
+                            serial,
+                            Focus::Clear,
+                        ),
+                        Err(()) => tracing::info!(
+                            "Super+pointer move rejected by shared operation admission"
+                        ),
+                    }
                 }
 
                 if mouse_button == Some(MouseButton::Right)

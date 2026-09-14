@@ -6342,6 +6342,20 @@ impl NickelSession {
     }
 
     pub fn remove_internal_surface(&mut self, id: nickel_ui::InternalSurfaceId) -> bool {
+        let subject = crate::session::grabs::move_internal_grab::operation_window(id);
+        if let Some(operation) = self.window_operations.operation_for_window(subject) {
+            let _ = self.window_operations.cancel(
+                operation,
+                nickel_core::window_operation::CancellationReason::TargetDestroyed,
+            );
+            if let Some(pointer) = self.seat.get_pointer() {
+                pointer.unset_grab(
+                    self,
+                    smithay::utils::SERIAL_COUNTER.next_serial(),
+                    smithay::backend::input::InputTime::now(),
+                );
+            }
+        }
         self.invalidate_remote_shell_surface(id);
         let removed = self.internal_ui.remove(id);
         if removed {
@@ -13351,6 +13365,73 @@ mod protocol_tests {
             session.output_capture_evidence(&identity).unwrap_err(),
             "output capture dimensions exceed limit"
         );
+    }
+
+    #[test]
+    fn removing_internal_surface_cancels_its_active_move_authority() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+
+            fn update(&mut self, _: ()) {}
+
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("move target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (10, 20, 300, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
+        let operation = crate::session::grabs::move_grab::WindowMoveOperation::begin(
+            &mut session.window_operations,
+            nickel_core::window_operation::BeginRequest {
+                seat: nickel_core::window_operation::SeatId::new(1),
+                subject: nickel_core::window_operation::WindowMapping {
+                    window: subject,
+                    native_lifetime: nickel_core::window_operation::NativeLifetimeId::new(
+                        surface.snapshot_token(),
+                    ),
+                    generation: nickel_core::window_operation::MappingGeneration::new(
+                        surface.snapshot_token(),
+                    ),
+                },
+                kind: nickel_core::window_operation::OperationKind::Move,
+                control: nickel_core::geometry_authority::ControlMode::Enforced,
+                origin: nickel_core::window_operation::CompletionBinding {
+                    source: nickel_core::window_operation::Source {
+                        id: nickel_core::window_operation::SourceId::new(1),
+                        generation: nickel_core::window_operation::SourceGeneration::new(1),
+                    },
+                    gesture: nickel_core::window_operation::CompletionGesture::Button(0x110),
+                },
+                optional_update_sources: Vec::new(),
+            },
+        )
+        .expect("internal move admitted");
+        let id = session
+            .window_operations
+            .operation_for_window(subject)
+            .expect("active internal move");
+
+        assert!(session.remove_internal_surface(surface));
+        assert_eq!(
+            session.window_operations.terminal_outcome(id),
+            Some(nickel_core::window_operation::TerminalOutcome::Cancelled(
+                nickel_core::window_operation::CancellationReason::TargetDestroyed,
+            ))
+        );
+        assert!(operation.complete(&mut session.window_operations));
     }
 
     #[test]

@@ -85,8 +85,16 @@ impl WindowPointerOperation {
     }
 
     pub(crate) fn cancel(&self, reducer: &mut WindowOperationReducer) {
+        self.cancel_for(reducer, CancellationReason::RequiredResourceLost);
+    }
+
+    pub(crate) fn cancel_for(
+        &self,
+        reducer: &mut WindowOperationReducer,
+        reason: CancellationReason,
+    ) {
         if reducer.operation(self.id).is_some() {
-            let _ = reducer.cancel(self.id, CancellationReason::RequiredResourceLost);
+            let _ = reducer.cancel(self.id, reason);
         }
     }
 
