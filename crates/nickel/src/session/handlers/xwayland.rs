@@ -706,6 +706,9 @@ impl XwmHandler for NickelSession {
                         generation: SourceGeneration::new(u64::from(u32::from(serial))),
                     },
                     gesture: CompletionGesture::Button(completion_button),
+                    press_epoch: nickel_core::window_operation::PressEpoch::new(u64::from(
+                        u32::from(serial),
+                    )),
                 },
                 optional_update_sources: Vec::new(),
             },
@@ -808,6 +811,9 @@ impl XwmHandler for NickelSession {
                         generation: SourceGeneration::new(u64::from(u32::from(serial))),
                     },
                     gesture: CompletionGesture::Button(completion_button),
+                    press_epoch: nickel_core::window_operation::PressEpoch::new(u64::from(
+                        u32::from(serial),
+                    )),
                 },
                 optional_update_sources: Vec::new(),
             },

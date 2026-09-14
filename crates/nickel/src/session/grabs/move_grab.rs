@@ -276,6 +276,7 @@ mod tests {
                     generation: SourceGeneration::new(1),
                 },
                 gesture: CompletionGesture::Button(button),
+                press_epoch: nickel_core::window_operation::PressEpoch::new(1),
             },
             optional_update_sources: Vec::new(),
         }

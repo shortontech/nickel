@@ -17,7 +17,7 @@ use nickel_core::{
     window_operation::{
         AcquisitionId, BeginRequest, CancellationReason, CompletionBinding, CompletionGesture,
         Disposition, Effect, FailureReason, MappingGeneration, NativeLifetimeId, OperationKind,
-        RejectionReason, ResourceLeaseId, SeatId, Source, SourceGeneration, SourceId,
+        PressEpoch, RejectionReason, ResourceLeaseId, SeatId, Source, SourceGeneration, SourceId,
         TerminalOutcome, WindowId, WindowMapping, WindowOperationReducer,
     },
 };
@@ -41,6 +41,7 @@ fn binding(id: u64) -> CompletionBinding {
     CompletionBinding {
         source: source(id),
         gesture: CompletionGesture::Button(1),
+        press_epoch: PressEpoch::new(1),
     }
 }
 

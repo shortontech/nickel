@@ -378,6 +378,9 @@ impl XdgShellHandler for NickelSession {
                             generation: SourceGeneration::new(u64::from(u32::from(serial))),
                         },
                         gesture: CompletionGesture::Button(button),
+                        press_epoch: nickel_core::window_operation::PressEpoch::new(u64::from(
+                            u32::from(serial),
+                        )),
                     },
                     optional_update_sources: Vec::new(),
                 },
@@ -477,6 +480,9 @@ impl XdgShellHandler for NickelSession {
                             generation: SourceGeneration::new(u64::from(u32::from(serial))),
                         },
                         gesture: CompletionGesture::Button(button),
+                        press_epoch: nickel_core::window_operation::PressEpoch::new(u64::from(
+                            u32::from(serial),
+                        )),
                     },
                     optional_update_sources: Vec::new(),
                 },

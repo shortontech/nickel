@@ -1751,12 +1751,13 @@ impl WindowDragCoordinator {
         let Some(kind) = operation_kind(admission.resize_edge) else {
             return false;
         };
+        self.next_mapping_generation = self.next_mapping_generation.saturating_add(1);
+        let mapping_generation = self.next_mapping_generation;
         let completion = CompletionBinding {
             source: windows_pointer_source(),
             gesture: CompletionGesture::Button(admission.initiating_button),
+            press_epoch: nickel_core::window_operation::PressEpoch::new(mapping_generation),
         };
-        self.next_mapping_generation = self.next_mapping_generation.saturating_add(1);
-        let mapping_generation = self.next_mapping_generation;
         let lifetime = NativeWindowLifetime {
             fingerprint: admission.fingerprint,
             generation: mapping_generation,
@@ -2102,7 +2103,10 @@ fn windows_pointer_source() -> Source {
     }
 }
 
-fn pointer_release_binding(kind: NativePointerKind) -> Option<CompletionBinding> {
+fn pointer_release_binding(
+    kind: NativePointerKind,
+    press_epoch: nickel_core::window_operation::PressEpoch,
+) -> Option<CompletionBinding> {
     let button = match kind {
         NativePointerKind::PrimaryReleased => 1,
         NativePointerKind::SecondaryReleased => 2,
@@ -2111,6 +2115,7 @@ fn pointer_release_binding(kind: NativePointerKind) -> Option<CompletionBinding>
     Some(CompletionBinding {
         source: windows_pointer_source(),
         gesture: CompletionGesture::Button(button),
+        press_epoch,
     })
 }
 
@@ -2377,7 +2382,7 @@ fn handle_native_pointer_hook(event: NativePointerEvent) -> HookDisposition {
     if let Ok(mut coordinator) = WINDOW_DRAG.lock()
         && let Some(operation) = coordinator.active.clone()
     {
-        let release = pointer_release_binding(event.kind);
+        let release = pointer_release_binding(event.kind, operation.completion.press_epoch);
         let current_release = release == Some(operation.completion);
         if event.kind == NativePointerKind::Moved || current_release {
             if event.kind == NativePointerKind::Moved
@@ -4997,6 +5002,7 @@ mod tests {
             completion: CompletionBinding {
                 source: super::windows_pointer_source(),
                 gesture: CompletionGesture::Button(1),
+                press_epoch: nickel_core::window_operation::PressEpoch::new(1),
             },
             window: 1,
             lifetime: NativeWindowLifetime {

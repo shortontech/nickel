@@ -15548,6 +15548,7 @@ mod protocol_tests {
                         generation: nickel_core::window_operation::SourceGeneration::new(1),
                     },
                     gesture: nickel_core::window_operation::CompletionGesture::Button(0x110),
+                    press_epoch: nickel_core::window_operation::PressEpoch::new(1),
                 },
                 optional_update_sources: Vec::new(),
             },
@@ -15665,6 +15666,7 @@ mod protocol_tests {
                     generation: nickel_core::window_operation::SourceGeneration::new(1),
                 },
                 gesture: nickel_core::window_operation::CompletionGesture::Button(1),
+                press_epoch: nickel_core::window_operation::PressEpoch::new(1),
             },
             optional_update_sources: Vec::new(),
         };

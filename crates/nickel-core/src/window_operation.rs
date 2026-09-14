@@ -46,6 +46,7 @@ opaque_id!(OperationId);
 opaque_id!(AcquisitionId);
 opaque_id!(ResourceLeaseId);
 opaque_id!(BindingEpoch);
+opaque_id!(PressEpoch);
 opaque_id!(AnchorEpoch);
 opaque_id!(SourceEpoch);
 
@@ -74,6 +75,8 @@ pub enum CompletionGesture {
 pub struct CompletionBinding {
     pub source: Source,
     pub gesture: CompletionGesture,
+    /// Incarnation of the press/grant that created this completion authority.
+    pub press_epoch: PressEpoch,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1029,9 +1032,14 @@ mod tests {
     }
 
     fn binding(id: u64) -> CompletionBinding {
+        binding_press(id, 1)
+    }
+
+    fn binding_press(id: u64, press: u64) -> CompletionBinding {
         CompletionBinding {
             source: source(id),
             gesture: CompletionGesture::Button(1),
+            press_epoch: PressEpoch::new(press),
         }
     }
 
@@ -1141,6 +1149,7 @@ mod tests {
         let unrelated_button = CompletionBinding {
             source: source(1),
             gesture: CompletionGesture::Button(2),
+            press_epoch: PressEpoch::new(1),
         };
 
         let result = reducer.release(operation, unrelated_button);
@@ -1223,6 +1232,35 @@ mod tests {
                 operation,
                 outcome: TerminalOutcome::Cancelled(CancellationReason::CompletionSourceLost),
             })
+        );
+    }
+
+    #[test]
+    fn source_return_accepts_fresh_press_and_consumes_retired_tail() {
+        let mut reducer = WindowOperationReducer::default();
+        let (operation, acquisition) = begin(&mut reducer, 1, 1);
+        activate(&mut reducer, operation, acquisition);
+
+        let to_b = reducer.request_handoff(operation, binding_press(2, 2), Vec::new());
+        let [Effect::Acquire { request, .. }] = to_b.effects.as_slice() else {
+            panic!("B handoff did not request acquisition")
+        };
+        reducer.handoff_acquired(operation, *request, ResourceLeaseId::new(2));
+
+        let fresh_a = binding_press(1, 3);
+        let to_a = reducer.request_handoff(operation, fresh_a, Vec::new());
+        let [Effect::Acquire { request, .. }] = to_a.effects.as_slice() else {
+            panic!("fresh A handoff did not request acquisition")
+        };
+        reducer.handoff_acquired(operation, *request, ResourceLeaseId::new(3));
+
+        assert_eq!(
+            reducer.release(operation, binding_press(1, 1)).disposition,
+            Disposition::ConsumedTail
+        );
+        assert_eq!(
+            reducer.release(operation, fresh_a).disposition,
+            Disposition::Applied
         );
     }
 

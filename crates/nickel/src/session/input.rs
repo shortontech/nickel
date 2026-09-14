@@ -371,6 +371,9 @@ impl NickelSession {
                 generation: SourceGeneration::new(u64::from(u32::from(serial))),
             },
             gesture: CompletionGesture::Button(u16::try_from(button).ok()?),
+            press_epoch: nickel_core::window_operation::PressEpoch::new(u64::from(u32::from(
+                serial,
+            ))),
         })
     }
 
