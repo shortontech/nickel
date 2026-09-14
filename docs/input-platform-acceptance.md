@@ -30,7 +30,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact current-tip results below were recorded at `66844cd`. Older focused evidence remains listed
+Exact current-tip results below were recorded at `c271b4b`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
