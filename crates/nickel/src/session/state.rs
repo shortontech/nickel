@@ -1756,7 +1756,10 @@ use nickel_core::{
     active_output::{
         ActiveOutputContext, InvocationSource, resolve_active_output, resolve_new_window_output,
     },
-    focus::FocusTransactions,
+    focus::{
+        DEFAULT_FOCUS_REQUEST_TIMEOUT, FocusScope, FocusSecurityEpoch, FocusTargetLifetime,
+        FocusTransactions,
+    },
     hotkeys::{CompositorShortcutAdapter, HotkeyAction},
     idle::{IdleController, IdleEffect, IdlePolicy},
     launcher::{LauncherPointerTarget, LauncherVisibility},
@@ -8019,7 +8022,9 @@ impl NickelSession {
             && let Some(request) = self.launcher_focus.requested().cloned()
             && focused.id() == request.surface
         {
-            let _ = self.launcher_focus.acknowledge(&request);
+            let _ = self
+                .launcher_focus
+                .acknowledge_at(&request, self.start_time.elapsed());
             return;
         }
         let Some(acknowledged) = self.launcher_focus.acknowledged().cloned() else {
@@ -8535,7 +8540,15 @@ impl NickelSession {
                 return;
             }
             let surface = window.toplevel().unwrap().wl_surface().clone();
-            let _request = self.launcher_focus.request(surface.id());
+            let _request = self.launcher_focus.request_at(
+                surface.id(),
+                FocusTargetLifetime::EmbeddedInTarget,
+                None,
+                FocusScope::Launcher,
+                FocusSecurityEpoch(0),
+                self.start_time.elapsed(),
+                DEFAULT_FOCUS_REQUEST_TIMEOUT,
+            );
             self.surrender_internal_focus();
             self.seat.get_keyboard().unwrap().set_focus(
                 self,

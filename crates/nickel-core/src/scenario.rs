@@ -2,7 +2,10 @@
 
 use crate::{
     active_output::{ActiveOutputContext, InvocationSource, resolve_active_output},
-    focus::{FocusRequest, FocusTransactions},
+    focus::{
+        DEFAULT_FOCUS_REQUEST_TIMEOUT, FocusRequest, FocusScope, FocusSecurityEpoch,
+        FocusTargetLifetime, FocusTransactions,
+    },
     hotkeys::{CompositorShortcutAdapter, HotkeyAction, KeyCode, KeyEdge},
     launcher::{
         LauncherActivation, LauncherActivationSource, LauncherPointerTarget,
@@ -602,7 +605,7 @@ impl Scenario {
     pub fn acknowledge_current_focus(mut self) -> Self {
         self.consume_event("acknowledge current focus".into());
         if let Some(request) = self.focus.requested().cloned() {
-            let _ = self.focus.acknowledge(&request);
+            let _ = self.focus.acknowledge_at(&request, self.now);
             self.authority.push(AuthorityRecord {
                 field: "focus.acknowledged".into(),
                 path: format!(
@@ -632,6 +635,12 @@ impl Scenario {
     pub fn lose_focus(mut self, request: FocusRequest<SurfaceIdentity>) -> Self {
         self.consume_event(format!("focus lost {:?}", request.transaction));
         if self.focus.loses_current(&request) {
+            self.authority.push(AuthorityRecord {
+                field: "focus.requested".into(),
+                path: format!(
+                    "platform focus callback -> FocusTransactions::loses_current({request:?})"
+                ),
+            });
             self.authority.push(AuthorityRecord {
                 field: "focus.acknowledged".into(),
                 path: format!(
@@ -666,6 +675,12 @@ impl Scenario {
         });
         self.consume_event(format!("focus lost {:?}", request.transaction));
         if self.focus.loses_current(&request) {
+            self.authority.push(AuthorityRecord {
+                field: "focus.requested".into(),
+                path: format!(
+                    "platform focus callback -> FocusTransactions::loses_current({request:?})"
+                ),
+            });
             self.authority.push(AuthorityRecord {
                 field: "focus.acknowledged".into(),
                 path: format!(
@@ -1126,7 +1141,15 @@ impl Scenario {
                 path: "semantic panel activation -> invoking output placement".into(),
             });
             self.record_launcher_effect(LauncherEffect::ShowSurface(self.launcher_identity));
-            let request = self.focus.request(self.launcher_identity);
+            let request = self.focus.request_at(
+                self.launcher_identity,
+                FocusTargetLifetime::Generation(self.launcher_identity.0),
+                None,
+                FocusScope::Launcher,
+                FocusSecurityEpoch(0),
+                self.now,
+                DEFAULT_FOCUS_REQUEST_TIMEOUT,
+            );
             self.record_launcher_effect(LauncherEffect::RequestFocus(request));
         } else if transition == LauncherTransition::Hidden {
             self.hide_launcher(true);
