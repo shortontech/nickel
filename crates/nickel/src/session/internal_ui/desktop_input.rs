@@ -16,8 +16,7 @@ use nickel_input::{
 };
 use nickel_ui::{
     HostBatch, HostEvent, InternalSurfaceId, NormalizedAdmissionBinding,
-    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedRecipientBinding,
-    NormalizedSourceBinding,
+    NormalizedIngressAuthority, NormalizedInputEnvelope, NormalizedSourceBinding,
 };
 
 use super::{InternalSurfaceRole, InternalUiRuntime};
@@ -731,6 +730,7 @@ impl InternalUiRuntime {
         device: DeviceId,
         input: InputEvent,
     ) -> HostEvent {
+        let recipient_binding = self.normalized_recipient(recipient);
         let state = &mut self.desktop_input;
         let epoch = state.admission_epoch.get_or_insert_with(Instant::now);
         let generation = device.0;
@@ -744,15 +744,11 @@ impl InternalUiRuntime {
             identity_capability: "session-device-name".into(),
             reconnect_generation: generation,
         };
-        let recipient_binding = NormalizedRecipientBinding {
-            lease: recipient.snapshot_token(),
-            lifetime: recipient.snapshot_token(),
-        };
         let authority = NormalizedIngressAuthority {
             source: source_binding.clone(),
             recipient: recipient_binding,
             transfer_cutoff: None,
-            host_connection_generation: recipient.snapshot_token(),
+            host_connection_generation: recipient_binding.lifetime,
             operation_epoch: None,
             transform_generation: None,
             text_transaction: None,
@@ -777,7 +773,7 @@ impl InternalUiRuntime {
             text_transaction: None,
             transfer_cutoff: None,
             broker_event_id: None,
-            host_connection_generation: recipient.snapshot_token(),
+            host_connection_generation: recipient_binding.lifetime,
             operation_epoch: None,
             role: "session-internal-surface".into(),
             coordinate_meaning: "surface-logical".into(),

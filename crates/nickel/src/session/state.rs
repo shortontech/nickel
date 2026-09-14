@@ -5283,6 +5283,8 @@ impl NickelSession {
                 .and_then(|name| outputs.iter().find(|(output, _, _)| output.name == name))
                 .map_or(1.0, |(output, _, _)| output.scale);
             let runtime_id = self.internal_ui.insert_scene(scene, placement, scale);
+            self.internal_ui
+                .bind_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
         }
         if let Some(runtime) =
@@ -6611,6 +6613,8 @@ impl NickelSession {
             let runtime_id = self
                 .internal_ui
                 .insert_scene(scene, placement, output_scale);
+            self.internal_ui
+                .bind_routed_recipient(runtime_id, surface.id);
             self.internal_shell_surfaces.insert(surface.id, runtime_id);
             if let Some(role) = remote_shell_event_role(surface.role) {
                 self.remote_desktop_events.record(

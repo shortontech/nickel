@@ -1551,6 +1551,9 @@ pub struct InternalUiRuntime {
         HostBatch,
         Option<nickel_input::ModifierState>,
     )>,
+    /// Session-owned mapping from renderer-local identities to the coordinator
+    /// recipient lifetime that will execute routed input.
+    routed_recipients: BTreeMap<InternalSurfaceId, nickel_ui::NormalizedRecipientBinding>,
     desktop_input: desktop_input::DesktopInputState,
     renderer_mode: InternalUiRendererMode,
     next_z_order: u64,
@@ -1570,6 +1573,7 @@ impl Default for InternalUiRuntime {
             hovered: None,
             touches: BTreeMap::new(),
             routed_events: Vec::new(),
+            routed_recipients: BTreeMap::new(),
             desktop_input: Default::default(),
             renderer_mode: InternalUiRendererMode::Gpu,
             next_z_order: 0,
@@ -1909,11 +1913,39 @@ impl InternalUiRuntime {
         let removed = self.surfaces.remove(id).is_some();
         self.surfaces_retired |= removed;
         self.presentation.remove(&id);
+        self.routed_recipients.remove(&id);
         if self.hovered == Some(id) {
             self.hovered = None;
         }
         self.touches.retain(|_, (target, _)| *target != id);
         removed
+    }
+
+    pub(crate) fn bind_routed_recipient(
+        &mut self,
+        runtime: InternalSurfaceId,
+        recipient: InternalSurfaceId,
+    ) {
+        let lifetime = recipient.snapshot_token();
+        self.routed_recipients.insert(
+            runtime,
+            nickel_ui::NormalizedRecipientBinding {
+                lease: lifetime,
+                lifetime,
+            },
+        );
+    }
+
+    pub(crate) fn normalized_recipient(
+        &self,
+        runtime: InternalSurfaceId,
+    ) -> nickel_ui::NormalizedRecipientBinding {
+        self.routed_recipients.get(&runtime).copied().unwrap_or(
+            nickel_ui::NormalizedRecipientBinding {
+                lease: runtime.snapshot_token(),
+                lifetime: runtime.snapshot_token(),
+            },
+        )
     }
 
     pub(crate) fn take_surface_retirement(&mut self) -> bool {
@@ -2172,10 +2204,16 @@ impl InternalUiRuntime {
         // event and is the only source accepted here.
         batch.normalized_authorities.clear();
         let mut consumed_authorities = Vec::new();
+        let expected_recipient = self.routed_recipients.get(&id).copied().unwrap_or(
+            nickel_ui::NormalizedRecipientBinding {
+                lease: id.snapshot_token(),
+                lifetime: id.snapshot_token(),
+            },
+        );
         batch.events.retain(|event| {
             if let HostEvent::NormalizedIngress(envelope) = event {
-                if envelope.recipient.lifetime != id.snapshot_token()
-                    || envelope.host_connection_generation != id.snapshot_token()
+                if envelope.recipient.lifetime != expected_recipient.lifetime
+                    || envelope.host_connection_generation != expected_recipient.lifetime
                 {
                     return false;
                 }
@@ -2264,7 +2302,33 @@ impl InternalUiRuntime {
         HostBatch,
         Option<nickel_input::ModifierState>,
     )> {
-        std::mem::take(&mut self.routed_events)
+        let mut routed = std::mem::take(&mut self.routed_events);
+        for (_, batch, _) in &mut routed {
+            // Direct compositor input queues routed events without stepping a
+            // renderer-local host first. Bind only the authority previously
+            // registered by that input boundary; never trust batch claims or
+            // reconstruct authority from the envelope.
+            for event in &batch.events {
+                let HostEvent::NormalizedIngress(envelope) = event else {
+                    continue;
+                };
+                if batch
+                    .normalized_authorities
+                    .iter()
+                    .any(|authority| authority.recipient == envelope.recipient)
+                {
+                    continue;
+                }
+                if let Some(authority) = self
+                    .desktop_input
+                    .authorities
+                    .remove(&envelope.admission.order)
+                {
+                    batch.normalized_authorities.push(authority);
+                }
+            }
+        }
+        routed
     }
 
     pub fn mark_dirty(&mut self, id: InternalSurfaceId) {

@@ -1928,11 +1928,7 @@ impl LiveShell {
         self.desktop_host_event_authorized(ingress, Some(authority))
     }
 
-    pub(crate) fn desktop_host_event(&mut self, ingress: HostEvent) -> bool {
-        self.desktop_host_event_authorized(ingress, None)
-    }
-
-    fn desktop_host_event_authorized(
+    pub(crate) fn desktop_host_event_authorized(
         &mut self,
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
@@ -2401,7 +2397,7 @@ impl LiveShell {
         self.launcher_host_event_with_authority(event, width, height, limit, None)
     }
 
-    fn launcher_host_event_with_authority(
+    pub(crate) fn launcher_host_event_with_authority(
         &mut self,
         event: HostEvent,
         width: u32,
@@ -2711,16 +2707,7 @@ impl LiveShell {
         self.notification_host_event_authorized(ingress, width, height, Some(authority))
     }
 
-    pub(crate) fn notification_host_event(
-        &mut self,
-        ingress: HostEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        self.notification_host_event_authorized(ingress, width, height, None)
-    }
-
-    fn notification_host_event_authorized(
+    pub(crate) fn notification_host_event_authorized(
         &mut self,
         ingress: HostEvent,
         width: u32,
@@ -2842,6 +2829,16 @@ impl LiveShell {
         size: (u32, u32),
         limit: Option<usize>,
     ) -> nickel_ui::HostEventOutcome {
+        self.control_host_event_authorized(event, size, limit, None)
+    }
+
+    pub(crate) fn control_host_event_authorized(
+        &mut self,
+        event: HostEvent,
+        size: (u32, u32),
+        limit: Option<usize>,
+        authority: Option<nickel_ui::NormalizedIngressAuthority>,
+    ) -> nickel_ui::HostEventOutcome {
         if !self.control_visible {
             return Default::default();
         }
@@ -2850,6 +2847,7 @@ impl LiveShell {
             surface_size: Some(size),
             clipboard_text_limit: limit,
             events: vec![event],
+            normalized_authorities: authority.into_iter().collect(),
             ..Default::default()
         });
         self.host_runtime_samples.record(outcome.telemetry);
@@ -3668,11 +3666,7 @@ impl LiveShell {
         self.preview_host_event_authorized(ingress, Some(authority))
     }
 
-    pub(crate) fn preview_host_event(&mut self, ingress: HostEvent) -> nickel_ui::HostEventOutcome {
-        self.preview_host_event_authorized(ingress, None)
-    }
-
-    fn preview_host_event_authorized(
+    pub(crate) fn preview_host_event_authorized(
         &mut self,
         ingress: HostEvent,
         authority: Option<nickel_ui::NormalizedIngressAuthority>,
@@ -3942,7 +3936,7 @@ impl LiveShell {
         self.window_menu_host_event_authorized(event, width, height, None)
     }
 
-    fn window_menu_host_event_authorized(
+    pub(crate) fn window_menu_host_event_authorized(
         &mut self,
         event: HostEvent,
         width: u32,

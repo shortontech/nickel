@@ -236,14 +236,15 @@ impl super::state::NickelSession {
             .set_clipboard_limit(self.native_clipboard.text_limit.unwrap_or(0));
         let mut released = event.clone();
         released.edge = nickel_input::KeyEdge::Released;
-        let surface_lifetime = id.snapshot_token();
+        let routed_recipient = self.internal_ui.normalized_recipient(id);
+        let surface_lifetime = routed_recipient.lifetime;
         let text_transaction = clipboard.as_ref().map(|_| event.order.0);
         let recipient_lease = if text_transaction.is_some() {
             self.native_field_lease(id)
                 .ok_or("native clipboard field is unavailable")?
                 .1
         } else {
-            surface_lifetime
+            routed_recipient.lease
         };
         let recipient = nickel_ui::NormalizedRecipientBinding {
             lease: recipient_lease,

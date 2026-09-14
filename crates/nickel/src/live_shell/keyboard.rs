@@ -189,16 +189,7 @@ impl LiveShell {
         self.keyboard_host_event_authorized(ingress, width, height, Some(authority))
     }
 
-    pub(crate) fn keyboard_host_event(
-        &mut self,
-        ingress: HostEvent,
-        width: u32,
-        height: u32,
-    ) -> bool {
-        self.keyboard_host_event_authorized(ingress, width, height, None)
-    }
-
-    fn keyboard_host_event_authorized(
+    pub(crate) fn keyboard_host_event_authorized(
         &mut self,
         ingress: HostEvent,
         width: u32,
