@@ -2091,10 +2091,6 @@ impl<Message: Clone> UiFrame<Message> {
         })
     }
 
-    pub(crate) fn accepts_accessibility_focus(&self, id: &UiId) -> bool {
-        self.hits.iter().any(|hit| &hit.id == id)
-    }
-
     pub fn resource_diagnostics(&self) -> FrameResourceDiagnostics {
         let vector_bytes = self.commands.capacity() * std::mem::size_of::<PaintCommand>()
             + self.hits.capacity() * std::mem::size_of::<HitRegion<Message>>()

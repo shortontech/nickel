@@ -1883,6 +1883,7 @@ pub struct HostEventOutcome {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ControllerExecutionDisposition {
     Executed,
+    RejectedBusy,
     RejectedStale,
     RejectedUnpairedRelease,
     ResetOverflow,
@@ -2708,44 +2709,82 @@ impl<A: Application> UiHost<A> {
     }
 
     fn touch_arbitration_for_event(&self, event: &HostEvent) -> TouchIntentArbitration {
-        let resolved_activation = |target: &UiId| {
+        let resolved_action = |target: &UiId, action: ActionKind| {
             self.tree
-                .resolve_effective_target(target, ActionKind::Activate)
+                .resolve_effective_target(target, action)
                 .ok()
                 .map(|route| route.target)
         };
         match event {
             HostEvent::Semantic { target, action }
             | HostEvent::Accessibility { target, action }
-            | HostEvent::ControllerSemantic { target, action }
-                if *action == SemanticAction::Invoke(ActionKind::Activate) =>
-            {
-                resolved_activation(target)
+            | HostEvent::ControllerSemantic { target, action } => {
+                let kind = match action {
+                    SemanticAction::Invoke(kind) => *kind,
+                    SemanticAction::SetValue(_) => ActionKind::SetValue,
+                };
+                resolved_action(target, kind)
                     .as_ref()
                     .map_or(TouchIntentArbitration::Preserve, |target| {
                         self.arbitrate_activation_target(Some(target))
                     })
-            }
-            HostEvent::Controller(ControllerAction::Confirm)
-            | HostEvent::Ui(UiEvent::ControllerActivate | UiEvent::KeyboardNavigateActivate) => {
-                let target = self
-                    .state
-                    .navigation()
-                    .controller_selected()
-                    .or_else(|| self.state.focused());
-                target
-                    .and_then(resolved_activation)
-                    .as_ref()
-                    .map_or(TouchIntentArbitration::Preserve, |target| {
-                        self.arbitrate_activation_target(Some(target))
-                    })
-            }
-            HostEvent::Ui(UiEvent::AccessibilityFocus(target))
-                if self.tree.accepts_accessibility_focus(target) =>
-            {
-                self.arbitrate_activation_target(Some(target))
             }
             _ => TouchIntentArbitration::Preserve,
+        }
+    }
+
+    fn touch_arbitration_for_ui_event(&self, event: &UiEvent) -> TouchIntentArbitration {
+        let Some(owner) = self.touch_owner_target() else {
+            return TouchIntentArbitration::Preserve;
+        };
+        let relevant = matches!(
+            event,
+            UiEvent::FocusNext
+                | UiEvent::FocusPrevious
+                | UiEvent::KeyboardNavigateUp
+                | UiEvent::KeyboardNavigateDown
+                | UiEvent::KeyboardNavigateLeft
+                | UiEvent::KeyboardNavigateRight
+                | UiEvent::KeyboardNavigateActivate
+                | UiEvent::ControllerUp
+                | UiEvent::ControllerDown
+                | UiEvent::ControllerLeft
+                | UiEvent::ControllerRight
+                | UiEvent::ControllerNext
+                | UiEvent::ControllerPrevious
+                | UiEvent::ControllerAdjust(_)
+                | UiEvent::ControllerActivate
+                | UiEvent::AccessibilityFocus(_)
+                | UiEvent::AccessibilityActivate(_)
+        );
+        if !relevant {
+            return TouchIntentArbitration::Preserve;
+        }
+        let mut preview = self.state.clone();
+        let Ok(outcome) = self.tree.transition(
+            &mut preview,
+            event.input_source(),
+            InteractionIntent::Event(event.clone()),
+        ) else {
+            return TouchIntentArbitration::Preserve;
+        };
+        let after = preview.current_target();
+        if after.is_some_and(|target| target != owner) {
+            TouchIntentArbitration::CancelThenDispatch
+        } else if after == Some(owner)
+            && (outcome.disposition != crate::EventDisposition::Unhandled
+                || !outcome.messages.is_empty())
+            && matches!(
+                event,
+                UiEvent::KeyboardNavigateActivate
+                    | UiEvent::ControllerAdjust(_)
+                    | UiEvent::ControllerActivate
+                    | UiEvent::AccessibilityActivate(_)
+            )
+        {
+            TouchIntentArbitration::RejectBusy
+        } else {
+            TouchIntentArbitration::Preserve
         }
     }
 
@@ -2871,6 +2910,17 @@ impl<A: Application> UiHost<A> {
             }
         }
         for event in batch.events {
+            let busy_controller_binding = match &event {
+                HostEvent::AdmittedController { action, binding }
+                    if *action == Some(ControllerAction::Confirm)
+                        && binding.edge == nickel_input::KeyEdge::Pressed
+                        && controller_authority
+                            .is_some_and(|authority| authority.admits(*binding)) =>
+                {
+                    Some(*binding)
+                }
+                _ => None,
+            };
             let touch_arbitration = match &event {
                 HostEvent::AdmittedController { action, binding }
                     if *action == Some(ControllerAction::Confirm)
@@ -2878,9 +2928,7 @@ impl<A: Application> UiHost<A> {
                         && controller_authority
                             .is_some_and(|authority| authority.admits(*binding)) =>
                 {
-                    self.touch_arbitration_for_event(&HostEvent::Controller(
-                        ControllerAction::Confirm,
-                    ))
+                    self.touch_arbitration_for_ui_event(&UiEvent::ControllerActivate)
                 }
                 _ => self.touch_arbitration_for_event(&event),
             };
@@ -2906,10 +2954,21 @@ impl<A: Application> UiHost<A> {
                 combined.merge(self.arbitrate_touch_ownership());
             }
             let mut outcome = if touch_arbitration == TouchIntentArbitration::RejectBusy {
-                HostEventOutcome {
+                let mut outcome = HostEventOutcome {
                     disposition: crate::EventDisposition::Rejected("input busy"),
                     ..HostEventOutcome::default()
+                };
+                if let Some(binding) = busy_controller_binding {
+                    outcome
+                        .controller_executions
+                        .push(ControllerExecutionEvidence {
+                            binding,
+                            disposition: ControllerExecutionDisposition::RejectedBusy,
+                            message_count: 0,
+                            effect_count: 0,
+                        });
                 }
+                outcome
             } else {
                 match event {
                     HostEvent::Ui(event) => self.dispatch_ui_event(event),
@@ -3214,6 +3273,22 @@ impl<A: Application> UiHost<A> {
     }
 
     fn dispatch_ui_event(&mut self, event: UiEvent) -> HostEventOutcome {
+        match self.touch_arbitration_for_ui_event(&event) {
+            TouchIntentArbitration::RejectBusy => {
+                return HostEventOutcome {
+                    disposition: crate::EventDisposition::Rejected("input busy"),
+                    ..HostEventOutcome::default()
+                };
+            }
+            TouchIntentArbitration::CancelThenDispatch => {
+                let pending = self.pending_long_press.take().is_some();
+                let active = self.input_dispatcher.cancel_touch_ownership();
+                if pending || active {
+                    let _ = self.dispatch_ui_event(UiEvent::PointerCancelled);
+                }
+            }
+            TouchIntentArbitration::Preserve => {}
+        }
         if let UiEvent::PointerMoved(point)
         | UiEvent::PointerPressed(point)
         | UiEvent::PointerReleased(point) = &event
@@ -6509,6 +6584,71 @@ mod tests {
             ..HostBatch::default()
         });
         assert_eq!(ended.messages.len(), 1);
+    }
+
+    #[test]
+    fn admitted_same_owner_busy_has_evidence_without_press_ledger_entry() {
+        let mut host = UiHost::new(ControllerApplication, 160, 48);
+        host.handle_input(
+            &InputEvent::Touch(TouchEvent::Started {
+                device: DeviceId(4),
+                order: EventOrder(1),
+                contact: TouchId(1),
+                position: Point { x: 40.0, y: 20.0 },
+            }),
+            None,
+        );
+        let binding = ControllerExecutionBinding {
+            device_generation: 5,
+            edge: nickel_input::KeyEdge::Pressed,
+            routing_epoch: 9,
+            event_id: 41,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+            repeat: false,
+        };
+        let authority = ControllerExecutionAuthority {
+            routing_epoch: 9,
+            lease_epoch: 7,
+            connection_generation: 3,
+            stream_generation: 2,
+            cutoff: Some(41),
+            surface_generation: Some(10),
+        };
+        let busy = host.step(HostBatch {
+            window_focused: Some(true),
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding,
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(busy.messages.len(), 0);
+        assert_eq!(busy.effects.len(), 0);
+        assert_eq!(
+            busy.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedBusy
+        );
+
+        let released = host.step(HostBatch {
+            controller_authority: Some(authority),
+            events: vec![HostEvent::AdmittedController {
+                action: Some(ControllerAction::Confirm),
+                binding: ControllerExecutionBinding {
+                    edge: nickel_input::KeyEdge::Released,
+                    ..binding
+                },
+            }],
+            ..HostBatch::default()
+        });
+        assert_eq!(
+            released.controller_executions[0].disposition,
+            ControllerExecutionDisposition::RejectedUnpairedRelease
+        );
     }
 
     #[test]
