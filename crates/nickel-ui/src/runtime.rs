@@ -664,6 +664,12 @@ struct PendingLongPress {
 const TOUCH_LONG_PRESS_DELAY: Duration = Duration::from_millis(500);
 const TOUCH_LONG_PRESS_SLOP: f32 = 8.0;
 
+/// Winit window delivery is currently treated as one aggregate device stream.
+/// It therefore supports stream-local pairing and reset, but cannot claim
+/// per-physical-mouse isolation until the runtime wires native device lifetimes
+/// through `nickel_input::winit::DeviceRegistry`.
+const STANDALONE_AGGREGATE_DEVICE: nickel_input::DeviceId = nickel_input::DeviceId(0);
+
 #[derive(Clone, Default)]
 struct OverlayInteractionSnapshot {
     focused: Option<UiId>,
@@ -2822,7 +2828,7 @@ impl<A: Application, H: HostAdapter<A>> ApplicationHandler for ApplicationRuntim
             }
             _ => {}
         }
-        for normalized in self.input.normalize(nickel_input::DeviceId(0), &event) {
+        for normalized in self.input.normalize(STANDALONE_AGGREGATE_DEVICE, &event) {
             if matches!(
                 normalized,
                 nickel_input::InputEvent::Pointer(
