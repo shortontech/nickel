@@ -37,7 +37,9 @@ enum SessionControllerSource {
         last_event: nickel_session_protocol::controller_broker::EventId,
         phase: SessionControllerPhase,
     },
-    Failed,
+    Retrying {
+        next_attempt: Instant,
+    },
 }
 
 #[cfg(any(unix, windows))]
@@ -49,6 +51,8 @@ enum SessionControllerPhase {
 
 #[cfg(any(unix, windows))]
 impl SessionControllerSource {
+    const RETRY_INTERVAL: Duration = Duration::from_millis(250);
+
     fn discover() -> (Option<ControllerInput>, Self) {
         use nickel_session_protocol::client::AsyncControllerConnection;
 
@@ -57,8 +61,19 @@ impl SessionControllerSource {
             Ok(Some(connection)) => (None, Self::Connecting { connection }),
             Err(error) => {
                 tracing::warn!(%error, "advertised session controller connection failed closed");
-                (None, Self::Failed)
+                (
+                    None,
+                    Self::Retrying {
+                        next_attempt: Instant::now() + Self::RETRY_INTERVAL,
+                    },
+                )
             }
+        }
+    }
+
+    fn retrying() -> Self {
+        Self::Retrying {
+            next_attempt: Instant::now() + Self::RETRY_INTERVAL,
         }
     }
 
@@ -74,8 +89,23 @@ impl SessionControllerSource {
             ControllerHostRequest, ControllerHostResponse, InputState,
             controller_broker::BrokerMessage,
         };
-        let state = std::mem::replace(self, Self::Failed);
+        let state = std::mem::replace(self, Self::retrying());
         let (next, actions) = match state {
+            Self::Retrying { next_attempt } if Instant::now() < next_attempt => {
+                (Self::Retrying { next_attempt }, Vec::new())
+            }
+            Self::Retrying { .. } => {
+                match nickel_session_protocol::client::AsyncControllerConnection::begin_from_environment(
+                    Duration::from_millis(100),
+                ) {
+                    Ok(Some(connection)) => (Self::Connecting { connection }, Vec::new()),
+                    Ok(None) => (Self::retrying(), Vec::new()),
+                    Err(error) => {
+                        tracing::warn!(%error, "session controller rediscovery failed closed");
+                        (Self::retrying(), Vec::new())
+                    }
+                }
+            }
             Self::Connecting { mut connection } => match connection.receive() {
                 Ok(None) => (Self::Connecting { connection }, Vec::new()),
                 Ok(Some(ControllerHostResponse::Attached {
@@ -86,7 +116,7 @@ impl SessionControllerSource {
                         connection_generation,
                     }) {
                         tracing::warn!(%error, "session controller lease request failed closed");
-                        (Self::Failed, Vec::new())
+                        (Self::retrying(), Vec::new())
                     } else {
                         (
                             Self::Attached {
@@ -100,10 +130,10 @@ impl SessionControllerSource {
                         )
                     }
                 }
-                Ok(Some(_)) => (Self::Failed, Vec::new()),
+                Ok(Some(_)) => (Self::retrying(), Vec::new()),
                 Err(error) => {
                     tracing::warn!(%error, "session controller attachment failed closed");
-                    (Self::Failed, Vec::new())
+                    (Self::retrying(), Vec::new())
                 }
             },
             Self::Attached {
@@ -125,7 +155,7 @@ impl SessionControllerSource {
                 ),
                 Err(error) => {
                     tracing::warn!(%error, "session controller request failed closed");
-                    (Self::Failed, Vec::new())
+                    (Self::retrying(), Vec::new())
                 }
                 Ok(Some(response)) => {
                     let mut actions = Vec::new();
@@ -141,11 +171,17 @@ impl SessionControllerSource {
                         }
                         (
                             SessionControllerPhase::Lease,
-                            ControllerHostResponse::LeasePending { .. }
-                            | ControllerHostResponse::LeaseFailed,
+                            ControllerHostResponse::LeasePending { .. },
                         ) => Some(ControllerHostRequest::Poll {
                             connection_generation,
                         }),
+                        (
+                            SessionControllerPhase::Lease,
+                            ControllerHostResponse::LeaseFailed,
+                        ) => {
+                            *self = Self::retrying();
+                            return Vec::new();
+                        }
                         (
                             SessionControllerPhase::Poll,
                             ControllerHostResponse::Messages {
@@ -170,6 +206,10 @@ impl SessionControllerSource {
                             });
                             if reset || revocation.is_some() {
                                 lease = None;
+                                if reset {
+                                    *self = Self::retrying();
+                                    return Vec::new();
+                                }
                                 revocation.map(|(lease_epoch, cutoff)| {
                                     ControllerHostRequest::AcknowledgeQuiescence {
                                         connection_generation,
@@ -226,9 +266,8 @@ impl SessionControllerSource {
                             }
                         }
                         (SessionControllerPhase::Acknowledge, _) => {
-                            Some(ControllerHostRequest::Poll {
-                                connection_generation,
-                            })
+                            *self = Self::retrying();
+                            return Vec::new();
                         }
                         _ => None,
                     };
@@ -243,7 +282,7 @@ impl SessionControllerSource {
                         };
                         if let Err(error) = connection.send(request) {
                             tracing::warn!(%error, "session controller request failed closed");
-                            (Self::Failed, Vec::new())
+                            (Self::retrying(), Vec::new())
                         } else {
                             (
                                 Self::Attached {
@@ -257,7 +296,7 @@ impl SessionControllerSource {
                             )
                         }
                     } else {
-                        (Self::Failed, Vec::new())
+                        (Self::retrying(), Vec::new())
                     }
                 }
             },
@@ -5361,6 +5400,14 @@ mod tests {
             std::thread::sleep(Duration::from_millis(1));
         }
         assert!(ack_seen, "revocation acknowledgement reached transport");
+        for _ in 0..100 {
+            assert!(source.poll_actions().is_empty());
+            if matches!(source, SessionControllerSource::Retrying { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(matches!(source, SessionControllerSource::Retrying { .. }));
         drop(source);
         worker.join().unwrap();
         std::fs::remove_file(server_path).unwrap();

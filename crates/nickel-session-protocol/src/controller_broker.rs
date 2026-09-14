@@ -88,6 +88,12 @@ struct Transfer {
     quiescent: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PoisonedPredecessor {
+    lease: Lease,
+    cutoff: EventId,
+}
+
 #[derive(Debug)]
 struct Host<T> {
     connection: ConnectionGeneration,
@@ -106,6 +112,7 @@ pub struct ControllerBroker<T> {
     reset_barrier: bool,
     active: Option<Lease>,
     transfer: Option<Transfer>,
+    poisoned_predecessor: Option<PoisonedPredecessor>,
 }
 
 impl<T> ControllerBroker<T> {
@@ -125,6 +132,7 @@ impl<T> ControllerBroker<T> {
             reset_barrier: false,
             active: None,
             transfer: None,
+            poisoned_predecessor: None,
         }
     }
 
@@ -144,6 +152,7 @@ impl<T> ControllerBroker<T> {
                     .transfer
                     .is_some_and(|transfer| transfer.from.host == host || transfer.to == host))
         {
+            self.poison_executor(EventId(self.next_event));
             self.install_reset(EventId(self.next_event));
         }
         generation
@@ -155,13 +164,23 @@ impl<T> ControllerBroker<T> {
             return;
         }
         self.hosts.remove(&host);
-        if self.active.is_some_and(|lease| lease.host == host) {
+        if self.active.is_some_and(|lease| lease.host == host)
+            || self
+                .transfer
+                .is_some_and(|transfer| transfer.from.host == host)
+        {
+            self.poison_executor(EventId(self.next_event));
             self.install_reset(EventId(self.next_event));
         }
     }
 
     pub fn grant(&mut self, host: HostId, connection: ConnectionGeneration) -> Option<Lease> {
-        if self.active.is_some() || self.transfer.is_some() || self.reset_barrier || !self.neutral {
+        if self.active.is_some()
+            || self.transfer.is_some()
+            || self.poisoned_predecessor.is_some()
+            || self.reset_barrier
+            || !self.neutral
+        {
             return None;
         }
         self.connection_matches(host, connection)
@@ -215,6 +234,14 @@ impl<T> ControllerBroker<T> {
         cutoff: EventId,
     ) -> TransferStatus {
         let Some(mut transfer) = self.transfer else {
+            if self.poisoned_predecessor.is_some_and(|poison| {
+                poison.lease.host == host
+                    && poison.lease.connection_generation == connection
+                    && poison.lease.epoch == lease
+                    && poison.cutoff == cutoff
+            }) {
+                self.clear_poison();
+            }
             return TransferStatus::Failed;
         };
         if transfer.from.host != host
@@ -240,6 +267,11 @@ impl<T> ControllerBroker<T> {
         connection: ConnectionGeneration,
     ) -> TransferStatus {
         let Some(mut transfer) = self.transfer else {
+            if self.poisoned_predecessor.is_some_and(|poison| {
+                poison.lease.host == host && poison.lease.connection_generation == connection
+            }) {
+                self.clear_poison();
+            }
             return TransferStatus::Failed;
         };
         if transfer.from.host == host && transfer.from.connection_generation == connection {
@@ -251,7 +283,7 @@ impl<T> ControllerBroker<T> {
 
     pub fn set_neutral(&mut self, neutral: bool) -> Option<Lease> {
         self.neutral = neutral;
-        if neutral {
+        if neutral && self.poisoned_predecessor.is_none() {
             self.reset_barrier = false;
             if let TransferStatus::Granted(lease) = self.try_finish_transfer() {
                 return Some(lease);
@@ -270,6 +302,10 @@ impl<T> ControllerBroker<T> {
                 cutoff: transfer.cutoff,
             };
         }
+        self.poisoned_predecessor = Some(PoisonedPredecessor {
+            lease: transfer.from,
+            cutoff: transfer.cutoff,
+        });
         self.transfer = None;
         self.active = None;
         self.reset_barrier = true;
@@ -392,6 +428,24 @@ impl<T> ControllerBroker<T> {
             });
         }
     }
+
+    fn poison_executor(&mut self, cutoff: EventId) {
+        if let Some(transfer) = self.transfer {
+            self.poisoned_predecessor = Some(PoisonedPredecessor {
+                lease: transfer.from,
+                cutoff: transfer.cutoff,
+            });
+        } else if let Some(lease) = self.active {
+            self.poisoned_predecessor = Some(PoisonedPredecessor { lease, cutoff });
+        }
+    }
+
+    fn clear_poison(&mut self) {
+        self.poisoned_predecessor = None;
+        if self.neutral {
+            self.reset_barrier = false;
+        }
+    }
 }
 
 impl<T> Default for ControllerBroker<T> {
@@ -466,14 +520,55 @@ mod tests {
         ));
         assert_eq!(broker.expire_transfer(15), TransferStatus::Failed);
         assert_eq!(broker.active_lease(), None);
-        assert_eq!(
-            broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
-            TransferStatus::Failed
-        );
         assert!(matches!(
             broker.ingest(()),
             IngressDisposition::RejectedResetBarrier { .. }
         ));
+        broker.set_neutral(true);
+        assert!(broker.grant(HostId(2), b).is_none());
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), a, old.epoch, cutoff),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(2), b).is_some());
+    }
+
+    #[test]
+    fn detached_executor_stays_poisoned_across_neutral_until_verified_dead() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let old_connection = broker.attach(HostId(1));
+        let successor = broker.attach(HostId(2));
+        broker.grant(HostId(1), old_connection).unwrap();
+
+        broker.detach(HostId(1), old_connection);
+        broker.set_neutral(true);
+        assert!(broker.grant(HostId(2), successor).is_none());
+        assert_eq!(
+            broker.acknowledge_verified_termination(HostId(1), old_connection),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(2), successor).is_some());
+    }
+
+    #[test]
+    fn reconnect_does_not_let_a_new_generation_clear_the_old_poison() {
+        let mut broker = ControllerBroker::<()>::new(4);
+        let old_connection = broker.attach(HostId(1));
+        let old_lease = broker.grant(HostId(1), old_connection).unwrap();
+        broker.detach(HostId(1), old_connection);
+        let new_connection = broker.attach(HostId(1));
+        broker.set_neutral(true);
+
+        assert_eq!(
+            broker.acknowledge_verified_termination(HostId(1), new_connection),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(1), new_connection).is_none());
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), old_connection, old_lease.epoch, EventId(0)),
+            TransferStatus::Failed
+        );
+        assert!(broker.grant(HostId(1), new_connection).is_some());
     }
 
     #[test]
@@ -516,6 +611,11 @@ mod tests {
         assert!(broker.drain(HostId(1), stale).is_empty());
         assert!(broker.grant(HostId(1), current).is_none());
         broker.set_neutral(true);
+        assert!(broker.grant(HostId(1), current).is_none());
+        assert_eq!(
+            broker.acknowledge_verified_termination(HostId(1), stale),
+            TransferStatus::Failed
+        );
         assert!(broker.grant(HostId(1), current).is_some());
     }
 
