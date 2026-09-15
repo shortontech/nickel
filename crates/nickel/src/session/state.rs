@@ -2133,6 +2133,158 @@ mod internal_shell_placement_tests {
         }
     }
 
+    pub(super) fn receive_concurrent_x11_text_mimes(display: &str) -> Result<[Vec<u8>; 2], String> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    Atom, AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property,
+                    WindowClass,
+                },
+            },
+        };
+        use std::time::{Duration, Instant};
+
+        #[derive(Default)]
+        struct Transfer {
+            property: Atom,
+            incremental: bool,
+            complete: bool,
+            bytes: Vec<u8>,
+        }
+
+        let (connection, screen) =
+            smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+        let root = &connection.setup().roots[screen];
+        let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        connection
+            .create_window(
+                0,
+                requestor,
+                root.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|e| e.to_string())?;
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map(|reply| reply.atom)
+                .map_err(|e| e.to_string())
+        };
+        let clipboard = atom(b"CLIPBOARD")?;
+        let incr = atom(b"INCR")?;
+        let targets = [atom(b"text/plain;charset=utf-8")?, atom(b"text/plain")?];
+        let mut transfers = [
+            Transfer {
+                property: atom(b"NICKEL_CONCURRENT_UTF8")?,
+                ..Default::default()
+            },
+            Transfer {
+                property: atom(b"NICKEL_CONCURRENT_PLAIN")?,
+                ..Default::default()
+            },
+        ];
+        for (target, transfer) in targets.into_iter().zip(&transfers) {
+            connection
+                .convert_selection(
+                    requestor,
+                    clipboard,
+                    target,
+                    transfer.property,
+                    smithay::reexports::x11rb::CURRENT_TIME,
+                )
+                .map_err(|e| e.to_string())?;
+        }
+        connection.flush().map_err(|e| e.to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while transfers.iter().any(|transfer| !transfer.complete) {
+            if Instant::now() >= deadline {
+                return Err("concurrent X11 MIME requests timed out".into());
+            }
+            let Some(event) = connection.poll_for_event().map_err(|e| e.to_string())? else {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            match event {
+                Event::SelectionNotify(event) if event.requestor == requestor => {
+                    if event.property == smithay::reexports::x11rb::NONE {
+                        return Err("concurrent X11 MIME request was rejected".into());
+                    }
+                    let Some(transfer) = transfers
+                        .iter_mut()
+                        .find(|transfer| transfer.property == event.property)
+                    else {
+                        continue;
+                    };
+                    let reply = connection
+                        .get_property(
+                            false,
+                            requestor,
+                            transfer.property,
+                            AtomEnum::ANY,
+                            0,
+                            u32::MAX,
+                        )
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.type_ == incr {
+                        transfer.incremental = true;
+                        connection
+                            .delete_property(requestor, transfer.property)
+                            .map_err(|e| e.to_string())?;
+                    } else {
+                        transfer.bytes = reply.value;
+                        transfer.complete = true;
+                    }
+                    connection.flush().map_err(|e| e.to_string())?;
+                }
+                Event::PropertyNotify(event)
+                    if event.window == requestor && event.state == Property::NEW_VALUE =>
+                {
+                    let Some(transfer) = transfers.iter_mut().find(|transfer| {
+                        transfer.incremental
+                            && !transfer.complete
+                            && transfer.property == event.atom
+                    }) else {
+                        continue;
+                    };
+                    let reply = connection
+                        .get_property(
+                            true,
+                            requestor,
+                            transfer.property,
+                            AtomEnum::ANY,
+                            0,
+                            u32::MAX,
+                        )
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.value.is_empty() {
+                        transfer.complete = true;
+                    } else {
+                        transfer.bytes.extend_from_slice(&reply.value);
+                    }
+                    connection.flush().map_err(|e| e.to_string())?;
+                }
+                _ => {}
+            }
+        }
+        Ok(transfers.map(|transfer| transfer.bytes))
+    }
+
     pub(super) fn receive_replaced_x11_clipboard(
         display: &str,
         property_name: &str,
@@ -19548,6 +19700,48 @@ mod protocol_tests {
             assert!(Instant::now() < text_deadline);
         };
         assert_eq!(received_text, utf8_bytes);
+
+        let concurrent_text = "two properties share one requestor ".repeat(4_097);
+        let concurrent_text_bytes = concurrent_text.as_bytes().to_vec();
+        session
+            .publish_native_text_selection(concurrent_text)
+            .unwrap();
+        let concurrent_display = display.clone();
+        let (concurrent_tx, concurrent_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::receive_concurrent_x11_text_mimes(
+                &concurrent_display,
+            );
+            let _ = concurrent_tx.send(result);
+        });
+        let concurrent_deadline = Instant::now() + Duration::from_secs(15);
+        let concurrent_received = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match concurrent_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("concurrent MIME requestor exited without a result")
+                }
+            }
+            assert!(Instant::now() < concurrent_deadline);
+        };
+        assert!(
+            concurrent_received
+                .iter()
+                .all(|payload| payload == &concurrent_text_bytes)
+        );
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
 
         let primary_text_bytes = vec![b'p'; 65_537];
         let primary_text = String::from_utf8(primary_text_bytes.clone()).unwrap();
