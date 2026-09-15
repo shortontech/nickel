@@ -2213,6 +2213,25 @@ where
                             return Ok(());
                         }
 
+                        // Incremental transfers advance when the requestor deletes the
+                        // property containing the INCR header or the preceding chunk.
+                        // Clipboard helpers are commonly InputOnly windows, so they never
+                        // pass through the managed-window CreateNotify path that normally
+                        // selects PropertyNotify events. Observe the actual requestor before
+                        // acknowledging the transfer, while preserving every event already
+                        // selected by this XWM connection.
+                        let attributes = conn.get_window_attributes(n.requestor)?.reply()?;
+                        let requestor_events =
+                            attributes.your_event_mask | EventMask::PROPERTY_CHANGE;
+                        if requestor_events != attributes.your_event_mask {
+                            conn.change_window_attributes(
+                                n.requestor,
+                                &ChangeWindowAttributesAux::new().event_mask(requestor_events),
+                            )?
+                            .check()?;
+                            conn.flush()?;
+                        }
+
                         let (recv_fd, send_fd) = rustix::pipe::pipe_with(
                             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
                         )
