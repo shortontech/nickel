@@ -426,6 +426,13 @@ impl LockApplication {
     }
 }
 
+#[cfg(test)]
+impl LiveShell {
+    pub(crate) fn lock_password_len(&self) -> usize {
+        self.lock_host.application().password.len()
+    }
+}
+
 impl nickel_ui::Application for LockApplication {
     type Message = LockMessage;
 
@@ -2972,9 +2979,15 @@ impl LiveShell {
                 if !self.locked {
                     return false;
                 }
+                let (window_focused, events) = match event {
+                    UiEvent::FocusGained => (Some(true), Vec::new()),
+                    UiEvent::FocusLost => (Some(false), Vec::new()),
+                    event => (None, vec![HostEvent::Ui(event)]),
+                };
                 let outcome = self.lock_host.step(HostBatch {
                     surface_size: Some((width, height)),
-                    events: vec![HostEvent::Ui(event)],
+                    window_focused,
+                    events,
                     ..HostBatch::default()
                 });
                 outcome.changed | self.apply_lock_effects()

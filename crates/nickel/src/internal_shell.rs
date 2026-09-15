@@ -901,6 +901,16 @@ impl InternalShellCoordinator {
                     | nickel_ui::HostEvent::NormalizedIngress(_)
             ) {
                 match entry.role {
+                    SurfaceRole::Lock => {
+                        let input = match event {
+                            nickel_ui::HostEvent::Normalized { input, .. } => input,
+                            nickel_ui::HostEvent::NormalizedIngress(envelope) => envelope.input,
+                            _ => unreachable!(),
+                        };
+                        changed |= self
+                            .shell
+                            .lock_host_input(input, entry.size.0, entry.size.1);
+                    }
                     SurfaceRole::WindowPreview => {
                         dependent_roles
                             .extend([SurfaceRole::Panel, SurfaceRole::WindowContextMenu]);
@@ -1885,6 +1895,51 @@ mod tests {
                     command, PaintCommand::Text { text, .. } if text == "konsole"
                 ))
         );
+    }
+
+    #[test]
+    fn native_lock_routes_normalized_keyboard_input_to_the_password_field() {
+        use nickel_input::{DeviceId, EventOrder, InputEvent, TextEvent};
+
+        let mut coordinator = coordinator();
+        coordinator.set_outputs(&[InternalOutput {
+            name: "nested".into(),
+            x: 0,
+            y: 0,
+            width: 1280,
+            height: 720,
+            scale: 1.0,
+        }]);
+        coordinator.set_lock_state(true);
+        let lock = coordinator
+            .surface(SurfaceRole::Lock, Some("nested"))
+            .unwrap()
+            .id;
+        coordinator.scene(lock);
+        coordinator.step_slot_changes(
+            lock,
+            HostBatch {
+                window_focused: Some(true),
+                ..HostBatch::default()
+            },
+        );
+
+        coordinator.step_slot_changes(
+            lock,
+            HostBatch {
+                events: vec![nickel_ui::HostEvent::Normalized {
+                    input: InputEvent::Text(TextEvent::Commit {
+                        device: DeviceId(1),
+                        order: EventOrder(1),
+                        text: "a".into(),
+                    }),
+                    clipboard_text: None,
+                }],
+                ..HostBatch::default()
+            },
+        );
+
+        assert_eq!(coordinator.shell_mut().lock_password_len(), 1);
     }
 
     #[test]
