@@ -1122,9 +1122,13 @@ impl X11Wm {
                 }
             }
             calloop::channel::Event::Closed => {
-                if let Some(token) = data.xwm_state(id).transfer_timer.take() {
+                let xwm = data.xwm_state(id);
+                if let Some(token) = xwm.transfer_timer.take() {
                     event_handle.remove(token);
                 }
+                xwm.clipboard.destroy_all(&event_handle);
+                xwm.primary.destroy_all(&event_handle);
+                xwm.dnd.selection.destroy_all(&event_handle);
                 data.disconnected(id);
             }
         })?;
@@ -2285,10 +2289,8 @@ where
                                 requestor = transfer.request.requestor,
                                 "Destroying stale transfer",
                             );
-                            if transfer.token.is_some() {
-                                send_selection_notify_resp(&transfer.conn, &transfer.request, false)?;
-                                transfer.destroy(loop_handle);
-                            }
+                            transfer.abort();
+                            transfer.destroy(loop_handle);
                         }
 
                         let atom = selection.atom;

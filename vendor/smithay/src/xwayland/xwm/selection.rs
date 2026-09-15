@@ -269,6 +269,20 @@ impl OutgoingTransfer {
         Ok(remaining)
     }
 
+    pub fn abort(&self) {
+        if self.incr {
+            // ICCCM has no failure SelectionNotify after INCR acknowledgement.
+            // Remove the outstanding handshake property so the requestor is not
+            // left waiting for a chunk from an owner which retired the transfer.
+            let _ = self
+                .conn
+                .delete_property(self.request.requestor, self.request.property);
+            let _ = self.conn.flush();
+        } else {
+            let _ = send_selection_notify_resp(&self.conn, &self.request, false);
+        }
+    }
+
     pub fn destroy<D>(mut self, handle: &LoopHandle<'_, D>) {
         if let Some(token) = self.token.take() {
             handle.remove(token);
@@ -388,17 +402,7 @@ impl XWmSelection {
             let Some(transfer) = self.outgoing.remove(key) else {
                 continue;
             };
-            if transfer.incr {
-                // ICCCM has no failure SelectionNotify after INCR begins. Remove
-                // the outstanding property so requestors do not remain blocked
-                // waiting for an acknowledgement cycle Nickel has retired.
-                let _ = transfer
-                    .conn
-                    .delete_property(transfer.request.requestor, transfer.request.property);
-                let _ = transfer.conn.flush();
-            } else {
-                let _ = send_selection_notify_resp(&transfer.conn, &transfer.request, false);
-            }
+            transfer.abort();
             warn!(
                 direction = "wayland-to-x11",
                 mime_type = transfer.mime_type,
@@ -411,6 +415,17 @@ impl XWmSelection {
             transfer.destroy(loop_handle);
         }
         expired.len()
+    }
+
+    pub fn destroy_all<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
+        for (_, transfer) in self.incoming.drain() {
+            transfer.destroy(loop_handle);
+        }
+        for (_, transfer) in self.outgoing.drain() {
+            transfer.abort();
+            transfer.destroy(loop_handle);
+        }
+        self.pending_transfers.lock().unwrap().clear();
     }
 }
 
@@ -436,7 +451,7 @@ pub fn read_selection_callback(
             requestor = transfer.request.requestor,
             "File descriptor closed, aborting transfer."
         );
-        send_selection_notify_resp(conn, &transfer.request, false)?;
+        transfer.abort();
         return Ok(OutgoingAction::Done);
     };
     trace!(
