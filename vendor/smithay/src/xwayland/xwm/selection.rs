@@ -2,7 +2,11 @@ use std::{
     collections::HashMap,
     fmt,
     os::fd::{BorrowedFd, OwnedFd},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use calloop::{LoopHandle, RegistrationToken};
@@ -13,9 +17,9 @@ use x11rb::{
     protocol::{
         xfixes::{ConnectionExt as _, SelectionEventMask},
         xproto::{
-            Atom, AtomEnum, ConnectionExt as _, CreateWindowAux, EventMask, GetPropertyReply, PropMode,
-            SELECTION_NOTIFY_EVENT, Screen, SelectionNotifyEvent, SelectionRequestEvent, Window as X11Window,
-            WindowClass,
+            Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux,
+            EventMask, GetPropertyReply, PropMode, SELECTION_NOTIFY_EVENT, Screen,
+            SelectionNotifyEvent, SelectionRequestEvent, Window as X11Window, WindowClass,
         },
     },
     rust_connection::RustConnection,
@@ -30,6 +34,100 @@ use crate::{
 // copied from wlroots - docs say "maximum size can vary widely depending on the implementation"
 // and there is no way to query the maximum size, you just get a non-descriptive `Length` error...
 pub const INCR_CHUNK_SIZE: usize = 64 * 1024;
+pub const MAX_OUTGOING_TRANSFERS: usize = 32;
+pub const MAX_OUTGOING_BUFFER: usize = INCR_CHUNK_SIZE * 2;
+pub const OUTGOING_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const OUTGOING_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct OutgoingTransferKey {
+    pub requestor: X11Window,
+    pub property: Atom,
+}
+
+#[derive(Debug)]
+pub struct OutgoingAdmission(Arc<AtomicUsize>);
+
+impl OutgoingAdmission {
+    pub fn acquire(count: &Arc<AtomicUsize>) -> Option<Self> {
+        count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < MAX_OUTGOING_TRANSFERS).then_some(current + 1)
+            })
+            .ok()?;
+        Some(Self(Arc::clone(count)))
+    }
+}
+
+impl Drop for OutgoingAdmission {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Debug)]
+pub struct RequestorObservation {
+    conn: Arc<RustConnection>,
+    requestor: X11Window,
+    observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
+}
+
+impl RequestorObservation {
+    pub fn acquire(
+        conn: &Arc<RustConnection>,
+        observations: &Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
+        requestor: X11Window,
+    ) -> Result<Self, ReplyOrIdError> {
+        let mut observations_guard = observations.lock().unwrap();
+        if let Some((_, references)) = observations_guard.get_mut(&requestor) {
+            *references += 1;
+        } else {
+            let attributes = conn.get_window_attributes(requestor)?.reply()?;
+            let original = attributes.your_event_mask;
+            if !original.contains(EventMask::PROPERTY_CHANGE) {
+                conn.change_window_attributes(
+                    requestor,
+                    &ChangeWindowAttributesAux::new()
+                        .event_mask(original | EventMask::PROPERTY_CHANGE),
+                )?
+                .check()?;
+                conn.flush()?;
+            }
+            observations_guard.insert(requestor, (original, 1));
+        }
+        drop(observations_guard);
+        Ok(Self {
+            conn: Arc::clone(conn),
+            requestor,
+            observations: Arc::clone(observations),
+        })
+    }
+}
+
+impl Drop for RequestorObservation {
+    fn drop(&mut self) {
+        let original = {
+            let mut observations = self.observations.lock().unwrap();
+            let Some((original, references)) = observations.get_mut(&self.requestor) else {
+                return;
+            };
+            *references -= 1;
+            if *references != 0 {
+                return;
+            }
+            let original = *original;
+            observations.remove(&self.requestor);
+            original
+        };
+        if !original.contains(EventMask::PROPERTY_CHANGE) {
+            let _ = self.conn.change_window_attributes(
+                self.requestor,
+                &ChangeWindowAttributesAux::new().event_mask(original),
+            );
+            let _ = self.conn.flush();
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct XWmSelection {
@@ -44,7 +142,7 @@ pub struct XWmSelection {
 
     pub pending_transfers: Arc<Mutex<HashMap<X11Window, (OwnedX11Window, OwnedFd)>>>,
     pub incoming: HashMap<X11Window, IncomingTransfer>,
-    pub outgoing: HashMap<X11Window, OutgoingTransfer>,
+    pub outgoing: HashMap<OutgoingTransferKey, OutgoingTransfer>,
 }
 
 pub struct IncomingTransfer {
@@ -109,6 +207,11 @@ pub struct OutgoingTransfer {
     pub incr: bool,
     pub source_data: Vec<u8>,
     pub request: SelectionRequestEvent,
+    pub mime_type: String,
+    pub _observation: RequestorObservation,
+    pub _admission: OutgoingAdmission,
+    pub started: Instant,
+    pub last_progress: Instant,
 
     pub property_set: bool,
     pub flush_property_on_delete: bool,
@@ -131,6 +234,16 @@ impl fmt::Debug for OutgoingTransfer {
 }
 
 impl OutgoingTransfer {
+    pub fn timeout_reason(&self, now: Instant) -> Option<&'static str> {
+        if now.saturating_duration_since(self.started) >= OUTGOING_TOTAL_TIMEOUT {
+            Some("total-deadline")
+        } else if now.saturating_duration_since(self.last_progress) >= OUTGOING_INACTIVITY_TIMEOUT {
+            Some("inactivity-deadline")
+        } else {
+            None
+        }
+    }
+
     pub fn flush_data(&mut self) -> Result<usize, ReplyOrIdError> {
         let len = std::cmp::min(self.source_data.len(), INCR_CHUNK_SIZE);
 
@@ -229,22 +342,31 @@ impl XWmSelection {
     }
 
     pub fn window_destroyed<D>(&mut self, window: &X11Window, loop_handle: &LoopHandle<'_, D>) -> bool {
-        (if let Some(transfer) = self.incoming.remove(window) {
+        let mut removed = if let Some(transfer) = self.incoming.remove(window) {
             transfer.destroy(loop_handle);
             true
         } else {
             false
-        }) || (if let Some(transfer) = self.outgoing.remove(window) {
-            transfer.destroy(loop_handle);
-            true
-        } else {
-            false
-        }) || self.pending_transfers.lock().unwrap().remove(window).is_some()
+        };
+        let outgoing = self
+            .outgoing
+            .keys()
+            .filter(|key| key.requestor == *window)
+            .copied()
+            .collect::<Vec<_>>();
+        for key in outgoing {
+            if let Some(transfer) = self.outgoing.remove(&key) {
+                transfer.destroy(loop_handle);
+                removed = true;
+            }
+        }
+        removed || self.pending_transfers.lock().unwrap().remove(window).is_some()
     }
 
     pub fn has_window(&self, window: &X11Window) -> bool {
         self.window == *window
             || self.incoming.contains_key(window)
+            || self.outgoing.keys().any(|key| key.requestor == *window)
             || self.pending_transfers.lock().unwrap().contains_key(window)
     }
 
@@ -255,11 +377,47 @@ impl XWmSelection {
             _ => None,
         }
     }
+
+    pub fn expire_outgoing<D>(&mut self, now: Instant, loop_handle: &LoopHandle<'_, D>) -> usize {
+        let expired = self
+            .outgoing
+            .iter()
+            .filter_map(|(key, transfer)| transfer.timeout_reason(now).map(|reason| (*key, reason)))
+            .collect::<Vec<_>>();
+        for (key, reason) in &expired {
+            let Some(transfer) = self.outgoing.remove(key) else {
+                continue;
+            };
+            if transfer.incr {
+                // ICCCM has no failure SelectionNotify after INCR begins. Remove
+                // the outstanding property so requestors do not remain blocked
+                // waiting for an acknowledgement cycle Nickel has retired.
+                let _ = transfer
+                    .conn
+                    .delete_property(transfer.request.requestor, transfer.request.property);
+                let _ = transfer.conn.flush();
+            } else {
+                let _ = send_selection_notify_resp(&transfer.conn, &transfer.request, false);
+            }
+            warn!(
+                direction = "wayland-to-x11",
+                mime_type = transfer.mime_type,
+                requestor = transfer.request.requestor,
+                bytes = transfer.source_data.len(),
+                elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
+                terminal_reason = *reason,
+                "selection transfer timed out"
+            );
+            transfer.destroy(loop_handle);
+        }
+        expired.len()
+    }
 }
 
 pub enum OutgoingAction {
     Done,
     DoneReading,
+    Backpressured,
     WaitForReadable,
 }
 
@@ -269,6 +427,9 @@ pub fn read_selection_callback(
     fd: BorrowedFd<'_>,
     transfer: &mut OutgoingTransfer,
 ) -> Result<OutgoingAction, ReplyOrIdError> {
+    if transfer.source_data.len() >= MAX_OUTGOING_BUFFER {
+        return Ok(OutgoingAction::Backpressured);
+    }
     let mut buf = [0; INCR_CHUNK_SIZE];
     let Ok(len) = rustix::io::read(fd, &mut buf) else {
         debug!(
@@ -284,6 +445,9 @@ pub fn read_selection_callback(
     );
 
     transfer.source_data.extend_from_slice(&buf[..len]);
+    if len > 0 {
+        transfer.last_progress = Instant::now();
+    }
     if transfer.source_data.len() >= INCR_CHUNK_SIZE {
         if !transfer.incr {
             // start incr transfer
@@ -334,6 +498,8 @@ pub fn read_selection_callback(
             send_selection_notify_resp(conn, &transfer.request, true)?;
             Ok(OutgoingAction::Done)
         }
+    } else if transfer.source_data.len() >= MAX_OUTGOING_BUFFER && transfer.property_set {
+        Ok(OutgoingAction::Backpressured)
     } else {
         Ok(OutgoingAction::WaitForReadable)
     } // nothing to be done, buffered the bytes

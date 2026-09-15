@@ -18547,6 +18547,196 @@ mod protocol_tests {
     }
 
     #[test]
+    #[ignore = "native XWayland clipboard acceptance: requires Xwayland and a writable XDG_RUNTIME_DIR; run alone"]
+    fn native_xwayland_input_only_requestor_receives_complete_incremental_png() {
+        use image::ImageEncoder;
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+                },
+            },
+        };
+
+        struct FixtureEnvironment(Option<std::ffi::OsString>);
+        impl Drop for FixtureEnvironment {
+            fn drop(&mut self) {
+                // SAFETY: this opt-in native test runs alone, like XWayland startup.
+                unsafe {
+                    match self.0.take() {
+                        Some(display) => std::env::set_var("DISPLAY", display),
+                        None => std::env::remove_var("DISPLAY"),
+                    }
+                }
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let _environment = FixtureEnvironment(std::env::var_os("DISPLAY"));
+        let (mut event_loop, mut session) = internal_shell_test_session();
+        session.start_xwayland();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while session.xwm.is_none() {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < deadline, "owned XWayland did not start");
+        }
+
+        let mut pixels = vec![0_u8; 512 * 512 * 4];
+        let mut random = 0x4d59_5df4_d0f3_3173_u64;
+        for byte in &mut pixels {
+            random ^= random << 13;
+            random ^= random >> 7;
+            random ^= random << 17;
+            *byte = random as u8;
+        }
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&pixels, 512, 512, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        assert!(png.len() > 64 * 1024, "fixture must exercise INCR");
+        session
+            .publish_native_image_clipboard(Arc::new(png.clone()))
+            .unwrap();
+
+        let display = format!(":{}", session.xwayland_display.unwrap());
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<Vec<u8>, String> {
+                let (connection, screen) = smithay::reexports::x11rb::connect(Some(&display))
+                    .map_err(|e| e.to_string())?;
+                let root = &connection.setup().roots[screen];
+                let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+                connection
+                    .create_window(
+                        0,
+                        requestor,
+                        root.root,
+                        0,
+                        0,
+                        1,
+                        1,
+                        0,
+                        WindowClass::INPUT_ONLY,
+                        0,
+                        &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let atom = |name: &[u8]| {
+                    connection
+                        .intern_atom(false, name)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map(|reply| reply.atom)
+                        .map_err(|e| e.to_string())
+                };
+                let clipboard = atom(b"CLIPBOARD")?;
+                let image_png = atom(b"image/png")?;
+                let property = atom(b"NICKEL_TEST_SELECTION")?;
+                let incr = atom(b"INCR")?;
+                connection
+                    .convert_selection(
+                        requestor,
+                        clipboard,
+                        image_png,
+                        property,
+                        smithay::reexports::x11rb::CURRENT_TIME,
+                    )
+                    .map_err(|e| e.to_string())?;
+                connection.flush().map_err(|e| e.to_string())?;
+
+                let mut bytes = Vec::new();
+                let transfer_deadline = Instant::now() + Duration::from_secs(15);
+                let mut incremental = false;
+                loop {
+                    if Instant::now() >= transfer_deadline {
+                        return Err("X11 selection transfer timed out".into());
+                    }
+                    let Some(event) = connection.poll_for_event().map_err(|e| e.to_string())?
+                    else {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    };
+                    match event {
+                        Event::SelectionNotify(event) if event.requestor == requestor => {
+                            if event.property == smithay::reexports::x11rb::NONE {
+                                return Err("selection owner rejected image/png".into());
+                            }
+                            let reply = connection
+                                .get_property(
+                                    false,
+                                    requestor,
+                                    property,
+                                    AtomEnum::ANY,
+                                    0,
+                                    u32::MAX,
+                                )
+                                .map_err(|e| e.to_string())?
+                                .reply()
+                                .map_err(|e| e.to_string())?;
+                            if reply.type_ == incr {
+                                incremental = true;
+                                connection
+                                    .delete_property(requestor, property)
+                                    .map_err(|e| e.to_string())?;
+                                connection.flush().map_err(|e| e.to_string())?;
+                            } else {
+                                return Ok(reply.value);
+                            }
+                        }
+                        Event::PropertyNotify(event)
+                            if incremental
+                                && event.window == requestor
+                                && event.atom == property
+                                && event.state == Property::NEW_VALUE =>
+                        {
+                            let reply = connection
+                                .get_property(true, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                                .map_err(|e| e.to_string())?
+                                .reply()
+                                .map_err(|e| e.to_string())?;
+                            if reply.value.is_empty() {
+                                return Ok(bytes);
+                            }
+                            bytes.extend_from_slice(&reply.value);
+                            connection.flush().map_err(|e| e.to_string())?;
+                        }
+                        _ => {}
+                    }
+                }
+            })();
+            let _ = result_tx.send(result);
+        });
+
+        let received = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match result_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("X11 requestor exited without a result")
+                }
+            }
+            assert!(Instant::now() < deadline + Duration::from_secs(15));
+        };
+        assert_eq!(received, png);
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
+    }
+
+    #[test]
     #[ignore = "native Wayland acceptance: requires /usr/bin/zenity and a writable XDG_RUNTIME_DIR"]
     fn native_launch_acknowledgement_waits_for_mapped_verified_window() {
         use crate::session::remote_identity::{ProcessIdentity, WindowIdentity};

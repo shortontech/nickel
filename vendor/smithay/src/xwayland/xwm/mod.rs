@@ -145,7 +145,12 @@ use crate::{
         xwayland_shell::{self, XWaylandShellHandler},
     },
 };
-use calloop::{Interest, LoopHandle, Mode, PostAction, generic::Generic, ping};
+use calloop::{
+    Interest, LoopHandle, Mode, PostAction, RegistrationToken,
+    generic::Generic,
+    ping,
+    timer::{TimeoutAction, Timer},
+};
 use portable_atomic::AtomicF64;
 use rustix::fs::OFlags;
 use std::{
@@ -158,9 +163,10 @@ use std::{
         net::UnixStream,
     },
     sync::{
-        Arc, Weak,
-        atomic::{AtomicBool, Ordering},
+        Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
+    time::Instant,
 };
 use tracing::{debug, debug_span, info, trace, warn};
 use wayland_server::{DisplayHandle, Resource};
@@ -613,6 +619,9 @@ pub struct X11Wm {
     clipboard: XWmSelection,
     primary: XWmSelection,
     dnd: XWmDnd,
+    requestor_observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
+    outgoing_transfer_count: Arc<AtomicUsize>,
+    transfer_timer: Option<RegistrationToken>,
 
     pub(crate) windows: Vec<X11Surface>,
     // oldest mapped -> newest
@@ -1061,7 +1070,7 @@ impl X11Wm {
             .then(|| isolated_keyboard::IsolatedKeyboard::create(&conn, win).ok())
             .flatten();
         drop(_guard);
-        let wm = Self {
+        let mut wm = Self {
             isolated_keyboard,
             id,
             conn,
@@ -1076,6 +1085,9 @@ impl X11Wm {
             clipboard,
             primary,
             dnd,
+            requestor_observations: Default::default(),
+            outgoing_transfer_count: Default::default(),
+            transfer_timer: None,
             unpaired_surfaces: Default::default(),
             sequences_to_ignore: Default::default(),
             colormaps: Default::default(),
@@ -1087,6 +1099,20 @@ impl X11Wm {
             span,
         };
 
+        let timeout_handle = handle.clone();
+        let transfer_timer = handle.insert_source(
+            Timer::from_duration(std::time::Duration::from_secs(1)),
+            move |_, _, data| {
+                let xwm = data.xwm_state(id);
+                let now = Instant::now();
+                xwm.clipboard.expire_outgoing(now, &timeout_handle);
+                xwm.primary.expire_outgoing(now, &timeout_handle);
+                xwm.dnd.selection.expire_outgoing(now, &timeout_handle);
+                TimeoutAction::ToDuration(std::time::Duration::from_secs(1))
+            },
+        )?;
+        wm.transfer_timer = Some(transfer_timer);
+
         let event_handle = handle.clone();
         let dh = dh.clone();
         handle.insert_source(source, move |event, _, data| match event {
@@ -1096,6 +1122,9 @@ impl X11Wm {
                 }
             }
             calloop::channel::Event::Closed => {
+                if let Some(token) = data.xwm_state(id).transfer_timer.take() {
+                    event_handle.remove(token);
+                }
                 data.disconnected(id);
             }
         })?;
@@ -1105,6 +1134,12 @@ impl X11Wm {
     /// Id of this X11 WM
     pub fn id(&self) -> XwmId {
         self.id
+    }
+
+    /// Number of admitted outgoing selection transfers across clipboard,
+    /// primary selection, and drag-and-drop for bounded adapter diagnostics.
+    pub fn outgoing_selection_transfer_count(&self) -> usize {
+        self.outgoing_transfer_count.load(Ordering::Acquire)
     }
 
     /// Whether or not the XSYNC extension is present
@@ -2132,6 +2167,8 @@ where
                 .unwrap_or(true);
 
             let xwm = state.xwm_state(xwm_id);
+            let requestor_observations = Arc::clone(&xwm.requestor_observations);
+            let outgoing_transfer_count = Arc::clone(&xwm.outgoing_transfer_count);
             let selection = match n.selection {
                 x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
                 x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
@@ -2213,36 +2250,37 @@ where
                             return Ok(());
                         }
 
-                        // Incremental transfers advance when the requestor deletes the
-                        // property containing the INCR header or the preceding chunk.
-                        // Clipboard helpers are commonly InputOnly windows, so they never
-                        // pass through the managed-window CreateNotify path that normally
-                        // selects PropertyNotify events. Observe the actual requestor before
-                        // acknowledging the transfer, while preserving every event already
-                        // selected by this XWM connection.
-                        let attributes = conn.get_window_attributes(n.requestor)?.reply()?;
-                        let requestor_events =
-                            attributes.your_event_mask | EventMask::PROPERTY_CHANGE;
-                        if requestor_events != attributes.your_event_mask {
-                            conn.change_window_attributes(
-                                n.requestor,
-                                &ChangeWindowAttributesAux::new().event_mask(requestor_events),
-                            )?
-                            .check()?;
-                            conn.flush()?;
-                        }
+                        let key = OutgoingTransferKey {
+                            requestor: n.requestor,
+                            property: n.property,
+                        };
+                        let Some(admission) = OutgoingAdmission::acquire(&outgoing_transfer_count)
+                        else {
+                            warn!(requestor = n.requestor, "outgoing selection admission limit reached");
+                            send_selection_notify_resp(&conn, &n, false)?;
+                            return Ok(());
+                        };
+                        let observation = match RequestorObservation::acquire(
+                            &conn,
+                            &requestor_observations,
+                            n.requestor,
+                        ) {
+                            Ok(observation) => observation,
+                            Err(error) => {
+                                warn!(?error, requestor = n.requestor, "failed to observe selection requestor");
+                                send_selection_notify_resp(&conn, &n, false)?;
+                                return Ok(());
+                            }
+                        };
 
                         let (recv_fd, send_fd) = rustix::pipe::pipe_with(
                             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
                         )
                         .map_err(|err| ConnectionError::IoError(std::io::Error::from(err)))?;
 
-                        // It seems that if we ever try to reply to a selection request after
-                        // another has been sent by the same requestor, the requestor never reads
-                        // from it. It appears to only ever read from the latest, so purge stale
-                        // transfers to prevent clipboard hangs.
-
-                        if let Some(transfer) = selection.outgoing.remove(&n.requestor) {
+                        // An exact request/property replacement retires only its predecessor;
+                        // distinct MIME properties on the same clipboard helper remain independent.
+                        if let Some(transfer) = selection.outgoing.remove(&key) {
                             debug!(
                                 requestor = transfer.request.requestor,
                                 "Destroying stale transfer",
@@ -2253,7 +2291,6 @@ where
                             }
                         }
 
-                        let requestor = n.requestor;
                         let atom = selection.atom;
 
                         let token = loop_handle.insert_source(
@@ -2267,20 +2304,23 @@ where
                                     _ => unreachable!(),
                                 };
 
-                                if let Some(transfer) = selection.outgoing.get_mut(&requestor) {
+                                if let Some(transfer) = selection.outgoing.get_mut(&key) {
                                     match read_selection_callback(&xwm.conn, &xwm.atoms, fd.as_fd(), transfer)
                                     {
                                         Ok(OutgoingAction::WaitForReadable) => {
                                             return Ok(PostAction::Continue);
                                         } // transfer ongoing
+                                        Ok(OutgoingAction::Backpressured) => {
+                                            return Ok(PostAction::Disable);
+                                        }
                                         Ok(OutgoingAction::Done) => {
                                             let _ = transfer.token.take();
-                                            selection.outgoing.remove(&requestor);
+                                            selection.outgoing.remove(&key);
                                         }
                                         Err(err) => {
                                             warn!(?err, "Transfer aborted");
                                             let _ = transfer.token.take();
-                                            selection.outgoing.remove(&requestor);
+                                            selection.outgoing.remove(&key);
                                         }
                                         Ok(OutgoingAction::DoneReading) => {
                                             let _ = transfer.token.take();
@@ -2313,11 +2353,16 @@ where
                             token: Some(token),
                             source_data: Vec::new(),
                             request: n,
+                            mime_type: mime_type.clone(),
+                            _observation: observation,
+                            _admission: admission,
+                            started: Instant::now(),
+                            last_progress: Instant::now(),
                             property_set: false,
                             flush_property_on_delete: false,
                             sent_finished: false,
                         };
-                        selection.outgoing.insert(n.requestor, transfer);
+                        selection.outgoing.insert(key, transfer);
 
                         let selection_type = selection.type_();
                         drop(_guard);
@@ -2383,51 +2428,66 @@ where
             }
 
             if n.state == Property::DELETE {
+                let key = OutgoingTransferKey {
+                    requestor: n.window,
+                    property: n.atom,
+                };
                 if let Some(selection) = if xwm
                     .clipboard
                     .outgoing
-                    .get(&n.window)
-                    .is_some_and(|t| t.incr && t.request.property == n.atom)
+                    .get(&key)
+                    .is_some_and(|t| t.incr)
                 {
                     Some(&mut xwm.clipboard)
                 } else if xwm
                     .primary
                     .outgoing
-                    .get(&n.window)
-                    .is_some_and(|t| t.incr && t.request.property == n.atom)
+                    .get(&key)
+                    .is_some_and(|t| t.incr)
                 {
                     Some(&mut xwm.primary)
                 } else if xwm
                     .dnd
                     .selection
                     .outgoing
-                    .get(&n.window)
-                    .is_some_and(|t| t.incr && t.request.property == n.atom)
+                    .get(&key)
+                    .is_some_and(|t| t.incr)
                 {
                     Some(&mut xwm.dnd.selection)
                 } else {
                     None
                 } {
-                    let transfer = selection.outgoing.get_mut(&n.window).unwrap();
+                    let done = {
+                        let transfer = selection.outgoing.get_mut(&key).unwrap();
 
-                    transfer.property_set = false;
-                    if transfer.flush_property_on_delete {
-                        transfer.flush_property_on_delete = false;
-                        let len = transfer.flush_data()?;
-                        let requestor = transfer.request.requestor;
-                        trace!(requestor, len, "Send data chunk");
+                        transfer.property_set = false;
+                        transfer.last_progress = Instant::now();
+                        let mut done = false;
+                        if transfer.flush_property_on_delete {
+                            transfer.flush_property_on_delete = false;
+                            let len = transfer.flush_data()?;
+                            trace!(requestor = key.requestor, len, "Send data chunk");
 
-                        if transfer.token.is_none() {
-                            if len > 0 || !transfer.sent_finished {
-                                // Either the transfer is done, but we still have bytes left, or
-                                // all bytes have been transferred but the final 0-byte data chunk
-                                // hasn't been sent yet
-                                transfer.flush_property_on_delete = true;
-                            } else {
-                                // done
-                                selection.outgoing.remove(&requestor);
+                            if transfer.token.is_none() {
+                                if len > 0 || !transfer.sent_finished {
+                                    // Either the transfer is done, but we still have bytes left, or
+                                    // all bytes have been transferred but the final 0-byte data chunk
+                                    // hasn't been sent yet
+                                    transfer.flush_property_on_delete = true;
+                                } else {
+                                    done = true;
+                                }
                             }
                         }
+                        done
+                    };
+                    if done {
+                        selection.outgoing.remove(&key);
+                    } else if let Some(transfer) = selection.outgoing.get(&key)
+                        && transfer.token.is_some()
+                        && transfer.source_data.len() < MAX_OUTGOING_BUFFER
+                    {
+                        let _ = loop_handle.enable(transfer.token.as_ref().unwrap());
                     }
                 }
             }
