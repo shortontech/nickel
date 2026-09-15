@@ -2247,10 +2247,18 @@ fn handle_native_keyboard_hook(
     let outcomes = windows_input_adapter()
         .lock()
         .map(|mut adapter| {
-            adapter
-                .handle_native(event)
-                .map(|dispatch| dispatch.outcomes)
-                .unwrap_or_default()
+            let mut outcomes = if !alt_physically_held {
+                adapter.reconcile_modifier_release(AggregateModifier::Alt)
+            } else {
+                Vec::new()
+            };
+            outcomes.extend(
+                adapter
+                    .handle_native(event)
+                    .map(|dispatch| dispatch.outcomes)
+                    .unwrap_or_default(),
+            );
+            outcomes
         })
         .unwrap_or_default();
     // The shared modifier-release binding deliberately dispatches only on the
@@ -2266,19 +2274,10 @@ fn handle_native_keyboard_hook(
 }
 
 fn handle_native_modifier_release(modifier: AggregateModifier) {
-    let keys = match modifier {
-        AggregateModifier::Super => [KeyCode::SuperLeft, KeyCode::SuperRight],
-        AggregateModifier::Alt => [KeyCode::AltLeft, KeyCode::AltRight],
-        _ => return,
-    };
     let actions = windows_input_adapter()
         .lock()
         .ok()
-        .map(|mut adapter| {
-            keys.into_iter()
-                .flat_map(|key| adapter.handle_key_code(key, KeyEdge::Released).outcomes)
-                .collect()
-        })
+        .map(|mut adapter| adapter.reconcile_modifier_release(modifier))
         .unwrap_or_default();
     send_hotkey_outcomes(actions);
 }

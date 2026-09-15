@@ -130,6 +130,25 @@ impl<A: Clone> WindowsInputAdapter<A> {
         self.engine.modifiers().aggregate(modifier)
     }
 
+    pub fn reconcile_modifier_release(
+        &mut self,
+        modifier: crate::AggregateModifier,
+    ) -> Vec<ShortcutOutcome<A>> {
+        let keys = match modifier {
+            crate::AggregateModifier::Shift => [KeyCode::ShiftLeft, KeyCode::ShiftRight],
+            crate::AggregateModifier::Control => [KeyCode::ControlLeft, KeyCode::ControlRight],
+            crate::AggregateModifier::Alt => [KeyCode::AltLeft, KeyCode::AltRight],
+            crate::AggregateModifier::Super => [KeyCode::SuperLeft, KeyCode::SuperRight],
+        };
+        let mut outcomes = Vec::new();
+        for key in keys {
+            if self.key_held(key) {
+                outcomes.extend(self.handle_key_code(key, KeyEdge::Released).outcomes);
+            }
+        }
+        outcomes
+    }
+
     pub fn key_held(&self, key: KeyCode) -> bool {
         self.engine
             .pressed_keys(WINDOWS_KEYBOARD_DEVICE)
@@ -866,6 +885,35 @@ mod tests {
         adapter.handle_key_code(KeyCode::AltRight, KeyEdge::Pressed);
         adapter.reset();
         assert!(!adapter.modifier_held(AggregateModifier::Alt));
+    }
+
+    #[test]
+    fn physical_alt_release_clears_stale_alt_before_space() {
+        let binding = Binding {
+            shortcut: Shortcut {
+                key: ShortcutKey::Physical(PhysicalKey::Code(KeyCode::Space)),
+                modifiers: [AggregateModifier::Alt].into_iter().collect(),
+                trigger: ShortcutTrigger::Pressed,
+            },
+            action: "window-menu",
+            suppress: true,
+        };
+        let mut adapter = WindowsInputAdapter::new([binding]);
+        adapter.handle_key_code(KeyCode::AltLeft, KeyEdge::Pressed);
+
+        assert!(adapter.modifier_held(AggregateModifier::Alt));
+        assert!(
+            adapter
+                .reconcile_modifier_release(AggregateModifier::Alt)
+                .is_empty()
+        );
+        assert!(!adapter.modifier_held(AggregateModifier::Alt));
+        assert!(
+            adapter
+                .handle_key_code(KeyCode::Space, KeyEdge::Pressed)
+                .outcomes
+                .is_empty()
+        );
     }
 
     #[test]
