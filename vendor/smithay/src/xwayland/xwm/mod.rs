@@ -1163,6 +1163,11 @@ impl X11Wm {
             + self.dnd.selection.pending_transfers.lock().unwrap().len()
     }
 
+    /// Number of active X11-to-Wayland transfers writing recipient descriptors.
+    pub fn incoming_selection_transfer_count(&self) -> usize {
+        self.clipboard.incoming.len() + self.primary.incoming.len() + self.dnd.selection.incoming.len()
+    }
+
     /// Number of live shared PROPERTY_CHANGE observation leases.
     pub fn selection_requestor_observation_count(&self) -> usize {
         self.requestor_observations
@@ -2226,6 +2231,7 @@ where
                             incr: false,
                             source_data: Vec::new(),
                             incr_done: false,
+                            recipient_closed: false,
                             started,
                             last_progress: Instant::now(),
                             mime_type,
@@ -2551,7 +2557,9 @@ where
                                 }
                             } else {
                                 transfer.read_selection_prop(prop);
-                                if let Some(token) = transfer.token.as_ref() {
+                                if transfer.recipient_closed {
+                                    conn.delete_property(*transfer.window, xwm.atoms._WL_SELECTION)?;
+                                } else if let Some(token) = transfer.token.as_ref() {
                                     let _ = loop_handle.enable(token);
                                 } else {
                                     selection.incoming.remove(&n.window);

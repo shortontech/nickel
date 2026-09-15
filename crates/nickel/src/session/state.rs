@@ -20180,6 +20180,80 @@ mod protocol_tests {
                 .is_ok()
         );
 
+        let closed_recipient_payload = (0..196_609)
+            .map(|offset| ((offset * 41 + 17) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let closed_display = display.clone();
+        let (closed_ready_tx, closed_ready_rx) = std::sync::mpsc::channel();
+        let (closed_done_tx, closed_done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::serve_x11_incremental_clipboard(
+                &closed_display,
+                "CLIPBOARD",
+                closed_recipient_payload,
+                closed_ready_tx,
+            );
+            let _ = closed_done_tx.send(result);
+        });
+        closed_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        for _ in 0..8 {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+        }
+        let (closed_reader, closed_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        session
+            .xwm
+            .as_mut()
+            .unwrap()
+            .1
+            .send_selection(
+                smithay::wayland::selection::SelectionTarget::Clipboard,
+                "image/png".into(),
+                closed_writer.into(),
+            )
+            .unwrap();
+        drop(closed_reader);
+        let closed_deadline = Instant::now() + Duration::from_secs(15);
+        let closed_result = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match closed_done_rx.try_recv() {
+                Ok(result) => break result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("closed-recipient owner exited without a result")
+                }
+            }
+            assert!(Instant::now() < closed_deadline);
+        };
+        assert!(closed_result.is_ok());
+        while session
+            .xwm
+            .as_ref()
+            .unwrap()
+            .1
+            .incoming_selection_transfer_count()
+            != 0
+        {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < closed_deadline);
+        }
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .incoming_selection_transfer_count(),
+            0
+        );
+
         for reject_transfer in [true, false] {
             let fixture_display = display.clone();
             let (ready_tx, ready_rx) = std::sync::mpsc::channel();

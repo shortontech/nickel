@@ -180,6 +180,7 @@ pub struct IncomingTransfer {
     pub incr: bool,
     pub source_data: Vec<u8>,
     pub incr_done: bool,
+    pub recipient_closed: bool,
     pub started: Instant,
     pub last_progress: Instant,
     pub mime_type: String,
@@ -204,7 +205,9 @@ impl IncomingTransfer {
             self.last_progress = Instant::now();
         }
         self.bytes_received = self.bytes_received.saturating_add(reply.value.len());
-        self.source_data.extend(&reply.value)
+        if !self.recipient_closed {
+            self.source_data.extend(&reply.value);
+        }
     }
 
     pub fn write_selection(&mut self, fd: BorrowedFd<'_>) -> std::io::Result<bool> {
@@ -663,6 +666,8 @@ pub fn write_selection_callback(
         Ok(false) => Ok(IncomingAction::WaitForWritable),
         Err(err) => {
             warn!(?err, "Transfer errored");
+            transfer.source_data.clear();
+            transfer.recipient_closed = true;
             if transfer.incr {
                 // even if it failed, we still need to drain the incr transfer
                 conn.delete_property(*transfer.window, atoms._WL_SELECTION)?;
