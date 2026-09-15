@@ -71,7 +71,8 @@ acknowledgements, simultaneous requestors, two MIME requests on distinct propert
 requestor, the global 32-transfer admission bound and rejection, injected inactivity timeout with
 recipient recovery, teardown/restart, UTF-8 crossing a chunk boundary, primary selection in both
 directions, exact numeric requestor-XID reuse across X client generations, reverse X11-to-native
-multi-chunk transfer, and an already-closed native recipient.
+multi-chunk transfer, an outgoing production Xdnd INCR offer with target-destruction cleanup, and an
+already-closed native recipient.
 It also verified refcounted property observation on a real X11 window while preserving unrelated
 event-mask bits. The vendored tests cover admission release and requestor/property identity.
 
