@@ -30,7 +30,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact integrated results below were recorded through `ac7bc88c`. Older focused evidence remains listed
+Exact integrated results below were recorded through `1d756697`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -49,7 +49,7 @@ cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file
 ```
 
 Pass. Reported library totals include `nickel-core` 183/0, `nickel-file` 181/0,
-`nickel-session-protocol` 58/0, `nickel-ui` 406/0 with 2 ignored, and
+`nickel-session-protocol` 59/0, `nickel-ui` 407/0 with 2 ignored, and
 `nickel-ui-testkit` 29/0. The `nickel-ui` suite includes the modal accessibility dispatch
 regression. The testkit touch scenario exercises separately supplied normalized authority rather
 than envelope self-certification.
