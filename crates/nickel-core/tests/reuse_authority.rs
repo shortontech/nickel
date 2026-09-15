@@ -495,8 +495,16 @@ fn xdg_resize_anchor_is_authorized_before_mapping_and_expiry_cleans_up() {
         .next()
         .unwrap();
     assert!(settlement.contains("SettlementStatus::Unconfirmed"));
-    assert!(settlement.contains("cancel_geometry_window_operation"));
-    assert!(settlement.contains("clear_resize_correlation"));
+    assert!(settlement.contains("clear_xdg_resize_operation"));
+    let cleanup = state
+        .split("fn clear_xdg_resize_operation")
+        .nth(1)
+        .unwrap()
+        .split("fn fail_xdg_resize_operation")
+        .next()
+        .unwrap();
+    assert!(cleanup.contains("cancel_geometry_window_operation"));
+    assert!(cleanup.contains("clear_resize_correlation"));
 
     let observation = state
         .split("pub(crate) fn observe_xdg_geometry_commit")
@@ -507,9 +515,5 @@ fn xdg_resize_anchor_is_authorized_before_mapping_and_expiry_cleans_up() {
         .unwrap();
     assert!(observation.contains("let was_pending"));
     assert!(observation.contains("SettlementStatus::AppliedWithAdjustment"));
-    assert!(
-        observation
-            .trim_end()
-            .ends_with("applied_transition\n    }")
-    );
+    assert!(observation.contains("\n        applied_transition\n    }\n"));
 }
