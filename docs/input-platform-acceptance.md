@@ -26,9 +26,9 @@ nested fixture, historical observation, or the presence of test source.
 | Linux XWayland | clipboard INCR, InputOnly/InputOutput requestors, timeout/restart cleanup, reverse transfer | pass: production-callback native harness plus vendored Smithay tests | pass | pass: X11 image paste confirmed in installed session | remaining explicit primary-selection/DnD live matrix |
 | Linux Gilrs | identity, navigation, repeat, disconnect, focus fence | source tests present, not rerun | compiled as dependency | untested | physical controller not used |
 | Unix controller broker/transport | live route/surface plus connection/lease/stream generation, transfer/revoke/reset | pass in protocol and session suites | pass | untested | live transfer and neutral barrier |
-| Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | unavailable on this Linux pass | untested | Windows host, layouts, IME, hook registration/suppression |
-| Windows foreign move/resize | bound source/button, contested control, release/reconciliation/takeover | source-reviewed fail-closed gates present; Windows-only tests not run | unavailable | untested | bounded identity-bearing native completion mechanism, hooks, DPI, monitors, takeover |
-| Windows controller pipe | nonblocking client/server adapters, bounded correlated delivery and generation fencing | source tests present; production server integration absent | unavailable | untested | production `WindowsPipeServer` construction, live partial I/O, replacement/disconnect and controller |
+| Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | pass: `nickel-platform` MSVC-target check | untested | Windows host, layouts, IME, hook registration/suppression |
+| Windows foreign move/resize | bound source/button, contested control, release/reconciliation/takeover | source-reviewed fail-closed gates present; Windows-only tests not run | pass: `nickel-platform` MSVC-target check | untested | bounded identity-bearing native completion mechanism, hooks, DPI, monitors, takeover |
+| Windows controller pipe | nonblocking client/server adapters, bounded correlated delivery and generation fencing | source tests present; production server integration absent | pass: protocol MSVC-target check | untested | production `WindowsPipeServer` construction, live partial I/O, replacement/disconnect and controller |
 | BSD native runtime | all capabilities | untested | untested | unsupported | implementation and host |
 
 ## Commands executed on this branch
@@ -58,6 +58,19 @@ in a private network namespace because the installed Nickel session correctly ow
 loopback port; all 154 tests passed without stopping the live desktop. The non-remote workspace
 members, including 1,017 Nickel library tests, passed with their declared native/release tests
 ignored. The complete release workspace built successfully.
+
+```sh
+cargo check -p nickel-session-protocol --all-targets \
+  --target x86_64-pc-windows-msvc
+cargo check -p nickel-platform --all-targets --all-features \
+  --target x86_64-pc-windows-msvc
+```
+
+Pass. These commands compile the Windows named-pipe client/server, native input, focus, and
+window-operation adapter code on the MSVC target. A full Windows workspace check remains unavailable
+on this Linux host: `ring` requires the Microsoft SDK headers and librarian (`lib.exe`). Supplying
+the installed `clang-cl` and `llvm-lib` advanced that build to the missing `assert.h` SDK boundary,
+but is not a substitute for a supported Windows toolchain or native run.
 
 ```sh
 cargo build -p nickel --no-default-features --features backend-winit \
