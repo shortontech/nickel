@@ -70,6 +70,7 @@ pub struct RequestorObservation {
     conn: Arc<RustConnection>,
     requestor: X11Window,
     observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
+    pub class: WindowClass,
 }
 
 impl RequestorObservation {
@@ -79,10 +80,10 @@ impl RequestorObservation {
         requestor: X11Window,
     ) -> Result<Self, ReplyOrIdError> {
         let mut observations_guard = observations.lock().unwrap();
+        let attributes = conn.get_window_attributes(requestor)?.reply()?;
         if let Some((_, references)) = observations_guard.get_mut(&requestor) {
             *references += 1;
         } else {
-            let attributes = conn.get_window_attributes(requestor)?.reply()?;
             let original = attributes.your_event_mask;
             if !original.contains(EventMask::PROPERTY_CHANGE) {
                 conn.change_window_attributes(
@@ -100,6 +101,7 @@ impl RequestorObservation {
             conn: Arc::clone(conn),
             requestor,
             observations: Arc::clone(observations),
+            class: attributes.class,
         })
     }
 }
@@ -154,6 +156,8 @@ pub struct IncomingTransfer {
     pub incr_done: bool,
     pub started: Instant,
     pub last_progress: Instant,
+    pub mime_type: String,
+    pub bytes_received: usize,
 }
 
 impl fmt::Debug for IncomingTransfer {
@@ -173,6 +177,7 @@ impl IncomingTransfer {
         if !reply.value.is_empty() {
             self.last_progress = Instant::now();
         }
+        self.bytes_received = self.bytes_received.saturating_add(reply.value.len());
         self.source_data.extend(&reply.value)
     }
 
@@ -230,6 +235,7 @@ pub struct OutgoingTransfer {
     pub _admission: OutgoingAdmission,
     pub started: Instant,
     pub last_progress: Instant,
+    pub bytes_read: usize,
 
     pub property_set: bool,
     pub flush_property_on_delete: bool,
@@ -424,8 +430,9 @@ impl XWmSelection {
             warn!(
                 direction = "wayland-to-x11",
                 mime_type = transfer.mime_type,
+                requestor_class = ?transfer._observation.class,
                 requestor = transfer.request.requestor,
-                bytes = transfer.source_data.len(),
+                bytes = transfer.bytes_read,
                 elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
                 terminal_reason = *reason,
                 "selection transfer timed out"
@@ -453,8 +460,9 @@ impl XWmSelection {
             }
             warn!(
                 direction = "x11-to-wayland",
+                mime_type = transfer.mime_type,
                 requestor = *window,
-                bytes = transfer.source_data.len(),
+                bytes = transfer.bytes_received,
                 elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
                 terminal_reason = *reason,
                 "selection transfer timed out"
@@ -507,6 +515,7 @@ pub fn read_selection_callback(
     );
 
     transfer.source_data.extend_from_slice(&buf[..len]);
+    transfer.bytes_read = transfer.bytes_read.saturating_add(len);
     if len > 0 {
         transfer.last_progress = Instant::now();
     }

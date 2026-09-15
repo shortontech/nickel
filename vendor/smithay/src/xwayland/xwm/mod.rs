@@ -2156,6 +2156,9 @@ where
                             incr_done: false,
                             started: Instant::now(),
                             last_progress: Instant::now(),
+                            mime_type: mime_from_atom(n.target, &conn, &xwm.atoms)?
+                                .unwrap_or_else(|| format!("atom:{}", n.target)),
+                            bytes_received: 0,
                         };
                         selection.incoming.insert(incoming_window, transfer);
                         selection.incoming.get_mut(&incoming_window).unwrap()
@@ -2358,6 +2361,7 @@ where
                                         }
                                         Err(err) => {
                                             warn!(?err, "Transfer aborted");
+                                            transfer.abort();
                                             let _ = transfer.token.take();
                                             selection.outgoing.remove(&key);
                                         }
@@ -2397,6 +2401,7 @@ where
                             _admission: admission,
                             started: Instant::now(),
                             last_progress: Instant::now(),
+                            bytes_read: 0,
                             property_set: false,
                             flush_property_on_delete: false,
                             sent_finished: false,
