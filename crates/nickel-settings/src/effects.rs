@@ -258,12 +258,21 @@ impl SettingsApp {
                     .get(&raw_name)
                     .cloned()
                     .unwrap_or_else(|| connector.clone());
+                let mode = nickel_session_protocol::OutputMode {
+                    width: size.width as i32,
+                    height: size.height as i32,
+                    refresh_millihz: 60_000,
+                };
                 DisplayCard {
                     connector: connector.clone(),
                     name: name.clone(),
                     detail: format!("{}  {} X {}", connector, size.width, size.height),
                     logical_width: size.width as i32,
                     logical_height: size.height as i32,
+                    logical_x: position.x,
+                    logical_y: position.y,
+                    modes: vec![mode],
+                    mode,
                     rect: Rect {
                         x: origin_x
                             + (f64::from(position.x - minimum_x) * self.pixels_per_logical).round()

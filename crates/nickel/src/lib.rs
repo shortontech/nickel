@@ -2421,8 +2421,9 @@ pub fn run() -> Result<(), String> {
         }
         let next_deadline = fast_subscription
             .deadline()
-            .min(system_subscription.deadline())
-            .min(controller_schedule.deadline());
+            .min(system_subscription.deadline());
+        #[cfg(not(target_os = "windows"))]
+        let next_deadline = next_deadline.min(controller_schedule.deadline());
         let next_deadline = codex
             .next_deadline()
             .map(|deadline| deadline.min(next_deadline))
