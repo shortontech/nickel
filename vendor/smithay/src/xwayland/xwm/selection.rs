@@ -152,6 +152,8 @@ pub struct IncomingTransfer {
     pub incr: bool,
     pub source_data: Vec<u8>,
     pub incr_done: bool,
+    pub started: Instant,
+    pub last_progress: Instant,
 }
 
 impl fmt::Debug for IncomingTransfer {
@@ -168,6 +170,9 @@ impl fmt::Debug for IncomingTransfer {
 
 impl IncomingTransfer {
     pub fn read_selection_prop(&mut self, reply: GetPropertyReply) {
+        if !reply.value.is_empty() {
+            self.last_progress = Instant::now();
+        }
         self.source_data.extend(&reply.value)
     }
 
@@ -177,6 +182,9 @@ impl IncomingTransfer {
         }
 
         let len = rustix::io::write(fd, &self.source_data)?;
+        if len > 0 {
+            self.last_progress = Instant::now();
+        }
         self.source_data = self.source_data.split_off(len);
 
         Ok(self.source_data.is_empty())
@@ -185,6 +193,16 @@ impl IncomingTransfer {
     pub fn destroy<D>(mut self, handle: &LoopHandle<'_, D>) {
         if let Some(token) = self.token.take() {
             handle.remove(token);
+        }
+    }
+
+    pub fn timeout_reason(&self, now: Instant) -> Option<&'static str> {
+        if now.saturating_duration_since(self.started) >= OUTGOING_TOTAL_TIMEOUT {
+            Some("total-deadline")
+        } else if now.saturating_duration_since(self.last_progress) >= OUTGOING_INACTIVITY_TIMEOUT {
+            Some("inactivity-deadline")
+        } else {
+            None
         }
     }
 }
@@ -407,6 +425,35 @@ impl XWmSelection {
                 direction = "wayland-to-x11",
                 mime_type = transfer.mime_type,
                 requestor = transfer.request.requestor,
+                bytes = transfer.source_data.len(),
+                elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
+                terminal_reason = *reason,
+                "selection transfer timed out"
+            );
+            transfer.destroy(loop_handle);
+        }
+        expired.len()
+    }
+
+    pub fn expire_incoming<D>(&mut self, now: Instant, loop_handle: &LoopHandle<'_, D>) -> usize {
+        let expired = self
+            .incoming
+            .iter()
+            .filter_map(|(window, transfer)| transfer.timeout_reason(now).map(|reason| (*window, reason)))
+            .collect::<Vec<_>>();
+        for (window, reason) in &expired {
+            let Some(transfer) = self.incoming.remove(window) else {
+                continue;
+            };
+            if transfer.incr {
+                if let Some(conn) = transfer.window.conn.upgrade() {
+                    let _ = conn.delete_property(*transfer.window, self.atoms._WL_SELECTION);
+                    let _ = conn.flush();
+                }
+            }
+            warn!(
+                direction = "x11-to-wayland",
+                requestor = *window,
                 bytes = transfer.source_data.len(),
                 elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
                 terminal_reason = *reason,

@@ -1106,8 +1106,11 @@ impl X11Wm {
                 let xwm = data.xwm_state(id);
                 let now = Instant::now();
                 xwm.clipboard.expire_outgoing(now, &timeout_handle);
+                xwm.clipboard.expire_incoming(now, &timeout_handle);
                 xwm.primary.expire_outgoing(now, &timeout_handle);
+                xwm.primary.expire_incoming(now, &timeout_handle);
                 xwm.dnd.selection.expire_outgoing(now, &timeout_handle);
+                xwm.dnd.selection.expire_incoming(now, &timeout_handle);
                 TimeoutAction::ToDuration(std::time::Duration::from_secs(1))
             },
         )?;
@@ -1144,6 +1147,13 @@ impl X11Wm {
     /// primary selection, and drag-and-drop for bounded adapter diagnostics.
     pub fn outgoing_selection_transfer_count(&self) -> usize {
         self.outgoing_transfer_count.load(Ordering::Acquire)
+    }
+
+    /// Cancel every clipboard/primary/DnD transfer owned by this XWM.
+    pub fn cancel_selection_transfers<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
+        self.clipboard.destroy_all(loop_handle);
+        self.primary.destroy_all(loop_handle);
+        self.dnd.selection.destroy_all(loop_handle);
     }
 
     /// Whether or not the XSYNC extension is present
@@ -2119,6 +2129,8 @@ where
                             incr: false,
                             source_data: Vec::new(),
                             incr_done: false,
+                            started: Instant::now(),
+                            last_progress: Instant::now(),
                         };
                         selection.incoming.insert(incoming_window, transfer);
                         selection.incoming.get_mut(&incoming_window).unwrap()

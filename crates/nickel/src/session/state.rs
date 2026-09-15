@@ -11566,6 +11566,9 @@ impl NickelSession {
         self.cancel_remote_keyboard();
         self.cancel_all_touch_authority();
         self.revoke_controller_role_lease();
+        if let Some((_, xwm)) = self.xwm.as_mut() {
+            xwm.cancel_selection_transfers(&self.event_loop_handle);
+        }
         if let Some(request) = self.launcher_focus.requested().cloned() {
             let _ = self
                 .launcher_focus
