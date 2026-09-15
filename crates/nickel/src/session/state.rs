@@ -2285,6 +2285,188 @@ mod internal_shell_placement_tests {
         Ok(transfers.map(|transfer| transfer.bytes))
     }
 
+    pub(super) fn receive_x11_after_requestor_id_reuse(
+        display: &str,
+        old_ready: std::sync::mpsc::Sender<u32>,
+        old_disconnected: std::sync::mpsc::Sender<()>,
+        reconnect: std::sync::mpsc::Receiver<()>,
+    ) -> Result<(u32, Vec<u8>), String> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+                },
+            },
+        };
+        use std::time::{Duration, Instant};
+
+        let old_requestor = {
+            let (connection, screen) =
+                smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+            let root = &connection.setup().roots[screen];
+            let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+            connection
+                .create_window(
+                    0,
+                    requestor,
+                    root.root,
+                    0,
+                    0,
+                    1,
+                    1,
+                    0,
+                    WindowClass::INPUT_ONLY,
+                    0,
+                    &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                )
+                .map_err(|e| e.to_string())?;
+            let atom = |name: &[u8]| {
+                connection
+                    .intern_atom(false, name)
+                    .map_err(|e| e.to_string())?
+                    .reply()
+                    .map(|reply| reply.atom)
+                    .map_err(|e| e.to_string())
+            };
+            let clipboard = atom(b"CLIPBOARD")?;
+            let target = atom(b"image/png")?;
+            let property = atom(b"NICKEL_REUSED_REQUESTOR")?;
+            let incr = atom(b"INCR")?;
+            connection
+                .convert_selection(
+                    requestor,
+                    clipboard,
+                    target,
+                    property,
+                    smithay::reexports::x11rb::CURRENT_TIME,
+                )
+                .map_err(|e| e.to_string())?;
+            connection.flush().map_err(|e| e.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            loop {
+                if Instant::now() >= deadline {
+                    return Err("old X11 requestor did not enter INCR".into());
+                }
+                match connection.poll_for_event().map_err(|e| e.to_string())? {
+                    Some(Event::SelectionNotify(event)) if event.requestor == requestor => {
+                        let reply = connection
+                            .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                            .map_err(|e| e.to_string())?
+                            .reply()
+                            .map_err(|e| e.to_string())?;
+                        if reply.type_ != incr {
+                            return Err("old X11 requestor did not receive an INCR header".into());
+                        }
+                        old_ready.send(requestor).map_err(|e| e.to_string())?;
+                        break requestor;
+                    }
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+        };
+        old_disconnected.send(()).map_err(|e| e.to_string())?;
+        reconnect.recv().map_err(|e| e.to_string())?;
+
+        let (connection, screen) =
+            smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+        let root = &connection.setup().roots[screen];
+        let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        if requestor != old_requestor {
+            return Err(format!(
+                "X server did not reuse requestor ID: old={old_requestor} new={requestor}"
+            ));
+        }
+        connection
+            .create_window(
+                0,
+                requestor,
+                root.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|e| e.to_string())?;
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map(|reply| reply.atom)
+                .map_err(|e| e.to_string())
+        };
+        let clipboard = atom(b"CLIPBOARD")?;
+        let target = atom(b"image/png")?;
+        let property = atom(b"NICKEL_REUSED_REQUESTOR")?;
+        let incr = atom(b"INCR")?;
+        connection
+            .convert_selection(
+                requestor,
+                clipboard,
+                target,
+                property,
+                smithay::reexports::x11rb::CURRENT_TIME,
+            )
+            .map_err(|e| e.to_string())?;
+        connection.flush().map_err(|e| e.to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut incremental = false;
+        let mut bytes = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                return Err("reused X11 requestor transfer timed out".into());
+            }
+            match connection.poll_for_event().map_err(|e| e.to_string())? {
+                Some(Event::SelectionNotify(event)) if event.requestor == requestor => {
+                    if event.property == smithay::reexports::x11rb::NONE {
+                        return Err("reused X11 requestor was rejected".into());
+                    }
+                    let reply = connection
+                        .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.type_ == incr {
+                        incremental = true;
+                        connection
+                            .delete_property(requestor, property)
+                            .map_err(|e| e.to_string())?;
+                        connection.flush().map_err(|e| e.to_string())?;
+                    } else {
+                        return Ok((requestor, reply.value));
+                    }
+                }
+                Some(Event::PropertyNotify(event))
+                    if incremental
+                        && event.window == requestor
+                        && event.atom == property
+                        && event.state == Property::NEW_VALUE =>
+                {
+                    let reply = connection
+                        .get_property(true, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.value.is_empty() {
+                        return Ok((requestor, bytes));
+                    }
+                    bytes.extend_from_slice(&reply.value);
+                    connection.flush().map_err(|e| e.to_string())?;
+                }
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
     pub(super) fn receive_replaced_x11_clipboard(
         display: &str,
         property_name: &str,
@@ -19733,6 +19915,83 @@ mod protocol_tests {
                 .iter()
                 .all(|payload| payload == &concurrent_text_bytes)
         );
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
+
+        let reused_payload = (0..196_609)
+            .map(|offset| ((offset * 43 + 29) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        session
+            .publish_native_image_clipboard(Arc::new(reused_payload.clone()))
+            .unwrap();
+        let reused_display = display.clone();
+        let (old_ready_tx, old_ready_rx) = std::sync::mpsc::channel();
+        let (old_disconnected_tx, old_disconnected_rx) = std::sync::mpsc::channel();
+        let (reconnect_tx, reconnect_rx) = std::sync::mpsc::channel();
+        let (reused_tx, reused_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result =
+                super::internal_shell_placement_tests::receive_x11_after_requestor_id_reuse(
+                    &reused_display,
+                    old_ready_tx,
+                    old_disconnected_tx,
+                    reconnect_rx,
+                );
+            let _ = reused_tx.send(result);
+        });
+        let reused_deadline = Instant::now() + Duration::from_secs(15);
+        let old_requestor = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match old_ready_rx.try_recv() {
+                Ok(requestor) => break requestor,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("old requestor exited before entering INCR")
+                }
+            }
+            assert!(Instant::now() < reused_deadline);
+        };
+        old_disconnected_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        while session
+            .xwm
+            .as_ref()
+            .unwrap()
+            .1
+            .outgoing_selection_transfer_count()
+            != 0
+        {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < reused_deadline);
+        }
+        reconnect_tx.send(()).unwrap();
+        let (new_requestor, reused_received) = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match reused_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("reused requestor exited without a result")
+                }
+            }
+            assert!(Instant::now() < reused_deadline);
+        };
+        assert_eq!(new_requestor, old_requestor);
+        assert_eq!(reused_received, reused_payload);
         assert_eq!(
             session
                 .xwm
