@@ -622,6 +622,7 @@ pub struct X11Wm {
     requestor_observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
     outgoing_transfer_count: Arc<AtomicUsize>,
     transfer_timer: Option<RegistrationToken>,
+    event_source: Option<RegistrationToken>,
 
     pub(crate) windows: Vec<X11Surface>,
     // oldest mapped -> newest
@@ -1088,6 +1089,7 @@ impl X11Wm {
             requestor_observations: Default::default(),
             outgoing_transfer_count: Default::default(),
             transfer_timer: None,
+            event_source: None,
             unpaired_surfaces: Default::default(),
             sequences_to_ignore: Default::default(),
             colormaps: Default::default(),
@@ -1113,7 +1115,7 @@ impl X11Wm {
 
         let event_handle = handle.clone();
         let dh = dh.clone();
-        handle.insert_source(source, move |event, _, data| match event {
+        let event_source = handle.insert_source(source, move |event, _, data| match event {
             calloop::channel::Event::Msg(event) => {
                 if let Err(err) = handle_event(&event_handle, &dh, data, id, event) {
                     warn!(id = id.0, err = ?err, "Failed to handle X11 event");
@@ -1121,6 +1123,7 @@ impl X11Wm {
             }
             calloop::channel::Event::Closed => {
                 let xwm = data.xwm_state(id);
+                xwm.event_source.take();
                 if let Some(token) = xwm.transfer_timer.take() {
                     event_handle.remove(token);
                 }
@@ -1130,6 +1133,7 @@ impl X11Wm {
                 data.disconnected(id);
             }
         })?;
+        wm.event_source = Some(event_source);
         Ok(wm)
     }
 
@@ -1149,6 +1153,18 @@ impl X11Wm {
         self.clipboard.destroy_all(loop_handle);
         self.primary.destroy_all(loop_handle);
         self.dnd.selection.destroy_all(loop_handle);
+    }
+
+    /// Remove event-loop registrations and retire all transfer resources before
+    /// the owning compositor drops this XWM during restart or session teardown.
+    pub fn shutdown<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
+        if let Some(token) = self.transfer_timer.take() {
+            loop_handle.remove(token);
+        }
+        if let Some(token) = self.event_source.take() {
+            loop_handle.remove(token);
+        }
+        self.cancel_selection_transfers(loop_handle);
     }
 
     /// Expire stalled transfers against an injected monotonic time sample.

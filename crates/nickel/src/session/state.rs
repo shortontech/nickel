@@ -18986,6 +18986,55 @@ mod protocol_tests {
                 .unwrap()
                 .is_ok()
         );
+
+        let restart_payload = (0..196_609)
+            .map(|offset| ((offset * 7 + 43) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        session
+            .publish_native_image_clipboard(Arc::new(restart_payload))
+            .unwrap();
+        let restart_display = display;
+        let (restart_ready_tx, restart_ready_rx) = std::sync::mpsc::channel();
+        let (restart_done_tx, restart_done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::wait_for_x11_incremental_abort(
+                &restart_display,
+                restart_ready_tx,
+            );
+            let _ = restart_done_tx.send(result);
+        });
+        let restart_deadline = Instant::now() + Duration::from_secs(15);
+        while restart_ready_rx.try_recv().is_err() {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < restart_deadline);
+        }
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            1
+        );
+        session
+            .xwm
+            .as_mut()
+            .unwrap()
+            .1
+            .shutdown(&event_loop.handle());
+        session.xwm.take();
+        let registration = session
+            .xwayland_registration
+            .take()
+            .expect("owned XWayland registration");
+        event_loop.handle().remove(registration);
+        assert!(
+            restart_done_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+            "X11 requestor must terminate when XWayland restarts"
+        );
     }
 
     #[test]
