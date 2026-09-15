@@ -122,11 +122,20 @@ impl Drop for RequestorObservation {
             original
         };
         if !original.contains(EventMask::PROPERTY_CHANGE) {
-            let _ = self.conn.change_window_attributes(
-                self.requestor,
-                &ChangeWindowAttributesAux::new().event_mask(original),
-            );
-            let _ = self.conn.flush();
+            // Preserve event bits acquired by unrelated users while this
+            // observation was alive. We own only PROPERTY_CHANGE here.
+            if let Ok(cookie) = self.conn.get_window_attributes(self.requestor)
+                && let Ok(attributes) = cookie.reply()
+            {
+                let current = attributes.your_event_mask;
+                let _ = self.conn.change_window_attributes(
+                    self.requestor,
+                    &ChangeWindowAttributesAux::new().event_mask(EventMask::from(
+                        current.bits() & !EventMask::PROPERTY_CHANGE.bits(),
+                    )),
+                );
+                let _ = self.conn.flush();
+            }
         }
     }
 }
