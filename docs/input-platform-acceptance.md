@@ -16,7 +16,7 @@ nested fixture, historical observation, or the presence of test source.
 | --- | --- | --- | --- | --- | --- |
 | Platform-neutral core | operation identity, admission, completion, handoff, cancellation, tails | pass | pass as dependency | not applicable | none for enumerated transitions |
 | Platform-neutral core | revisioned geometry, compensation, late/superseded fencing | pass | pass as dependency | not applicable | native settlement is platform-specific |
-| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 406 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
+| Platform-neutral UI | active-widget identity, shared pointer/keyboard/controller activation prefix, handled/fallback disposition | pass: 407 passed, 2 ignored | pass | not applicable | none for enumerated headless transitions |
 | Linux Smithay | physical keyboard/pointer/touch normalization | pass in serialized session and focused library suites | pass | untested | real devices, focus/grab and lock/suspend teardown |
 | Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
 | Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
