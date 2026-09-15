@@ -1161,6 +1161,16 @@ impl X11Wm {
             + self.dnd.selection.pending_transfers.lock().unwrap().len()
     }
 
+    /// Number of live shared PROPERTY_CHANGE observation leases.
+    pub fn selection_requestor_observation_count(&self) -> usize {
+        self.requestor_observations
+            .lock()
+            .unwrap()
+            .values()
+            .map(|(_, references)| *references)
+            .sum()
+    }
+
     /// Cancel every clipboard/primary/DnD transfer owned by this XWM.
     pub fn cancel_selection_transfers<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
         self.clipboard
@@ -1652,6 +1662,26 @@ impl X11Wm {
                 .check()?;
             self.colormaps.borrow_mut().insert(visual, colormap);
             Ok(colormap)
+        }
+    }
+}
+
+fn retire_outgoing_property<D>(
+    xwm: &mut X11Wm,
+    key: OutgoingTransferKey,
+    loop_handle: &LoopHandle<'_, D>,
+) {
+    for selection in [
+        &mut xwm.clipboard,
+        &mut xwm.primary,
+        &mut xwm.dnd.selection,
+    ] {
+        if let Some(transfer) = selection.outgoing.remove(&key) {
+            if transfer.incr && transfer.property_set {
+                *xwm.replacement_delete_fences.entry(key).or_default() += 1;
+            }
+            transfer.abort();
+            transfer.destroy(loop_handle);
         }
     }
 }
@@ -2263,7 +2293,8 @@ where
                 _ => unreachable!(),
             };
 
-            let _guard = xwm.span.enter();
+            let span = xwm.span.clone();
+            let _guard = span.enter();
             if n.requestor == *selection.window {
                 warn!("Got SelectionRequest from our own selection window.");
                 send_selection_notify_resp(&conn, &n, false)?;
@@ -2302,14 +2333,17 @@ where
                                     .filter_map(|mime| atom_from_mime(mime, &conn, &xwm.atoms).ok()?),
                             )
                             .collect::<Vec<u32>>();
+                        retire_outgoing_property(xwm, request_key, loop_handle);
                         trace!(requstor = n.requestor, ?targets, "Sending TARGETS");
                         conn.change_property32(PropMode::REPLACE, n.requestor, n.property, AtomEnum::ATOM, &targets)?;
                         send_selection_notify_resp(&conn, &n, true)?;
                     }
                     x if x == xwm.atoms.TIMESTAMP => {
+                        let timestamp = selection.timestamp;
+                        retire_outgoing_property(xwm, request_key, loop_handle);
                         trace!(
                             requestor = n.requestor,
-                            timestamp = selection.timestamp,
+                            timestamp,
                             "Sending TIMESTAMP",
                         );
                         conn.change_property32(
@@ -2317,11 +2351,12 @@ where
                             n.requestor,
                             n.property,
                             AtomEnum::INTEGER,
-                            &[selection.timestamp],
+                            &[timestamp],
                         )?;
                         send_selection_notify_resp(&conn, &n, true)?;
                     }
                     x if x == xwm.atoms.DELETE => {
+                        retire_outgoing_property(xwm, request_key, loop_handle);
                         send_selection_notify_resp(&conn, &n, true)?;
                     }
                     target => {
@@ -2342,19 +2377,7 @@ where
                         // PropertyNotify carries no selection identity. Once the
                         // request is validated, give this requestor/property pair
                         // one XWM-global generation across all selection kinds.
-                        for candidate in [
-                            &mut xwm.clipboard,
-                            &mut xwm.primary,
-                            &mut xwm.dnd.selection,
-                        ] {
-                            if let Some(transfer) = candidate.outgoing.remove(&key) {
-                                if transfer.incr && transfer.property_set {
-                                    *xwm.replacement_delete_fences.entry(key).or_default() += 1;
-                                }
-                                transfer.abort();
-                                transfer.destroy(loop_handle);
-                            }
-                        }
+                        retire_outgoing_property(xwm, key, loop_handle);
                         let selection = match selection_atom {
                             x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
                             x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
