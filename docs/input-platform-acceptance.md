@@ -25,7 +25,7 @@ nested fixture, historical observation, or the presence of test source.
 | Linux XWayland | move/resize, unknown-causality settlement and conditional compensation | source tests present, not rerun | test build pass | untested | real request/configure ordering, deadline, focus and teardown |
 | Linux XWayland | clipboard INCR, InputOnly/InputOutput requestors, timeout/restart cleanup, reverse transfer | pass: production-callback native harness plus vendored Smithay tests | pass | pass: X11 image paste confirmed in installed session | remaining explicit primary-selection/DnD live matrix |
 | Linux Gilrs | identity, navigation, repeat, disconnect, focus fence | source tests present, not rerun | compiled as dependency | untested | physical controller not used |
-| Unix controller broker/transport | live route/surface plus connection/lease/stream generation, transfer/revoke/reset | pass in protocol and session suites | pass | untested | live transfer and neutral barrier |
+| Unix controller broker/transport | live route/surface plus connection/lease/stream generation, transfer/revoke/reset | pass in protocol and session suites | pass | pass: nested kernel-uinput ingress and reconnect | physical controller, live external-host transfer and neutral barrier |
 | Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | pass: `nickel-platform` MSVC-target check | untested | Windows host, layouts, IME, hook registration/suppression |
 | Windows foreign move/resize | bound source/button, contested control, release/reconciliation/takeover | source-reviewed fail-closed gates present; Windows-only tests not run | pass: `nickel-platform` MSVC-target check | untested | bounded identity-bearing native completion mechanism, hooks, DPI, monitors, takeover |
 | Windows controller pipe | nonblocking client/server adapters, bounded correlated delivery and generation fencing | source tests present; production server integration absent | pass: protocol MSVC-target check | untested | production `WindowsPipeServer` construction, live partial I/O, replacement/disconnect and controller |
@@ -95,6 +95,10 @@ ticks over the bounded two-second idle window, requested logout, and observed cl
 The same harness then passed against the host XWayland display in 8.4 seconds with 57 idle CPU
 ticks. The X11 run explicitly removed inherited `WAYLAND_DISPLAY` and `WAYLAND_SOCKET`; winit 0.31
 selects its Unix backend from those standard display variables rather than `WINIT_UNIX_BACKEND`.
+The final harness revision also closed and reopened the launcher through a kernel uinput controller,
+disconnected that device, created a fresh device generation, and closed the launcher through the
+reconnected production gilrs/controller route. The expanded harness passed on both host backends;
+these virtual-device results do not claim physical-controller acceptance.
 
 ```sh
 cargo test -p nickel --lib \

@@ -125,7 +125,7 @@ fn run() -> Result<(), String> {
     let _ = fs::remove_dir_all(&runtime);
     result?;
     println!(
-        "PASS: nested compositor became ready, exposed shell surfaces, accepted input, reported idle diagnostics, and shut down cleanly"
+        "PASS: nested compositor became ready, exposed shell surfaces, accepted keyboard and kernel-uinput controller ingress across reconnect, reported idle diagnostics, and shut down cleanly"
     );
     Ok(())
 }
@@ -192,6 +192,23 @@ fn exercise(
     if launcher.ends_with("hidden") {
         return Err("injected Meta did not make the internal launcher visible".into());
     }
+    checked(test_input, &environment, &["key", "meta", "pressed"])?;
+    checked(test_input, &environment, &["key", "meta", "released"])?;
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(2))?;
+
+    // This is kernel-native ingress through uinput and the production gilrs reader, not direct
+    // controller reducer injection. Exercise a fresh device generation after disconnect as well.
+    checked(test_input, &environment, &["controller", "connect"])?;
+    thread::sleep(Duration::from_secs(1));
+    checked(test_input, &environment, &["controller", "tap", "guide"])?;
+    wait_for_launcher_visibility(test_input, &environment, true, Duration::from_secs(5))?;
+    checked(test_input, &environment, &["controller", "disconnect"])?;
+    checked(test_input, &environment, &["controller", "connect"])?;
+    thread::sleep(Duration::from_secs(1));
+    checked(test_input, &environment, &["controller", "tap", "guide"])?;
+    wait_for_launcher_visibility(test_input, &environment, false, Duration::from_secs(5))?;
+    checked(test_input, &environment, &["controller", "disconnect"])?;
+
     // Launcher construction and its first GPU upload are interaction work, not
     // idle work. Let that frame settle before sampling the unchanged runtime.
     thread::sleep(Duration::from_millis(500));
@@ -209,6 +226,36 @@ fn exercise(
         ));
     }
     Ok(())
+}
+
+fn wait_for_launcher_visibility(
+    test_input: &Path,
+    environment: &[(String, String)],
+    expected_visible: bool,
+    timeout: Duration,
+) -> Result<(), String> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let surfaces = checked(test_input, environment, &["surfaces"])?;
+        let launcher = surfaces
+            .lines()
+            .find(|line| line.starts_with("Launcher\t"))
+            .ok_or("internal launcher disappeared while awaiting visibility")?;
+        if launcher.ends_with("hidden") != expected_visible {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(format!(
+                "launcher did not become {} before deadline: {launcher}",
+                if expected_visible {
+                    "visible"
+                } else {
+                    "hidden"
+                }
+            ));
+        }
+        thread::sleep(POLL);
+    }
 }
 
 fn process_ticks(pid: u32) -> Result<u64, String> {

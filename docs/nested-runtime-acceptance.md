@@ -13,8 +13,11 @@ binary with the winit backend and explicit test control, then waits for
 compositor-owned shell readiness. It asserts that no
 shell PID is expected or authenticated and no `--role shell` child exists,
 checks the internal surface inventory, injects Meta and verifies that the
-internal launcher becomes visible, samples compositor CPU ticks across a
-two-second idle interval, and requests logout. Every phase has a deadline. On
+internal launcher becomes visible, closes it again, creates a kernel uinput controller, and verifies
+that the production gilrs/controller route opens the launcher. It then disconnects and reconnects
+the controller, verifies the fresh device generation can close the launcher without inheriting
+stale held state, samples compositor CPU ticks across a two-second idle interval, and requests
+logout. Every phase has a deadline. On
 failure, the harness terminates its compositor child and removes its temporary
 runtime data.
 
