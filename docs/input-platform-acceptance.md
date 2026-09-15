@@ -3,8 +3,9 @@
 Updated: 2026-09-15
 
 This matrix records evidence reproducible from the current integrated branch. Automated tests prove
-reducer and adapter contracts; they do not prove native interaction. This pass did not launch a
-compositor, inject live input, restart an installed session, or use a Windows host.
+reducer and adapter contracts; they do not prove native interaction. This pass launched an isolated
+XWayland server for the owned clipboard harness, but did not inject physical input, restart the
+installed session, or use a Windows host.
 
 Vocabulary: `pass` (the named command passed), `failed`, `unavailable` (required host/tool absent),
 `unsupported`, and `untested`. A native row never inherits `pass` from a unit test, cross-build,
@@ -31,9 +32,9 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact integrated results below were recorded through `b2ffe02d`. Older focused evidence remains listed
-after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
-as product evidence.
+Exact integrated results below were recorded on the current branch. Older focused evidence remains
+listed after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache
+failure as product evidence.
 
 ```sh
 cargo fmt --all --check
@@ -66,9 +67,12 @@ cargo test -p nickel --lib \
 
 Pass. The owned-XWayland harness exercised real production XWM callbacks with InputOnly and
 InputOutput requestors, non-INCR/INCR boundary sizes, a valid multi-chunk PNG, delayed
-acknowledgements, simultaneous requestors, injected inactivity timeout with recipient recovery,
-teardown/restart, UTF-8 crossing a chunk boundary, and reverse X11-to-native multi-chunk transfer.
-The vendored tests verify the global 32-transfer admission bound and requestor/property identity.
+acknowledgements, simultaneous requestors, two MIME requests on distinct properties of one
+requestor, the global 32-transfer admission bound and rejection, injected inactivity timeout with
+recipient recovery, teardown/restart, UTF-8 crossing a chunk boundary, primary selection in both
+directions, reverse X11-to-native multi-chunk transfer, and a native recipient closing mid-transfer.
+It also verified refcounted property observation on a real X11 window while preserving unrelated
+event-mask bits. The vendored tests cover bounded buffering and requestor/property identity.
 
 ## Installed Linux observations
 
