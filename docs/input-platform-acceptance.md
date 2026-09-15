@@ -4,8 +4,9 @@ Updated: 2026-09-15
 
 This matrix records evidence reproducible from the current integrated branch. Automated tests prove
 reducer and adapter contracts; they do not prove native interaction. This pass launched an isolated
-XWayland server for the owned clipboard harness, but did not inject physical input, restart the
-installed session, or use a Windows host.
+XWayland server for the owned clipboard harness. The graphical nested-session harness was also
+attempted, but the current host could not initialize an EGL display. This pass did not inject
+physical input, restart the installed session, or use a Windows host.
 
 Vocabulary: `pass` (the named command passed), `failed`, `unavailable` (required host/tool absent),
 `unsupported`, and `untested`. A native row never inherits `pass` from a unit test, cross-build,
@@ -57,6 +58,17 @@ in a private network namespace because the installed Nickel session correctly ow
 loopback port; all 154 tests passed without stopping the live desktop. The non-remote workspace
 members, including 1,017 Nickel library tests, passed with their declared native/release tests
 ignored. The complete release workspace built successfully.
+
+```sh
+cargo build -p nickel --no-default-features --features backend-winit \
+  --bin nickel --bin nickel-test-input --bin nickel-nested-acceptance
+./target/debug/nickel-nested-acceptance
+```
+
+Build pass; native run unavailable. The compositor exited before readiness because EGL could not
+obtain a valid display. A host `eglinfo` check independently failed EGL initialization for both the
+Wayland and X11 platforms, while its surfaceless NVIDIA platform remained available. This is host
+display evidence, not a product failure or nested native pass.
 
 ```sh
 cargo test -p nickel --lib \
