@@ -2345,8 +2345,102 @@ mod internal_shell_placement_tests {
         }
     }
 
+    pub(super) fn exercise_x11_admission_limit(
+        display: &str,
+        result: std::sync::mpsc::Sender<Result<(usize, usize), String>>,
+        stop: std::sync::mpsc::Receiver<()>,
+    ) {
+        let run = || -> Result<(usize, usize), String> {
+            use smithay::reexports::x11rb::{
+                connection::Connection,
+                protocol::{
+                    Event,
+                    xproto::{ConnectionExt, CreateWindowAux, EventMask, WindowClass},
+                },
+            };
+            use std::time::{Duration, Instant};
+
+            let (connection, screen) =
+                smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+            let root = &connection.setup().roots[screen];
+            let atom = |name: &[u8]| {
+                connection
+                    .intern_atom(false, name)
+                    .map_err(|e| e.to_string())?
+                    .reply()
+                    .map(|reply| reply.atom)
+                    .map_err(|e| e.to_string())
+            };
+            let clipboard = atom(b"CLIPBOARD")?;
+            let image_png = atom(b"image/png")?;
+            let mut requestors = Vec::new();
+            for index in 0..33 {
+                let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+                connection
+                    .create_window(
+                        0,
+                        requestor,
+                        root.root,
+                        0,
+                        0,
+                        1,
+                        1,
+                        0,
+                        WindowClass::INPUT_ONLY,
+                        0,
+                        &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                    )
+                    .map_err(|e| e.to_string())?;
+                let property = atom(format!("NICKEL_ADMISSION_{index}").as_bytes())?;
+                connection
+                    .convert_selection(
+                        requestor,
+                        clipboard,
+                        image_png,
+                        property,
+                        smithay::reexports::x11rb::CURRENT_TIME,
+                    )
+                    .map_err(|e| e.to_string())?;
+                requestors.push(requestor);
+            }
+            connection.flush().map_err(|e| e.to_string())?;
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut accepted = 0;
+            let mut rejected = 0;
+            while accepted + rejected != requestors.len() {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "admission fixture timed out after {accepted} accepted and {rejected} rejected"
+                    ));
+                }
+                match connection.poll_for_event().map_err(|e| e.to_string())? {
+                    Some(Event::SelectionNotify(event))
+                        if requestors.contains(&event.requestor) =>
+                    {
+                        if event.property == smithay::reexports::x11rb::NONE {
+                            rejected += 1;
+                        } else {
+                            accepted += 1;
+                        }
+                    }
+                    Some(_) => {}
+                    None => std::thread::sleep(Duration::from_millis(1)),
+                }
+            }
+            result
+                .send(Ok((accepted, rejected)))
+                .map_err(|e| e.to_string())?;
+            let _ = stop.recv_timeout(Duration::from_secs(15));
+            Ok((accepted, rejected))
+        };
+        if let Err(error) = run() {
+            let _ = result.send(Err(error));
+        }
+    }
+
     pub(super) fn serve_x11_incremental_clipboard(
         display: &str,
+        selection_name: &str,
         payload: Vec<u8>,
         ready: std::sync::mpsc::Sender<()>,
     ) -> Result<(), String> {
@@ -2390,12 +2484,16 @@ mod internal_shell_placement_tests {
                 .map(|reply| reply.atom)
                 .map_err(|e| e.to_string())
         };
-        let clipboard = atom(b"CLIPBOARD")?;
+        let selection_atom = atom(selection_name.as_bytes())?;
         let targets = atom(b"TARGETS")?;
         let image_png = atom(b"image/png")?;
         let incr = atom(b"INCR")?;
         connection
-            .set_selection_owner(owner, clipboard, smithay::reexports::x11rb::CURRENT_TIME)
+            .set_selection_owner(
+                owner,
+                selection_atom,
+                smithay::reexports::x11rb::CURRENT_TIME,
+            )
             .map_err(|e| e.to_string())?;
         connection.flush().map_err(|e| e.to_string())?;
         ready.send(()).map_err(|e| e.to_string())?;
@@ -19482,6 +19580,59 @@ mod protocol_tests {
             0
         );
 
+        let admission_payload = (0..196_609)
+            .map(|offset| ((offset * 17 + 149) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        session
+            .publish_native_image_clipboard(Arc::new(admission_payload))
+            .unwrap();
+        let admission_display = display.clone();
+        let (admission_tx, admission_rx) = std::sync::mpsc::channel();
+        let (admission_stop_tx, admission_stop_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            super::internal_shell_placement_tests::exercise_x11_admission_limit(
+                &admission_display,
+                admission_tx,
+                admission_stop_rx,
+            );
+        });
+        let admission_deadline = Instant::now() + Duration::from_secs(20);
+        let (accepted, rejected) = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match admission_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("admission requestors exited without a result")
+                }
+            }
+            assert!(Instant::now() < admission_deadline);
+        };
+        assert_eq!((accepted, rejected), (32, 1));
+        let retained = session
+            .xwm
+            .as_ref()
+            .unwrap()
+            .1
+            .outgoing_selection_transfer_count();
+        assert!((1..=32).contains(&retained));
+        admission_stop_tx.send(()).unwrap();
+        while session
+            .xwm
+            .as_ref()
+            .unwrap()
+            .1
+            .outgoing_selection_transfer_count()
+            != 0
+        {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < admission_deadline);
+        }
+
         session
             .publish_native_image_clipboard(Arc::new(simultaneous_payload))
             .unwrap();
@@ -19542,6 +19693,7 @@ mod protocol_tests {
         std::thread::spawn(move || {
             let result = super::internal_shell_placement_tests::serve_x11_incremental_clipboard(
                 &reverse_display,
+                "CLIPBOARD",
                 reverse_source,
                 owner_ready_tx,
             );
@@ -19602,6 +19754,72 @@ mod protocol_tests {
         assert_eq!(reverse_received, reverse_payload);
         assert!(
             owner_done_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_ok()
+        );
+
+        let primary_payload = (0..65_537)
+            .map(|offset| ((offset * 37 + 71) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let primary_display = display.clone();
+        let primary_source = primary_payload.clone();
+        let (primary_ready_tx, primary_ready_rx) = std::sync::mpsc::channel();
+        let (primary_done_tx, primary_done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::serve_x11_incremental_clipboard(
+                &primary_display,
+                "PRIMARY",
+                primary_source,
+                primary_ready_tx,
+            );
+            let _ = primary_done_tx.send(result);
+        });
+        primary_ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        for _ in 0..8 {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+        }
+        let (primary_reader, primary_writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        session
+            .xwm
+            .as_mut()
+            .unwrap()
+            .1
+            .send_selection(
+                smithay::wayland::selection::SelectionTarget::Primary,
+                "image/png".into(),
+                primary_writer.into(),
+            )
+            .unwrap();
+        let (primary_tx, primary_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut reader = primary_reader;
+            let mut bytes = Vec::new();
+            let result = reader.read_to_end(&mut bytes).map(|_| bytes);
+            let _ = primary_tx.send(result);
+        });
+        let primary_deadline = Instant::now() + Duration::from_secs(15);
+        let primary_received = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match primary_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("native primary recipient exited without a result")
+                }
+            }
+            assert!(Instant::now() < primary_deadline);
+        };
+        assert_eq!(primary_received, primary_payload);
+        assert!(
+            primary_done_rx
                 .recv_timeout(Duration::from_secs(5))
                 .unwrap()
                 .is_ok()
