@@ -2373,7 +2373,7 @@ mod tests {
     }
 
     #[test]
-    fn controller_legend_tracks_search_selection_and_open_menu_semantics() {
+    fn controller_legend_tracks_search_and_modal_menu_semantics() {
         let mut host = launcher_host();
         host.application_mut()
             .set_controller_family(ControllerFamily::PlayStation);
@@ -2404,13 +2404,22 @@ mod tests {
         host.perform_semantic_action(target.id, SemanticAction::Invoke(ActionKind::ContextMenu));
         let menu_labels = accessibility_labels(&host);
         assert!(
-            menu_labels.contains(&"Cross: Select".to_owned()),
-            "menu labels: {menu_labels:?}; inspection: {:?}",
-            host.inspect()
+            host.inspect().open_overlay.is_some(),
+            "application menu must own the modal scope"
         );
-        assert!(menu_labels.contains(&"Circle: Back".to_owned()));
+        assert_eq!(
+            host.inspect().available_semantic_actions,
+            [ActionKind::Activate]
+        );
+        assert!(menu_labels.contains(&"Launch".to_owned()));
         assert!(!menu_labels.iter().any(|label| label == "Options: Actions"));
         assert!(!menu_labels.iter().any(|label| label.contains("Sidebar")));
+        assert!(
+            !menu_labels
+                .iter()
+                .any(|label| label.starts_with("Cross:") || label.starts_with("Circle:")),
+            "modal accessibility must not expose the obscured base legend: {menu_labels:?}"
+        );
     }
 
     #[test]
