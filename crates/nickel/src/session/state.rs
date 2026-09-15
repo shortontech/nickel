@@ -11652,6 +11652,14 @@ impl NickelSession {
         self.client_touch_slots.cancel_all();
     }
 
+    pub(crate) fn cancel_native_client_touch_authority(&mut self) {
+        // Smithay's native seat is one cancellation domain. Internal UiHost contacts are a
+        // separate domain and may remain valid on surviving outputs.
+        self.seat.get_touch().unwrap().cancel(self);
+        self.active_touch_slots.clear();
+        self.client_touch_slots.cancel_all();
+    }
+
     fn unlock_session(&mut self) {
         if !self.locked {
             return;
@@ -12506,6 +12514,7 @@ impl NickelSession {
 
     pub fn maximize_window(&mut self, id: WindowId) {
         if let Some(surface) = self.internal_surface_for_window(id) {
+            self.supersede_internal_move_for_presentation(surface);
             self.activate_window(id);
             let Some(current) = self.internal_ui.placement(surface).cloned() else {
                 return;
@@ -12625,6 +12634,25 @@ impl NickelSession {
         });
         if let Some(surface) = surface {
             self.toggle_maximized_toplevel(&surface);
+        }
+    }
+
+    fn supersede_internal_move_for_presentation(&mut self, surface: nickel_ui::InternalSurfaceId) {
+        let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
+        let Some(operation) = self.window_operations.operation_for_window(subject) else {
+            return;
+        };
+        let _ = self.window_operations.cancel(
+            operation,
+            nickel_core::window_operation::CancellationReason::Superseded,
+        );
+        self.internal_move_baselines.remove(&surface);
+        if let Some(pointer) = self.seat.get_pointer() {
+            pointer.unset_grab(
+                self,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                smithay::backend::input::InputTime::now(),
+            );
         }
     }
 
@@ -13372,9 +13400,7 @@ impl NickelSession {
             ) {
                 return None;
             }
-            let restore = self.x11_maximized_restore.remove(&surface.window_id())?;
-            self.presentation_restore_revisions
-                .remove(&(id, nickel_core::geometry_authority::Presentation::Maximized));
+            let restore = *self.x11_maximized_restore.get(&surface.window_id())?;
             let restore = Geometry {
                 x: restore.loc.x,
                 y: restore.loc.y,
@@ -13412,9 +13438,7 @@ impl NickelSession {
         ) {
             return None;
         }
-        let restore = self.maximized_restore.remove(&surface.wl_surface().id())?;
-        self.presentation_restore_revisions
-            .remove(&(id, nickel_core::geometry_authority::Presentation::Maximized));
+        let restore = *self.maximized_restore.get(&surface.wl_surface().id())?;
         let geometry = restored_drag_content_geometry(
             current,
             restore,
@@ -13444,6 +13468,42 @@ impl NickelSession {
         self.send_tracked_xdg_configure(&surface);
         self.notify_protocol_snapshot();
         Some((geometry.x, geometry.y).into())
+    }
+
+    pub(crate) fn finish_restored_maximized_drag(&mut self, window: &Window) {
+        let id = if let Some(surface) = window.x11_surface() {
+            self.x11_maximized_restore.remove(&surface.window_id());
+            self.x11_windows.get(&surface.window_id()).copied()
+        } else if let Some(surface) = window.toplevel() {
+            self.maximized_restore.remove(&surface.wl_surface().id());
+            self.surface_windows
+                .get(&surface.wl_surface().id())
+                .copied()
+        } else {
+            None
+        };
+        if let Some(id) = id {
+            self.presentation_restore_revisions
+                .remove(&(id, nickel_core::geometry_authority::Presentation::Maximized));
+        }
+    }
+
+    pub(crate) fn restore_maximized_drag_after_cancel(&mut self, window: &Window) {
+        if let Some(surface) = window.x11_surface() {
+            if self
+                .x11_maximized_restore
+                .contains_key(&surface.window_id())
+            {
+                let _ = surface.set_maximized(true);
+                self.apply_maximized_x11_geometry(window, surface, false);
+            }
+        } else if let Some(surface) = window.toplevel()
+            && self
+                .maximized_restore
+                .contains_key(&surface.wl_surface().id())
+        {
+            self.maximize_toplevel(surface);
+        }
     }
 
     pub(crate) fn relayout_fullscreen_windows(&mut self) {
@@ -16104,6 +16164,134 @@ mod protocol_tests {
             false,
         ));
         session.cancel_all_touch_authority();
+    }
+
+    #[test]
+    fn native_client_touch_cancel_preserves_internal_touch_domains() {
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let desktop = session
+            .internal_shell
+            .as_ref()
+            .unwrap()
+            .surfaces()
+            .iter()
+            .find(|surface| surface.role == crate::winit_shell::SurfaceRole::Desktop)
+            .unwrap()
+            .id;
+        let runtime = session.internal_shell_surfaces[&desktop];
+        let geometry = session.internal_ui.placement(runtime).unwrap().geometry;
+        let point = (f64::from(geometry.0 + 10), f64::from(geometry.1 + 10));
+
+        assert!(session.internal_ui.normalized_touch_input(
+            "surviving-output",
+            9,
+            point,
+            crate::session::TouchPhase::Started,
+            false,
+        ));
+        assert!(session.internal_ui.touch_from_source(
+            "surviving-host",
+            10,
+            point,
+            crate::session::TouchPhase::Started,
+            false,
+        ));
+
+        session.cancel_native_client_touch_authority();
+
+        assert!(session.internal_ui.normalized_touch_input(
+            "surviving-output",
+            9,
+            point,
+            crate::session::TouchPhase::Moved,
+            false,
+        ));
+        assert!(session.internal_ui.touch_from_source(
+            "surviving-host",
+            10,
+            point,
+            crate::session::TouchPhase::Ended,
+            false,
+        ));
+    }
+
+    #[test]
+    fn internal_maximize_supersedes_active_titlebar_move() {
+        #[derive(Default)]
+        struct App;
+        impl nickel_ui::Application for App {
+            type Message = ();
+            fn update(&mut self, _: ()) {}
+            fn view(&self, _: nickel_ui::ViewContext) -> impl nickel_ui::View<()> {
+                nickel_ui::Text::new("internal move target")
+            }
+        }
+
+        let _guard = PREVIEW_SESSION_TEST_LOCK.lock().unwrap();
+        let (_event_loop, mut session) = internal_shell_test_session();
+        let surface = session.insert_internal_surface(
+            App,
+            crate::session::InternalSurfacePlacement {
+                role: crate::session::InternalSurfaceRole::Application,
+                geometry: (10, 20, 300, 200),
+                output: Some("file-test".into()),
+            },
+            1.0,
+        );
+        session
+            .register_internal_application(surface)
+            .expect("internal application admitted");
+        let id = session.internal_surface_windows[&surface];
+        let subject = crate::session::grabs::move_internal_grab::operation_window(surface);
+        let operation = crate::session::grabs::move_grab::WindowPointerOperation::begin(
+            &mut session.window_operations,
+            nickel_core::window_operation::BeginRequest {
+                seat: nickel_core::window_operation::SeatId::new(1),
+                subject: nickel_core::window_operation::WindowMapping {
+                    window: subject,
+                    native_lifetime: nickel_core::window_operation::NativeLifetimeId::new(
+                        surface.snapshot_token(),
+                    ),
+                    generation: nickel_core::window_operation::MappingGeneration::new(
+                        surface.snapshot_token(),
+                    ),
+                },
+                kind: nickel_core::window_operation::OperationKind::Move,
+                control: nickel_core::geometry_authority::ControlMode::Enforced,
+                origin: nickel_core::window_operation::CompletionBinding {
+                    source: nickel_core::window_operation::Source {
+                        id: nickel_core::window_operation::SourceId::new(1),
+                        generation: nickel_core::window_operation::SourceGeneration::new(1),
+                    },
+                    gesture: nickel_core::window_operation::CompletionGesture::Button(0x110),
+                    press_epoch: nickel_core::window_operation::PressEpoch::new(1),
+                },
+                optional_update_sources: Vec::new(),
+            },
+        )
+        .expect("internal move admitted");
+        let operation_id = operation.id();
+        let mut moved = session.internal_ui.placement(surface).unwrap().clone();
+        moved.geometry.0 += 20;
+        assert!(session.apply_internal_move(surface, moved));
+
+        session.maximize_window(id);
+
+        assert_eq!(
+            session.window_operations.terminal_outcome(operation_id),
+            Some(nickel_core::window_operation::TerminalOutcome::Cancelled(
+                nickel_core::window_operation::CancellationReason::Superseded,
+            ))
+        );
+        assert!(!session.internal_move_baselines.contains_key(&surface));
+        assert!(
+            operation
+                .propose(&mut session.window_operations, 40, 20)
+                .is_none(),
+            "late titlebar motion cannot overwrite maximized placement"
+        );
+        assert!(session.internal_maximized_restore.contains_key(&id));
     }
 
     #[test]

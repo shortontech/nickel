@@ -146,6 +146,13 @@ impl WindowPointerOperation {
             == Some(nickel_core::window_operation::CompensationDecision::Conditional)
     }
 
+    fn was_cancelled_by_user(&self, reducer: &WindowOperationReducer) -> bool {
+        reducer.terminal_outcome(self.id)
+            == Some(nickel_core::window_operation::TerminalOutcome::Cancelled(
+                CancellationReason::UserCancelled,
+            ))
+    }
+
     #[cfg(test)]
     pub(crate) fn id(&self) -> OperationId {
         self.id
@@ -211,6 +218,9 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
         let initiating_button_released =
             !handle.current_pressed().contains(&self.start_data.button);
         if initiating_button_released && self.operation.complete(&mut data.window_operations) {
+            if self.restored_from_maximized {
+                data.finish_restored_maximized_drag(&self.window);
+            }
             // The initiating button released and the shared reducer committed.
             if self.window.x11_surface().is_some()
                 && let Some(location) = data.space.element_location(&self.window)
@@ -233,7 +243,18 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
     fn unset(&mut self, data: &mut NickelSession) {
         // Covers target loss, grab replacement, and seat/resource teardown.
         // Normal completion has already removed the operation.
+        let restore_maximized = self.restored_from_maximized
+            && self
+                .operation
+                .was_cancelled_by_user(&data.window_operations);
         self.operation.cancel(&mut data.window_operations);
+        if restore_maximized {
+            data.restore_maximized_drag_after_cancel(&self.window);
+            return;
+        }
+        if self.restored_from_maximized {
+            data.finish_restored_maximized_drag(&self.window);
+        }
         if self
             .operation
             .requests_conditional_compensation(&data.window_operations)
