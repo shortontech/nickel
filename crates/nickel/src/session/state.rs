@@ -6054,10 +6054,19 @@ impl NickelSession {
         for event in events {
             let payload = controller_envelope_payload(event, routing_epoch, surface_generation);
             let disposition = self.controller_broker.ingest(payload);
-            if matches!(
-                disposition,
-                nickel_session_protocol::controller_broker::IngressDisposition::OverflowReset { .. }
-            ) {
+            if let nickel_session_protocol::controller_broker::IngressDisposition::OverflowReset {
+                event_id,
+                lease,
+            } = disposition
+            {
+                if lease.host == ControllerHostId(0) {
+                    let _ = self.controller_broker.acknowledge_quiescence(
+                        lease.host,
+                        lease.connection_generation,
+                        lease.epoch,
+                        event_id,
+                    );
+                }
                 self.controller_neutral_probe_requested
                     .store(true, Ordering::Release);
                 tracing::error!(
@@ -6105,7 +6114,17 @@ impl NickelSession {
         let recoverable = self
             .controller_broker
             .reset_ingress()
-            .map(|lease| (lease.host, lease.connection_generation));
+            .map(|(lease, cutoff)| {
+                if lease.host == ControllerHostId(0) {
+                    let _ = self.controller_broker.acknowledge_quiescence(
+                        lease.host,
+                        lease.connection_generation,
+                        lease.epoch,
+                        cutoff,
+                    );
+                }
+                (lease.host, lease.connection_generation)
+            });
         self.controller_recovery
             .get_or_insert_with(ControllerRecoveryIntent::default)
             .merge_overflow(recoverable);
@@ -10349,13 +10368,20 @@ impl NickelSession {
     }
 
     pub fn is_maximized_window(&self, window: &Window) -> bool {
-        window.x11_surface().is_some_and(|surface| {
+        let has_restore = window.x11_surface().is_some_and(|surface| {
             self.x11_maximized_restore
                 .contains_key(&surface.window_id())
         }) || window.toplevel().is_some_and(|surface| {
             self.maximized_restore
                 .contains_key(&surface.wl_surface().id())
-        })
+        });
+        has_restore
+            && self.window_geometry_authority_id(window).is_some_and(|id| {
+                self.presentation_restore_is_current(
+                    id,
+                    nickel_core::geometry_authority::Presentation::Maximized,
+                )
+            })
     }
 
     pub fn is_server_decorated(&self, window: &Window) -> bool {
@@ -12912,15 +12938,12 @@ impl NickelSession {
         &mut self,
         surface: &ToplevelSurface,
     ) -> bool {
-        if !self
-            .maximized_restore
-            .contains_key(&surface.wl_surface().id())
-        {
-            return false;
-        }
         let Some(window) = self.window_for_surface(surface.wl_surface()) else {
             return false;
         };
+        if !self.is_maximized_window(&window) {
+            return false;
+        }
         let Some(output) = self.output_geometry_for_window(&window) else {
             return false;
         };
@@ -13242,8 +13265,8 @@ impl NickelSession {
 
     pub fn toggle_maximized_toplevel(&mut self, surface: &ToplevelSurface) {
         if self
-            .maximized_restore
-            .contains_key(&surface.wl_surface().id())
+            .window_for_surface(surface.wl_surface())
+            .is_some_and(|window| self.is_maximized_window(&window))
         {
             self.unmaximize_toplevel(surface);
         } else {
@@ -13269,9 +13292,8 @@ impl NickelSession {
             .space
             .elements()
             .filter_map(|window| {
-                let surface = window.toplevel()?.wl_surface();
-                self.maximized_restore
-                    .contains_key(&surface.id())
+                window.toplevel()?;
+                self.is_maximized_window(window)
                     .then_some((window.clone(), window.toplevel()?.clone()))
             })
             .collect();
@@ -13305,8 +13327,7 @@ impl NickelSession {
             .elements()
             .filter_map(|window| {
                 let surface = window.x11_surface()?;
-                self.x11_maximized_restore
-                    .contains_key(&surface.window_id())
+                self.is_maximized_window(window)
                     .then_some((window.clone(), surface.clone()))
             })
             .collect::<Vec<_>>();

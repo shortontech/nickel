@@ -65,7 +65,7 @@ pub enum IngressDisposition {
     RejectedNoOwner { event_id: EventId },
     RejectedTransfer { event_id: EventId },
     RejectedResetBarrier { event_id: EventId },
-    OverflowReset { event_id: EventId },
+    OverflowReset { event_id: EventId, lease: Lease },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -527,7 +527,7 @@ impl<T> ControllerBroker<T> {
     /// Retire all delivery after an upstream bounded ingress overflow. The dropped native batch
     /// may contain release edges, so authority cannot survive and delivery stays behind the reset
     /// barrier until native neutral is observed and a lease is granted again.
-    pub fn reset_ingress(&mut self) -> Option<Lease> {
+    pub fn reset_ingress(&mut self) -> Option<(Lease, EventId)> {
         if self.exhausted {
             return None;
         }
@@ -536,6 +536,9 @@ impl<T> ControllerBroker<T> {
         let recoverable = (self.transfer.is_none() && self.poisoned_predecessor.is_none())
             .then_some(self.active)
             .flatten();
+        if recoverable.is_some() {
+            self.poison_executor(EventId(self.next_event));
+        }
         self.install_reset(EventId(self.next_event));
         self.recovery_destination = recovery_destination;
         if let Some(transfer) = interrupted_transfer {
@@ -555,7 +558,7 @@ impl<T> ControllerBroker<T> {
                 });
             }
         }
-        recoverable
+        recoverable.map(|lease| (lease, EventId(self.next_event)))
     }
 
     /// Accept an authenticated executor's report that its bounded press ledger overflowed.
@@ -651,6 +654,7 @@ impl<T> ControllerBroker<T> {
             payload,
         });
         let Some(host) = self.hosts.get_mut(&lease.host) else {
+            self.poison_executor(event_id);
             self.install_reset(event_id);
             if !self.exhausted {
                 self.recovery_destination = Some(RecoveryDestination {
@@ -658,9 +662,10 @@ impl<T> ControllerBroker<T> {
                     abandoned_connection: lease.connection_generation,
                 });
             }
-            return IngressDisposition::OverflowReset { event_id };
+            return IngressDisposition::OverflowReset { event_id, lease };
         };
         if host.outbox.len() >= self.queue_limit {
+            self.poison_executor(event_id);
             self.install_reset(event_id);
             if !self.exhausted {
                 self.recovery_destination = Some(RecoveryDestination {
@@ -668,7 +673,7 @@ impl<T> ControllerBroker<T> {
                     abandoned_connection: lease.connection_generation,
                 });
             }
-            return IngressDisposition::OverflowReset { event_id };
+            return IngressDisposition::OverflowReset { event_id, lease };
         }
         host.outbox.push_back(delivery);
         IngressDisposition::Delivered { event_id, lease }
@@ -1279,7 +1284,7 @@ mod tests {
     fn queue_overflow_replaces_edges_with_non_droppable_reset() {
         let mut broker = ControllerBroker::new(2);
         let connection = broker.attach(HostId(1));
-        broker.grant(HostId(1), connection).unwrap();
+        let old = broker.grant(HostId(1), connection).unwrap();
         assert!(matches!(
             broker.ingest(1),
             IngressDisposition::Delivered { .. }
@@ -1301,6 +1306,10 @@ mod tests {
             }]
         ));
         assert!(broker.grant(HostId(1), connection).is_none());
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), connection, old.epoch, EventId(3)),
+            TransferStatus::Failed
+        );
         assert!(broker.set_neutral(true).is_none());
         assert!(broker.grant(HostId(1), connection).is_none());
         let replacement = broker.attach(HostId(1));
@@ -1318,7 +1327,7 @@ mod tests {
     fn slow_host_recovers_after_the_257th_event_overflows_its_outbox() {
         let mut broker = ControllerBroker::new(DEFAULT_CONTROLLER_QUEUE_LIMIT);
         let connection = broker.attach(HostId(9));
-        broker.grant(HostId(9), connection).unwrap();
+        let old = broker.grant(HostId(9), connection).unwrap();
         for payload in 0..DEFAULT_CONTROLLER_QUEUE_LIMIT {
             assert!(matches!(
                 broker.ingest(payload),
@@ -1328,7 +1337,8 @@ mod tests {
         assert!(matches!(
             broker.ingest(DEFAULT_CONTROLLER_QUEUE_LIMIT),
             IngressDisposition::OverflowReset {
-                event_id: EventId(257)
+                event_id: EventId(257),
+                ..
             }
         ));
         assert!(matches!(
@@ -1339,6 +1349,10 @@ mod tests {
             }]
         ));
 
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(9), connection, old.epoch, EventId(257)),
+            TransferStatus::Failed
+        );
         broker.set_neutral(true);
         let replacement = broker.attach(HostId(9));
         assert!(matches!(
@@ -1378,7 +1392,17 @@ mod tests {
         ));
         assert!(broker.grant(HostId(1), connection).is_none());
         broker.set_neutral(true);
-        let recoverable = recoverable.unwrap();
+        let (recoverable, cutoff) = recoverable.unwrap();
+        assert_eq!(
+            broker.acknowledge_quiescence(
+                recoverable.host,
+                recoverable.connection_generation,
+                recoverable.epoch,
+                cutoff,
+            ),
+            TransferStatus::Failed
+        );
+        broker.set_neutral(true);
         assert!(
             broker
                 .grant(recoverable.host, recoverable.connection_generation)

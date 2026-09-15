@@ -102,6 +102,14 @@ fn should_publish_native_controller_batch(
     !events.is_empty() || transitioned
 }
 
+fn collect_for_controller_route<T>(
+    routing_epoch: &AtomicU64,
+    collect: impl FnOnce() -> T,
+) -> (u64, T) {
+    let epoch = routing_epoch.load(Ordering::Acquire);
+    (epoch, collect())
+}
+
 fn admit_native_controller_generation(
     batch_generation: u64,
     published_generation: u64,
@@ -278,7 +286,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut last_neutral = true;
             let mut force_observation = false;
             loop {
-                let events = controller.wait_global_envelopes(Duration::from_secs(1));
+                // Bind the whole blocking read/drain to the route that existed before any of its
+                // events were observed. A handoff during collection must retire this batch.
+                let (routing_epoch, events) =
+                    collect_for_controller_route(&controller_routing_epoch, || {
+                        controller.wait_global_envelopes(Duration::from_secs(1))
+                    });
                 let neutral = !controller.held_input();
                 let neutral_probe_requested =
                     controller_neutral_probe_requested.swap(false, Ordering::AcqRel);
@@ -289,7 +302,6 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let ingress_generation = controller_ingress_generation.load(Ordering::Acquire);
-                let routing_epoch = controller_routing_epoch.load(Ordering::Acquire);
                 match publish_native_controller_batch(
                     &controller_changed,
                     &controller_ingress_generation,
@@ -479,12 +491,25 @@ mod tests {
 
     use super::{
         NativeControllerBatch, NativeControllerPublish, TEST_CONTROL_ENVIRONMENT,
-        USER_SESSION_ENVIRONMENT, admit_native_controller_generation,
+        USER_SESSION_ENVIRONMENT, admit_native_controller_generation, collect_for_controller_route,
         native_controller_generation_exhausted, publish_native_controller_batch,
         secure_storage_required, secure_storage_startup_timed_out,
         should_publish_native_controller_batch, test_control_allowed,
         wait_for_secure_storage_start,
     };
+
+    #[test]
+    fn controller_collection_retains_the_pre_handoff_route_epoch() {
+        let routing_epoch = AtomicU64::new(7);
+        let (collected_epoch, event) = collect_for_controller_route(&routing_epoch, || {
+            routing_epoch.store(8, Ordering::Release);
+            "old-route event"
+        });
+
+        assert_eq!(collected_epoch, 7);
+        assert_eq!(event, "old-route event");
+        assert_eq!(routing_epoch.load(Ordering::Acquire), 8);
+    }
 
     #[test]
     fn native_controller_ingress_is_bounded_and_latches_overflow() {
