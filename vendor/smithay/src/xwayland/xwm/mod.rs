@@ -1105,12 +1105,7 @@ impl X11Wm {
             move |_, _, data| {
                 let xwm = data.xwm_state(id);
                 let now = Instant::now();
-                xwm.clipboard.expire_outgoing(now, &timeout_handle);
-                xwm.clipboard.expire_incoming(now, &timeout_handle);
-                xwm.primary.expire_outgoing(now, &timeout_handle);
-                xwm.primary.expire_incoming(now, &timeout_handle);
-                xwm.dnd.selection.expire_outgoing(now, &timeout_handle);
-                xwm.dnd.selection.expire_incoming(now, &timeout_handle);
+                xwm.expire_selection_transfers(now, &timeout_handle);
                 TimeoutAction::ToDuration(std::time::Duration::from_secs(1))
             },
         )?;
@@ -1154,6 +1149,20 @@ impl X11Wm {
         self.clipboard.destroy_all(loop_handle);
         self.primary.destroy_all(loop_handle);
         self.dnd.selection.destroy_all(loop_handle);
+    }
+
+    /// Expire stalled transfers against an injected monotonic time sample.
+    pub fn expire_selection_transfers<D>(
+        &mut self,
+        now: Instant,
+        loop_handle: &LoopHandle<'_, D>,
+    ) -> usize {
+        self.clipboard.expire_outgoing(now, loop_handle)
+            + self.clipboard.expire_incoming(now, loop_handle)
+            + self.primary.expire_outgoing(now, loop_handle)
+            + self.primary.expire_incoming(now, loop_handle)
+            + self.dnd.selection.expire_outgoing(now, loop_handle)
+            + self.dnd.selection.expire_incoming(now, loop_handle)
     }
 
     /// Whether or not the XSYNC extension is present

@@ -245,13 +245,13 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
             && self
                 .operation
                 .requests_conditional_compensation(&data.window_operations);
-        if restore_maximized {
-            if data.restore_maximized_drag_after_cancel(
+        if restore_maximized
+            && data.restore_maximized_drag_after_cancel(
                 &self.window,
                 self.last_owned_geometry_revisions,
-            ) {
-                return;
-            }
+            )
+        {
+            return;
         }
         if self.restored_from_maximized {
             data.finish_restored_maximized_drag(&self.window);

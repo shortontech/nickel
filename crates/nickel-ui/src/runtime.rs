@@ -1567,9 +1567,11 @@ impl NormalizedIngressAuthority {
             && self.role == envelope.role
             && self.coordinate_meaning == envelope.coordinate_meaning
             && envelope.recipient.lease != 0
-            && !envelope
-                .transfer_cutoff
-                .is_some_and(|cutoff| envelope.broker_event_id.is_none_or(|event| event > cutoff))
+            && envelope.transfer_cutoff.is_none_or(|cutoff| {
+                envelope
+                    .broker_event_id
+                    .is_some_and(|event| event <= cutoff)
+            })
     }
 }
 

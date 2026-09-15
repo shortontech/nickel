@@ -1994,6 +1994,213 @@ mod internal_shell_placement_tests {
         ]
     }
 
+    pub(super) fn receive_x11_clipboard(
+        display: &str,
+        property_name: &str,
+        acknowledgement_delay: std::time::Duration,
+    ) -> Result<Vec<u8>, String> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+                },
+            },
+        };
+        use std::time::{Duration, Instant};
+
+        let (connection, screen) =
+            smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+        let root = &connection.setup().roots[screen];
+        let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        connection
+            .create_window(
+                0,
+                requestor,
+                root.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|e| e.to_string())?;
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map(|reply| reply.atom)
+                .map_err(|e| e.to_string())
+        };
+        let clipboard = atom(b"CLIPBOARD")?;
+        let image_png = atom(b"image/png")?;
+        let property = atom(property_name.as_bytes())?;
+        let incr = atom(b"INCR")?;
+        connection
+            .convert_selection(
+                requestor,
+                clipboard,
+                image_png,
+                property,
+                smithay::reexports::x11rb::CURRENT_TIME,
+            )
+            .map_err(|e| e.to_string())?;
+        connection.flush().map_err(|e| e.to_string())?;
+
+        let mut bytes = Vec::new();
+        let transfer_deadline = Instant::now() + Duration::from_secs(15);
+        let mut incremental = false;
+        loop {
+            if Instant::now() >= transfer_deadline {
+                return Err("X11 selection transfer timed out".into());
+            }
+            let Some(event) = connection.poll_for_event().map_err(|e| e.to_string())? else {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            match event {
+                Event::SelectionNotify(event) if event.requestor == requestor => {
+                    if event.property == smithay::reexports::x11rb::NONE {
+                        return Err("selection owner rejected image/png".into());
+                    }
+                    let reply = connection
+                        .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.type_ == incr {
+                        incremental = true;
+                        if !acknowledgement_delay.is_zero() {
+                            std::thread::sleep(acknowledgement_delay);
+                        }
+                        connection
+                            .delete_property(requestor, property)
+                            .map_err(|e| e.to_string())?;
+                        connection.flush().map_err(|e| e.to_string())?;
+                    } else {
+                        return Ok(reply.value);
+                    }
+                }
+                Event::PropertyNotify(event)
+                    if incremental
+                        && event.window == requestor
+                        && event.atom == property
+                        && event.state == Property::NEW_VALUE =>
+                {
+                    let reply = connection
+                        .get_property(true, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.value.is_empty() {
+                        return Ok(bytes);
+                    }
+                    bytes.extend_from_slice(&reply.value);
+                    connection.flush().map_err(|e| e.to_string())?;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    pub(super) fn wait_for_x11_incremental_abort(
+        display: &str,
+        ready: std::sync::mpsc::Sender<()>,
+    ) -> Result<(), String> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+                },
+            },
+        };
+        use std::time::{Duration, Instant};
+
+        let (connection, screen) =
+            smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+        let root = &connection.setup().roots[screen];
+        let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        connection
+            .create_window(
+                0,
+                requestor,
+                root.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_ONLY,
+                0,
+                &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .map_err(|e| e.to_string())?;
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map(|reply| reply.atom)
+                .map_err(|e| e.to_string())
+        };
+        let clipboard = atom(b"CLIPBOARD")?;
+        let image_png = atom(b"image/png")?;
+        let property = atom(b"NICKEL_STALLED_SELECTION")?;
+        let incr = atom(b"INCR")?;
+        connection
+            .convert_selection(
+                requestor,
+                clipboard,
+                image_png,
+                property,
+                smithay::reexports::x11rb::CURRENT_TIME,
+            )
+            .map_err(|e| e.to_string())?;
+        connection.flush().map_err(|e| e.to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut acknowledged = false;
+        loop {
+            if Instant::now() >= deadline {
+                return Err("stalled requestor did not observe abort".into());
+            }
+            let Some(event) = connection.poll_for_event().map_err(|e| e.to_string())? else {
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            };
+            match event {
+                Event::SelectionNotify(event) if event.requestor == requestor => {
+                    let reply = connection
+                        .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.type_ != incr {
+                        return Err("stalled fixture did not enter INCR".into());
+                    }
+                    acknowledged = true;
+                    ready.send(()).map_err(|e| e.to_string())?;
+                }
+                Event::PropertyNotify(event)
+                    if acknowledged
+                        && event.window == requestor
+                        && event.atom == property
+                        && event.state == Property::DELETE =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn launcher_uses_active_output_global_origin() {
         let placement = internal_shell_surface_placement(
@@ -18553,15 +18760,6 @@ mod protocol_tests {
     #[ignore = "native XWayland clipboard acceptance: requires Xwayland and a writable XDG_RUNTIME_DIR; run alone"]
     fn native_xwayland_input_only_requestor_receives_complete_incremental_png() {
         use image::ImageEncoder;
-        use smithay::reexports::x11rb::{
-            connection::Connection,
-            protocol::{
-                Event,
-                xproto::{
-                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
-                },
-            },
-        };
 
         struct FixtureEnvironment(Option<std::ffi::OsString>);
         impl Drop for FixtureEnvironment {
@@ -18607,110 +18805,13 @@ mod protocol_tests {
 
         let display = format!(":{}", session.xwayland_display.unwrap());
         let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let client_display = display.clone();
         std::thread::spawn(move || {
-            let result = (|| -> Result<Vec<u8>, String> {
-                let (connection, screen) = smithay::reexports::x11rb::connect(Some(&display))
-                    .map_err(|e| e.to_string())?;
-                let root = &connection.setup().roots[screen];
-                let requestor = connection.generate_id().map_err(|e| e.to_string())?;
-                connection
-                    .create_window(
-                        0,
-                        requestor,
-                        root.root,
-                        0,
-                        0,
-                        1,
-                        1,
-                        0,
-                        WindowClass::INPUT_ONLY,
-                        0,
-                        &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
-                    )
-                    .map_err(|e| e.to_string())?;
-                let atom = |name: &[u8]| {
-                    connection
-                        .intern_atom(false, name)
-                        .map_err(|e| e.to_string())?
-                        .reply()
-                        .map(|reply| reply.atom)
-                        .map_err(|e| e.to_string())
-                };
-                let clipboard = atom(b"CLIPBOARD")?;
-                let image_png = atom(b"image/png")?;
-                let property = atom(b"NICKEL_TEST_SELECTION")?;
-                let incr = atom(b"INCR")?;
-                connection
-                    .convert_selection(
-                        requestor,
-                        clipboard,
-                        image_png,
-                        property,
-                        smithay::reexports::x11rb::CURRENT_TIME,
-                    )
-                    .map_err(|e| e.to_string())?;
-                connection.flush().map_err(|e| e.to_string())?;
-
-                let mut bytes = Vec::new();
-                let transfer_deadline = Instant::now() + Duration::from_secs(15);
-                let mut incremental = false;
-                loop {
-                    if Instant::now() >= transfer_deadline {
-                        return Err("X11 selection transfer timed out".into());
-                    }
-                    let Some(event) = connection.poll_for_event().map_err(|e| e.to_string())?
-                    else {
-                        std::thread::sleep(Duration::from_millis(1));
-                        continue;
-                    };
-                    match event {
-                        Event::SelectionNotify(event) if event.requestor == requestor => {
-                            if event.property == smithay::reexports::x11rb::NONE {
-                                return Err("selection owner rejected image/png".into());
-                            }
-                            let reply = connection
-                                .get_property(
-                                    false,
-                                    requestor,
-                                    property,
-                                    AtomEnum::ANY,
-                                    0,
-                                    u32::MAX,
-                                )
-                                .map_err(|e| e.to_string())?
-                                .reply()
-                                .map_err(|e| e.to_string())?;
-                            if reply.type_ == incr {
-                                incremental = true;
-                                connection
-                                    .delete_property(requestor, property)
-                                    .map_err(|e| e.to_string())?;
-                                connection.flush().map_err(|e| e.to_string())?;
-                            } else {
-                                return Ok(reply.value);
-                            }
-                        }
-                        Event::PropertyNotify(event)
-                            if incremental
-                                && event.window == requestor
-                                && event.atom == property
-                                && event.state == Property::NEW_VALUE =>
-                        {
-                            let reply = connection
-                                .get_property(true, requestor, property, AtomEnum::ANY, 0, u32::MAX)
-                                .map_err(|e| e.to_string())?
-                                .reply()
-                                .map_err(|e| e.to_string())?;
-                            if reply.value.is_empty() {
-                                return Ok(bytes);
-                            }
-                            bytes.extend_from_slice(&reply.value);
-                            connection.flush().map_err(|e| e.to_string())?;
-                        }
-                        _ => {}
-                    }
-                }
-            })();
+            let result = super::internal_shell_placement_tests::receive_x11_clipboard(
+                &client_display,
+                "NICKEL_TEST_SELECTION",
+                Duration::ZERO,
+            );
             let _ = result_tx.send(result);
         });
 
@@ -18736,6 +18837,154 @@ mod protocol_tests {
                 .1
                 .outgoing_selection_transfer_count(),
             0
+        );
+
+        for (index, size) in [0, 1, 65_535, 65_536, 65_537, 196_609]
+            .into_iter()
+            .enumerate()
+        {
+            let payload = (0..size)
+                .map(|offset| ((offset * 31 + index * 17) & 0xff) as u8)
+                .collect::<Vec<_>>();
+            session
+                .publish_native_image_clipboard(Arc::new(payload.clone()))
+                .unwrap();
+            let client_display = display.clone();
+            let property = format!("NICKEL_TEST_SELECTION_{index}");
+            let (result_tx, result_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let delay = (size >= 65_536)
+                    .then_some(Duration::from_millis(25))
+                    .unwrap_or_default();
+                let _ = result_tx.send(
+                    super::internal_shell_placement_tests::receive_x11_clipboard(
+                        &client_display,
+                        &property,
+                        delay,
+                    ),
+                );
+            });
+            let transfer_deadline = Instant::now() + Duration::from_secs(15);
+            let received = loop {
+                event_loop
+                    .dispatch(Duration::from_millis(10), &mut session)
+                    .unwrap();
+                match result_rx.try_recv() {
+                    Ok(result) => break result.unwrap(),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        panic!("X11 boundary requestor exited without a result")
+                    }
+                }
+                assert!(Instant::now() < transfer_deadline);
+            };
+            assert_eq!(received, payload, "payload mismatch at {size} bytes");
+            assert_eq!(
+                session
+                    .xwm
+                    .as_ref()
+                    .unwrap()
+                    .1
+                    .outgoing_selection_transfer_count(),
+                0
+            );
+        }
+
+        let simultaneous_payload = (0..196_609)
+            .map(|offset| ((offset * 13 + 91) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        session
+            .publish_native_image_clipboard(Arc::new(simultaneous_payload.clone()))
+            .unwrap();
+        let (simultaneous_tx, simultaneous_rx) = std::sync::mpsc::channel();
+        for index in 0..2 {
+            let client_display = display.clone();
+            let result_tx = simultaneous_tx.clone();
+            std::thread::spawn(move || {
+                let property = format!("NICKEL_SIMULTANEOUS_SELECTION_{index}");
+                let result = super::internal_shell_placement_tests::receive_x11_clipboard(
+                    &client_display,
+                    &property,
+                    Duration::from_millis(50),
+                );
+                let _ = result_tx.send(result);
+            });
+        }
+        drop(simultaneous_tx);
+        let simultaneous_deadline = Instant::now() + Duration::from_secs(15);
+        let mut received = Vec::new();
+        while received.len() != 2 {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            while let Ok(result) = simultaneous_rx.try_recv() {
+                received.push(result.unwrap());
+            }
+            assert!(Instant::now() < simultaneous_deadline);
+        }
+        assert!(
+            received
+                .iter()
+                .all(|payload| payload == &simultaneous_payload)
+        );
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
+
+        session
+            .publish_native_image_clipboard(Arc::new(simultaneous_payload))
+            .unwrap();
+        let stalled_display = display.clone();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (aborted_tx, aborted_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::wait_for_x11_incremental_abort(
+                &stalled_display,
+                ready_tx,
+            );
+            let _ = aborted_tx.send(result);
+        });
+        let stalled_deadline = Instant::now() + Duration::from_secs(15);
+        while ready_rx.try_recv().is_err() {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < stalled_deadline);
+        }
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            1
+        );
+        let expired = session.xwm.as_mut().unwrap().1.expire_selection_transfers(
+            Instant::now() + Duration::from_secs(6),
+            &event_loop.handle(),
+        );
+        assert_eq!(expired, 1);
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
+        assert!(
+            aborted_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap()
+                .is_ok()
         );
     }
 

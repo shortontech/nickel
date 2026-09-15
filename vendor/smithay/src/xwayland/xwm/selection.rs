@@ -629,3 +629,40 @@ pub fn send_selection_notify_resp(
     conn.flush()?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outgoing_admission_is_bounded_and_released_exactly_once() {
+        let count = Arc::new(AtomicUsize::new(0));
+        let permits = (0..MAX_OUTGOING_TRANSFERS)
+            .map(|_| OutgoingAdmission::acquire(&count).expect("within admission bound"))
+            .collect::<Vec<_>>();
+        assert_eq!(count.load(Ordering::Acquire), MAX_OUTGOING_TRANSFERS);
+        assert!(OutgoingAdmission::acquire(&count).is_none());
+
+        drop(permits);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        assert!(OutgoingAdmission::acquire(&count).is_some());
+    }
+
+    #[test]
+    fn request_property_identity_does_not_alias_simultaneous_transfers() {
+        let first = OutgoingTransferKey {
+            requestor: 7,
+            property: 11,
+        };
+        let second_property = OutgoingTransferKey {
+            requestor: 7,
+            property: 12,
+        };
+        let second_requestor = OutgoingTransferKey {
+            requestor: 8,
+            property: 11,
+        };
+        assert_ne!(first, second_property);
+        assert_ne!(first, second_requestor);
+    }
+}
