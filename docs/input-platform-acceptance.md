@@ -5,8 +5,8 @@ Updated: 2026-09-15
 This matrix records evidence reproducible from the current integrated branch. Automated tests prove
 reducer and adapter contracts; they do not prove native interaction. This pass launched an isolated
 XWayland server for the owned clipboard harness. The graphical nested-session harness was also
-attempted, but the current host could not initialize an EGL display. This pass did not inject
-physical input, restart the installed session, or use a Windows host.
+attempted with the host's default EGL selection and with Mesa software rendering. This pass did not
+inject physical input, restart the installed session, or use a Windows host.
 
 Vocabulary: `pass` (the named command passed), `failed`, `unavailable` (required host/tool absent),
 `unsupported`, and `untested`. A native row never inherits `pass` from a unit test, cross-build,
@@ -65,10 +65,15 @@ cargo build -p nickel --no-default-features --features backend-winit \
 ./target/debug/nickel-nested-acceptance
 ```
 
-Build pass; native run unavailable. The compositor exited before readiness because EGL could not
-obtain a valid display. A host `eglinfo` check independently failed EGL initialization for both the
-Wayland and X11 platforms, while its surfaceless NVIDIA platform remained available. This is host
-display evidence, not a product failure or nested native pass.
+Build pass; native run unavailable. The host's default NVIDIA EGL selection could not obtain a
+valid Wayland or X11 display. Selecting the installed Mesa EGL vendor with software rendering did
+create the nested window, output, Wayland listener, and test-control socket in both debug and
+release builds. However, the host-present path did not return to calloop to service a queued
+readiness datagram before the fixed 30-second deadline. The harness terminated the child and
+removed its private runtime directory as designed. This is a bounded failed acceptance attempt on
+the current graphical host, not a native pass; it does not establish whether the stall belongs to
+Nickel, winit/Smithay, Mesa software presentation, or their interaction under the installed Nickel
+parent session.
 
 ```sh
 cargo test -p nickel --lib \
