@@ -634,7 +634,9 @@ const fn compliant_surface(color: Color) -> Color {
 
 fn contrasting_text(color: Color) -> Color {
     let dark = 0x111111;
-    let light = 0xffffff;
+    // This role is also reused for filled control indicators. Keep it clear
+    // of the pure-white background extreme enforced by the runtime policy.
+    let light = 0xf7f7f5;
     if contrast_ratio(color, dark) >= contrast_ratio(color, light) {
         dark
     } else {
@@ -695,7 +697,7 @@ mod tests {
         assert_eq!(theme.borders.controller_focus, 0x50c080);
         assert_ne!(theme.borders.controller_focus, theme.borders.focus);
         assert_eq!(theme.text.success, 0x50c080);
-        assert_eq!(theme.accent.on_accent, 0xffffff);
+        assert_eq!(theme.accent.on_accent, 0xf7f7f5);
         assert_ne!(theme.surfaces.hover, theme.surfaces.pressed);
         assert_ne!(theme.accent.ordinary, theme.accent.hover);
         assert!(theme.spacing.section > theme.spacing.compact);
@@ -813,7 +815,7 @@ mod tests {
 
     #[test]
     fn color_helpers_are_deterministic() {
-        assert_eq!(contrasting_text(0x000000), 0xffffff);
+        assert_eq!(contrasting_text(0x000000), 0xf7f7f5);
         assert_eq!(contrasting_text(0xffffff), 0x111111);
         assert_eq!(mix(0x000000, 0xffffff, 50), 0x808080);
     }

@@ -873,8 +873,14 @@ pub(crate) fn assert_background_color_policy(identity: &str, commands: &[PaintCo
             | PaintCommand::PushClip(_)
             | PaintCommand::PopClip => continue,
         };
-        if colors.iter().any(|color| is_prohibited_background(*color)) {
-            panic!("prohibited pure-black/white UI background in {identity} paint command {index}");
+        if let Some(color) = colors
+            .iter()
+            .copied()
+            .find(|color| is_prohibited_background(*color))
+        {
+            panic!(
+                "prohibited pure-black/white UI background in {identity} paint command {index} ({color:#010x})"
+            );
         }
     }
 }
