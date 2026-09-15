@@ -21,7 +21,8 @@ use smithay::{
                 set_data_device_selection,
             },
             primary_selection::{
-                clear_primary_selection, request_primary_client_selection, set_primary_selection,
+                clear_primary_selection, current_primary_selection_userdata,
+                request_primary_client_selection, set_primary_selection,
             },
         },
         xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
@@ -870,30 +871,34 @@ impl XwmHandler for NickelSession {
         mime_type: String,
         fd: OwnedFd,
     ) {
-        if selection == SelectionTarget::Clipboard {
-            let owner =
+        let owner = match selection {
+            SelectionTarget::Clipboard => {
                 smithay::wayland::selection::data_device::current_data_device_selection_userdata(
                     &self.seat,
                 )
-                .map(|owner| owner.clone());
-            if let Some(SelectionOwner::NativeImage(png)) = &owner {
-                if mime_type == "image/png"
-                    && let Err(error) = self.send_native_image_clipboard(fd, png.clone())
-                {
-                    tracing::warn!(error, "native image clipboard XWayland transfer rejected");
-                }
-                return;
+                .map(|owner| owner.clone())
             }
-            if let Some(SelectionOwner::NativeText(text)) = owner {
-                if matches!(
-                    mime_type.as_str(),
-                    "text/plain;charset=utf-8" | "text/plain"
-                ) && let Err(error) = self.send_native_clipboard(fd, text)
-                {
-                    tracing::warn!(error, "native clipboard XWayland transfer rejected");
-                }
-                return;
+            SelectionTarget::Primary => {
+                current_primary_selection_userdata(&self.seat).map(|owner| owner.clone())
             }
+        };
+        if let Some(SelectionOwner::NativeImage(png)) = &owner {
+            if mime_type == "image/png"
+                && let Err(error) = self.send_native_image_clipboard(fd, png.clone())
+            {
+                tracing::warn!(error, "native image clipboard XWayland transfer rejected");
+            }
+            return;
+        }
+        if let Some(SelectionOwner::NativeText(text)) = owner {
+            if matches!(
+                mime_type.as_str(),
+                "text/plain;charset=utf-8" | "text/plain"
+            ) && let Err(error) = self.send_native_clipboard(fd, text)
+            {
+                tracing::warn!(error, "native clipboard XWayland transfer rejected");
+            }
+            return;
         }
         let result = match selection {
             SelectionTarget::Clipboard => {

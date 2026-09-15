@@ -2001,6 +2001,24 @@ mod internal_shell_placement_tests {
         target_name: &str,
         input_only: bool,
     ) -> Result<Vec<u8>, String> {
+        receive_x11_selection(
+            display,
+            "CLIPBOARD",
+            property_name,
+            acknowledgement_delay,
+            target_name,
+            input_only,
+        )
+    }
+
+    pub(super) fn receive_x11_selection(
+        display: &str,
+        selection_name: &str,
+        property_name: &str,
+        acknowledgement_delay: std::time::Duration,
+        target_name: &str,
+        input_only: bool,
+    ) -> Result<Vec<u8>, String> {
         use smithay::reexports::x11rb::{
             connection::Connection,
             protocol::{
@@ -2044,14 +2062,14 @@ mod internal_shell_placement_tests {
                 .map(|reply| reply.atom)
                 .map_err(|e| e.to_string())
         };
-        let clipboard = atom(b"CLIPBOARD")?;
+        let selection = atom(selection_name.as_bytes())?;
         let target = atom(target_name.as_bytes())?;
         let property = atom(property_name.as_bytes())?;
         let incr = atom(b"INCR")?;
         connection
             .convert_selection(
                 requestor,
-                clipboard,
+                selection,
                 target,
                 property,
                 smithay::reexports::x11rb::CURRENT_TIME,
@@ -19473,6 +19491,53 @@ mod protocol_tests {
             assert!(Instant::now() < text_deadline);
         };
         assert_eq!(received_text, utf8_bytes);
+
+        let primary_text_bytes = vec![b'p'; 65_537];
+        let primary_text = String::from_utf8(primary_text_bytes.clone()).unwrap();
+        smithay::wayland::selection::primary_selection::set_primary_selection(
+            &session.display_handle,
+            &session.seat,
+            vec!["text/plain;charset=utf-8".into()],
+            crate::session::handlers::SelectionOwner::NativeText(Arc::new(primary_text)),
+        );
+        session
+            .xwm
+            .as_mut()
+            .unwrap()
+            .1
+            .new_selection(
+                smithay::wayland::selection::SelectionTarget::Primary,
+                Some(vec!["text/plain;charset=utf-8".into()]),
+            )
+            .unwrap();
+        let outgoing_primary_display = display.clone();
+        let (outgoing_primary_tx, outgoing_primary_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::receive_x11_selection(
+                &outgoing_primary_display,
+                "PRIMARY",
+                "NICKEL_OUTGOING_PRIMARY",
+                Duration::from_millis(25),
+                "text/plain;charset=utf-8",
+                true,
+            );
+            let _ = outgoing_primary_tx.send(result);
+        });
+        let outgoing_primary_deadline = Instant::now() + Duration::from_secs(15);
+        let outgoing_primary = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match outgoing_primary_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("outgoing primary requestor exited without a result")
+                }
+            }
+            assert!(Instant::now() < outgoing_primary_deadline);
+        };
+        assert_eq!(outgoing_primary, primary_text_bytes);
 
         let simultaneous_payload = (0..196_609)
             .map(|offset| ((offset * 13 + 91) & 0xff) as u8)
