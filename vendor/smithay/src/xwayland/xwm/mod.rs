@@ -2252,6 +2252,10 @@ where
             let xwm = state.xwm_state(xwm_id);
             let requestor_observations = Arc::clone(&xwm.requestor_observations);
             let outgoing_transfer_count = Arc::clone(&xwm.outgoing_transfer_count);
+            let request_key = OutgoingTransferKey {
+                requestor: n.requestor,
+                property: n.property,
+            };
             let selection = match n.selection {
                 x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
                 x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
@@ -2333,9 +2337,29 @@ where
                             return Ok(());
                         }
 
-                        let key = OutgoingTransferKey {
-                            requestor: n.requestor,
-                            property: n.property,
+                        let key = request_key;
+                        let selection_atom = selection.atom;
+                        // PropertyNotify carries no selection identity. Once the
+                        // request is validated, give this requestor/property pair
+                        // one XWM-global generation across all selection kinds.
+                        for candidate in [
+                            &mut xwm.clipboard,
+                            &mut xwm.primary,
+                            &mut xwm.dnd.selection,
+                        ] {
+                            if let Some(transfer) = candidate.outgoing.remove(&key) {
+                                if transfer.incr && transfer.property_set {
+                                    *xwm.replacement_delete_fences.entry(key).or_default() += 1;
+                                }
+                                transfer.abort();
+                                transfer.destroy(loop_handle);
+                            }
+                        }
+                        let selection = match selection_atom {
+                            x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
+                            x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
+                            x if x == xwm.atoms.XdndSelection => &mut xwm.dnd.selection,
+                            _ => unreachable!(),
                         };
                         let Some(admission) = OutgoingAdmission::acquire(&outgoing_transfer_count)
                         else {
@@ -2360,20 +2384,6 @@ where
                             rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
                         )
                         .map_err(|err| ConnectionError::IoError(std::io::Error::from(err)))?;
-
-                        // An exact request/property replacement retires only its predecessor;
-                        // distinct MIME properties on the same clipboard helper remain independent.
-                        if let Some(transfer) = selection.outgoing.remove(&key) {
-                            debug!(
-                                requestor = transfer.request.requestor,
-                                "Destroying stale transfer",
-                            );
-                            if transfer.incr && transfer.property_set {
-                                *xwm.replacement_delete_fences.entry(key).or_default() += 1;
-                            }
-                            transfer.abort();
-                            transfer.destroy(loop_handle);
-                        }
 
                         let atom = selection.atom;
 
