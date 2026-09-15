@@ -30,7 +30,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact integrated results below were recorded through `de10b5e8`. Older focused evidence remains listed
+Exact integrated results below were recorded through `ac7bc88c`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -50,19 +50,19 @@ cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file
 
 Pass. Reported library totals include `nickel-core` 183/0, `nickel-file` 181/0,
 `nickel-session-protocol` 58/0, `nickel-ui` 406/0 with 2 ignored, and
-`nickel-ui-testkit` 29/0. The testkit touch scenario exercises separately supplied normalized
-authority rather than envelope self-certification.
+`nickel-ui-testkit` 29/0. The `nickel-ui` suite includes the modal accessibility dispatch
+regression. The testkit touch scenario exercises separately supplied normalized authority rather
+than envelope self-certification.
 
 ```sh
 cargo test -p nickel --lib session:: -- --test-threads=1
 ```
 
-Pass: 471 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
+Pass: 472 passed, 0 failed, 6 ignored. This covers the integrated session authority route,
 nonzero recipient leases, queued controller route-epoch and overflow/recovery fencing,
-output-scoped native touch cancellation, native keyboard/clipboard routing, modal accessibility
-dispatch, screenshot Escape handling, focus lifecycle, internal-maximize supersession,
-XDG/XWayland operations, and geometry ownership. The ignored rows explicitly require live native
-facilities.
+output-scoped native touch cancellation, native keyboard/clipboard routing, screenshot Escape
+handling, focus lifecycle, internal-maximize supersession, XDG/XWayland operations, and geometry
+ownership. The ignored rows explicitly require live native facilities.
 
 ```sh
 env RUSTC_WRAPPER= cargo test -p nickel-core window_operation -- --nocapture
