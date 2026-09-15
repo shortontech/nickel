@@ -19036,9 +19036,11 @@ mod protocol_tests {
             let property = format!("NICKEL_TEST_SELECTION_{index}");
             let (result_tx, result_rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                let delay = (size >= 65_536)
-                    .then_some(Duration::from_millis(25))
-                    .unwrap_or_default();
+                let delay = if size >= 65_536 {
+                    Duration::from_millis(25)
+                } else {
+                    Duration::default()
+                };
                 let _ = result_tx.send(
                     super::internal_shell_placement_tests::receive_x11_clipboard(
                         &client_display,
