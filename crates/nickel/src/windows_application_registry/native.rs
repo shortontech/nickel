@@ -99,14 +99,15 @@ impl LaunchCapture {
     }
 
     pub(crate) fn prepare(application: &Application) -> Option<Self> {
+        let launch_target = application.launch_command()?.first()?.clone();
         let (descriptor, shortcut) = read_descriptor(
             application,
             windows::Win32::Storage::FileSystem::FILE_SHARE_READ.0,
         )?;
-        let (target, ancestors) = pin_launch_path(&shortcut)?;
+        let (_, ancestors) = pin_launch_path(&shortcut)?;
         Some(Self {
             descriptor,
-            target,
+            target: launch_target,
             _shortcut: shortcut,
             _ancestors: ancestors,
             invoked_at: None,
@@ -828,7 +829,7 @@ mod tests {
             Some(vec![path]),
         );
         let capture = LaunchCapture::prepare(&application).unwrap();
-        assert!(capture.target().starts_with(r"\\?\Volume{"));
+        assert_eq!(capture.target(), path);
         assert!(OpenOptions::new().write(true).open(&shortcut).is_err());
         // Actual native regression checks, not inferred from share flags. These
         // remain unexecuted until run on Windows with a supported local volume.
