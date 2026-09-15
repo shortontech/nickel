@@ -19368,6 +19368,63 @@ mod protocol_tests {
             .unwrap();
 
         let display = format!(":{}", session.xwayland_display.unwrap());
+        {
+            use smithay::reexports::x11rb::{
+                connection::Connection as _,
+                protocol::xproto::{ConnectionExt as _, CreateWindowAux, EventMask, WindowClass},
+            };
+            let (conn, screen) = smithay::reexports::x11rb::connect(Some(&display)).unwrap();
+            let conn = Arc::new(conn);
+            let root = &conn.setup().roots[screen];
+            let requestor = conn.generate_id().unwrap();
+            conn.create_window(
+                root.root_depth,
+                requestor,
+                root.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                root.root_visual,
+                &CreateWindowAux::new().event_mask(EventMask::FOCUS_CHANGE),
+            )
+            .unwrap()
+            .check()
+            .unwrap();
+            let observations = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+            let first = smithay::xwayland::xwm::RequestorObservation::acquire(
+                &conn,
+                &observations,
+                requestor,
+            )
+            .unwrap();
+            let second = smithay::xwayland::xwm::RequestorObservation::acquire(
+                &conn,
+                &observations,
+                requestor,
+            )
+            .unwrap();
+            drop(first);
+            let retained = conn
+                .get_window_attributes(requestor)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .your_event_mask;
+            assert!(retained.contains(EventMask::PROPERTY_CHANGE));
+            assert!(retained.contains(EventMask::FOCUS_CHANGE));
+            drop(second);
+            let restored = conn
+                .get_window_attributes(requestor)
+                .unwrap()
+                .reply()
+                .unwrap()
+                .your_event_mask;
+            assert!(!restored.contains(EventMask::PROPERTY_CHANGE));
+            assert!(restored.contains(EventMask::FOCUS_CHANGE));
+        }
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let client_display = display.clone();
         std::thread::spawn(move || {

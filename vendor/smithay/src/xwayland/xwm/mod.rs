@@ -202,6 +202,8 @@ pub mod settings;
 use settings::{NameError, Value, XSettings};
 mod isolated_keyboard;
 mod selection;
+#[doc(hidden)]
+pub use selection::RequestorObservation;
 mod surface;
 use self::dnd::XWmDnd;
 pub use self::dnd::XwmOfferData;
