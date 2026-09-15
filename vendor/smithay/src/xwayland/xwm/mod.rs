@@ -1168,6 +1168,11 @@ impl X11Wm {
         self.clipboard.incoming.len() + self.primary.incoming.len() + self.dnd.selection.incoming.len()
     }
 
+    /// Whether an outgoing Wayland-to-X11 DnD offer still owns its target.
+    pub fn has_active_dnd_offer(&self) -> bool {
+        self.dnd.active_offer.is_some()
+    }
+
     /// Cancel every clipboard/primary/DnD transfer owned by this XWM.
     pub fn cancel_selection_transfers<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
         self.clipboard

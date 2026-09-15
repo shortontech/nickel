@@ -2467,6 +2467,133 @@ mod internal_shell_placement_tests {
         }
     }
 
+    pub(super) fn receive_x11_dnd_selection(
+        display: &str,
+        ready: std::sync::mpsc::Sender<u32>,
+        request: std::sync::mpsc::Receiver<()>,
+    ) -> Result<Vec<u8>, String> {
+        use smithay::reexports::x11rb::{
+            connection::Connection,
+            protocol::{
+                Event,
+                xproto::{
+                    AtomEnum, ConnectionExt, CreateWindowAux, EventMask, Property, WindowClass,
+                },
+            },
+            wrapper::ConnectionExt as _,
+        };
+        use std::time::{Duration, Instant};
+
+        let (connection, screen) =
+            smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
+        let root = &connection.setup().roots[screen];
+        let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        connection
+            .create_window(
+                root.root_depth,
+                requestor,
+                root.root,
+                0,
+                0,
+                16,
+                16,
+                0,
+                WindowClass::INPUT_OUTPUT,
+                root.root_visual,
+                &CreateWindowAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::STRUCTURE_NOTIFY),
+            )
+            .map_err(|e| e.to_string())?;
+        let atom = |name: &[u8]| {
+            connection
+                .intern_atom(false, name)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map(|reply| reply.atom)
+                .map_err(|e| e.to_string())
+        };
+        let xdnd_aware = atom(b"XdndAware")?;
+        connection
+            .change_property32(
+                smithay::reexports::x11rb::protocol::xproto::PropMode::REPLACE,
+                requestor,
+                xdnd_aware,
+                AtomEnum::ATOM,
+                &[5],
+            )
+            .map_err(|e| e.to_string())?;
+        connection
+            .map_window(requestor)
+            .map_err(|e| e.to_string())?;
+        connection.flush().map_err(|e| e.to_string())?;
+        ready.send(requestor).map_err(|e| e.to_string())?;
+        request.recv().map_err(|e| e.to_string())?;
+
+        let selection = atom(b"XdndSelection")?;
+        let target = atom(b"image/png")?;
+        let property = atom(b"NICKEL_XDND_SELECTION")?;
+        let incr = atom(b"INCR")?;
+        connection
+            .convert_selection(
+                requestor,
+                selection,
+                target,
+                property,
+                smithay::reexports::x11rb::CURRENT_TIME,
+            )
+            .map_err(|e| e.to_string())?;
+        connection.flush().map_err(|e| e.to_string())?;
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let mut incremental = false;
+        let mut bytes = Vec::new();
+        loop {
+            if Instant::now() >= deadline {
+                return Err("X11 DnD selection transfer timed out".into());
+            }
+            match connection.poll_for_event().map_err(|e| e.to_string())? {
+                Some(Event::SelectionNotify(event)) if event.requestor == requestor => {
+                    if event.property == smithay::reexports::x11rb::NONE {
+                        return Err("X11 DnD selection request was rejected".into());
+                    }
+                    let reply = connection
+                        .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.type_ == incr {
+                        incremental = true;
+                        connection
+                            .delete_property(requestor, property)
+                            .map_err(|e| e.to_string())?;
+                        connection.flush().map_err(|e| e.to_string())?;
+                    } else {
+                        return Ok(reply.value);
+                    }
+                }
+                Some(Event::PropertyNotify(event))
+                    if incremental
+                        && event.window == requestor
+                        && event.atom == property
+                        && event.state == Property::NEW_VALUE =>
+                {
+                    let reply = connection
+                        .get_property(true, requestor, property, AtomEnum::ANY, 0, u32::MAX)
+                        .map_err(|e| e.to_string())?
+                        .reply()
+                        .map_err(|e| e.to_string())?;
+                    if reply.value.is_empty() {
+                        return Ok(bytes);
+                    }
+                    bytes.extend_from_slice(&reply.value);
+                    connection.flush().map_err(|e| e.to_string())?;
+                }
+                Some(_) => {}
+                None => std::thread::sleep(Duration::from_millis(1)),
+            }
+        }
+    }
+
     pub(super) fn receive_replaced_x11_clipboard(
         display: &str,
         property_name: &str,
@@ -19659,6 +19786,52 @@ mod protocol_tests {
     fn native_xwayland_input_only_requestor_receives_complete_incremental_png() {
         use image::ImageEncoder;
 
+        struct NativeDndSource(Arc<Vec<u8>>);
+
+        impl smithay::utils::IsAlive for NativeDndSource {
+            fn alive(&self) -> bool {
+                true
+            }
+        }
+
+        impl smithay::input::dnd::Source for NativeDndSource {
+            fn metadata(&self) -> Option<smithay::input::dnd::SourceMetadata> {
+                Some(smithay::input::dnd::SourceMetadata {
+                    mime_types: vec!["image/png".into()],
+                    dnd_actions: std::iter::once(smithay::input::dnd::DndAction::Copy).collect(),
+                })
+            }
+
+            fn choose_action(&self, _action: smithay::input::dnd::DndAction) {}
+
+            fn send(&self, mime_type: &str, fd: std::os::fd::OwnedFd) {
+                if mime_type != "image/png" {
+                    return;
+                }
+                let payload = Arc::clone(&self.0);
+                std::thread::spawn(move || {
+                    use std::io::Write as _;
+                    use std::os::fd::AsRawFd as _;
+                    // SAFETY: `fd` is owned by this worker and remains live for the call.
+                    assert!(
+                        unsafe {
+                            nix::libc::fcntl(
+                                fd.as_raw_fd(),
+                                nix::libc::F_SETFL,
+                                nix::libc::O_WRONLY,
+                            )
+                        } >= 0
+                    );
+                    let mut file = std::fs::File::from(fd);
+                    file.write_all(&payload).unwrap();
+                });
+            }
+
+            fn drop_performed(&self) {}
+            fn cancel(&self) {}
+            fn finished(&self) {}
+        }
+
         struct FixtureEnvironment(Option<std::ffi::OsString>);
         impl Drop for FixtureEnvironment {
             fn drop(&mut self) {
@@ -19998,6 +20171,94 @@ mod protocol_tests {
         };
         assert_eq!(new_requestor, old_requestor);
         assert_eq!(reused_received, reused_payload);
+        assert_eq!(
+            session
+                .xwm
+                .as_ref()
+                .unwrap()
+                .1
+                .outgoing_selection_transfer_count(),
+            0
+        );
+
+        let dnd_payload = (0..196_609)
+            .map(|offset| ((offset * 53 + 31) & 0xff) as u8)
+            .collect::<Vec<_>>();
+        let dnd_display = display.clone();
+        let (dnd_ready_tx, dnd_ready_rx) = std::sync::mpsc::channel();
+        let (dnd_request_tx, dnd_request_rx) = std::sync::mpsc::channel();
+        let (dnd_result_tx, dnd_result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::receive_x11_dnd_selection(
+                &dnd_display,
+                dnd_ready_tx,
+                dnd_request_rx,
+            );
+            let _ = dnd_result_tx.send(result);
+        });
+        let dnd_deadline = Instant::now() + Duration::from_secs(15);
+        let dnd_window = dnd_ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let dnd_surface = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            if let Some(surface) = session.space.elements().find_map(|window| {
+                window
+                    .x11_surface()
+                    .filter(|surface| surface.window_id() == dnd_window)
+                    .cloned()
+            }) {
+                break surface;
+            }
+            assert!(Instant::now() < dnd_deadline);
+        };
+        let display_handle = session.display_handle.clone();
+        let seat = session.seat.clone();
+        let source = Arc::new(NativeDndSource(Arc::new(dnd_payload.clone())));
+        let offer = smithay::input::dnd::DndFocus::enter(
+            &dnd_surface,
+            &mut session,
+            &display_handle,
+            source,
+            &seat,
+            (1.0, 1.0).into(),
+            &smithay::utils::SERIAL_COUNTER.next_serial(),
+        );
+        assert!(
+            offer.is_some(),
+            "production Xdnd entry must create an offer"
+        );
+        dnd_request_tx.send(()).unwrap();
+        let dnd_received = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match dnd_result_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("X11 DnD requestor exited without a result")
+                }
+            }
+            assert!(Instant::now() < dnd_deadline);
+        };
+        assert_eq!(dnd_received.len(), dnd_payload.len());
+        assert_eq!(dnd_received, dnd_payload);
+        drop(offer);
+        while session.space.elements().any(|window| {
+            window
+                .x11_surface()
+                .is_some_and(|surface| surface.window_id() == dnd_window)
+        }) {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < dnd_deadline);
+        }
+        assert!(
+            !session.xwm.as_ref().unwrap().1.has_active_dnd_offer(),
+            "destroying the X11 target must retire its DnD offer"
+        );
         assert_eq!(
             session
                 .xwm

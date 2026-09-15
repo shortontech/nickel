@@ -105,6 +105,14 @@ impl XWmDnd {
 
     pub fn window_destroyed<D>(&mut self, window: &X11Window, loop_handle: &LoopHandle<'_, D>) -> bool {
         let mut res = self.selection.window_destroyed(window, loop_handle);
+        if self
+            .active_offer
+            .as_ref()
+            .is_some_and(|offer| offer.state.lock().unwrap().target == *window)
+        {
+            self.active_offer.take();
+            res = true;
+        }
         if let Some(active_drag) = self.active_drag.as_ref() {
             if active_drag.owner == *window
                 || active_drag
