@@ -65,15 +65,20 @@ cargo build -p nickel --no-default-features --features backend-winit \
 ./target/debug/nickel-nested-acceptance
 ```
 
-Build pass; native run unavailable. The host's default NVIDIA EGL selection could not obtain a
-valid Wayland or X11 display. Selecting the installed Mesa EGL vendor with software rendering did
-create the nested window, output, Wayland listener, and test-control socket in both debug and
-release builds. However, the host-present path did not return to calloop to service a queued
-readiness datagram before the fixed 30-second deadline. The harness terminated the child and
-removed its private runtime directory as designed. This is a bounded failed acceptance attempt on
-the current graphical host, not a native pass; it does not establish whether the stall belongs to
-Nickel, winit/Smithay, Mesa software presentation, or their interaction under the installed Nickel
-parent session.
+Pass with the installed Mesa EGL vendor and software renderer:
+
+```sh
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
+```
+
+The host's default NVIDIA EGL selection could not obtain a valid nested Wayland or X11 display.
+Mesa initially exposed a real winit/Smithay starvation bug: the winit `before_sleep` lifecycle hook
+pumped the host event loop before calloop dispatched an already-readable control socket. After the
+redundant pre-sleep pump was removed, the registered winit event source delivered host events and
+the harness completed in 7.8 seconds. It verified compositor readiness and shell surfaces, injected
+Meta through the production input reducer, observed the launcher becoming visible, measured 15 CPU
+ticks over the bounded two-second idle window, requested logout, and observed clean shutdown.
 
 ```sh
 cargo test -p nickel --lib \

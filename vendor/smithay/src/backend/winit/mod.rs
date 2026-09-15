@@ -676,15 +676,10 @@ impl EventSource for WinitEventLoop {
     const NEEDS_EXTRA_LIFECYCLE_EVENTS: bool = true;
 
     fn before_sleep(&mut self) -> calloop::Result<Option<(calloop::Readiness, calloop::Token)>> {
-        let mut pending_events = std::mem::take(&mut self.pending_events);
-        let callback = |event| {
-            pending_events.push(event);
-        };
-        // NOTE: drain winit's event loop before going to sleep, so we can
-        // wake up if other thread has woken up underlying winit loop, like other
-        // event queue got dispatched during that.
-        self.dispatch_new_events(callback);
-        self.pending_events = pending_events;
+        // Do not pump winit from this lifecycle hook. The registered winit FD wakes calloop and
+        // `process_events` drains it; pumping here can enter the host presentation path before
+        // calloop dispatches other already-readable sources, indefinitely starving compositor
+        // control and protocol sockets.
         if self.pending_events.is_empty() {
             Ok(None)
         } else {

@@ -19,6 +19,14 @@ failure, the harness terminates its compositor child and removes its temporary
 runtime data.
 
 This is a live graphical acceptance check, so it requires a working host display.
+On hosts where GLVND's default vendor cannot create a nested EGL display, an installed Mesa software
+renderer can be selected explicitly without changing the compositor under test:
+
+```sh
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
+```
+
 The idle check allows up to one fully occupied CPU core across its two-second
 window (on the Linux 100 Hz process clock), a deliberately broad bound intended
 to catch an unbounded redraw loop without imposing a benchmark-grade threshold.
