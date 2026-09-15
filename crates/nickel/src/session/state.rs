@@ -6014,7 +6014,7 @@ impl NickelSession {
         events: Vec<nickel_ui::ControllerEnvelope>,
         neutral: bool,
     ) {
-        let routing_epoch = self.controller_routing_epoch;
+        let routing_epoch = self.refresh_controller_route().0;
         self.handle_brokered_controller_batch_for_route(events, neutral, routing_epoch);
     }
 
