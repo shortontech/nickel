@@ -620,6 +620,7 @@ pub struct X11Wm {
     primary: XWmSelection,
     dnd: XWmDnd,
     requestor_observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
+    replacement_delete_fences: HashMap<OutgoingTransferKey, usize>,
     outgoing_transfer_count: Arc<AtomicUsize>,
     transfer_timer: Option<RegistrationToken>,
     event_source: Option<RegistrationToken>,
@@ -1087,6 +1088,7 @@ impl X11Wm {
             primary,
             dnd,
             requestor_observations: Default::default(),
+            replacement_delete_fences: Default::default(),
             outgoing_transfer_count: Default::default(),
             transfer_timer: None,
             event_source: None,
@@ -1146,6 +1148,13 @@ impl X11Wm {
     /// primary selection, and drag-and-drop for bounded adapter diagnostics.
     pub fn outgoing_selection_transfer_count(&self) -> usize {
         self.outgoing_transfer_count.load(Ordering::Acquire)
+    }
+
+    /// Number of X11-to-Wayland requests awaiting SelectionNotify.
+    pub fn pending_selection_transfer_count(&self) -> usize {
+        self.clipboard.pending_transfers.lock().unwrap().len()
+            + self.primary.pending_transfers.lock().unwrap().len()
+            + self.dnd.selection.pending_transfers.lock().unwrap().len()
     }
 
     /// Cancel every clipboard/primary/DnD transfer owned by this XWM.
@@ -2024,6 +2033,8 @@ where
             }
         }
         Event::DestroyNotify(n) => {
+            xwm.replacement_delete_fences
+                .retain(|key, _| key.requestor != n.window);
             xwm.clipboard.window_destroyed(&n.window, loop_handle);
             xwm.primary.window_destroyed(&n.window, loop_handle);
             xwm.dnd.window_destroyed(&n.window, loop_handle);
@@ -2343,7 +2354,7 @@ where
                                 "Destroying stale transfer",
                             );
                             if transfer.incr && transfer.property_set {
-                                selection.suppress_next_property_delete(key);
+                                *xwm.replacement_delete_fences.entry(key).or_default() += 1;
                             }
                             transfer.abort();
                             transfer.destroy(loop_handle);
@@ -2492,10 +2503,11 @@ where
                     requestor: n.window,
                     property: n.atom,
                 };
-                if xwm.clipboard.consume_suppressed_property_delete(key)
-                    || xwm.primary.consume_suppressed_property_delete(key)
-                    || xwm.dnd.selection.consume_suppressed_property_delete(key)
-                {
+                if let Some(count) = xwm.replacement_delete_fences.get_mut(&key) {
+                    *count -= 1;
+                    if *count == 0 {
+                        xwm.replacement_delete_fences.remove(&key);
+                    }
                     return Ok(());
                 }
                 if let Some(selection) = if xwm

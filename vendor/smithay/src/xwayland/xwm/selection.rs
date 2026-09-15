@@ -67,6 +67,7 @@ impl Drop for OutgoingAdmission {
 
 #[derive(Debug)]
 pub struct RequestorObservation {
+    conn: Arc<RustConnection>,
     requestor: X11Window,
     observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
     pub class: WindowClass,
@@ -97,6 +98,7 @@ impl RequestorObservation {
         }
         drop(observations_guard);
         Ok(Self {
+            conn: Arc::clone(conn),
             requestor,
             observations: Arc::clone(observations),
             class: attributes.class,
@@ -106,17 +108,35 @@ impl RequestorObservation {
 
 impl Drop for RequestorObservation {
     fn drop(&mut self) {
-        let mut observations = self.observations.lock().unwrap();
-        let Some((_, references)) = observations.get_mut(&self.requestor) else {
-            return;
-        };
-        *references -= 1;
-        if *references == 0 {
+        let original = {
+            let mut observations = self.observations.lock().unwrap();
+            let Some((original, references)) = observations.get_mut(&self.requestor) else {
+                return;
+            };
+            *references -= 1;
+            if *references != 0 {
+                return;
+            }
+            let original = *original;
             observations.remove(&self.requestor);
+            original
+        };
+        if !original.contains(EventMask::PROPERTY_CHANGE)
+            && let Ok(cookie) = self.conn.get_window_attributes(self.requestor)
+            && let Ok(attributes) = cookie.reply()
+        {
+            // The registry is shared by clipboard, primary and DnD, so reaching
+            // zero proves no selection transfer on this connection still owns
+            // PROPERTY_CHANGE. Preserve every unrelated bit currently selected.
+            let retained = EventMask::from(
+                attributes.your_event_mask.bits() & !EventMask::PROPERTY_CHANGE.bits(),
+            );
+            let _ = self.conn.change_window_attributes(
+                self.requestor,
+                &ChangeWindowAttributesAux::new().event_mask(retained),
+            );
+            let _ = self.conn.flush();
         }
-        // X11 exposes no ownership for individual event-mask bits. Another
-        // connection-local observer may have acquired PROPERTY_CHANGE while this
-        // transfer was alive, so conservatively retain the bit until teardown.
     }
 }
 
@@ -148,7 +168,6 @@ pub struct XWmSelection {
     pub pending_transfers: Arc<Mutex<HashMap<X11Window, PendingTransfer>>>,
     pub incoming: HashMap<X11Window, IncomingTransfer>,
     pub outgoing: HashMap<OutgoingTransferKey, OutgoingTransfer>,
-    pub suppressed_property_deletes: HashMap<OutgoingTransferKey, usize>,
 }
 
 pub struct IncomingTransfer {
@@ -380,7 +399,6 @@ impl XWmSelection {
             pending_transfers: Arc::new(Mutex::new(HashMap::new())),
             incoming: HashMap::new(),
             outgoing: HashMap::new(),
-            suppressed_property_deletes: HashMap::new(),
         })
     }
 
@@ -498,21 +516,6 @@ impl XWmSelection {
         expired.len()
     }
 
-    pub fn suppress_next_property_delete(&mut self, key: OutgoingTransferKey) {
-        *self.suppressed_property_deletes.entry(key).or_default() += 1;
-    }
-
-    pub fn consume_suppressed_property_delete(&mut self, key: OutgoingTransferKey) -> bool {
-        let Some(count) = self.suppressed_property_deletes.get_mut(&key) else {
-            return false;
-        };
-        *count -= 1;
-        if *count == 0 {
-            self.suppressed_property_deletes.remove(&key);
-        }
-        true
-    }
-
     pub fn destroy_all<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
         for (_, transfer) in self.incoming.drain() {
             transfer.destroy(loop_handle);
@@ -522,7 +525,6 @@ impl XWmSelection {
             transfer.destroy(loop_handle);
         }
         self.pending_transfers.lock().unwrap().clear();
-        self.suppressed_property_deletes.clear();
     }
 }
 
