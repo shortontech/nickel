@@ -73,6 +73,8 @@ fn button_kind_for_device(
     native_code: u32,
     reported_name: &str,
 ) -> ControllerButton {
+    #[cfg(not(target_os = "linux"))]
+    let _ = reported_name;
     #[cfg(target_os = "linux")]
     if is_left_joycon(reported_name) {
         const EV_KEY: u32 = 1 << 16;
@@ -139,6 +141,8 @@ pub fn button_kind(button: Button) -> ControllerButton {
 }
 
 fn button_kind_with_code(button: Button, native_code: u32) -> ControllerButton {
+    #[cfg(not(target_os = "linux"))]
+    let _ = native_code;
     #[cfg(target_os = "linux")]
     {
         // Individual Joy-Con mappings in SDL_GameControllerDB omit `guide`, but
