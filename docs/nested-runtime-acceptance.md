@@ -27,6 +27,16 @@ __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
 LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
 ```
 
+To exercise the X11 host path from a Wayland session, provide a nonexistent `WAYLAND_DISPLAY` to
+the harness while retaining a valid `DISPLAY`. The harness removes both Wayland selectors from the
+nested child so winit selects X11:
+
+```sh
+WAYLAND_DISPLAY=does-not-exist \
+__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/50_mesa.json \
+LIBGL_ALWAYS_SOFTWARE=1 ./target/debug/nickel-nested-acceptance
+```
+
 The idle check allows up to one fully occupied CPU core across its two-second
 window (on the Linux 100 Hz process clock), a deliberately broad bound intended
 to catch an unbounded redraw loop without imposing a benchmark-grade threshold.

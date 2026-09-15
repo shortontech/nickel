@@ -70,11 +70,13 @@ fn run() -> Result<(), String> {
     if let Some(host_wayland) = host_wayland {
         // Preserve the absolute host socket while isolating the nested
         // compositor's own runtime directory and Wayland listener.
-        command
-            .env("WINIT_UNIX_BACKEND", "wayland")
-            .env("WAYLAND_DISPLAY", host_wayland);
+        command.env("WAYLAND_DISPLAY", host_wayland);
     } else {
-        command.env("WINIT_UNIX_BACKEND", "x11");
+        // Winit 0.31 selects Wayland whenever either selector is present; it no longer honors
+        // WINIT_UNIX_BACKEND. Remove inherited selectors so DISPLAY authoritatively selects X11.
+        command
+            .env_remove("WAYLAND_DISPLAY")
+            .env_remove("WAYLAND_SOCKET");
     }
     let mut compositor = command
         .spawn()

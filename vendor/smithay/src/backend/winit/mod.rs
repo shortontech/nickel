@@ -171,7 +171,7 @@ where
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// Failed to initialize an event loop.
-    #[error("Failed to initialize an event loop")]
+    #[error("Failed to initialize an event loop: {0}")]
     EventLoopCreation(#[from] winit::error::EventLoopError),
     /// Failed to initialize a window.
     #[error("Failed to initialize a window")]

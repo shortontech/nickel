@@ -79,6 +79,9 @@ redundant pre-sleep pump was removed, the registered winit event source delivere
 the harness completed in 7.8 seconds. It verified compositor readiness and shell surfaces, injected
 Meta through the production input reducer, observed the launcher becoming visible, measured 15 CPU
 ticks over the bounded two-second idle window, requested logout, and observed clean shutdown.
+The same harness then passed against the host XWayland display in 8.4 seconds with 57 idle CPU
+ticks. The X11 run explicitly removed inherited `WAYLAND_DISPLAY` and `WAYLAND_SOCKET`; winit 0.31
+selects its Unix backend from those standard display variables rather than `WINIT_UNIX_BACKEND`.
 
 ```sh
 cargo test -p nickel --lib \
