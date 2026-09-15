@@ -604,7 +604,7 @@ impl<T> ControllerBroker<T> {
                 cutoff: transfer.cutoff,
             };
         }
-        if !transfer.quiescent {
+        if !transfer.quiescent && self.poisoned_predecessor.is_none() {
             self.poisoned_predecessor = Some(PoisonedPredecessor {
                 lease: transfer.from,
                 cutoff: transfer.cutoff,
@@ -838,16 +838,29 @@ impl<T> ControllerBroker<T> {
         };
         self.stream_generation = StreamGeneration(stream_generation);
         let generation = self.stream_generation;
-        for host in self.hosts.values_mut() {
+        for (host_id, host) in &mut self.hosts {
+            let acknowledged_through = self
+                .poisoned_predecessor
+                .filter(|poison| {
+                    poison.lease.host == *host_id
+                        && poison.lease.connection_generation == host.connection
+                })
+                .map_or(through, |poison| poison.cutoff);
             host.outbox.clear();
             host.outbox.push_back(BrokerMessage::StreamReset {
                 stream_generation: generation,
-                through,
+                through: acknowledged_through,
             });
         }
     }
 
     fn poison_executor(&mut self, cutoff: EventId) {
+        // The first poisoned predecessor owns the acknowledgement contract.
+        // Later resets must not replace its original lease/cutoff with a value
+        // no executor can legitimately acknowledge.
+        if self.poisoned_predecessor.is_some() {
+            return;
+        }
         if let Some(transfer) = self.transfer {
             self.poisoned_predecessor = Some(PoisonedPredecessor {
                 lease: transfer.from,
@@ -1408,6 +1421,32 @@ mod tests {
                 .grant(recoverable.host, recoverable.connection_generation)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn repeated_reset_preserves_the_original_poison_acknowledgement_cutoff() {
+        let mut broker = ControllerBroker::<u8>::new(4);
+        let connection = broker.attach(HostId(1));
+        let lease = broker.grant(HostId(1), connection).unwrap();
+        broker.ingest(1);
+
+        broker.poison_executor(EventId(1));
+        broker.install_reset(EventId(1));
+        broker.install_reset(EventId(9));
+
+        assert!(matches!(
+            broker.drain(HostId(1), connection).as_slice(),
+            [BrokerMessage::StreamReset {
+                through: EventId(1),
+                ..
+            }]
+        ));
+        broker.set_neutral(true);
+        assert_eq!(
+            broker.acknowledge_quiescence(HostId(1), connection, lease.epoch, EventId(1)),
+            TransferStatus::Failed
+        );
+        assert!(broker.poisoned_predecessor.is_none());
     }
 
     #[test]

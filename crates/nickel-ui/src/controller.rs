@@ -263,6 +263,18 @@ impl ControllerInput {
         self.normalizer.has_held_input()
     }
 
+    /// Retire physical state produced for a route which lost ownership.
+    ///
+    /// The timestamp fence also rejects backend backlog which was queued before
+    /// the handoff but is not drained until a later poll. Clearing normalized
+    /// held state prevents a synthesized repeat from acquiring the new route.
+    pub fn retire_route_epoch(&mut self, handoff: SystemTime) {
+        self.barrier_unix_ms = handoff
+            .duration_since(UNIX_EPOCH)
+            .map_or(u64::MAX, |age| age.as_millis() as u64);
+        self.normalizer.suppress_held();
+    }
+
     /// Device nodes already identified as controllers by the active backend.
     /// This supports native state queries without scanning unrelated input devices.
     #[cfg(target_os = "linux")]
@@ -410,7 +422,10 @@ impl ControllerInput {
             .collect();
         self.last_poll_events = events.len();
         let fence = match focused {
-            None => ControllerFence::default(),
+            None => ControllerFence {
+                blocked: false,
+                barrier_unix_ms: self.barrier_unix_ms,
+            },
             Some((false, _)) => ControllerFence {
                 blocked: true,
                 barrier_unix_ms: self.barrier_unix_ms,

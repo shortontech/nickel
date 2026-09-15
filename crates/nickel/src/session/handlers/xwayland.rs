@@ -851,6 +851,7 @@ impl XwmHandler for NickelSession {
                 initial_window_location,
                 last_window_location: initial_window_location,
                 restored_from_maximized: false,
+                last_owned_geometry_revisions: None,
                 operation,
             },
             serial,

@@ -39,7 +39,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 pub use authority::{SessionAuthority, SessionAuthorityRequest};
@@ -288,10 +288,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
             loop {
                 // Bind the whole blocking read/drain to the route that existed before any of its
                 // events were observed. A handoff during collection must retire this batch.
-                let (routing_epoch, events) =
+                let (routing_epoch, mut events) =
                     collect_for_controller_route(&controller_routing_epoch, || {
                         controller.wait_global_envelopes(Duration::from_secs(1))
                     });
+                if controller_routing_epoch.load(Ordering::Acquire) != routing_epoch {
+                    controller.retire_route_epoch(SystemTime::now());
+                    events.clear();
+                }
                 let neutral = !controller.held_input();
                 let neutral_probe_requested =
                     controller_neutral_probe_requested.swap(false, Ordering::AcqRel);
@@ -315,6 +319,14 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
                     NativeControllerPublish::Sent => force_observation = false,
                     NativeControllerPublish::Overflow => force_observation = true,
                     NativeControllerPublish::Disconnected => return,
+                }
+                // Close the smaller race between the post-drain check and queue
+                // publication. The queued batch remains bound to its old epoch
+                // and will be rejected by the session; retire held/backlog state
+                // here so it cannot synthesize input for the next route.
+                if controller_routing_epoch.load(Ordering::Acquire) != routing_epoch {
+                    controller.retire_route_epoch(SystemTime::now());
+                    force_observation = true;
                 }
             }
         })?;

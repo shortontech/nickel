@@ -13519,7 +13519,23 @@ impl NickelSession {
         }
     }
 
-    pub(crate) fn restore_maximized_drag_after_cancel(&mut self, window: &Window) {
+    pub(crate) fn window_geometry_revisions(
+        &self,
+        window: &Window,
+    ) -> Option<nickel_core::geometry_authority::DesiredRevisions> {
+        self.window_geometry_authority_id(window)
+            .and_then(|id| self.geometry_authorities.get(&id))
+            .map(nickel_core::geometry_authority::GeometryAuthority::revisions)
+    }
+
+    pub(crate) fn restore_maximized_drag_after_cancel(
+        &mut self,
+        window: &Window,
+        expected: Option<nickel_core::geometry_authority::DesiredRevisions>,
+    ) -> bool {
+        if expected.is_none() || self.window_geometry_revisions(window) != expected {
+            return false;
+        }
         if let Some(surface) = window.x11_surface() {
             if self
                 .x11_maximized_restore
@@ -13527,6 +13543,7 @@ impl NickelSession {
             {
                 let _ = surface.set_maximized(true);
                 self.apply_maximized_x11_geometry(window, surface, false);
+                return true;
             }
         } else if let Some(surface) = window.toplevel()
             && self
@@ -13534,7 +13551,9 @@ impl NickelSession {
                 .contains_key(&surface.wl_surface().id())
         {
             self.maximize_toplevel(surface);
+            return true;
         }
+        false
     }
 
     pub(crate) fn relayout_fullscreen_windows(&mut self) {

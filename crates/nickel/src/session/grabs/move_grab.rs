@@ -18,6 +18,7 @@ pub struct MoveSurfaceGrab {
     pub initial_window_location: Point<i32, Logical>,
     pub last_window_location: Point<i32, Logical>,
     pub restored_from_maximized: bool,
+    pub last_owned_geometry_revisions: Option<nickel_core::geometry_authority::DesiredRevisions>,
     pub operation: WindowPointerOperation,
 }
 
@@ -174,6 +175,7 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
             self.initial_window_location = location;
             self.start_data.location = event.location;
             self.restored_from_maximized = true;
+            self.last_owned_geometry_revisions = data.window_geometry_revisions(&self.window);
             let size = self.window.geometry().size;
             if !self.operation.rebase(
                 &mut data.window_operations,
@@ -197,7 +199,9 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
             return;
         };
         self.last_window_location = Point::from((proposal.x, proposal.y));
-        data.map_compositor_moved_window(self.window.clone(), self.last_window_location, true);
+        if data.map_compositor_moved_window(self.window.clone(), self.last_window_location, true) {
+            self.last_owned_geometry_revisions = data.window_geometry_revisions(&self.window);
+        }
     }
 
     fn button(
@@ -242,8 +246,12 @@ impl PointerGrab<NickelSession> for MoveSurfaceGrab {
                 .operation
                 .requests_conditional_compensation(&data.window_operations);
         if restore_maximized {
-            data.restore_maximized_drag_after_cancel(&self.window);
-            return;
+            if data.restore_maximized_drag_after_cancel(
+                &self.window,
+                self.last_owned_geometry_revisions,
+            ) {
+                return;
+            }
         }
         if self.restored_from_maximized {
             data.finish_restored_maximized_drag(&self.window);
