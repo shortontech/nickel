@@ -4864,13 +4864,21 @@ impl LiveShell {
         self.launcher_host
             .application_mut()
             .sync(&self.launcher, self.palette, status);
-        self.launcher_host
+        let mut changed = self
+            .launcher_host
             .step(HostBatch {
                 application_changed: true,
                 window_focused: Some(true),
                 ..HostBatch::default()
             })
-            .changed
+            .changed;
+        if let Ok(search) = self
+            .launcher_host
+            .query_unique(&nickel_ui::SemanticSelector::Role(SemanticRole::TextField))
+        {
+            changed |= self.launcher_host.request_focus(search.id).changed;
+        }
+        changed
     }
 
     pub fn control_click(&mut self, x: f32, y: f32, width: u32, height: u32) -> bool {

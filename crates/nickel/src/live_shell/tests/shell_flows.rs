@@ -124,6 +124,34 @@
     }
 
     #[test]
+    fn reopening_launcher_replaces_retained_child_focus_with_search() {
+        let mut shell = LiveShell::new().unwrap();
+        shell.apply_session_launcher_visibility(true);
+        shell.scene(SurfaceRole::Launcher, 920, 680);
+        let non_search = shell
+            .launcher_host
+            .unique_semantic_target_for_message(&LauncherAction::SetView(
+                crate::launcher::LauncherView::Applications,
+            ))
+            .expect("launcher navigation target");
+        assert!(shell.launcher_host.request_focus(non_search.id).changed);
+        shell.apply_session_launcher_visibility(false);
+        shell.apply_session_launcher_visibility(true);
+        let search = shell
+            .launcher_host
+            .query_unique(&nickel_ui::SemanticSelector::Role(
+                nickel_ui::SemanticRole::TextField,
+            ))
+            .expect("launcher search field");
+        assert_eq!(
+            shell.launcher_host.inspect().keyboard_focus,
+            Some(search.id)
+        );
+        shell.launcher_host_ui(UiEvent::TextInput("files".into()), 920, 680);
+        assert_eq!(shell.launcher.query(), "files");
+    }
+
+    #[test]
     fn launcher_submit_opens_the_keyboard_focused_dashboard_project() {
         let mut shell = LiveShell::new().unwrap();
         shell.launcher.set_codex_available(true);
