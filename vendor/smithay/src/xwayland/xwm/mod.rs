@@ -202,8 +202,6 @@ pub mod settings;
 use settings::{NameError, Value, XSettings};
 mod isolated_keyboard;
 mod selection;
-#[doc(hidden)]
-pub use selection::RequestorObservation;
 mod surface;
 use self::dnd::XWmDnd;
 pub use self::dnd::XwmOfferData;
@@ -1166,16 +1164,6 @@ impl X11Wm {
     /// Number of active X11-to-Wayland transfers writing recipient descriptors.
     pub fn incoming_selection_transfer_count(&self) -> usize {
         self.clipboard.incoming.len() + self.primary.incoming.len() + self.dnd.selection.incoming.len()
-    }
-
-    /// Number of live shared PROPERTY_CHANGE observation leases.
-    pub fn selection_requestor_observation_count(&self) -> usize {
-        self.requestor_observations
-            .lock()
-            .unwrap()
-            .values()
-            .map(|(_, references)| *references)
-            .sum()
     }
 
     /// Cancel every clipboard/primary/DnD transfer owned by this XWM.

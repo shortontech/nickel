@@ -66,17 +66,14 @@ impl Drop for OutgoingAdmission {
 }
 
 #[derive(Debug)]
-/// Shared lease for observing an X11 selection requestor's property changes.
 pub struct RequestorObservation {
     conn: Arc<RustConnection>,
     requestor: X11Window,
     observations: Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
-    /// Native X11 requestor class recorded for bounded diagnostics.
     pub class: WindowClass,
 }
 
 impl RequestorObservation {
-    /// Acquire a connection-wide, reference-counted PROPERTY_CHANGE observation.
     pub fn acquire(
         conn: &Arc<RustConnection>,
         observations: &Arc<Mutex<HashMap<X11Window, (EventMask, usize)>>>,
