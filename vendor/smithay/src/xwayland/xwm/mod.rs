@@ -1129,9 +1129,13 @@ impl X11Wm {
                 if let Some(token) = xwm.transfer_timer.take() {
                     event_handle.remove(token);
                 }
-                xwm.clipboard.destroy_all(&event_handle);
-                xwm.primary.destroy_all(&event_handle);
-                xwm.dnd.selection.destroy_all(&event_handle);
+                xwm.clipboard
+                    .destroy_all(&event_handle, &mut xwm.replacement_delete_fences);
+                xwm.primary
+                    .destroy_all(&event_handle, &mut xwm.replacement_delete_fences);
+                xwm.dnd
+                    .selection
+                    .destroy_all(&event_handle, &mut xwm.replacement_delete_fences);
                 data.disconnected(id);
             }
         })?;
@@ -1159,9 +1163,13 @@ impl X11Wm {
 
     /// Cancel every clipboard/primary/DnD transfer owned by this XWM.
     pub fn cancel_selection_transfers<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
-        self.clipboard.destroy_all(loop_handle);
-        self.primary.destroy_all(loop_handle);
-        self.dnd.selection.destroy_all(loop_handle);
+        self.clipboard
+            .destroy_all(loop_handle, &mut self.replacement_delete_fences);
+        self.primary
+            .destroy_all(loop_handle, &mut self.replacement_delete_fences);
+        self.dnd
+            .selection
+            .destroy_all(loop_handle, &mut self.replacement_delete_fences);
     }
 
     /// Remove event-loop registrations and retire all transfer resources before
@@ -1182,13 +1190,20 @@ impl X11Wm {
         now: Instant,
         loop_handle: &LoopHandle<'_, D>,
     ) -> usize {
-        self.clipboard.expire_outgoing(now, loop_handle)
+        self.clipboard
+            .expire_outgoing(now, loop_handle, &mut self.replacement_delete_fences)
             + self.clipboard.expire_incoming(now, loop_handle)
             + self.clipboard.expire_pending(now)
-            + self.primary.expire_outgoing(now, loop_handle)
+            + self
+                .primary
+                .expire_outgoing(now, loop_handle, &mut self.replacement_delete_fences)
             + self.primary.expire_incoming(now, loop_handle)
             + self.primary.expire_pending(now)
-            + self.dnd.selection.expire_outgoing(now, loop_handle)
+            + self.dnd.selection.expire_outgoing(
+                now,
+                loop_handle,
+                &mut self.replacement_delete_fences,
+            )
             + self.dnd.selection.expire_incoming(now, loop_handle)
             + self.dnd.selection.expire_pending(now)
     }
@@ -2366,10 +2381,17 @@ where
                             Generic::new(recv_fd, Interest::READ, Mode::Level),
                             move |_, fd, data| {
                                 let xwm = data.xwm_state(xwm_id);
-                                let selection = match atom {
-                                    x if x == xwm.atoms.CLIPBOARD => &mut xwm.clipboard,
-                                    x if x == xwm.atoms.PRIMARY => &mut xwm.primary,
-                                    x if x == xwm.atoms.XdndSelection => &mut xwm.dnd.selection,
+                                let (selection, delete_fences) = match atom {
+                                    x if x == xwm.atoms.CLIPBOARD => {
+                                        (&mut xwm.clipboard, &mut xwm.replacement_delete_fences)
+                                    }
+                                    x if x == xwm.atoms.PRIMARY => {
+                                        (&mut xwm.primary, &mut xwm.replacement_delete_fences)
+                                    }
+                                    x if x == xwm.atoms.XdndSelection => (
+                                        &mut xwm.dnd.selection,
+                                        &mut xwm.replacement_delete_fences,
+                                    ),
                                     _ => unreachable!(),
                                 };
 
@@ -2386,11 +2408,22 @@ where
                                             let _ = transfer.token.take();
                                             selection.outgoing.remove(&key);
                                         }
-                                        Err(err) => {
-                                            warn!(?err, "Transfer aborted");
+                                        Ok(OutgoingAction::Abort) => {
+                                            let mut transfer = selection.outgoing.remove(&key).unwrap();
+                                            if transfer.incr && transfer.property_set {
+                                                *delete_fences.entry(key).or_default() += 1;
+                                            }
                                             transfer.abort();
                                             let _ = transfer.token.take();
-                                            selection.outgoing.remove(&key);
+                                        }
+                                        Err(err) => {
+                                            warn!(?err, "Transfer aborted");
+                                            let mut transfer = selection.outgoing.remove(&key).unwrap();
+                                            if transfer.incr && transfer.property_set {
+                                                *delete_fences.entry(key).or_default() += 1;
+                                            }
+                                            transfer.abort();
+                                            let _ = transfer.token.take();
                                         }
                                         Ok(OutgoingAction::DoneReading) => {
                                             let _ = transfer.token.take();

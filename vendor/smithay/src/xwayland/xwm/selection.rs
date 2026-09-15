@@ -439,7 +439,12 @@ impl XWmSelection {
         }
     }
 
-    pub fn expire_outgoing<D>(&mut self, now: Instant, loop_handle: &LoopHandle<'_, D>) -> usize {
+    pub fn expire_outgoing<D>(
+        &mut self,
+        now: Instant,
+        loop_handle: &LoopHandle<'_, D>,
+        delete_fences: &mut HashMap<OutgoingTransferKey, usize>,
+    ) -> usize {
         let expired = self
             .outgoing
             .iter()
@@ -449,6 +454,9 @@ impl XWmSelection {
             let Some(transfer) = self.outgoing.remove(key) else {
                 continue;
             };
+            if transfer.incr && transfer.property_set {
+                *delete_fences.entry(*key).or_default() += 1;
+            }
             transfer.abort();
             warn!(
                 direction = "wayland-to-x11",
@@ -516,11 +524,18 @@ impl XWmSelection {
         expired.len()
     }
 
-    pub fn destroy_all<D>(&mut self, loop_handle: &LoopHandle<'_, D>) {
+    pub fn destroy_all<D>(
+        &mut self,
+        loop_handle: &LoopHandle<'_, D>,
+        delete_fences: &mut HashMap<OutgoingTransferKey, usize>,
+    ) {
         for (_, transfer) in self.incoming.drain() {
             transfer.destroy(loop_handle);
         }
-        for (_, transfer) in self.outgoing.drain() {
+        for (key, transfer) in self.outgoing.drain() {
+            if transfer.incr && transfer.property_set {
+                *delete_fences.entry(key).or_default() += 1;
+            }
             transfer.abort();
             transfer.destroy(loop_handle);
         }
@@ -533,6 +548,7 @@ pub enum OutgoingAction {
     DoneReading,
     Backpressured,
     WaitForReadable,
+    Abort,
 }
 
 pub fn read_selection_callback(
@@ -550,8 +566,7 @@ pub fn read_selection_callback(
             requestor = transfer.request.requestor,
             "File descriptor closed, aborting transfer."
         );
-        transfer.abort();
-        return Ok(OutgoingAction::Done);
+        return Ok(OutgoingAction::Abort);
     };
     trace!(
         requestor = transfer.request.requestor,

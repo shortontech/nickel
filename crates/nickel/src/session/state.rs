@@ -2118,6 +2118,8 @@ mod internal_shell_placement_tests {
     pub(super) fn receive_replaced_x11_clipboard(
         display: &str,
         property_name: &str,
+        replace_ready: std::sync::mpsc::Sender<()>,
+        replace_go: std::sync::mpsc::Receiver<()>,
     ) -> Result<Vec<u8>, String> {
         use smithay::reexports::x11rb::{
             connection::Connection,
@@ -2214,6 +2216,10 @@ mod internal_shell_placement_tests {
                                 AtomEnum::STRING,
                                 b"unrelated",
                             )
+                            .map_err(|e| e.to_string())?;
+                        replace_ready.send(()).map_err(|e| e.to_string())?;
+                        replace_go
+                            .recv_timeout(Duration::from_secs(5))
                             .map_err(|e| e.to_string())?;
                         request()?;
                     } else {
@@ -19419,22 +19425,39 @@ mod protocol_tests {
             0
         );
 
-        let replacement_payload = (0..196_609)
+        let predecessor_payload = (0..196_609)
             .map(|offset| ((offset * 23 + 5) & 0xff) as u8)
             .collect::<Vec<_>>();
+        let replacement_payload = (0..196_609)
+            .map(|offset| ((offset * 29 + 113) & 0xff) as u8)
+            .collect::<Vec<_>>();
         session
-            .publish_native_image_clipboard(Arc::new(replacement_payload.clone()))
+            .publish_native_image_clipboard(Arc::new(predecessor_payload))
             .unwrap();
         let replacement_display = display.clone();
         let (replacement_tx, replacement_rx) = std::sync::mpsc::channel();
+        let (replace_ready_tx, replace_ready_rx) = std::sync::mpsc::channel();
+        let (replace_go_tx, replace_go_rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let result = super::internal_shell_placement_tests::receive_replaced_x11_clipboard(
                 &replacement_display,
                 "NICKEL_REPLACED_SELECTION",
+                replace_ready_tx,
+                replace_go_rx,
             );
             let _ = replacement_tx.send(result);
         });
         let replacement_deadline = Instant::now() + Duration::from_secs(15);
+        while replace_ready_rx.try_recv().is_err() {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            assert!(Instant::now() < replacement_deadline);
+        }
+        session
+            .publish_native_image_clipboard(Arc::new(replacement_payload.clone()))
+            .unwrap();
+        replace_go_tx.send(()).unwrap();
         let replacement_received = loop {
             event_loop
                 .dispatch(Duration::from_millis(10), &mut session)
