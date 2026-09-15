@@ -1998,6 +1998,8 @@ mod internal_shell_placement_tests {
         display: &str,
         property_name: &str,
         acknowledgement_delay: std::time::Duration,
+        target_name: &str,
+        input_only: bool,
     ) -> Result<Vec<u8>, String> {
         use smithay::reexports::x11rb::{
             connection::Connection,
@@ -2014,9 +2016,14 @@ mod internal_shell_placement_tests {
             smithay::reexports::x11rb::connect(Some(display)).map_err(|e| e.to_string())?;
         let root = &connection.setup().roots[screen];
         let requestor = connection.generate_id().map_err(|e| e.to_string())?;
+        let (depth, class, visual) = if input_only {
+            (0, WindowClass::INPUT_ONLY, 0)
+        } else {
+            (root.root_depth, WindowClass::INPUT_OUTPUT, root.root_visual)
+        };
         connection
             .create_window(
-                0,
+                depth,
                 requestor,
                 root.root,
                 0,
@@ -2024,8 +2031,8 @@ mod internal_shell_placement_tests {
                 1,
                 1,
                 0,
-                WindowClass::INPUT_ONLY,
-                0,
+                class,
+                visual,
                 &CreateWindowAux::new().event_mask(EventMask::PROPERTY_CHANGE),
             )
             .map_err(|e| e.to_string())?;
@@ -2038,14 +2045,14 @@ mod internal_shell_placement_tests {
                 .map_err(|e| e.to_string())
         };
         let clipboard = atom(b"CLIPBOARD")?;
-        let image_png = atom(b"image/png")?;
+        let target = atom(target_name.as_bytes())?;
         let property = atom(property_name.as_bytes())?;
         let incr = atom(b"INCR")?;
         connection
             .convert_selection(
                 requestor,
                 clipboard,
-                image_png,
+                target,
                 property,
                 smithay::reexports::x11rb::CURRENT_TIME,
             )
@@ -2066,7 +2073,7 @@ mod internal_shell_placement_tests {
             match event {
                 Event::SelectionNotify(event) if event.requestor == requestor => {
                     if event.property == smithay::reexports::x11rb::NONE {
-                        return Err("selection owner rejected image/png".into());
+                        return Err(format!("selection owner rejected {target_name}"));
                     }
                     let reply = connection
                         .get_property(false, requestor, property, AtomEnum::ANY, 0, u32::MAX)
@@ -18985,6 +18992,8 @@ mod protocol_tests {
                 &client_display,
                 "NICKEL_TEST_SELECTION",
                 Duration::ZERO,
+                "image/png",
+                true,
             );
             let _ = result_tx.send(result);
         });
@@ -19035,6 +19044,8 @@ mod protocol_tests {
                         &client_display,
                         &property,
                         delay,
+                        "image/png",
+                        true,
                     ),
                 );
             });
@@ -19064,6 +19075,38 @@ mod protocol_tests {
             );
         }
 
+        let mut utf8_bytes = vec![b'a'; 65_538];
+        utf8_bytes[65_534..].copy_from_slice("💚".as_bytes());
+        let utf8_text = String::from_utf8(utf8_bytes.clone()).unwrap();
+        session.publish_native_text_selection(utf8_text).unwrap();
+        let text_display = display.clone();
+        let (text_tx, text_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = super::internal_shell_placement_tests::receive_x11_clipboard(
+                &text_display,
+                "NICKEL_TEXT_SELECTION",
+                Duration::from_millis(25),
+                "text/plain;charset=utf-8",
+                false,
+            );
+            let _ = text_tx.send(result);
+        });
+        let text_deadline = Instant::now() + Duration::from_secs(15);
+        let received_text = loop {
+            event_loop
+                .dispatch(Duration::from_millis(10), &mut session)
+                .unwrap();
+            match text_rx.try_recv() {
+                Ok(result) => break result.unwrap(),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    panic!("X11 InputOutput text requestor exited")
+                }
+            }
+            assert!(Instant::now() < text_deadline);
+        };
+        assert_eq!(received_text, utf8_bytes);
+
         let simultaneous_payload = (0..196_609)
             .map(|offset| ((offset * 13 + 91) & 0xff) as u8)
             .collect::<Vec<_>>();
@@ -19080,6 +19123,8 @@ mod protocol_tests {
                     &client_display,
                     &property,
                     Duration::from_millis(50),
+                    "image/png",
+                    true,
                 );
                 let _ = result_tx.send(result);
             });
