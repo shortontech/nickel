@@ -1175,10 +1175,13 @@ impl X11Wm {
     ) -> usize {
         self.clipboard.expire_outgoing(now, loop_handle)
             + self.clipboard.expire_incoming(now, loop_handle)
+            + self.clipboard.expire_pending(now)
             + self.primary.expire_outgoing(now, loop_handle)
             + self.primary.expire_incoming(now, loop_handle)
+            + self.primary.expire_pending(now)
             + self.dnd.selection.expire_outgoing(now, loop_handle)
             + self.dnd.selection.expire_incoming(now, loop_handle)
+            + self.dnd.selection.expire_pending(now)
     }
 
     /// Whether or not the XSYNC extension is present
@@ -1474,7 +1477,15 @@ impl X11Wm {
             .pending_transfers
             .lock()
             .unwrap()
-            .insert(incoming_window, (OwnedX11Window::new(incoming_window, &self.conn), fd));
+            .insert(
+                incoming_window,
+                selection::PendingTransfer {
+                    window: OwnedX11Window::new(incoming_window, &self.conn),
+                    fd,
+                    mime_type: mime_type.to_string(),
+                    started: Instant::now(),
+                },
+            );
         Ok(())
     }
 
@@ -2067,6 +2078,14 @@ where
                 _ => return Ok(()),
             };
 
+            if n.property == AtomEnum::NONE.into() {
+                if let Some(transfer) = selection.incoming.remove(&n.requestor) {
+                    transfer.destroy(loop_handle);
+                }
+                selection.pending_transfers.lock().unwrap().remove(&n.requestor);
+                return Ok(());
+            }
+
             match n.target {
                 x if x == xwm.atoms.TARGETS => {
                     if let Some(prop) = conn
@@ -2090,18 +2109,12 @@ where
                         }
                     }
                 }
-                x if x == AtomEnum::NONE.into() => {
-                    // transfer failed
-                    if let Some(transfer) = selection.incoming.remove(&n.requestor) {
-                        transfer.destroy(loop_handle);
-                    }
-                }
                 _ => {
                     let transfer = if let Some(transfer) = selection.incoming.get_mut(&n.requestor) {
                         transfer
                     } else {
                         // create incoming transfer
-                        let Some((window, fd)) =
+                        let Some(pending) =
                             selection.pending_transfers.lock().unwrap().remove(&n.requestor)
                         else {
                             // no file descriptor for incoming transfer
@@ -2112,6 +2125,7 @@ where
                             return Ok(());
                         };
 
+                        let selection::PendingTransfer { window, fd, mime_type, started } = pending;
                         let loop_handle_clone = loop_handle.clone();
                         let incoming_window = *window;
                         let atom = n.selection;
@@ -2154,10 +2168,9 @@ where
                             incr: false,
                             source_data: Vec::new(),
                             incr_done: false,
-                            started: Instant::now(),
+                            started,
                             last_progress: Instant::now(),
-                            mime_type: mime_from_atom(n.target, &conn, &xwm.atoms)?
-                                .unwrap_or_else(|| format!("atom:{}", n.target)),
+                            mime_type,
                             bytes_received: 0,
                         };
                         selection.incoming.insert(incoming_window, transfer);
@@ -2329,6 +2342,9 @@ where
                                 requestor = transfer.request.requestor,
                                 "Destroying stale transfer",
                             );
+                            if transfer.incr && transfer.property_set {
+                                selection.suppress_next_property_delete(key);
+                            }
                             transfer.abort();
                             transfer.destroy(loop_handle);
                         }
@@ -2476,6 +2492,12 @@ where
                     requestor: n.window,
                     property: n.atom,
                 };
+                if xwm.clipboard.consume_suppressed_property_delete(key)
+                    || xwm.primary.consume_suppressed_property_delete(key)
+                    || xwm.dnd.selection.consume_suppressed_property_delete(key)
+                {
+                    return Ok(());
+                }
                 if let Some(selection) = if xwm
                     .clipboard
                     .outgoing
