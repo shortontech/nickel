@@ -1554,6 +1554,25 @@ pub struct NormalizedIngressAuthority {
     pub coordinate_meaning: String,
 }
 
+impl NormalizedIngressAuthority {
+    pub fn admits(&self, envelope: &NormalizedInputEnvelope) -> bool {
+        self.source == envelope.source
+            && self.recipient == envelope.recipient
+            && self.transfer_cutoff == envelope.transfer_cutoff
+            && self.host_connection_generation == envelope.host_connection_generation
+            && self.operation_epoch == envelope.operation_epoch
+            && self.transform_generation == envelope.transform_generation
+            && self.text_transaction == envelope.text_transaction
+            && self.composition_recipient_epoch == envelope.composition_recipient_epoch
+            && self.role == envelope.role
+            && self.coordinate_meaning == envelope.coordinate_meaning
+            && envelope.recipient.lease != 0
+            && !envelope
+                .transfer_cutoff
+                .is_some_and(|cutoff| envelope.broker_event_id.is_none_or(|event| event > cutoff))
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NormalizedSourceBinding {
     pub seat: u64,
@@ -3648,26 +3667,10 @@ impl<A: Application> UiHost<A> {
         envelope: &NormalizedInputEnvelope,
         authorities: &[NormalizedIngressAuthority],
     ) -> bool {
-        let authorized = authorities.iter().any(|authority| {
-            authority.source == envelope.source
-                && authority.recipient == envelope.recipient
-                && authority.transfer_cutoff == envelope.transfer_cutoff
-                && authority.host_connection_generation == envelope.host_connection_generation
-                && authority.operation_epoch == envelope.operation_epoch
-                && authority.transform_generation == envelope.transform_generation
-                && authority.text_transaction == envelope.text_transaction
-                && authority.composition_recipient_epoch == envelope.composition_recipient_epoch
-                && authority.role == envelope.role
-                && authority.coordinate_meaning == envelope.coordinate_meaning
-        });
+        let authorized = authorities
+            .iter()
+            .any(|authority| authority.admits(envelope));
         if !authorized {
-            return false;
-        }
-        if envelope.recipient.lease == 0
-            || envelope
-                .transfer_cutoff
-                .is_some_and(|cutoff| envelope.broker_event_id.is_none_or(|event| event > cutoff))
-        {
             return false;
         }
         let key = (envelope.source.seat, envelope.source.backend_stream.clone());

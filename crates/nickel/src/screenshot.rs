@@ -481,6 +481,20 @@ impl ScreenshotTool {
     ) -> bool {
         use nickel_input::{InputEvent, KeyEdge, PointerButton, PointerEvent};
         match event {
+            HostEvent::NormalizedIngress(envelope) => {
+                if !authority.is_some_and(|authority| authority.admits(&envelope)) {
+                    return false;
+                }
+                self.host_event_authorized(
+                    HostEvent::Normalized {
+                        input: envelope.input,
+                        clipboard_text: envelope.clipboard_text,
+                    },
+                    width,
+                    height,
+                    None,
+                )
+            }
             HostEvent::Ui(UiEvent::PointerMoved(point)) => {
                 self.queue_pointer_moved(point.x, point.y, width, height);
                 false

@@ -20443,7 +20443,7 @@ mod protocol_tests {
     fn native_screenshot_captures_and_opens_on_the_invoking_pointer_output() {
         use crate::session_host::DesktopCapturePoll;
         use crate::winit_shell::SurfaceRole;
-        use nickel_session_protocol::{InputState, TestInput, TestKey};
+        use nickel_session_protocol::{InputState, TestInput, TestKey, TestPointerButton};
         #[derive(Default)]
         struct CaptureHost(std::sync::Mutex<Vec<Option<String>>>);
         impl SessionHost for CaptureHost {
@@ -20519,6 +20519,61 @@ mod protocol_tests {
             )
         );
         assert_eq!(session.internal_ui.focused(), Some(runtime));
+
+        session
+            .inject_test_input(TestInput::PointerMove {
+                x: geometry.loc.x + 180,
+                y: geometry.loc.y + 180,
+            })
+            .unwrap();
+        assert_eq!(
+            session
+                .internal_ui
+                .surface_at(
+                    (
+                        f64::from(geometry.loc.x + 180),
+                        f64::from(geometry.loc.y + 180),
+                    ),
+                    true,
+                )
+                .map(|(id, _)| id),
+            Some(runtime),
+            "native screenshot must be the pointer hit target"
+        );
+        session
+            .inject_test_input(TestInput::PointerButton {
+                button: TestPointerButton::Left,
+                state: InputState::Pressed,
+            })
+            .unwrap();
+        assert!(
+            session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .pointer_interaction_active(),
+            "native screenshot press must retain pointer capture"
+        );
+        session
+            .inject_test_input(TestInput::PointerMove {
+                x: geometry.loc.x + 620,
+                y: geometry.loc.y + 520,
+            })
+            .unwrap();
+        session
+            .inject_test_input(TestInput::PointerButton {
+                button: TestPointerButton::Left,
+                state: InputState::Released,
+            })
+            .unwrap();
+        assert!(
+            !session
+                .internal_shell
+                .as_ref()
+                .unwrap()
+                .pointer_interaction_active(),
+            "native screenshot release must finish pointer capture"
+        );
     }
 
     #[test]
