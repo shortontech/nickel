@@ -39,6 +39,24 @@ pub const MAX_OUTGOING_BUFFER: usize = INCR_CHUNK_SIZE * 2;
 pub const OUTGOING_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const OUTGOING_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 
+fn outgoing_timeout_phase(property_set: bool, sent_finished: bool) -> &'static str {
+    match (property_set, sent_finished) {
+        (true, true) => "waiting-terminator-ack",
+        (true, false) => "waiting-recipient-ack",
+        (false, _) => "waiting-source-data",
+    }
+}
+
+fn incoming_timeout_phase(recipient_closed: bool, buffered: bool) -> &'static str {
+    if recipient_closed {
+        "draining-after-recipient-close"
+    } else if buffered {
+        "writing-recipient"
+    } else {
+        "waiting-source-data"
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct OutgoingTransferKey {
     pub requestor: X11Window,
@@ -200,6 +218,10 @@ impl fmt::Debug for IncomingTransfer {
 }
 
 impl IncomingTransfer {
+    fn timeout_phase(&self) -> &'static str {
+        incoming_timeout_phase(self.recipient_closed, !self.source_data.is_empty())
+    }
+
     pub fn read_selection_prop(&mut self, reply: GetPropertyReply) {
         if !reply.value.is_empty() {
             self.last_progress = Instant::now();
@@ -287,6 +309,10 @@ impl fmt::Debug for OutgoingTransfer {
 }
 
 impl OutgoingTransfer {
+    fn timeout_phase(&self) -> &'static str {
+        outgoing_timeout_phase(self.property_set, self.sent_finished)
+    }
+
     pub fn timeout_reason(&self, now: Instant) -> Option<&'static str> {
         if now.saturating_duration_since(self.started) >= OUTGOING_TOTAL_TIMEOUT {
             Some("total-deadline")
@@ -466,6 +492,7 @@ impl XWmSelection {
             transfer.abort();
             warn!(
                 direction = "wayland-to-x11",
+                phase = transfer.timeout_phase(),
                 mime_type = transfer.mime_type,
                 requestor_class = ?transfer._observation.class,
                 requestor = transfer.request.requestor,
@@ -497,6 +524,7 @@ impl XWmSelection {
             }
             warn!(
                 direction = "x11-to-wayland",
+                phase = transfer.timeout_phase(),
                 mime_type = transfer.mime_type,
                 requestor = *window,
                 bytes = transfer.bytes_received,
@@ -519,6 +547,7 @@ impl XWmSelection {
             if let Some(transfer) = pending.remove(window) {
                 warn!(
                     direction = "x11-to-wayland",
+                    phase = "waiting-selection-notify",
                     mime_type = transfer.mime_type,
                     requestor = *window,
                     elapsed_ms = now.saturating_duration_since(transfer.started).as_millis(),
@@ -740,5 +769,37 @@ mod tests {
         };
         assert_ne!(first, second_property);
         assert_ne!(first, second_requestor);
+    }
+
+    #[test]
+    fn timeout_phases_distinguish_source_recipient_and_protocol_waits() {
+        assert_eq!(
+            outgoing_timeout_phase(false, false),
+            "waiting-source-data"
+        );
+        assert_eq!(
+            outgoing_timeout_phase(true, false),
+            "waiting-recipient-ack"
+        );
+        assert_eq!(
+            outgoing_timeout_phase(true, true),
+            "waiting-terminator-ack"
+        );
+        assert_eq!(
+            incoming_timeout_phase(false, false),
+            "waiting-source-data"
+        );
+        assert_eq!(
+            incoming_timeout_phase(false, true),
+            "writing-recipient"
+        );
+        assert_eq!(
+            incoming_timeout_phase(true, false),
+            "draining-after-recipient-close"
+        );
+        assert_eq!(
+            incoming_timeout_phase(true, true),
+            "draining-after-recipient-close"
+        );
     }
 }
