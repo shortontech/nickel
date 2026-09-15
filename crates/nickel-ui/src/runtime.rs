@@ -368,22 +368,28 @@ impl SessionControllerSource {
                                 }
                                 _ => None,
                             });
-                            let reset = messages.iter().any(|message| {
-                                matches!(message, BrokerMessage::StreamReset { .. })
+                            let reset = messages.iter().find_map(|message| {
+                                let BrokerMessage::StreamReset { through, .. } = message else {
+                                    return None;
+                                };
+                                Some(*through)
                             });
-                            if reset || revocation.is_some() {
+                            if reset.is_some() || revocation.is_some() {
+                                let acknowledgement = reset
+                                    .and_then(|cutoff| {
+                                        lease.map(|lease_epoch| (lease_epoch, cutoff))
+                                    })
+                                    .or(revocation);
                                 lease = None;
                                 role_lease = None;
-                                if reset {
+                                let Some((lease_epoch, cutoff)) = acknowledgement else {
                                     *self = Self::retrying();
                                     return Vec::new();
-                                }
-                                revocation.map(|(lease_epoch, cutoff)| {
-                                    ControllerHostRequest::AcknowledgeQuiescence {
-                                        connection_generation,
-                                        lease_epoch,
-                                        cutoff,
-                                    }
+                                };
+                                Some(ControllerHostRequest::AcknowledgeQuiescence {
+                                    connection_generation,
+                                    lease_epoch,
+                                    cutoff,
                                 })
                             } else {
                                 lease = lease_epoch;
@@ -9156,7 +9162,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn session_controller_revocation_drops_queued_old_lease_before_acknowledging() {
+    fn session_controller_reset_drops_queued_old_lease_before_acknowledging() {
         use nickel_session_protocol::{
             ClientEnvelope, ControllerActionMessage, ControllerEnvelopePayload,
             ControllerFamilyMessage, ControllerHostRequest, ControllerHostResponse, InputState,
@@ -9252,10 +9258,9 @@ mod tests {
                                         surface_generation: Some(10),
                                     },
                                 }),
-                                BrokerMessage::Revoke {
-                                    connection_generation: ConnectionGeneration(2),
-                                    lease_epoch: LeaseEpoch(4),
-                                    cutoff: EventId(7),
+                                BrokerMessage::StreamReset {
+                                    stream_generation: StreamGeneration(2),
+                                    through: EventId(7),
                                 },
                             ],
                         }

@@ -1751,12 +1751,9 @@ impl NickelSession {
                     minimized: self.minimized_windows.contains_key(&window.id)
                         || self.internal_minimized_windows.contains(&window.id),
                     maximized: self.internal_maximized_restore.contains_key(&window.id)
-                        || surface
-                            .is_some_and(|surface| self.maximized_restore.contains_key(surface))
                         || native
                             .as_ref()
-                            .and_then(Window::x11_surface)
-                            .is_some_and(|x11| x11.is_maximized()),
+                            .is_some_and(|window| self.is_maximized_window(window)),
                     fullscreen: surface
                         .is_some_and(|surface| self.fullscreen_restore.contains_key(surface))
                         || native

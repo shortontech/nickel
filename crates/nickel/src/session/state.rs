@@ -5949,12 +5949,14 @@ impl NickelSession {
             target,
             security_epoch: self.controller_role_security_epoch,
         });
+        self.refresh_controller_route();
     }
 
     fn revoke_controller_role_lease(&mut self) {
         if self.controller_role_lease.take().is_some() {
             self.controller_role_security_epoch =
                 self.controller_role_security_epoch.wrapping_add(1).max(1);
+            self.refresh_controller_route();
         }
     }
 
@@ -6002,6 +6004,8 @@ impl NickelSession {
             self.controller_routing_epoch = epoch.max(1);
             self.controller_published_routing_epoch
                 .store(self.controller_routing_epoch, Ordering::Release);
+            self.controller_neutral_probe_requested
+                .store(true, Ordering::Release);
         }
         (self.controller_routing_epoch, route)
     }
@@ -6028,6 +6032,9 @@ impl NickelSession {
         self.controller_broker.expire_transfer(now_ms);
         let (routing_epoch, route) = self.refresh_controller_route();
         if ingress_routing_epoch != routing_epoch {
+            // Neutrality is global physical state, not recipient-routed input. Preserve it even
+            // when every edge in this stale-route batch is fenced.
+            let _ = self.controller_broker.set_neutral(neutral);
             return;
         }
         let surface_generation = route
@@ -9649,6 +9656,7 @@ impl NickelSession {
         // event-loop deadline. State changes must wake it just as external
         // subscribers are notified, otherwise the panel can retain stale
         // focus and a pinned-only task list until an unrelated timer fires.
+        self.refresh_controller_route();
         self.wake_internal_shell();
         if self.refresh_output_topology_generation() {
             self.notify_shell_behavior_snapshot(self.protocol_shell_behavior());
@@ -12276,12 +12284,14 @@ impl NickelSession {
             .get_keyboard()
             .and_then(|keyboard| keyboard.current_focus());
         let eligible = observed == target;
-        self.seat_focus.acknowledge_if(
+        let acknowledged = self.seat_focus.acknowledge_if(
             &request,
             self.start_time.elapsed(),
             eligible,
             FocusRejectionReason::NativeDenied,
-        )
+        );
+        self.refresh_controller_route();
+        acknowledged
     }
 
     /// Complete a deferred native focus handoff without withdrawing the current
@@ -19882,8 +19892,14 @@ mod protocol_tests {
             .copied()
             .unwrap();
         assert!(session.focus_internal_surface(launcher_surface));
-        session.refresh_controller_route();
         assert_ne!(session.controller_routing_epoch, queued_epoch);
+        assert_eq!(
+            session
+                .controller_published_routing_epoch
+                .load(std::sync::atomic::Ordering::Acquire),
+            session.controller_routing_epoch,
+            "the focus transition must publish its fence before later controller collection"
+        );
 
         session.handle_brokered_controller_batch_for_route(vec![confirm], false, queued_epoch);
         assert!(
