@@ -1,6 +1,6 @@
 # Input and window-operation platform acceptance
 
-Updated: 2026-09-14
+Updated: 2026-09-15
 
 This matrix records evidence reproducible from the current integrated branch. Automated tests prove
 reducer and adapter contracts; they do not prove native interaction. This pass did not launch a
@@ -21,6 +21,7 @@ nested fixture, historical observation, or the presence of test source.
 | Linux Smithay | completed-frame touch cancellation | focused vendor test pass | vendor test build pass | untested | real down/frame/cancel and absence of later motion/up |
 | Linux Smithay | XDG move/resize, titlebar, Super+pointer, internal move | focused move tests pass | test build pass | untested | nested/installed grab, cursor and configure behavior |
 | Linux XWayland | move/resize, unknown-causality settlement and conditional compensation | source tests present, not rerun | test build pass | untested | real request/configure ordering, deadline, focus and teardown |
+| Linux XWayland | clipboard INCR, InputOnly/InputOutput requestors, timeout/restart cleanup, reverse transfer | pass: production-callback native harness plus vendored Smithay tests | pass | pass: X11 image paste confirmed in installed session | remaining explicit primary-selection/DnD live matrix |
 | Linux Gilrs | identity, navigation, repeat, disconnect, focus fence | source tests present, not rerun | compiled as dependency | untested | physical controller not used |
 | Unix controller broker/transport | live route/surface plus connection/lease/stream generation, transfer/revoke/reset | pass in protocol and session suites | pass | untested | live transfer and neutral barrier |
 | Windows focused/global input | winit, hook suppression, typed shortcuts | source tests present, not rerun | unavailable on this Linux pass | untested | Windows host, layouts, IME, hook registration/suppression |
@@ -30,7 +31,7 @@ nested fixture, historical observation, or the presence of test source.
 
 ## Commands executed on this branch
 
-Exact integrated results below were recorded through `1d756697`. Older focused evidence remains listed
+Exact integrated results below were recorded through `b2ffe02d`. Older focused evidence remains listed
 after the current integrated gates. `RUSTC_WRAPPER=` avoids treating a local compiler-cache failure
 as product evidence.
 
@@ -42,6 +43,44 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Pass. The PipeWire build script reported its existing SPA plugindir fallback warning.
+
+```sh
+cargo test --workspace --exclude nickel-remote-control -- --test-threads=1
+unshare --user --map-root-user --net sh -c \
+  'ip link set lo up 2>/dev/null || true; cargo test -p nickel-remote-control --lib -- --test-threads=1'
+cargo build --workspace --release
+```
+
+Pass after gate-discovered source-audit and semantic-color corrections. The remote-control crate ran
+in a private network namespace because the installed Nickel session correctly owned its fixed
+loopback port; all 154 tests passed without stopping the live desktop. The non-remote workspace
+members, including 1,017 Nickel library tests, passed with their declared native/release tests
+ignored. The complete release workspace built successfully.
+
+```sh
+cargo test -p nickel --lib \
+  native_xwayland_input_only_requestor_receives_complete_incremental_png -- --ignored --nocapture
+(cd vendor/smithay && cargo test --features xwayland --lib \
+  xwayland::xwm::selection::tests --no-default-features)
+```
+
+Pass. The owned-XWayland harness exercised real production XWM callbacks with InputOnly and
+InputOutput requestors, non-INCR/INCR boundary sizes, a valid multi-chunk PNG, delayed
+acknowledgements, simultaneous requestors, injected inactivity timeout with recipient recovery,
+teardown/restart, UTF-8 crossing a chunk boundary, and reverse X11-to-native multi-chunk transfer.
+The vendored tests verify the global 32-transfer admission bound and requestor/property identity.
+
+## Installed Linux observations
+
+The user tested the release in the installed Nickel session on 2026-09-14/15 and confirmed:
+
+- Print Screen opens the screenshot tool and pointer drag selection completes.
+- Native screenshot/image clipboard content pastes into X11 applications, including the previously
+  failing Chromium-family InputOnly clipboard path; large text paste also works.
+- The compositor-owned lock screen accepts password input and unlocks normally.
+
+These observations cover the reported regressions. They do not silently promote the remaining
+physical-controller, Windows, primary-selection, DnD, or full mixed-output rows to pass.
 
 ```sh
 cargo test -p nickel-core -p nickel-session-protocol -p nickel-ui -p nickel-file \
