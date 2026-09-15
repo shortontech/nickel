@@ -19925,11 +19925,14 @@ mod protocol_tests {
             0
         );
 
+        let retired_payload = (0..196_609)
+            .map(|offset| ((offset * 47 + 7) & 0xff) as u8)
+            .collect::<Vec<_>>();
         let reused_payload = (0..196_609)
             .map(|offset| ((offset * 43 + 29) & 0xff) as u8)
             .collect::<Vec<_>>();
         session
-            .publish_native_image_clipboard(Arc::new(reused_payload.clone()))
+            .publish_native_image_clipboard(Arc::new(retired_payload))
             .unwrap();
         let reused_display = display.clone();
         let (old_ready_tx, old_ready_rx) = std::sync::mpsc::channel();
@@ -19976,6 +19979,9 @@ mod protocol_tests {
                 .unwrap();
             assert!(Instant::now() < reused_deadline);
         }
+        session
+            .publish_native_image_clipboard(Arc::new(reused_payload.clone()))
+            .unwrap();
         reconnect_tx.send(()).unwrap();
         let (new_requestor, reused_received) = loop {
             event_loop
