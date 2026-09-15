@@ -2093,7 +2093,7 @@ impl WindowDragCoordinator {
 
 fn native_window_fingerprint(window: isize) -> Option<NativeWindowFingerprint> {
     let hwnd = HWND(window as *mut c_void);
-    if unsafe { !IsWindow(hwnd).as_bool() } {
+    if unsafe { !IsWindow(Some(hwnd)).as_bool() } {
         return None;
     }
     let mut process_id = 0;

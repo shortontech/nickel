@@ -2383,6 +2383,7 @@ pub fn run() -> Result<(), String> {
             owner.reconcile_indicators(&mut shell, state.semantic_theme());
         }
         diagnostic_loop_iterations = diagnostic_loop_iterations.saturating_add(1);
+        #[cfg(not(target_os = "windows"))]
         let now = Instant::now();
         #[cfg(not(target_os = "windows"))]
         if controller_schedule.is_due(now) {

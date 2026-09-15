@@ -8175,7 +8175,14 @@ impl WindowsRemoteControl {
         }
         match event {
             ShellEvent::Input { event, .. } => {
-                indicator.host.normalized_input(event.clone(), None);
+                let (ingress, authority) = crate::live_shell::internal_normalized_ingress(
+                    event.clone(),
+                    None,
+                    "trusted-control",
+                    indicator.host.inspection(),
+                    None,
+                );
+                indicator.host.normalized_ingress(ingress, authority);
             }
             ShellEvent::FocusChanged { focused, .. } => {
                 indicator.host.window_focus(*focused);
